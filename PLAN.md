@@ -12,12 +12,13 @@ writers of scientific-data formats.
 > mappings), the **superblock extension** (**File Space Info** + **free-space managers**), and **every**
 > object-header message type. **Write (H7–H8):** `Hdf5Writer` emits a valid modern-format file — v3
 > (checksummed) superblock, v2 (checksummed) object headers, a **nested group tree**, contiguous
-> **int32 / float64 / variable-length-string** datasets (strings via a global heap), **chunked**
-> datasets (fixed-array index) with **all six built-in filters encoded** (deflate, shuffle, fletcher32,
+> **int32 / float64 / variable-length-string / compound / enum / object-reference** datasets (strings
+> via a global heap; references resolved across objects, forward refs included), **chunked** datasets
+> (fixed-array index) with **all six built-in filters encoded** (deflate, shuffle, fletcher32,
 > scale-offset, n-bit, and pure-Java **szip**), and scalar/array **attributes** — read back identically
-> by Falcon *and h5py* (szip verified via libaec, since h5py's szip is disabled here). Remaining: more
-> write datatypes + older formats; and a few read edge cases (SOHM shared messages, float scale-offset,
-> compound n-bit, signed szip, the revised reference encoding).
+> by Falcon *and h5py* (szip verified via libaec, since h5py's szip is disabled here). Remaining: a few
+> write datatypes (array / vlen-sequence / complex) + older formats; and a few read edge cases (SOHM
+> shared messages, float scale-offset, compound n-bit, signed szip, the revised reference encoding).
 
 ## Program roadmap (Falcon)
 
@@ -290,9 +291,14 @@ Each stage ends with a **milestone** and concrete **acceptance criteria**. "Refe
 - **szip encode ✓** (`.szip()`): a pure-Java CCSDS extended-Rice **encoder** in `filter.Aec` (per-block
   cost-optimal sample-splitting vs uncompressed, no preprocessing), mirroring the decoder. **All six
   built-in filters now encode.** Verified by libaec/imagecodecs decode (h5py szip is disabled here).
-- Remaining write breadth: all datatype classes (compound/array/vlen/enum/reference/complex); dense +
-  compact group/attribute storage; fill-value policies; user-selectable layout; szip preprocessing +
-  zero-block / second-extension modes for better ratios.
+- **Compound / enum / object-reference write ✓**: `compoundDataset` (packed named-column records,
+  version-5 class-6 message), `enumDataset` (ordered `name -> code` members over a 32-bit base,
+  class 8), and `referenceDataset` (class 7; target paths resolved to object-header addresses when the
+  file is written, via a pending-patch list that also handles forward references and h5py-compatible
+  null refs). All h5py-verified.
+- Remaining write breadth: the rest of the datatype classes (array / vlen-sequence / complex / bitfield
+  / opaque / time / fixed-length string); dense + compact group/attribute storage; fill-value policies;
+  user-selectable layout; szip preprocessing + zero-block / second-extension modes for better ratios.
 - **Milestone:** round-trip parity across the full fixture matrix.
 - **Acceptance:** for every fixture, `Falcon-write → h5py-read` and `h5py-write → Falcon-read` agree on
   structure + data; property-based random round-trips pass.
