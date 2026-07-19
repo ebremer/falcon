@@ -348,6 +348,28 @@ class WriteTest {
     }
 
     @Test
+    void roundTripDenseLinks() throws IOException {
+        Path file = Files.createTempFile("falcon-dense-links", ".h5");
+        try {
+            try (Hdf5Writer w = Hdf5Writer.create(file)) {
+                Hdf5Writer.GroupWriter g = w.group("g");
+                for (int i = 0; i < 10; i++) { // > 8 children -> dense link storage
+                    g.intDataset(String.format("item%02d", i), new int[] {i}, new long[] {1});
+                }
+            }
+            try (Hdf5File h5 = Hdf5File.open(file)) {
+                Group g = h5.root().group("g");
+                assertEquals(10, g.childNames().size());
+                for (int i = 0; i < 10; i++) {
+                    assertArrayEquals(new int[] {i}, g.dataset(String.format("item%02d", i)).readInts());
+                }
+            }
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    @Test
     void roundTripDenseAttributes() throws IOException {
         Path file = Files.createTempFile("falcon-dense-attrs", ".h5");
         try {
