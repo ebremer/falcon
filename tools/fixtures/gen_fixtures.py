@@ -92,6 +92,22 @@ def build_chunked(f):
     f.create_dataset("scaleoffset_i4", data=np.arange(20, dtype="i4"), chunks=(5,), scaleoffset=0)
 
 
+def build_nbit(path):
+    """An n-bit dataset: 16-bit-precision unsigned stored in 4 bytes (via the generic filter API,
+    since h5py's high level does not expose n-bit)."""
+    tid = h5py.h5t.py_create(np.dtype("<u4")).copy()
+    tid.set_precision(16)
+    space = h5py.h5s.create_simple((20,))
+    dc = h5py.h5p.create(h5py.h5p.DATASET_CREATE)
+    dc.set_chunk((5,))
+    dc.set_filter(h5py.h5z.FILTER_NBIT, h5py.h5z.FLAG_MANDATORY, ())
+    f = h5py.File(path, "w")
+    dsid = h5py.h5d.create(f.id, b"nbit_u", tid, space, dc)
+    dsid.write(h5py.h5s.ALL, h5py.h5s.ALL, np.arange(20, dtype="<u4"))
+    dsid.close()
+    f.close()
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     with h5py.File(os.path.join(OUT, "old_style_groups.h5"), "w") as f:
@@ -104,6 +120,7 @@ def main():
         build_data(f)
     with h5py.File(os.path.join(OUT, "chunked_data.h5"), "w") as f:
         build_chunked(f)
+    build_nbit(os.path.join(OUT, "nbit_data.h5"))
     print("wrote fixtures to", OUT)
     print("h5py", h5py.__version__, "| bundled HDF5", h5py.version.hdf5_version)
 

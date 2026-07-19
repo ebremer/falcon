@@ -3,11 +3,11 @@
 **Falcon** is a multi-module Maven umbrella for **pure-JDK 25, zero-runtime-dependency** readers and
 writers of scientific-data formats.
 
-> **Status: H4 in progress — 61 tests green.** H0–H3 done. H4 so far: chunked storage (v1 B-tree
-> index, 1-D/2-D, boundary chunks) with **deflate / shuffle / fletcher32**, **hyperslab** (partial)
-> reads, and **szip decode** (pure-Java CCSDS 121.0 / extended-Rice, validated against libaec).
-> Remaining in H4: scaleoffset / nbit filters (and signed-integer szip). New-style (link) groups and
-> the newer chunk indexes → H5.
+> **Status: H4 essentially complete — 63 tests green; H5 is next.** H0–H3 done. H4: chunked storage
+> (v1 B-tree index) with **all six built-in filters** — deflate, shuffle, fletcher32, **szip** (pure-Java
+> CCSDS 121.0, validated vs libaec), **scaleoffset**, **nbit** — plus **hyperslab** (partial) reads.
+> The newer chunk indexes (single / implicit / fixed-array / extensible-array / v2-B-tree) pair with
+> new-style groups in **H5**; signed szip and the szip encoder come later.
 
 ## Program roadmap (Falcon)
 
@@ -191,15 +191,18 @@ Each stage ends with a **milestone** and concrete **acceptance criteria**. "Refe
   float32/64, 2-D, and fixed-length-string fixtures; an unallocated dataset reads back its fill value;
   compact storage reads correctly.
 
-### H4 — Chunked storage & filters (incl. szip decode)
-- Chunked layout + all index types (Appendix C): **v1 B-tree type 1**, **single chunk**, **implicit**,
-  **fixed array**, **extensible array**, **v2 B-tree**.
-- **Filter Pipeline message (11)**; filter decode: `deflate` (`java.util.zip`), `shuffle`,
-  `fletcher32`, `nbit`, `scaleoffset`, and **`szip` decode** (§9).
-- Chunk cache; partial/hyperslab reads that touch only needed chunks.
-- **Milestone:** read chunked + compressed datasets (incl. filter chains and szip) and hyperslabs.
-- **Acceptance:** matches h5py for gzip/shuffle/fletcher32/nbit/scaleoffset/**szip** fixtures and for
-  each chunk-index type; hyperslab reads match full-read subsets.
+### H4 — Chunked storage & filters (incl. szip decode)  ✅ **decode done** (newer indexes → H5)
+- Chunked layout (v3) via the **v1 B-tree (type 1)** index. The newer indexes (single / implicit /
+  fixed-array / extensible-array / v2 B-tree, v4 layout) accompany new-style files → **H5**.
+- **Filter Pipeline message (11)** + filter decode: **deflate** (`java.util.zip`), **shuffle**,
+  **fletcher32**, **scaleoffset** (integer), **nbit** (atomic), and **szip** (pure-Java CCSDS 121.0, §9).
+- **Shipped:** `layout.DataLayoutMessage` (chunked v3) + `DataLayout.Chunked`, `btree.ChunkBTreeV1`,
+  `data.ChunkedReader` (N-D assembly + boundary clamping), `filter.FilterPipeline`/`Filters`/`Aec`;
+  `Dataset.select(...)` → `Selection` (hyperslab).
+- **Acceptance met:** matches h5py for chunked (1-D/2-D) + deflate/shuffle/fletcher32/scaleoffset/nbit
+  fixtures; szip validated against libaec vectors; hyperslab reads equal full-read subsets.
+- Deferred: chunk-cache and touch-only-needed-chunks optimization (H9); float scaleoffset, compound
+  nbit, signed szip, szip **encode** (H8).
 
 ### H5 — New-style groups, links, attributes, fractal heap, v2 B-trees
 - **Link Info (2)**, **Link (6)**, **Group Info (10)**; **fractal heap**; **v2 B-trees** types 5/6

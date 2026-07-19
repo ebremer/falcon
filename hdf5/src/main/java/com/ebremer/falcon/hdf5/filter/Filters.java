@@ -35,9 +35,117 @@ public final class Filters {
             case SHUFFLE -> unshuffle(data, filter.clientData().length > 0 ? filter.clientData()[0] : elementSize);
             case FLETCHER32 -> stripFletcher32(data);
             case SZIP -> szip(data, filter.clientData(), elementSize, uncompressedSize);
+            case SCALEOFFSET -> scaleOffset(data, filter.clientData(), elementSize, uncompressedSize);
+            case NBIT -> nbit(data, filter.clientData(), uncompressedSize);
             default -> throw new HdfUnsupportedException(
                     "HDF5 filter id " + filter.id() + " is not yet supported (arrives in a later H4 increment)");
         };
+    }
+
+    // scale-offset scale types (H5Zscaleoffset.c)
+    private static final int SO_FLOAT_DSCALE = 0;
+    private static final int SO_FLOAT_ESCALE = 1;
+    private static final int SO_INT = 2;
+
+    /**
+     * Decodes an integer scale-offset chunk (filter id 6). The chunk header holds {@code minbits}
+     * (4-byte LE) and the chunk's minimum value; each element is stored as {@code minbits} bits
+     * (min-subtracted, MSB-first, packed at the chunk's end). An all-ones code marks an element that
+     * held the fill value. Floating-point scale-offset is not yet supported.
+     */
+    private static byte[] scaleOffset(byte[] data, int[] clientData, int elementSize, int uncompressedSize) {
+        int scaleType = clientData.length > 0 ? clientData[0] : SO_INT;
+        if (scaleType == SO_FLOAT_DSCALE || scaleType == SO_FLOAT_ESCALE) {
+            throw new HdfUnsupportedException("floating-point scale-offset filter is not yet supported");
+        }
+        int elements = uncompressedSize / elementSize;
+        int minBits = (int) readLittleEndian(data, 0, 4);
+        long minVal = readSignedLittleEndian(data, 5, elementSize);
+        byte[] out = new byte[uncompressedSize];
+
+        if (minBits == 0) { // every value equals the minimum
+            for (int i = 0; i < elements; i++) {
+                writeLittleEndian(out, i * elementSize, elementSize, minVal);
+            }
+            return out;
+        }
+
+        long fillMarker = (1L << minBits) - 1;
+        long fillValue = 0; // elements that held the dataset fill value
+        int packedBytes = (int) (((long) elements * minBits + 7) / 8);
+        long bit = (long) (data.length - packedBytes) * 8; // packed data sits at the chunk's end
+        for (int i = 0; i < elements; i++) {
+            long code = 0;
+            for (int b = 0; b < minBits; b++) {
+                code = (code << 1) | ((data[(int) (bit >> 3)] >> (7 - (int) (bit & 7))) & 1);
+                bit++;
+            }
+            long value = code == fillMarker ? fillValue : code + minVal;
+            writeLittleEndian(out, i * elementSize, elementSize, value);
+        }
+        return out;
+    }
+
+    private static final int NBIT_ATOMIC = 1;
+
+    /**
+     * Decodes an n-bit chunk (filter id 5) for an atomic datatype. The filter drops each element's
+     * padding bits, packing only its {@code precision} significant bits (at bit {@code offset},
+     * MSB-first, from the start of the chunk); decoding restores full-width, zero-padded elements in
+     * the datatype's byte order. Client data: {@code [total, flag, nelmts, ATOMIC, size, order,
+     * precision, offset]}. Only atomic datatypes are supported (compound n-bit is future work).
+     */
+    private static byte[] nbit(byte[] data, int[] clientData, int uncompressedSize) {
+        if (clientData.length < 8 || clientData[3] != NBIT_ATOMIC) {
+            throw new HdfUnsupportedException("only atomic n-bit datatypes are supported");
+        }
+        int size = clientData[4];
+        boolean bigEndian = clientData[5] == 1;
+        int precision = clientData[6];
+        int offset = clientData[7];
+        int elements = uncompressedSize / size;
+
+        byte[] out = new byte[uncompressedSize]; // padding bits stay zero
+        long bit = 0;
+        for (int i = 0; i < elements; i++) {
+            long significant = 0;
+            for (int b = 0; b < precision; b++) {
+                significant = (significant << 1) | ((data[(int) (bit >> 3)] >> (7 - (int) (bit & 7))) & 1);
+                bit++;
+            }
+            long value = significant << offset;
+            int base = i * size;
+            for (int b = 0; b < size; b++) {
+                int shift = bigEndian ? (size - 1 - b) * 8 : b * 8;
+                out[base + b] = (byte) (value >>> shift);
+            }
+        }
+        return out;
+    }
+
+    private static long readLittleEndian(byte[] d, int off, int n) {
+        long v = 0;
+        for (int i = 0; i < n; i++) {
+            v |= (long) (d[off + i] & 0xff) << (8 * i);
+        }
+        return v;
+    }
+
+    private static long readSignedLittleEndian(byte[] d, int off, int n) {
+        long v = readLittleEndian(d, off, n);
+        if (n < 8) {
+            long signBit = 1L << (n * 8 - 1);
+            if ((v & signBit) != 0) {
+                v |= -(1L << (n * 8));
+            }
+        }
+        return v;
+    }
+
+    private static void writeLittleEndian(byte[] d, int off, int n, long v) {
+        for (int i = 0; i < n; i++) {
+            d[off + i] = (byte) (v >>> (8 * i));
+        }
     }
 
     /**

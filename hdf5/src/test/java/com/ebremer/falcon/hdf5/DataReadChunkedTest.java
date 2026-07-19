@@ -72,4 +72,18 @@ class DataReadChunkedTest {
     void fletcher32Checksummed() {
         assertArrayEquals(range(20), ds("fletcher_i4").readInts());
     }
+
+    @Test
+    void scaleOffsetInts() {
+        // integer scale-offset: min-subtracted, bit-packed, with fill-value markers.
+        assertArrayEquals(range(20), ds("scaleoffset_i4").readInts());
+    }
+
+    @Test
+    void nbitReducedPrecision() throws IOException {
+        // 16-bit-precision unsigned stored in 4 bytes: n-bit packs only the significant bits.
+        try (Hdf5File f = Hdf5File.open(Fixtures.path("nbit_data.h5"))) {
+            assertArrayEquals(range(20), f.root().dataset("nbit_u").readInts());
+        }
+    }
 }
