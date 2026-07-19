@@ -125,6 +125,13 @@ def build_vlen(f):
                                            dtype=h5py.string_dtype("utf-8")))
 
 
+def build_dense_links(f):
+    """A group with enough links to force dense (fractal-heap + v2 B-tree) storage."""
+    g = f.create_group("dense")
+    for i in range(20):
+        g.create_dataset(f"link{i:02d}", data=np.int32(i))
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     with h5py.File(os.path.join(OUT, "old_style_groups.h5"), "w") as f:
@@ -142,6 +149,8 @@ def main():
         build_attributes(f)
     with h5py.File(os.path.join(OUT, "vlen_data.h5"), "w") as f:
         build_vlen(f)
+    with h5py.File(os.path.join(OUT, "dense_links.h5"), "w", libver="latest") as f:
+        build_dense_links(f)
     print("wrote fixtures to", OUT)
     print("h5py", h5py.__version__, "| bundled HDF5", h5py.version.hdf5_version)
 

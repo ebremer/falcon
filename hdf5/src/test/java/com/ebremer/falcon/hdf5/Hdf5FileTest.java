@@ -1,5 +1,6 @@
 package com.ebremer.falcon.hdf5;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -64,6 +65,18 @@ class Hdf5FileTest {
             expected.put("/empty", true);
             expected.put("/root_ds", false);
             assertEquals(expected, tree);
+        }
+    }
+
+    @Test
+    void listsDenseGroupViaFractalHeap() throws IOException {
+        try (Hdf5File h5 = Hdf5File.open(Fixtures.path("dense_links.h5"))) {
+            Group dense = h5.root().group("dense");
+            List<String> names = dense.childNames().stream().sorted().toList();
+            assertEquals(20, names.size());
+            assertEquals("link00", names.get(0));
+            assertEquals("link19", names.get(19));
+            assertArrayEquals(new int[] {5}, dense.dataset("link05").readInts());
         }
     }
 

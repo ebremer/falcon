@@ -16,13 +16,22 @@ public final class LinkInfoMessage {
 
     /** The group's fractal-heap address, or {@link HdfBuffer#UNDEFINED_ADDRESS} for compact storage. */
     public static long fractalHeapAddress(FileContext ctx, HeaderMessage message) {
-        HdfBuffer buf = ctx.buffer();
+        return ctx.buffer().getAddress(addressesOffset(ctx, message), ctx.sizeOfOffsets());
+    }
+
+    /** The address of the v2 B-tree indexing links by name (present when storage is dense). */
+    public static long nameBTreeAddress(FileContext ctx, HeaderMessage message) {
+        long p = addressesOffset(ctx, message) + ctx.sizeOfOffsets(); // after the fractal-heap address
+        return ctx.buffer().getAddress(p, ctx.sizeOfOffsets());
+    }
+
+    private static long addressesOffset(FileContext ctx, HeaderMessage message) {
         long p = message.bodyOffset();
-        int flags = buf.getUnsignedByte(p + 1);
+        int flags = ctx.buffer().getUnsignedByte(p + 1);
         p += 2; // version, flags
         if ((flags & 0x01) != 0) {
             p += 8; // maximum creation index
         }
-        return buf.getAddress(p, ctx.sizeOfOffsets());
+        return p;
     }
 }

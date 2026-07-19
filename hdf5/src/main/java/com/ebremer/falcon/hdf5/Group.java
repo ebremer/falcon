@@ -1,10 +1,12 @@
 package com.ebremer.falcon.hdf5;
 
+import com.ebremer.falcon.hdf5.btree.BTreeV2;
 import com.ebremer.falcon.hdf5.btree.GroupBTreeV1;
 import com.ebremer.falcon.hdf5.group.SymbolTableEntry;
 import com.ebremer.falcon.hdf5.header.HeaderMessage;
 import com.ebremer.falcon.hdf5.header.MessageType;
 import com.ebremer.falcon.hdf5.header.ObjectHeader;
+import com.ebremer.falcon.hdf5.heap.FractalHeap;
 import com.ebremer.falcon.hdf5.heap.LocalHeap;
 import com.ebremer.falcon.hdf5.io.FileContext;
 import com.ebremer.falcon.hdf5.io.HdfBuffer;
@@ -12,6 +14,7 @@ import com.ebremer.falcon.hdf5.message.LinkInfoMessage;
 import com.ebremer.falcon.hdf5.message.LinkMessage;
 import com.ebremer.falcon.hdf5.message.SymbolTableMessage;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Optional;
@@ -105,8 +108,7 @@ public final class Group extends Hdf5Object {
         HeaderMessage linkInfo = header.find(MessageType.LINK_INFO);
         if (linkInfo != null
                 && LinkInfoMessage.fractalHeapAddress(ctx, linkInfo) != HdfBuffer.UNDEFINED_ADDRESS) {
-            throw new HdfUnsupportedException(
-                    "dense (fractal-heap) link storage is implemented in a later H5 increment: " + displayPath());
+            return loadDenseChildren(linkInfo);
         }
         // Compact storage: the links are Link messages in this object header.
         List<Hdf5Object> result = new ArrayList<>();
@@ -119,6 +121,22 @@ public final class Group extends Hdf5Object {
                 result.add(createChild(link.name(), link.targetAddress()));
             }
             // soft/external links are resolved in a later increment
+        }
+        return result;
+    }
+
+    /** Dense storage: links live in a fractal heap indexed by a v2 B-tree (name index). */
+    private List<Hdf5Object> loadDenseChildren(HeaderMessage linkInfo) {
+        FractalHeap heap = FractalHeap.parse(ctx, LinkInfoMessage.fractalHeapAddress(ctx, linkInfo));
+        long nameBTree = LinkInfoMessage.nameBTreeAddress(ctx, linkInfo);
+        List<Hdf5Object> result = new ArrayList<>();
+        for (byte[] record : BTreeV2.readRecords(ctx, nameBTree)) {
+            // link-name-index record: name hash (4 bytes) followed by the heap ID.
+            byte[] heapId = Arrays.copyOfRange(record, 4, 4 + heap.idLength());
+            LinkMessage link = LinkMessage.parse(HdfBuffer.of(heap.readObject(heapId)), 0, ctx.sizeOfOffsets());
+            if (link.linkType() == LinkMessage.HARD) {
+                result.add(createChild(link.name(), link.targetAddress()));
+            }
         }
         return result;
     }

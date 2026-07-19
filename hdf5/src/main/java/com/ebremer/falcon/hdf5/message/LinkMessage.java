@@ -41,8 +41,12 @@ public final class LinkMessage {
     }
 
     public static LinkMessage parse(FileContext ctx, HeaderMessage message) {
-        HdfBuffer buf = ctx.buffer();
-        long p = message.bodyOffset();
+        return parse(ctx.buffer(), message.bodyOffset(), ctx.sizeOfOffsets());
+    }
+
+    /** Parses a Link message body starting at {@code start} (e.g. a fractal-heap object). */
+    public static LinkMessage parse(HdfBuffer buf, long start, int sizeOfOffsets) {
+        long p = start;
         p += 1; // version
         int flags = buf.getUnsignedByte(p);
         p += 1;
@@ -66,7 +70,7 @@ public final class LinkMessage {
 
         long target = HdfBuffer.UNDEFINED_ADDRESS;
         if (linkType == HARD) {
-            target = buf.getAddress(p, ctx.sizeOfOffsets());
+            target = buf.getAddress(p, sizeOfOffsets);
         }
         return new LinkMessage(name, linkType, target);
     }
