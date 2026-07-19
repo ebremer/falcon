@@ -3,7 +3,10 @@ package com.ebremer.falcon.hdf5;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+import com.ebremer.falcon.hdf5.datatype.Datatype;
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -178,6 +181,60 @@ class WriteTest {
                 assertArrayEquals(new String[] {"alpha", "beta", "gamma"}, run.dataset("labels").readStrings());
                 assertArrayEquals(new int[] {3}, run.attribute("count").orElseThrow().readInts());
                 assertArrayEquals(new int[] {7, 8, 9}, run.group("nested").dataset("inner").readInts());
+            }
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    @Test
+    void roundTripCompoundDataset() throws IOException {
+        Path file = Files.createTempFile("falcon-compound", ".h5");
+        try {
+            try (Hdf5Writer w = Hdf5Writer.create(file)) {
+                w.compoundDataset("records", new long[] {3},
+                        Hdf5Writer.CompoundField.int32("a", new int[] {1, 2, 3}),
+                        Hdf5Writer.CompoundField.float64("b", new double[] {1.5, 2.5, 3.5}));
+            }
+            try (Hdf5File h5 = Hdf5File.open(file)) {
+                Dataset ds = h5.root().dataset("records");
+                Datatype.Compound type = (Datatype.Compound) ds.datatype();
+                assertEquals(12, type.size());
+                assertEquals(2, type.members().size());
+                assertEquals("a", type.members().get(0).name());
+                assertEquals(0, type.members().get(0).offset());
+                assertEquals("b", type.members().get(1).name());
+                assertEquals(4, type.members().get(1).offset());
+                ByteBuffer raw = ByteBuffer.wrap(ds.readRawBytes()).order(ByteOrder.LITTLE_ENDIAN);
+                for (int r = 0; r < 3; r++) {
+                    assertEquals(r + 1, raw.getInt(r * 12));
+                    assertEquals(r + 1.5, raw.getDouble(r * 12 + 4));
+                }
+            }
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    @Test
+    void roundTripEnumDataset() throws IOException {
+        Path file = Files.createTempFile("falcon-enum", ".h5");
+        try {
+            try (Hdf5Writer w = Hdf5Writer.create(file)) {
+                w.enumDataset("colors", new long[] {3},
+                        Hdf5Writer.enumType().add("RED", 0).add("GREEN", 1).add("BLUE", 2),
+                        new int[] {2, 0, 1});
+            }
+            try (Hdf5File h5 = Hdf5File.open(file)) {
+                Dataset ds = h5.root().dataset("colors");
+                Datatype.Enumeration type = (Datatype.Enumeration) ds.datatype();
+                assertEquals(4, type.size());
+                assertEquals(List.of("RED", "GREEN", "BLUE"),
+                        type.members().stream().map(Datatype.Enumeration.Member::name).toList());
+                assertEquals(2, type.members().get(2).value());
+                ByteBuffer raw = ByteBuffer.wrap(ds.readRawBytes()).order(ByteOrder.LITTLE_ENDIAN);
+                assertArrayEquals(new int[] {2, 0, 1},
+                        new int[] {raw.getInt(0), raw.getInt(4), raw.getInt(8)});
             }
         } finally {
             Files.deleteIfExists(file);

@@ -47,6 +47,8 @@ public final class Hdf5Writer implements AutoCloseable {
     private static final byte[] DATATYPE_VLEN_STRING = {
         0x19, 0x01, 0x01, 0, 0x10, 0, 0, 0, 0x10, 0, 0, 0, 0x01, 0, 0, 0, 0, 0, 0x08, 0
     };
+    // Object reference (class 7, kind 0): an 8-byte object-header address. Verbatim from h5py.
+    private static final byte[] DATATYPE_OBJECT_REFERENCE = {0x17, 0, 0, 0, 8, 0, 0, 0};
 
     private final Path path;
     private final GroupSpec root = new GroupSpec();
@@ -86,6 +88,14 @@ public final class Hdf5Writer implements AutoCloseable {
 
     public DatasetWriter doubleChunkedDataset(String name, double[] data, long[] shape, long[] chunkShape) {
         return rootWriter.doubleChunkedDataset(name, data, shape, chunkShape);
+    }
+
+    public DatasetWriter compoundDataset(String name, long[] shape, CompoundField... fields) {
+        return rootWriter.compoundDataset(name, shape, fields);
+    }
+
+    public DatasetWriter enumDataset(String name, long[] shape, EnumType type, int[] values) {
+        return rootWriter.enumDataset(name, shape, type, values);
     }
 
     public GroupWriter group(String name) {
@@ -146,6 +156,40 @@ public final class Hdf5Writer implements AutoCloseable {
                 bytes.add(s.getBytes(StandardCharsets.UTF_8));
             }
             return addDataset(new DatasetSpec(name, DATATYPE_VLEN_STRING, 16, shape, null, null, bytes));
+        }
+
+        /**
+         * A compound (record) dataset. Each {@link CompoundField} supplies one named, typed column;
+         * fields are packed in order (no alignment gaps) and every column must have one value per
+         * element.
+         */
+        public DatasetWriter compoundDataset(String name, long[] shape, CompoundField... fields) {
+            long count = elementCount(shape);
+            int recordSize = 0;
+            int[] offsets = new int[fields.length];
+            for (int i = 0; i < fields.length; i++) {
+                if (fields[i].count != count) {
+                    throw new IllegalArgumentException("compound field '" + fields[i].name + "' has "
+                            + fields[i].count + " values but the shape implies " + count);
+                }
+                offsets[i] = recordSize;
+                recordSize += fields[i].size;
+            }
+            byte[] data = new byte[Math.toIntExact(count * recordSize)];
+            for (int r = 0; r < count; r++) {
+                for (int i = 0; i < fields.length; i++) {
+                    System.arraycopy(fields[i].column, r * fields[i].size,
+                            data, r * recordSize + offsets[i], fields[i].size);
+                }
+            }
+            return addDataset(new DatasetSpec(name, compoundDatatype(fields, offsets, recordSize),
+                    recordSize, shape, null, data, null));
+        }
+
+        /** An enumerated dataset over a 32-bit base type: each value must be one of {@code type}'s codes. */
+        public DatasetWriter enumDataset(String name, long[] shape, EnumType type, int[] values) {
+            requireElementCount(shape, values.length);
+            return addDataset(new DatasetSpec(name, enumDatatype(type), 4, shape, null, intBytes(values), null));
         }
 
         public GroupWriter group(String name) {
@@ -251,6 +295,51 @@ public final class Hdf5Writer implements AutoCloseable {
             spec.attributes.add(new AttributeSpec(name, DATATYPE_FLOAT64, shape, doubleBytes(data)));
             return this;
         }
+    }
+
+    /** One named, typed column of a {@link GroupWriter#compoundDataset compound dataset}. */
+    public static final class CompoundField {
+        private final String name;
+        private final byte[] datatype;
+        private final int size;
+        private final byte[] column;
+        private final int count;
+
+        private CompoundField(String name, byte[] datatype, int size, byte[] column, int count) {
+            this.name = name;
+            this.datatype = datatype;
+            this.size = size;
+            this.column = column;
+            this.count = count;
+        }
+
+        /** An {@code int32} field. */
+        public static CompoundField int32(String name, int[] values) {
+            return new CompoundField(name, DATATYPE_INT32, 4, intBytes(values), values.length);
+        }
+
+        /** A {@code float64} field. */
+        public static CompoundField float64(String name, double[] values) {
+            return new CompoundField(name, DATATYPE_FLOAT64, 8, doubleBytes(values), values.length);
+        }
+    }
+
+    /** An enumeration type over a 32-bit base: an ordered list of {@code name -> code} members. */
+    public static final class EnumType {
+        private final List<String> names = new ArrayList<>();
+        private final List<Integer> values = new ArrayList<>();
+
+        /** Adds a member; returns {@code this} for chaining. */
+        public EnumType add(String name, int value) {
+            names.add(name);
+            values.add(value);
+            return this;
+        }
+    }
+
+    /** Starts building an {@link EnumType}. */
+    public static EnumType enumType() {
+        return new EnumType();
     }
 
     // --------------------------------------------------------------- serialization
@@ -878,13 +967,60 @@ public final class Hdf5Writer implements AutoCloseable {
     }
 
     private static void requireElementCount(long[] shape, int length) {
+        if (elementCount(shape) != length) {
+            throw new IllegalArgumentException(
+                    "shape implies " + elementCount(shape) + " elements but data has " + length);
+        }
+    }
+
+    private static long elementCount(long[] shape) {
         long count = 1;
         for (long d : shape) {
             count *= d;
         }
-        if (count != length) {
-            throw new IllegalArgumentException("shape implies " + count + " elements but data has " + length);
+        return count;
+    }
+
+    /** Minimum number of bytes needed to hold an unsigned value up to {@code size} (member offsets). */
+    private static int byteWidthFor(int size) {
+        int bits = 32 - Integer.numberOfLeadingZeros(Math.max(1, size));
+        return Math.max(1, (bits + 7) / 8);
+    }
+
+    /** Builds a compound (class 6, version 5) datatype message: members packed at the given offsets. */
+    private static byte[] compoundDatatype(CompoundField[] fields, int[] offsets, int recordSize) {
+        GrowBuffer b = new GrowBuffer();
+        b.u8(0x56); // version 5, class 6 (compound)
+        b.u8(fields.length & 0xFF);
+        b.u8((fields.length >>> 8) & 0xFF);
+        b.u8(0);
+        b.u32(recordSize);
+        int offsetWidth = byteWidthFor(recordSize);
+        for (int i = 0; i < fields.length; i++) {
+            b.bytes((fields[i].name + "\0").getBytes(StandardCharsets.US_ASCII)); // null-terminated name
+            b.uvar(offsets[i], offsetWidth);
+            b.bytes(fields[i].datatype);
         }
+        return b.toByteArray();
+    }
+
+    /** Builds an enumerated (class 8, version 5) datatype message over a 32-bit base type. */
+    private static byte[] enumDatatype(EnumType type) {
+        GrowBuffer b = new GrowBuffer();
+        int members = type.names.size();
+        b.u8(0x58); // version 5, class 8 (enumerated)
+        b.u8(members & 0xFF);
+        b.u8((members >>> 8) & 0xFF);
+        b.u8(0);
+        b.u32(4); // size = base type size
+        b.bytes(DATATYPE_INT32);
+        for (String name : type.names) {
+            b.bytes((name + "\0").getBytes(StandardCharsets.US_ASCII));
+        }
+        for (int value : type.values) {
+            b.u32(value);
+        }
+        return b.toByteArray();
     }
 
     private static int align8(int n) {
