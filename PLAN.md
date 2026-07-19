@@ -3,11 +3,13 @@
 **Falcon** is a multi-module Maven umbrella for **pure-JDK 25, zero-runtime-dependency** readers and
 writers of scientific-data formats.
 
-> **Status: H5 in progress — 72 tests green.** H0–H4 done (chunked storage + all six filters incl.
+> **Status: H5 in progress — 80 tests green.** H0–H4 done (chunked storage + all six filters incl.
 > pure-Java szip, hyperslab). H5 so far: **new-style groups** (compact + **dense**) and **attributes**
-> (compact + **dense**) via the **fractal heap + v2 B-tree** + **global heap**, plus **vlen string
-> datasets**. Remaining H5: indirect-block heaps / deeper B-trees (very large sets), the newer chunk
-> indexes, shared/committed datatypes, and vlen sequences.
+> (compact + **dense**) via the **fractal heap + v2 B-tree** + **global heap**, **vlen string
+> datasets**, and the **newer chunk indexes** (version-4/5 layout: single-chunk, **fixed array**,
+> **extensible array** incl. secondary blocks, and **v2-B-tree** — non-filtered + filtered). Remaining
+> H5: indirect-block heaps / deeper B-trees & paged data blocks (very large sets), shared/committed
+> datatypes, and vlen sequences.
 
 ## Program roadmap (Falcon)
 
@@ -192,8 +194,9 @@ Each stage ends with a **milestone** and concrete **acceptance criteria**. "Refe
   compact storage reads correctly.
 
 ### H4 — Chunked storage & filters (incl. szip decode)  ✅ **decode done** (newer indexes → H5)
-- Chunked layout (v3) via the **v1 B-tree (type 1)** index. The newer indexes (single / implicit /
-  fixed-array / extensible-array / v2 B-tree, v4 layout) accompany new-style files → **H5**.
+- Chunked layout (v3) via the **v1 B-tree (type 1)** index. The newer indexes (single-chunk /
+  fixed-array / extensible-array / v2 B-tree, v4/v5 layout) accompany new-style files and are **done in
+  H5** (§ H5 below).
 - **Filter Pipeline message (11)** + filter decode: **deflate** (`java.util.zip`), **shuffle**,
   **fletcher32**, **scaleoffset** (integer), **nbit** (atomic), and **szip** (pure-Java CCSDS 121.0, §9).
 - **Shipped:** `layout.DataLayoutMessage` (chunked v3) + `DataLayout.Chunked`, `btree.ChunkBTreeV1`,
@@ -208,6 +211,12 @@ Each stage ends with a **milestone** and concrete **acceptance criteria**. "Refe
 - **Link Info (2)**, **Link (6)**, **Group Info (10)**; **fractal heap**; **v2 B-trees** types 5/6
   (link name/creation-order) and 8/9 (attribute name/creation-order); types 1–4 (huge fractal-heap
   objects).
+- **Newer chunk indexes ✓** (version-4/5 Data Layout): **single-chunk** (type 1), **fixed array**
+  (`FAHD`/`FADB`, type 3), **extensible array** (`EAHD`/`EAIB`/`EASB`/`EADB`, type 4, incl. secondary
+  blocks), and **v2-B-tree** (`BTHD`/`BTLF`, type 5, records 10/11) — each for non-filtered and
+  filtered chunks. `index.{FixedArray,ExtensibleArray,ChunkBTreeV2}`. Implicit (type 2) throws
+  unsupported (h5py emits a fixed array instead). Deferred to "very large" work: deep v2 B-trees with
+  `BTIN` internal nodes and paged extensible-array data blocks.
 - **Attribute (12)** + **Attribute Info (21)**; **global heap** for variable-length data;
   **Shared Message Table (15)** + shared/committed messages; v2 B-tree type 7.
 - **Milestone:** full read of modern HDF5 (dense links/attrs, vlen, committed types).
@@ -309,7 +318,9 @@ zero-dependency, pure-JDK guarantee intact.
 |---|---|
 | Compact, Contiguous | H3 |
 | Chunked — v1 B-tree (type 1) | H4 |
-| Chunked — single / implicit / fixed array / extensible array / v2 B-tree | H4 |
+| Chunked — single-chunk / fixed array / extensible array / v2 B-tree (v4/v5 layout) | **H5 ✓** |
+| Chunked — implicit index (h5py emits fixed array instead; untestable) | throws unsupported |
+| Chunked — deep v2 B-trees (BTIN) / paged EA data blocks (very large sets) | later |
 | Virtual (VDS) | H6 |
 
 ### 10.4 Filters (all built-in; **szip included**)
