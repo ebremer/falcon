@@ -151,6 +151,8 @@ def build_chunk_indexes(f):
                      chunks=(5,), compression="gzip")
     f.create_dataset("btree2", data=np.arange(16, dtype="i4").reshape(4, 4),
                      maxshape=(None, None), chunks=(2, 2))                                          # v2 B-tree
+    f.create_dataset("btree2_gz", data=np.arange(64, dtype="i4").reshape(8, 8),
+                     maxshape=(None, None), chunks=(2, 2), compression="gzip")                      # v2 B-tree, filtered
 
 
 def main():

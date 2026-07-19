@@ -127,6 +127,24 @@ class DataReadChunkedTest {
     }
 
     @Test
+    void v2BTreeIndex() throws IOException {
+        // 4x4 with both dims unlimited and 2x2 chunks -> v2 B-tree index (type 10 records).
+        try (Hdf5File h5 = Hdf5File.open(Fixtures.path("chunk_indexes.h5"))) {
+            int[] expected = range(16);
+            int[] actual = h5.root().dataset("btree2").readInts();
+            assertArrayEquals(expected, actual);
+        }
+    }
+
+    @Test
+    void v2BTreeIndexFiltered() throws IOException {
+        // 8x8, both dims unlimited, gzip -> v2 B-tree with filtered (type 11) records.
+        try (Hdf5File h5 = Hdf5File.open(Fixtures.path("chunk_indexes.h5"))) {
+            assertArrayEquals(range(64), h5.root().dataset("btree2_gz").readInts());
+        }
+    }
+
+    @Test
     void nbitReducedPrecision() throws IOException {
         // 16-bit-precision unsigned stored in 4 bytes: n-bit packs only the significant bits.
         try (Hdf5File f = Hdf5File.open(Fixtures.path("nbit_data.h5"))) {
