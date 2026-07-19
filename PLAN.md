@@ -3,9 +3,9 @@
 **Falcon** is a multi-module Maven umbrella for **pure-JDK 25, zero-runtime-dependency** readers and
 writers of scientific-data formats.
 
-> **Status: reviewed — decisions locked (see §13); building begins at stage H0.**
-> Nothing in the HDF5 roadmap (H1 onward) is implemented yet; the reactor scaffold, module, license,
-> and this plan are in place.
+> **Status: stage H0 (foundations) complete and green — 16 tests pass; H1 is next.**
+> The `io` and `checksum` packages are implemented and tested. Nothing in the HDF5 roadmap beyond H0
+> is implemented yet.
 
 ## Program roadmap (Falcon)
 
@@ -146,11 +146,14 @@ The write API mirrors this (`Hdf5File.create`, `createGroup`, `createDataset(nam
 Each stage ends with a **milestone** and concrete **acceptance criteria**. "Reference file" = an
 `.h5` produced by h5py (§11). Stages are dependency-ordered.
 
-### H0 — Foundations  🔜
+### H0 — Foundations  ✅ **done**
 - `io` layer: `MemorySegment`-backed random access with little-endian primitives, configurable
   offset/length widths, undefined-address sentinel; `checksum` package with Jenkins lookup3.
-- **Milestone / acceptance:** `mvn -pl hdf5 test` green; lookup3 reproduces known vectors; can map a
-  file and read arbitrary offsets/widths.
+- **Shipped:** `io.HdfBuffer`, `io.MappedHdfFile` (FFM mmap, read-only), `checksum.Lookup3`,
+  `HdfException` / `HdfFormatException`; 16 unit tests.
+- **Acceptance met:** `mvn -pl hdf5 test` green; lookup3 reproduces the canonical Jenkins vectors
+  **and** a real HDF5 v3 superblock checksum written by h5py; maps a file and reads arbitrary
+  offsets/widths.
 
 ### H1 — Vertical slice: open a file, walk old-style groups
 - Superblock **v0–v3** (locate root group; validate signature + checksum).

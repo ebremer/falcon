@@ -44,6 +44,9 @@ mvn -pl hdf5 compile       # compile just the hdf5 module
 
 ## Hard constraints
 
+- **Approval gate for dependencies (standing instruction from Erich).** Before adding ANY library
+  outside `java.base` — any module, **any scope** (runtime, test, or build) — **stop and ask Erich for
+  explicit approval first.** The only pre-approved non-JDK library is **JUnit 5** (test scope).
 - **Pure JDK, zero runtime dependencies.** Every shipped artifact must depend on nothing beyond
   `java.base`. JUnit 5 is allowed but **test scope only**. Do not add runtime dependencies —
   including compression libraries.
