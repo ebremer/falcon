@@ -101,6 +101,44 @@ class WriteTest {
     }
 
     @Test
+    void roundTripScaleOffsetDataset() throws IOException {
+        Path file = Files.createTempFile("falcon-so", ".h5");
+        try {
+            int[] data = new int[16];
+            for (int i = 0; i < 16; i++) {
+                data[i] = 100 + i;
+            }
+            try (Hdf5Writer w = Hdf5Writer.create(file)) {
+                w.intChunkedDataset("so", data, new long[] {16}, new long[] {8}).scaleOffset();
+            }
+            try (Hdf5File h5 = Hdf5File.open(file)) {
+                assertArrayEquals(data, h5.root().dataset("so").readInts());
+            }
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    @Test
+    void roundTripNbitDataset() throws IOException {
+        Path file = Files.createTempFile("falcon-nbit", ".h5");
+        try {
+            int[] data = new int[16];
+            for (int i = 0; i < 16; i++) {
+                data[i] = 100 + i;
+            }
+            try (Hdf5Writer w = Hdf5Writer.create(file)) {
+                w.intChunkedDataset("nb", data, new long[] {16}, new long[] {8}).nbit(16);
+            }
+            try (Hdf5File h5 = Hdf5File.open(file)) {
+                assertArrayEquals(data, h5.root().dataset("nb").readInts());
+            }
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    @Test
     void roundTripSubgroupsAndStrings() throws IOException {
         Path file = Files.createTempFile("falcon-tree", ".h5");
         try {

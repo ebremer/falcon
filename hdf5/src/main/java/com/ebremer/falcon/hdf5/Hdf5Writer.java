@@ -201,6 +201,27 @@ public final class Hdf5Writer implements AutoCloseable {
             return this;
         }
 
+        /**
+         * Losslessly compresses integer chunks with the scale-offset filter (subtract the minimum, then
+         * bit-pack). Chunked {@code int32} datasets only, and not combined with other filters.
+         */
+        public DatasetWriter scaleOffset() {
+            requireChunked();
+            spec.scaleOffset = true;
+            return this;
+        }
+
+        /**
+         * Stores each element in only its {@code precision} low bits with the n-bit filter (an unsigned
+         * integer datatype of that precision). Chunked {@code int32} datasets only; values must be
+         * non-negative and fit in {@code precision} bits.
+         */
+        public DatasetWriter nbit(int precision) {
+            requireChunked();
+            spec.nbitPrecision = precision;
+            return this;
+        }
+
         private void requireChunked() {
             if (spec.chunkShape == null) {
                 throw new IllegalStateException("filters require a chunked dataset");
@@ -256,12 +277,15 @@ public final class Hdf5Writer implements AutoCloseable {
         buf.align(8);
         long headerAddress = buf.position();
 
+        byte[] datatype = dataset.nbitPrecision >= 0
+                ? nbitDatatype(dataset.elementSize, dataset.nbitPrecision) : dataset.datatype;
         GrowBuffer messages = new GrowBuffer();
         writeMessage(messages, 1, 0x00, dataspaceBody(dataset.shape));
-        writeMessage(messages, 3, 0x01, dataset.datatype);
+        writeMessage(messages, 3, 0x01, datatype);
         writeMessage(messages, 5, 0x01, new byte[] {0x03, 0x0a}); // fill value: default 0
         writeMessage(messages, 8, 0x00, layout);
-        if (dataset.shuffle || dataset.deflateLevel >= 0 || dataset.fletcher32) {
+        if (dataset.shuffle || dataset.deflateLevel >= 0 || dataset.fletcher32 || dataset.scaleOffset
+                || dataset.nbitPrecision >= 0) {
             writeMessage(messages, 11, 0x00, filterPipelineBody(dataset));
         }
         for (AttributeSpec attribute : dataset.attributes) {
@@ -278,11 +302,19 @@ public final class Hdf5Writer implements AutoCloseable {
      */
     private static byte[] writeChunkedStorage(GrowBuffer buf, DatasetSpec dataset) {
         List<byte[]> chunks = splitChunks(dataset);
-        boolean filtered = dataset.shuffle || dataset.deflateLevel >= 0 || dataset.fletcher32;
+        boolean filtered = dataset.shuffle || dataset.deflateLevel >= 0 || dataset.fletcher32
+                || dataset.scaleOffset || dataset.nbitPrecision >= 0;
         long[] chunkAddresses = new long[chunks.size()];
         int[] chunkSizes = new int[chunks.size()];
         for (int i = 0; i < chunks.size(); i++) {
-            byte[] block = applyFilters(chunks.get(i), dataset);
+            byte[] block;
+            if (dataset.scaleOffset) {
+                block = scaleOffsetEncode(chunks.get(i), dataset.elementSize);
+            } else if (dataset.nbitPrecision >= 0) {
+                block = nbitEncode(chunks.get(i), dataset.elementSize, dataset.nbitPrecision);
+            } else {
+                block = applyFilters(chunks.get(i), dataset);
+            }
             buf.align(8);
             chunkAddresses[i] = buf.position();
             chunkSizes[i] = block.length;
@@ -347,6 +379,28 @@ public final class Hdf5Writer implements AutoCloseable {
     private static byte[] filterPipelineBody(DatasetSpec dataset) {
         GrowBuffer b = new GrowBuffer();
         b.u8(2); // version
+        if (dataset.nbitPrecision >= 0) {
+            b.u8(1);
+            int elements = 1;
+            for (long c : dataset.chunkShape) {
+                elements *= (int) c;
+            }
+            // n-bit client data: total, flag, nelmts, ATOMIC, size, byte order (0=LE), precision, offset.
+            writeFilter(b, Filters.NBIT, 0,
+                    8, 0, elements, 1, dataset.elementSize, 0, dataset.nbitPrecision, 0);
+            return b.toByteArray();
+        }
+        if (dataset.scaleOffset) {
+            b.u8(1);
+            int elements = 1;
+            for (long c : dataset.chunkShape) {
+                elements *= (int) c;
+            }
+            // scale-offset client data for a signed little-endian int (size, sign, order, fill available).
+            writeFilter(b, Filters.SCALEOFFSET, 1,
+                    2, 0, elements, 0, dataset.elementSize, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+            return b.toByteArray();
+        }
         int count = (dataset.shuffle ? 1 : 0) + (dataset.deflateLevel >= 0 ? 1 : 0) + (dataset.fletcher32 ? 1 : 0);
         b.u8(count);
         if (dataset.shuffle) {
@@ -359,6 +413,99 @@ public final class Hdf5Writer implements AutoCloseable {
             writeFilter(b, Filters.FLETCHER32, 0);
         }
         return b.toByteArray();
+    }
+
+    /**
+     * Integer scale-offset encode: a 21-byte header ({@code minbits}, minimum value, fill value) then
+     * each element packed as {@code minbits} bits (value minus the minimum, MSB-first). {@code minbits}
+     * reserves the all-ones code (the fill marker), so no real value ever encodes to it.
+     */
+    private static byte[] scaleOffsetEncode(byte[] chunk, int elementSize) {
+        int elements = chunk.length / elementSize;
+        long[] values = new long[elements];
+        long min = Long.MAX_VALUE;
+        long max = Long.MIN_VALUE;
+        for (int i = 0; i < elements; i++) {
+            long v = signedLittleEndian(chunk, i * elementSize, elementSize);
+            values[i] = v;
+            min = Math.min(min, v);
+            max = Math.max(max, v);
+        }
+        long range = max - min;
+        int minBits = 0;
+        if (range != 0) {
+            minBits = 64 - Long.numberOfLeadingZeros(range);
+            if (range == (1L << minBits) - 1) {
+                minBits++; // keep the all-ones code free for the fill marker
+            }
+        }
+
+        GrowBuffer b = new GrowBuffer();
+        b.u32(minBits);
+        b.u8(8);       // width of the minimum-value field
+        b.u64(min);    // minimum value
+        b.u64(0);      // fill value
+        if (minBits > 0) {
+            int packedBytes = (elements * minBits + 7) / 8;
+            byte[] packed = new byte[packedBytes];
+            int bit = 0;
+            for (long value : values) {
+                long code = value - min;
+                for (int k = minBits - 1; k >= 0; k--) {
+                    packed[bit >> 3] |= (int) ((code >> k) & 1) << (7 - (bit & 7));
+                    bit++;
+                }
+            }
+            b.bytes(packed);
+        }
+        return b.toByteArray();
+    }
+
+    /** An unsigned little-endian integer datatype of {@code precision} significant bits (for n-bit). */
+    private static byte[] nbitDatatype(int size, int precision) {
+        GrowBuffer b = new GrowBuffer();
+        b.u8(0x10); // version 1, class 0 (fixed point)
+        b.u8(0);    // class bit field: little-endian, unsigned
+        b.u8(0);
+        b.u8(0);
+        b.u32(size);
+        b.u16(0);         // bit offset
+        b.u16(precision); // bit precision
+        return b.toByteArray();
+    }
+
+    /** N-bit encode: pack each element's low {@code precision} bits, MSB-first, from the chunk start. */
+    private static byte[] nbitEncode(byte[] chunk, int elementSize, int precision) {
+        int elements = chunk.length / elementSize;
+        byte[] out = new byte[(elements * precision + 7) / 8];
+        long mask = precision >= 64 ? -1L : (1L << precision) - 1;
+        int bit = 0;
+        for (int i = 0; i < elements; i++) {
+            long value = 0;
+            for (int b = 0; b < elementSize; b++) {
+                value |= (long) (chunk[i * elementSize + b] & 0xff) << (8 * b);
+            }
+            long significant = value & mask;
+            for (int k = precision - 1; k >= 0; k--) {
+                out[bit >> 3] |= (int) ((significant >> k) & 1) << (7 - (bit & 7));
+                bit++;
+            }
+        }
+        return out;
+    }
+
+    private static long signedLittleEndian(byte[] data, int offset, int size) {
+        long v = 0;
+        for (int i = 0; i < size; i++) {
+            v |= (long) (data[offset + i] & 0xff) << (8 * i);
+        }
+        if (size < 8) {
+            long signBit = 1L << (size * 8 - 1);
+            if ((v & signBit) != 0) {
+                v |= -(1L << (size * 8));
+            }
+        }
+        return v;
     }
 
     private static void writeFilter(GrowBuffer b, int id, int flags, int... clientData) {
@@ -753,6 +900,8 @@ public final class Hdf5Writer implements AutoCloseable {
         int deflateLevel = -1;          // -1 = no compression
         boolean shuffle;
         boolean fletcher32;
+        boolean scaleOffset;
+        int nbitPrecision = -1;         // -1 = no n-bit filter
 
         DatasetSpec(String name, byte[] datatype, int elementSize, long[] shape, long[] chunkShape,
                     byte[] data, List<byte[]> vlenStrings) {

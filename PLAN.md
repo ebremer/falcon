@@ -10,10 +10,10 @@ writers of scientific-data formats.
 > virtual datasets (full external-source assembly), and object metadata. **Write path (H7) started**:
 > `Hdf5Writer` emits a valid modern-format file — v3 (checksummed) superblock, v2 (checksummed) object
 > headers, a **nested group tree**, contiguous **int32 / float64 / variable-length-string** datasets
-> (strings via a global heap), **chunked** datasets (fixed-array index) with **deflate + shuffle +
-> fletcher32** encode, and scalar/array **attributes** on groups and datasets — read back identically
-> by Falcon *and h5py*. Remaining: the nbit/scaleoffset/szip encoders, more datatypes, older formats,
-> plus the minor read-side completeness messages.
+> (strings via a global heap), **chunked** datasets (fixed-array index) with **deflate, shuffle,
+> fletcher32, scale-offset, and n-bit** encode, and scalar/array **attributes** on groups and datasets
+> — read back identically by Falcon *and h5py*. Remaining: **szip** encode, more datatypes, older
+> formats, plus the minor read-side completeness messages.
 
 ## Program roadmap (Falcon)
 
@@ -270,7 +270,9 @@ Each stage ends with a **milestone** and concrete **acceptance criteria**. "Refe
   **deflate**, **shuffle**, and **fletcher32** (applied in write order shuffle&rarr;deflate&rarr;fletcher32;
   filtered fixed array, client id 1; layout version 5 for the 8-byte stored-size entry; multi-filter
   pipeline message). `writer.intChunkedDataset(...).shuffle().deflate(level).fletcher32()`.
-- Remaining filter **encode**: nbit/scaleoffset + **szip encode** (§9); dense + compact
+- **Scale-offset ✓** (`.scaleOffset()`: reserves the all-ones fill code, packs `value − min`) and
+  **n-bit ✓** (`.nbit(precision)`: unsigned reduced-precision datatype + significant-bit packing).
+- Remaining filter **encode**: **szip** (§9, the CCSDS extended-Rice encoder); dense + compact
   group/attribute storage; all datatype classes (compound/array/vlen/enum/reference/complex);
   fill-value policies; user-selectable layout.
 - **Milestone:** round-trip parity across the full fixture matrix.
