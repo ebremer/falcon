@@ -168,6 +168,21 @@ def build_chunk_indexes(f):
                      maxshape=(None, None), chunks=(2, 2), compression="gzip")                      # v2 B-tree, filtered
 
 
+def build_committed_types(f):
+    """A committed (named) datatype shared by two datasets and by an attribute, plus a second
+    committed enum type used by a dataset."""
+    f["itype"] = np.dtype("i4")                       # committed named datatype at /itype
+    itype = f["itype"]
+    a = f.create_dataset("a", shape=(4,), dtype=itype)
+    a[...] = np.arange(4, dtype="i4")
+    b = f.create_dataset("b", shape=(3,), dtype=itype)
+    b[...] = np.array([7, 8, 9], dtype="i4")
+    a.attrs.create("tag", data=np.int32(42), dtype=itype)  # attribute sharing the committed type
+    f["etype"] = h5py.enum_dtype({"RED": 0, "GREEN": 1, "BLUE": 2}, basetype="i4")
+    e = f.create_dataset("colors", shape=(3,), dtype=f["etype"])
+    e[...] = np.array([2, 0, 1], dtype="i4")
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     with h5py.File(os.path.join(OUT, "old_style_groups.h5"), "w") as f:
@@ -191,6 +206,10 @@ def main():
         build_dense_attrs(f)
     with h5py.File(os.path.join(OUT, "chunk_indexes.h5"), "w", libver="latest") as f:
         build_chunk_indexes(f)
+    with h5py.File(os.path.join(OUT, "committed_types.h5"), "w", libver="latest") as f:
+        build_committed_types(f)
+    with h5py.File(os.path.join(OUT, "committed_types_old.h5"), "w", libver="earliest") as f:
+        build_committed_types(f)  # v0 superblock + symbol-table groups + v1 object headers
     print("wrote fixtures to", OUT)
     print("h5py", h5py.__version__, "| bundled HDF5", h5py.version.hdf5_version)
 

@@ -3,14 +3,15 @@
 **Falcon** is a multi-module Maven umbrella for **pure-JDK 25, zero-runtime-dependency** readers and
 writers of scientific-data formats.
 
-> **Status: H5 in progress — 84 tests green.** H0–H4 done (chunked storage + all six filters incl.
+> **Status: H5 in progress — 90 tests green.** H0–H4 done (chunked storage + all six filters incl.
 > pure-Java szip, hyperslab). H5 so far: **new-style groups** (compact + **dense**) and **attributes**
 > (compact + **dense**) via the **fractal heap + v2 B-tree** + **global heap**, **vlen string
 > datasets**, the **newer chunk indexes** (version-4/5 layout: single-chunk, **fixed array**,
-> **extensible array** incl. secondary blocks, and **v2-B-tree** — non-filtered + filtered), and
-> **vlen sequences** (ragged int/long/float/double arrays, datasets + attributes). Remaining H5:
-> indirect-block heaps / deeper B-trees & paged data blocks (very large sets), and shared/committed
-> datatypes.
+> **extensible array** incl. secondary blocks, and **v2-B-tree** — non-filtered + filtered),
+> **vlen sequences** (ragged int/long/float/double arrays, datasets + attributes), and
+> **shared/committed (named) datatypes** (datasets, attributes, and navigable committed-type objects).
+> Remaining H5: indirect-block heaps / deeper B-trees & paged data blocks (very large sets), and the
+> SOHM shared-message heap.
 
 ## Program roadmap (Falcon)
 
@@ -222,7 +223,12 @@ Each stage ends with a **milestone** and concrete **acceptance criteria**. "Refe
   both flavours of class-9 data resolve through the global heap — **strings** (`data.VlenStrings`) and
   **sequences / ragged arrays** (`data.VlenSequences`: int/long/float/double rows incl. empty rows),
   for datasets and attributes alike.
-- **Shared Message Table (15)** + shared/committed messages; v2 B-tree type 7.
+- **Committed datatypes ✓**: a shared Datatype message (flag `0x02`) whose body is a `header.SharedMessage`
+  locating the committed type's object header; `DatatypeMessage.resolve` follows it (and any chain) for
+  both datasets and attributes. Committed-type objects are a first-class `CommittedDatatype` in the
+  object hierarchy (navigable via `group.committedType(name)`), across old- and new-style files.
+  Deferred: the **SOHM heap** form (arbitrary messages deduplicated via the Shared Message Table 15 /
+  a fractal heap) throws unsupported; v2 B-tree type 7.
 - **Milestone:** full read of modern HDF5 (dense links/attrs, vlen, committed types).
 - **Acceptance:** listings + attribute values + vlen data match h5py for dense-storage, large-group,
   and shared-datatype fixtures.

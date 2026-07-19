@@ -9,6 +9,7 @@ import com.ebremer.falcon.hdf5.filter.FilterPipeline;
 import com.ebremer.falcon.hdf5.filter.FilterPipelineMessage;
 import com.ebremer.falcon.hdf5.header.HeaderMessage;
 import com.ebremer.falcon.hdf5.header.MessageType;
+import com.ebremer.falcon.hdf5.header.SharedMessage;
 import com.ebremer.falcon.hdf5.io.FileContext;
 import com.ebremer.falcon.hdf5.io.HdfBuffer;
 import com.ebremer.falcon.hdf5.layout.DataLayout;
@@ -48,10 +49,11 @@ public final class Dataset extends Hdf5Object {
         return false;
     }
 
-    /** This dataset's element datatype. */
+    /** This dataset's element datatype (resolving a committed/shared type if referenced). */
     public Datatype datatype() {
         if (datatype == null) {
-            datatype = DatatypeMessage.parse(ctx.buffer(), require(MessageType.DATATYPE, "datatype").bodyOffset());
+            HeaderMessage message = require(MessageType.DATATYPE, "datatype");
+            datatype = DatatypeMessage.resolve(ctx, message.bodyOffset(), SharedMessage.isShared(message));
         }
         return datatype;
     }

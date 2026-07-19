@@ -80,6 +80,11 @@ public final class Group extends Hdf5Object {
         return requireChild(name, Dataset.class);
     }
 
+    /** The direct child committed (named) datatype with the given name. */
+    public CommittedDatatype committedType(String name) {
+        return requireChild(name, CommittedDatatype.class);
+    }
+
     private <T extends Hdf5Object> T requireChild(String name, Class<T> kind) {
         Hdf5Object object = child(name).orElseThrow(
                 () -> new NoSuchElementException("no child '" + name + "' in " + displayPath()));
@@ -141,16 +146,21 @@ public final class Group extends Hdf5Object {
         return result;
     }
 
-    /** Builds a child by classifying the target object header as a group or a dataset. */
+    /** Builds a child by classifying the target object header as a group, dataset, or committed type. */
     private Hdf5Object createChild(String name, long objectHeaderAddress) {
         ObjectHeader child = ObjectHeader.parse(ctx, objectHeaderAddress);
         boolean isGroup = child.contains(MessageType.SYMBOL_TABLE)
                 || child.contains(MessageType.LINK_INFO)
                 || child.contains(MessageType.GROUP_INFO)
                 || child.contains(MessageType.LINK);
-        return isGroup
-                ? Group.child(ctx, name, path(), objectHeaderAddress)
-                : Dataset.child(ctx, name, path(), objectHeaderAddress);
+        if (isGroup) {
+            return Group.child(ctx, name, path(), objectHeaderAddress);
+        }
+        // A committed (named) datatype has a datatype message but no dataspace or data layout.
+        if (child.contains(MessageType.DATATYPE) && !child.contains(MessageType.DATASPACE)) {
+            return CommittedDatatype.child(ctx, name, path(), objectHeaderAddress);
+        }
+        return Dataset.child(ctx, name, path(), objectHeaderAddress);
     }
 
     private List<Hdf5Object> loadOldStyleChildren(HeaderMessage symbolTable) {
@@ -162,11 +172,11 @@ public final class Group extends Hdf5Object {
         for (SymbolTableEntry entry : entries) {
             String childName = heap.name(ctx, entry.linkNameOffset());
             long childHeader = entry.objectHeaderAddress();
-            if (entry.isGroup()) {
-                result.add(Group.child(ctx, childName, path(), childHeader));
-            } else {
-                result.add(Dataset.child(ctx, childName, path(), childHeader));
-            }
+            // The symbol-table cache flags known groups; everything else is classified from its header
+            // (a plain dataset or a committed datatype).
+            result.add(entry.isGroup()
+                    ? Group.child(ctx, childName, path(), childHeader)
+                    : createChild(childName, childHeader));
         }
         return result;
     }

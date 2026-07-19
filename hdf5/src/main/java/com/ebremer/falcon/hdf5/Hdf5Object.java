@@ -18,7 +18,7 @@ import java.util.Optional;
  * An object in the HDF5 hierarchy &mdash; a {@link Group} or a {@link Dataset} &mdash; identified by
  * its name, its absolute path, and the file address of its object header.
  */
-public abstract sealed class Hdf5Object permits Group, Dataset {
+public abstract sealed class Hdf5Object permits Group, Dataset, CommittedDatatype {
 
     final FileContext ctx;
     private final String name;

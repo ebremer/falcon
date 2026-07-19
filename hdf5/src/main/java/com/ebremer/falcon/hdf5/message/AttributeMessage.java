@@ -27,10 +27,14 @@ public final class AttributeMessage {
     public static Attribute parse(FileContext ctx, long base, int bodySize) {
         HdfBuffer buf = ctx.buffer();
         int version = buf.getUnsignedByte(base);
+        // Version 1 has a reserved byte here; versions 2-3 use it for flags (bit 0: datatype shared,
+        // bit 1: dataspace shared).
+        int flags = version == 1 ? 0 : buf.getUnsignedByte(base + 1);
         int nameSize = buf.getUnsignedShort(base + 2);
         int datatypeSize = buf.getUnsignedShort(base + 4);
         int dataspaceSize = buf.getUnsignedShort(base + 6);
         boolean padded = version == 1;
+        boolean datatypeShared = (flags & 0x01) != 0;
 
         long p = base + 8;
         if (version == 3) {
@@ -44,7 +48,7 @@ public final class AttributeMessage {
         p += padded ? align8(dataspaceSize) : dataspaceSize;
         long dataOffset = p;
 
-        Datatype datatype = DatatypeMessage.parse(buf, datatypeOffset);
+        Datatype datatype = DatatypeMessage.resolve(ctx, datatypeOffset, datatypeShared);
         Dataspace dataspace = DataspaceMessage.parse(ctx, dataspaceOffset);
         int dataSize = (int) (base + bodySize - dataOffset);
         return new Attribute(ctx, name, datatype, dataspace, dataOffset, dataSize);
