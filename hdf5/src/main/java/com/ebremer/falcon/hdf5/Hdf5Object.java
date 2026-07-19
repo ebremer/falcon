@@ -5,6 +5,7 @@ import com.ebremer.falcon.hdf5.header.HeaderMessage;
 import com.ebremer.falcon.hdf5.header.MessageType;
 import com.ebremer.falcon.hdf5.header.ObjectHeader;
 import com.ebremer.falcon.hdf5.heap.FractalHeap;
+import com.ebremer.falcon.hdf5.heap.GlobalHeap;
 import com.ebremer.falcon.hdf5.io.FileContext;
 import com.ebremer.falcon.hdf5.io.HdfBuffer;
 import com.ebremer.falcon.hdf5.message.AttributeInfoMessage;
@@ -127,6 +128,69 @@ public abstract sealed class Hdf5Object permits Group, Dataset, CommittedDatatyp
             out[i] = address == HdfBuffer.UNDEFINED_ADDRESS ? null : classify(ctx, "", "", address);
         }
         return out;
+    }
+
+    /**
+     * Resolves a region-reference buffer: each {@code stride}-byte element is a global-heap ID whose
+     * object holds a target dataset's address followed by a serialized dataspace selection. Returns a
+     * {@link Selection} of the referenced dataset per element (or {@code null} for a null reference).
+     */
+    static Selection[] resolveRegionReferences(FileContext ctx, MemorySegment data, int count, int stride) {
+        HdfBuffer buffer = new HdfBuffer(data);
+        int offsets = ctx.sizeOfOffsets();
+        Selection[] out = new Selection[count];
+        for (int i = 0; i < count; i++) {
+            long base = (long) i * stride;
+            long collection = buffer.getAddress(base, offsets);
+            if (collection == HdfBuffer.UNDEFINED_ADDRESS) {
+                continue; // null reference
+            }
+            int index = (int) buffer.getUnsignedInt(base + offsets);
+            out[i] = parseRegion(ctx, GlobalHeap.readObject(ctx, collection, index), offsets);
+        }
+        return out;
+    }
+
+    /** Parses a serialized region reference (dataset address + dataspace selection) into a selection. */
+    private static Selection parseRegion(FileContext ctx, byte[] object, int offsets) {
+        HdfBuffer body = HdfBuffer.of(object);
+        long datasetHeader = body.getAddress(0, offsets);
+        if (!(classify(ctx, "", "", datasetHeader) instanceof Dataset dataset)) {
+            throw new HdfFormatException("region reference does not point at a dataset");
+        }
+        long[] dims = dataset.dataspace().dimensions();
+        int rank = dims.length;
+        int type = (int) body.getUnsignedInt(offsets);
+        if (type == 3) { // H5S_SEL_ALL: the whole dataset
+            return dataset.select(new long[rank], dims);
+        }
+        if (type != 2) { // H5S_SEL_HYPERSLABS
+            throw new HdfUnsupportedException("region reference selection type " + type
+                    + " (only hyperslab and all-points selections are supported)");
+        }
+        long p = offsets + 4L; // past the selection type
+        int version = (int) body.getUnsignedInt(p);
+        if (version != 3) {
+            throw new HdfUnsupportedException("region reference hyperslab selection version " + version
+                    + " is not yet supported");
+        }
+        int encodeSize = body.getUnsignedByte(p + 5); // version(4), flags(1), encode size(1)
+        int selectionRank = (int) body.getUnsignedInt(p + 6);
+        long q = p + 10;
+        long[] offset = new long[selectionRank];
+        long[] shape = new long[selectionRank];
+        for (int d = 0; d < selectionRank; d++) {
+            long start = body.getUnsignedValue(q, encodeSize);
+            long blockCount = body.getUnsignedValue(q + 2L * encodeSize, encodeSize);
+            long block = body.getUnsignedValue(q + 3L * encodeSize, encodeSize);
+            q += 4L * encodeSize; // start, stride, count, block
+            if (blockCount != 1) {
+                throw new HdfUnsupportedException("strided / multi-block region references are not yet supported");
+            }
+            offset[d] = start;
+            shape[d] = block;
+        }
+        return dataset.select(offset, shape);
     }
 
     /** Joins a parent path and a child name into an absolute path. */

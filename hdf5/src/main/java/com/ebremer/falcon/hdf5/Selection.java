@@ -25,6 +25,16 @@ public final class Selection {
         this.count = count.clone();
     }
 
+    /** The dataset this selection is taken from. */
+    public Dataset dataset() {
+        return dataset;
+    }
+
+    /** The start coordinate of the selection in each dimension. */
+    public long[] offset() {
+        return offset.clone();
+    }
+
     /** The shape of the selection. */
     public long[] shape() {
         return count.clone();

@@ -55,6 +55,23 @@ class ReferenceTest {
     }
 
     @Test
+    void regionReferencesResolveToSelections() {
+        Selection[] regions = h5.root().dataset("rrefs").readRegionReferences();
+        assertEquals(2, regions.length);
+
+        // 1-D: elements 1,2,3 of target_a = arange(5).
+        assertEquals(h5.root().dataset("target_a").objectHeaderAddress(), regions[0].dataset().objectHeaderAddress());
+        assertArrayEquals(new long[] {1}, regions[0].offset());
+        assertArrayEquals(new long[] {3}, regions[0].shape());
+        assertArrayEquals(new int[] {1, 2, 3}, regions[0].readInts());
+
+        // 2-D: rows 1-2, cols 1-3 of the 4x5 grid arange(20).
+        assertArrayEquals(new long[] {1, 1}, regions[1].offset());
+        assertArrayEquals(new long[] {2, 3}, regions[1].shape());
+        assertArrayEquals(new int[] {6, 7, 8, 11, 12, 13}, regions[1].readInts());
+    }
+
+    @Test
     void readDispatchesToReferenceResolution() {
         Object value = h5.root().dataset("refs").read();
         Hdf5Object[] refs = assertInstanceOf(Hdf5Object[].class, value);

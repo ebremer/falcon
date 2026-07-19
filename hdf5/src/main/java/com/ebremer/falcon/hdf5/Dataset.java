@@ -147,6 +147,18 @@ public final class Dataset extends Hdf5Object {
         return resolveObjectReferences(ctx, rawData(), elementCount(), type.size());
     }
 
+    /**
+     * Reads a region-reference dataset, resolving each element to a {@link Selection} of the dataset it
+     * points into (or {@code null} for a null reference). Read the selection to get the referenced data.
+     */
+    public Selection[] readRegionReferences() {
+        Datatype type = datatype();
+        if (!(type instanceof Datatype.Reference ref) || ref.kind() != Datatype.ReferenceKind.DATASET_REGION) {
+            throw new HdfUnsupportedException("readRegionReferences requires a region-reference datatype: " + path());
+        }
+        return resolveRegionReferences(ctx, rawData(), elementCount(), type.size());
+    }
+
     /** The dataset's raw storage bytes (decoded from the layout; not yet de-filtered). */
     public byte[] readRawBytes() {
         return Elements.toRawBytes(rawData(), (long) elementCount() * datatype().size());
@@ -165,6 +177,7 @@ public final class Dataset extends Hdf5Object {
             case Datatype.VariableLength v when v.kind() == Datatype.VlenKind.STRING -> readStrings();
             case Datatype.VariableLength v -> readVlenSequence(v);
             case Datatype.Reference r when r.kind() == Datatype.ReferenceKind.OBJECT -> readObjectReferences();
+            case Datatype.Reference r when r.kind() == Datatype.ReferenceKind.DATASET_REGION -> readRegionReferences();
             default -> throw new HdfUnsupportedException(
                     "reading datatype class " + type.typeClass() + " is not yet supported: " + path());
         };

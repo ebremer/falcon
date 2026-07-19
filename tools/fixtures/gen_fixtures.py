@@ -189,6 +189,11 @@ def build_references(f):
     refs[1] = f["target_g"].ref
     refs[2] = f["target_g/inner"].ref
     refs.attrs["points_to"] = f["target_a"].ref
+    # region references: a 1-D and a 2-D hyperslab selection
+    grid = f.create_dataset("grid", data=np.arange(20, dtype="i4").reshape(4, 5))
+    rrefs = f.create_dataset("rrefs", (2,), dtype=h5py.regionref_dtype)
+    rrefs[0] = f["target_a"].regionref[1:4]      # elements 1,2,3 of arange(5)
+    rrefs[1] = grid.regionref[1:3, 1:4]          # rows 1-2, cols 1-3
 
 
 def build_ea_paged(f):
