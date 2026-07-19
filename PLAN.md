@@ -3,17 +3,15 @@
 **Falcon** is a multi-module Maven umbrella for **pure-JDK 25, zero-runtime-dependency** readers and
 writers of scientific-data formats.
 
-> **Status: H6 in progress — 102 tests green.** **H0–H5 complete**: superblock/headers/groups (old +
-> new style), all datatype classes, compact/contiguous/chunked storage with every chunk index
-> (v1-B-tree, single-chunk, fixed/extensible array, v2-B-tree) at any scale, all six filters (incl.
-> pure-Java szip), hyperslabs, dense links/attributes via fractal heap + v2 B-tree + global heap, vlen
-> strings & sequences, committed datatypes, and the large-set structures (deep BTIN B-trees,
-> indirect-block fractal heaps, paged EA data blocks). H6 so far: **object references** and **region
-> references** (resolved to navigable objects / selections), **virtual datasets** (full assembly from
-> external source files, honouring fill), and **object metadata** (comment, modification time,
-> reference count). Remaining: superblock-extension messages (File Space Info, Driver Info, B-tree K
-> Values), the SOHM shared-message heap, and nested indirect fractal-heap blocks (only for extreme
-> heaps).
+> **Status: H7 in progress — 104 tests green.** **Read path (H0–H6) complete**: superblock/headers/
+> groups (old + new style), all datatype classes, compact/contiguous/chunked storage with every chunk
+> index at any scale, all six filters (incl. pure-Java szip), hyperslabs, dense links/attributes,
+> vlen strings & sequences, committed datatypes, the large-set structures, object + region references,
+> virtual datasets (full external-source assembly), and object metadata. **Write path (H7) started**:
+> `Hdf5Writer` emits a valid modern-format file — v3 (checksummed) superblock, v2 (checksummed) object
+> headers, compact-link root group, contiguous **int32 / float64** datasets, and scalar/array
+> attributes — read back identically by Falcon *and h5py*. Remaining: broader write coverage (strings,
+> subgroups, chunked + filters, older formats), plus the minor read-side completeness messages.
 
 ## Program roadmap (Falcon)
 
@@ -255,12 +253,14 @@ Each stage ends with a **milestone** and concrete **acceptance criteria**. "Refe
   errors; VDS resolves against source datasets.
 
 ### H7 — Write path foundations
-- **File-space allocation**: end-of-file bump allocator first, then **free-space manager** +
-  aggregators; **File Space Info** strategy.
-- Write superblock (default v2/v3 with checksums), object header **v2**, message serialization,
-  **local/global/fractal heap** writers, **v1/v2 B-tree** writers.
-- **Milestone:** write a minimal valid file: root group + one contiguous atomic dataset + one attribute.
-- **Acceptance:** h5py opens it and reads identical data; if `h5check` is installed, it reports valid.
+- **File-space allocation**: end-of-file bump allocator ✓ (`write.GrowBuffer`, append + patch +
+  lookup3); free-space manager + aggregators and the File Space Info strategy remain.
+- **Superblock (v3, checksummed) ✓**, **object header v2 (checksummed) ✓**, message serialization ✓
+  (dataspace, datatype, fill value, contiguous data layout, link info, group info, link, attribute).
+  Heap and B-tree writers (for dense storage / chunk indexes) remain.
+- **Milestone ✓:** `Hdf5Writer` writes root group + contiguous **int32/float64** datasets + scalar/array
+  attributes; **verified read-identical by Falcon and by h5py**.
+- Remaining write breadth: strings & more datatypes, subgroups, chunked storage, and old-style formats.
 
 ### H8 — Write path breadth (incl. szip encode)
 - Chunked write + filter pipeline **encode**: deflate/shuffle/fletcher32/nbit/scaleoffset + **szip

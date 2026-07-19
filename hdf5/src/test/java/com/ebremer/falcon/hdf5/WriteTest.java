@@ -39,4 +39,22 @@ class WriteTest {
             Files.deleteIfExists(file);
         }
     }
+
+    @Test
+    void roundTripDoubleDatasetAndAttribute() throws IOException {
+        Path file = Files.createTempFile("falcon-write-f8", ".h5");
+        try {
+            try (Hdf5Writer writer = Hdf5Writer.create(file)) {
+                writer.doubleDataset("values", new double[] {1.5, -2.25, 3.0}, new long[] {3})
+                        .doubleAttribute("offset", new double[] {0.125}, new long[] {});
+            }
+            try (Hdf5File h5 = Hdf5File.open(file)) {
+                Dataset values = h5.root().dataset("values");
+                assertArrayEquals(new double[] {1.5, -2.25, 3.0}, values.readDoubles());
+                assertArrayEquals(new double[] {0.125}, values.attribute("offset").orElseThrow().readDoubles());
+            }
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
 }

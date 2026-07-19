@@ -33,6 +33,10 @@ public final class Hdf5Writer implements AutoCloseable {
     private static final int SUPERBLOCK_SIZE = 48;
     // Fixed-point, version 1, class 0: 4-byte signed little-endian integer (bit precision 32).
     private static final byte[] DATATYPE_INT32 = {0x10, 0x08, 0, 0, 4, 0, 0, 0, 0, 0, 0x20, 0};
+    // Floating-point, version 1, class 1: 8-byte little-endian IEEE double (exp bias 1023).
+    private static final byte[] DATATYPE_FLOAT64 = {
+        0x11, 0x20, 0x3f, 0, 8, 0, 0, 0, 0, 0, 0x40, 0, 0x34, 0x0b, 0, 0x34, (byte) 0xff, 0x03, 0, 0
+    };
 
     private final Path path;
     private final List<DatasetSpec> datasets = new ArrayList<>();
@@ -65,6 +69,24 @@ public final class Hdf5Writer implements AutoCloseable {
         requireElementCount(shape, data.length);
         datasets.get(datasets.size() - 1).attributes()
                 .add(new AttributeSpec(name, DATATYPE_INT32, shape, intBytes(data)));
+        return this;
+    }
+
+    /** Adds a contiguous {@code float64} dataset of the given row-major shape. */
+    public Hdf5Writer doubleDataset(String name, double[] data, long[] shape) {
+        requireElementCount(shape, data.length);
+        datasets.add(new DatasetSpec(name, DATATYPE_FLOAT64, shape, doubleBytes(data), new ArrayList<>()));
+        return this;
+    }
+
+    /** Attaches a {@code float64} attribute to the most recently added dataset. */
+    public Hdf5Writer doubleAttribute(String name, double[] data, long[] shape) {
+        if (datasets.isEmpty()) {
+            throw new IllegalStateException("add a dataset before attaching an attribute");
+        }
+        requireElementCount(shape, data.length);
+        datasets.get(datasets.size() - 1).attributes()
+                .add(new AttributeSpec(name, DATATYPE_FLOAT64, shape, doubleBytes(data)));
         return this;
     }
 
@@ -236,6 +258,17 @@ public final class Hdf5Writer implements AutoCloseable {
             out[i * 4 + 1] = (byte) (v >>> 8);
             out[i * 4 + 2] = (byte) (v >>> 16);
             out[i * 4 + 3] = (byte) (v >>> 24);
+        }
+        return out;
+    }
+
+    private static byte[] doubleBytes(double[] data) {
+        byte[] out = new byte[data.length * 8];
+        for (int i = 0; i < data.length; i++) {
+            long v = Double.doubleToLongBits(data[i]);
+            for (int b = 0; b < 8; b++) {
+                out[i * 8 + b] = (byte) (v >>> (8 * b));
+            }
         }
         return out;
     }
