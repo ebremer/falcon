@@ -1,0 +1,8 @@
+# Normalize all text files to LF in the repository (deterministic across platforms)
+* text=auto eol=lf
+
+# Treat these as binary (no EOL conversion, no diff)
+*.jar   binary
+*.class binary
+*.h5    binary
+*.hdf5  binary

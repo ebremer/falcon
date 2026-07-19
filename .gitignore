@@ -1,0 +1,48 @@
+# Maven
+target/
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+pom.xml.next
+release.properties
+dependency-reduced-pom.xml
+
+# Compiled class files
+*.class
+
+# Log / package files
+*.log
+*.jar
+*.war
+*.ear
+
+# IDE - IntelliJ
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# IDE - Eclipse
+.classpath
+.project
+.settings/
+bin/
+
+# IDE - VS Code
+.vscode/
+
+# IDE - NetBeans
+nbproject/private/
+nbbuild/
+nbdist/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code local (machine-specific) settings — a shared .claude/settings.json stays committable
+.claude/settings.local.json
+
+# Falcon: local scratch HDF5 files produced by ad-hoc runs (checked-in fixtures live in src/test/resources)
+/scratch/
+*.h5.tmp
