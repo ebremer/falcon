@@ -1,8 +1,15 @@
 # CLAUDE.md — Falcon project conventions
 
-Falcon is a **pure-JDK 25, zero-runtime-dependency HDF5 reader/writer** implementing the
-[HDF5 File Format Specification, Version 4.0](https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html)
-(HDF5 2.0). The implementation roadmap lives in [`PLAN.md`](PLAN.md).
+**Falcon** is a multi-module Maven umbrella for **pure-JDK 25, zero-runtime-dependency** readers and
+writers of scientific-data formats:
+
+- **`hdf5`** module (`com.ebremer.falcon.hdf5`) — an HDF5 reader/writer implementing the
+  [HDF5 File Format Specification, Version 4.0](https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html)
+  (HDF5 2.0). **Built now** (Falcon Phase 1).
+- **`zarr`** module (`com.ebremer.falcon.zarr`) — a Zarr reader/writer. **Planned / pinned**
+  (Falcon Phase 2). Do not start it until asked.
+
+The full roadmap is in [`PLAN.md`](PLAN.md).
 
 ## Commit policy (IMPORTANT)
 
@@ -15,8 +22,8 @@ Erich Bremer <erich@ebremer.com>
 - **Do NOT** add `Co-Authored-By:` trailers (including any Claude/Anthropic co-author trailer).
 - **Do NOT** attribute commits to any other name, email, or bot account.
 - Author **and** committer identity must both be `erich@ebremer.com`.
-- This identity is pinned in the repository-local git config (`git config --local user.email`),
-  so commits made from this repo use it automatically. Do not override it per-commit.
+- Pinned in repository-local git config (`git config --local user.email` / `user.name`), so commits
+  from this repo use it automatically. Do not override it per-commit.
 
 Verify before pushing anywhere: `git log --format='%an <%ae> | %cn <%ce>'` — every line must read
 `Erich Bremer <erich@ebremer.com> | Erich Bremer <erich@ebremer.com>`.
@@ -24,29 +31,39 @@ Verify before pushing anywhere: `git log --format='%an <%ae> | %cn <%ce>'` — e
 ## Build & test
 
 ```bash
-mvn compile        # compile the modular main sources (JDK 25, --release 25)
-mvn test           # run the JUnit 5 suite
-mvn verify         # full build
+mvn verify                 # build/test the whole reactor (parent + all modules)
+mvn -pl hdf5 test          # test just the hdf5 module
+mvn -pl hdf5 compile       # compile just the hdf5 module
 ```
 
-- **JDK 25 required.** The build sets `<maven.compiler.release>25</maven.compiler.release>`.
-- The project is a **JPMS module** (`module com.ebremer.falcon`). Only `com.ebremer.falcon`
-  is exported; format-level packages stay encapsulated.
+- **JDK 25 required.** The parent POM sets `<maven.compiler.release>25</maven.compiler.release>`.
+- Each format module is a **JPMS module** (e.g. `module com.ebremer.falcon.hdf5`), exporting only its
+  public API package; format-level packages stay encapsulated.
+- The root `pom.xml` is a `pom`-packaging aggregator: shared versions live in its `<properties>`,
+  `<dependencyManagement>` (JUnit BOM), and `<pluginManagement>`.
 
 ## Hard constraints
 
-- **Pure JDK, zero runtime dependencies.** The shipped artifact must depend on nothing beyond
+- **Pure JDK, zero runtime dependencies.** Every shipped artifact must depend on nothing beyond
   `java.base`. JUnit 5 is allowed but **test scope only**. Do not add runtime dependencies —
-  including compression libraries. `deflate` uses `java.util.zip`; every other filter and the
-  Jenkins lookup3 checksum are implemented from scratch.
-- **Foreign Function & Memory API** (`java.lang.foreign`, `MemorySegment`/`Arena`) is the primary
-  I/O backend, so files larger than 2 GB are handled without per-mapping size limits.
+  including compression libraries.
+  - `deflate` uses `java.util.zip`.
+  - **`szip` is IN scope** and must be implemented from scratch in pure Java as CCSDS 121.0
+    extended-Rice / adaptive entropy coding (libaec-compatible), **not** by wrapping native code.
+  - `shuffle`, `fletcher32`, `nbit`, `scaleoffset`, and the Jenkins lookup3 checksum are hand-written.
+- **Foreign Function & Memory API** (`java.lang.foreign`, `MemorySegment`/`Arena`) is the primary I/O
+  backend, so files larger than 2 GB are handled without per-mapping size limits.
 - **HDF5 metadata is little-endian.** Per-datatype *data* byte order is read from the datatype
   message, not assumed.
 
 ## Conventions
 
-- Base package: `com.ebremer.falcon`. Sub-packages by format concern (see `PLAN.md` §5).
+- HDF5 code lives under `com.ebremer.falcon.hdf5.*`; sub-packages by format concern (see `PLAN.md` §6).
+- Shared abstractions (byte I/O, checksums, the array/datatype/chunk model) may be promoted to a
+  future `com.ebremer.falcon.core` module when the Zarr module lands — keep them cohesive.
 - Reference the spec section in a comment when implementing a non-obvious on-disk structure.
-- Every phase in `PLAN.md` lands with tests (unit + conformance against reference files).
+- Every roadmap stage lands with tests: unit tests plus conformance tests against reference `.h5`
+  files generated with **h5py** (3.16.0 / HDF5 2.0.0 is installed locally — the reference oracle).
 - Match the style of surrounding code; keep the public API small and documented with Javadoc.
+- License: **Apache-2.0** (`LICENSE` at the repo root). New source files may carry the standard
+  Apache header; keep `Copyright <year> Erich Bremer`.

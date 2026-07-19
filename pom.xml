@@ -7,17 +7,19 @@
     <groupId>com.ebremer</groupId>
     <artifactId>falcon</artifactId>
     <version>0.1.0-SNAPSHOT</version>
-    <packaging>jar</packaging>
+    <packaging>pom</packaging>
 
     <name>Falcon</name>
-    <description>A pure-JDK 25, zero-runtime-dependency reader and writer for the HDF5 file
-        format, implementing the HDF5 File Format Specification, Version 4.0 (HDF5 2.0).</description>
-    <url>https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html</url>
+    <description>Umbrella for pure-JDK 25, zero-runtime-dependency readers/writers of scientific-data
+        formats. The hdf5 module implements the HDF5 File Format Specification, Version 4.0 (HDF5 2.0);
+        a zarr module is planned.</description>
+    <url>https://github.com/ebremer/falcon</url>
 
     <licenses>
         <license>
-            <name>The Apache License, Version 2.0</name>
+            <name>Apache License, Version 2.0</name>
             <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+            <distribution>repo</distribution>
         </license>
     </licenses>
 
@@ -28,12 +30,17 @@
         </developer>
     </developers>
 
+    <modules>
+        <module>hdf5</module>
+        <!-- <module>zarr</module>  Planned — Falcon Phase 2 (see PLAN.md §12). Pinned for now. -->
+    </modules>
+
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
         <maven.compiler.release>25</maven.compiler.release>
 
-        <!-- Plugin / dependency versions (test scope only; the artifact has zero runtime deps) -->
+        <!-- Test-scope only; the shipped artifacts have zero runtime dependencies. -->
         <junit.version>5.11.4</junit.version>
         <compiler.plugin.version>3.13.0</compiler.plugin.version>
         <surefire.plugin.version>3.5.2</surefire.plugin.version>
@@ -51,27 +58,20 @@
         </dependencies>
     </dependencyManagement>
 
-    <dependencies>
-        <!-- Test only. The main artifact depends on nothing beyond java.base. -->
-        <dependency>
-            <groupId>org.junit.jupiter</groupId>
-            <artifactId>junit-jupiter</artifactId>
-            <scope>test</scope>
-        </dependency>
-    </dependencies>
-
     <build>
-        <plugins>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-compiler-plugin</artifactId>
-                <version>${compiler.plugin.version}</version>
-            </plugin>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-surefire-plugin</artifactId>
-                <version>${surefire.plugin.version}</version>
-            </plugin>
-        </plugins>
+        <pluginManagement>
+            <plugins>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-compiler-plugin</artifactId>
+                    <version>${compiler.plugin.version}</version>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-surefire-plugin</artifactId>
+                    <version>${surefire.plugin.version}</version>
+                </plugin>
+            </plugins>
+        </pluginManagement>
     </build>
 </project>
