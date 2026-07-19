@@ -178,6 +178,15 @@ def build_chunk_indexes(f):
                      maxshape=(None, None), chunks=(2, 2))                                          # 400 chunks -> BTIN nodes
 
 
+def build_metadata(f):
+    """Object metadata: a comment, a tracked modification time, and a second hard link."""
+    plain = f.create_dataset("plain", data=np.arange(3, dtype="i4"))
+    f["hardlink"] = plain  # a second hard link -> reference count 2
+    f.create_dataset("timed", data=np.arange(3, dtype="i4"), track_times=True)
+    commented = f.create_dataset("commented", data=np.arange(3, dtype="i4"))
+    h5py.h5o.set_comment(commented.id, b"a helpful comment")
+
+
 def build_vds(out):
     """A virtual dataset assembling two external source files, plus one with an unmapped (fill) row."""
     for k in range(2):
@@ -265,6 +274,10 @@ def main():
     with h5py.File(os.path.join(OUT, "references.h5"), "w", libver="latest") as f:
         build_references(f)
     build_vds(OUT)
+    with h5py.File(os.path.join(OUT, "metadata.h5"), "w", libver="latest") as f:
+        build_metadata(f)
+    with h5py.File(os.path.join(OUT, "metadata_old.h5"), "w", libver="earliest") as f:
+        build_metadata(f)
     with h5py.File(os.path.join(OUT, "committed_types_old.h5"), "w", libver="earliest") as f:
         build_committed_types(f)  # v0 superblock + symbol-table groups + v1 object headers
     print("wrote fixtures to", OUT)

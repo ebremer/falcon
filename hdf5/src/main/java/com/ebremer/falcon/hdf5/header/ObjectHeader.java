@@ -31,14 +31,40 @@ public final class ObjectHeader {
 
     private final int version;
     private final List<HeaderMessage> messages;
+    private final int v1ReferenceCount;     // version-1 prefix hard-link count; -1 for version 2
+    private final long headerModificationTime; // version-2 prefix modification time (seconds); -1 if absent
 
-    private ObjectHeader(int version, List<HeaderMessage> messages) {
+    private ObjectHeader(int version, List<HeaderMessage> messages, int v1ReferenceCount,
+                         long headerModificationTime) {
         this.version = version;
         this.messages = messages;
+        this.v1ReferenceCount = v1ReferenceCount;
+        this.headerModificationTime = headerModificationTime;
     }
 
     public int version() {
         return version;
+    }
+
+    /** The number of hard links to this object (at least 1). */
+    public int referenceCount() {
+        if (v1ReferenceCount >= 0) {
+            return v1ReferenceCount;
+        }
+        HeaderMessage message = find(MessageType.OBJECT_REFERENCE_COUNT);
+        return message == null ? 1 : (int) message.body().getUnsignedInt(1); // version(1), count(4)
+    }
+
+    /** The object's modification time (seconds since the epoch), if the file tracks it. */
+    public java.util.OptionalLong modificationTimeSeconds() {
+        if (headerModificationTime >= 0) {
+            return java.util.OptionalLong.of(headerModificationTime);
+        }
+        HeaderMessage message = find(MessageType.OBJECT_MODIFICATION_TIME);
+        if (message != null) {
+            return java.util.OptionalLong.of(message.body().getUnsignedInt(4)); // version(1), reserved(3), seconds(4)
+        }
+        return java.util.OptionalLong.empty();
     }
 
     public List<HeaderMessage> messages() {
@@ -78,11 +104,12 @@ public final class ObjectHeader {
         HdfBuffer buf = ctx.buffer();
         int version = buf.getUnsignedByte(addr);
         // addr+1 reserved, addr+2 total message count (2), addr+4 reference count (4)
+        int referenceCount = (int) buf.getUnsignedInt(addr + 4);
         long chunk0Size = buf.getUnsignedInt(addr + 8);
         long messageStart = addr + 16; // 12-byte prefix padded to an 8-byte boundary
         List<HeaderMessage> out = new ArrayList<>();
         readVersion1Messages(ctx, messageStart, chunk0Size, out, 0);
-        return new ObjectHeader(version, out);
+        return new ObjectHeader(version, out, referenceCount, -1);
     }
 
     private static void readVersion1Messages(FileContext ctx, long start, long size,
@@ -119,8 +146,11 @@ public final class ObjectHeader {
         int version = buf.getUnsignedByte(addr + 4);
         int flags = buf.getUnsignedByte(addr + 5);
         long p = addr + 6;
+        long modificationTime = -1;
         if ((flags & 0x20) != 0) {
-            p += 16; // access/modification/change/birth times
+            // access(4), modification(4), change(4), birth(4)
+            modificationTime = buf.getUnsignedInt(addr + 10);
+            p += 16;
         }
         if ((flags & 0x10) != 0) {
             p += 4; // max-compact / min-dense attribute phase-change values
@@ -131,7 +161,7 @@ public final class ObjectHeader {
         boolean creationOrder = (flags & 0x04) != 0;
         List<HeaderMessage> out = new ArrayList<>();
         readVersion2Messages(ctx, p, chunk0Size, creationOrder, out, 0);
-        return new ObjectHeader(version, out);
+        return new ObjectHeader(version, out, -1, modificationTime);
     }
 
     private static void readVersion2Messages(FileContext ctx, long start, long size,

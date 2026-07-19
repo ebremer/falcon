@@ -11,6 +11,8 @@ import com.ebremer.falcon.hdf5.io.HdfBuffer;
 import com.ebremer.falcon.hdf5.message.AttributeInfoMessage;
 import com.ebremer.falcon.hdf5.message.AttributeMessage;
 import java.lang.foreign.MemorySegment;
+import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -93,6 +95,31 @@ public abstract sealed class Hdf5Object permits Group, Dataset, CommittedDatatyp
     }
 
     public abstract boolean isGroup();
+
+    /** The number of hard links to this object (at least 1). */
+    public int referenceCount() {
+        return header().referenceCount();
+    }
+
+    /** This object's modification time, if the file tracks object times. */
+    public Optional<Instant> modificationTime() {
+        var seconds = header().modificationTimeSeconds();
+        return seconds.isPresent() ? Optional.of(Instant.ofEpochSecond(seconds.getAsLong())) : Optional.empty();
+    }
+
+    /** This object's comment (object-comment message), if it has one. */
+    public Optional<String> comment() {
+        HeaderMessage message = header().find(MessageType.OBJECT_COMMENT);
+        if (message == null) {
+            return Optional.empty();
+        }
+        byte[] bytes = message.body().getBytes(0, message.bodySize());
+        int length = 0;
+        while (length < bytes.length && bytes[length] != 0) {
+            length++;
+        }
+        return Optional.of(new String(bytes, 0, length, StandardCharsets.UTF_8));
+    }
 
     /**
      * Builds the object at {@code objectHeaderAddress}, classifying it from its header as a group, a
