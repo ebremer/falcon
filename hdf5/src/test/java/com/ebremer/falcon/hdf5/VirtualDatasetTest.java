@@ -26,4 +26,23 @@ class VirtualDatasetTest {
                     h5.root().dataset("vds_gap").readInts());
         }
     }
+
+    @Test
+    void assemblesColumnBlockMappings() throws IOException {
+        try (Hdf5File h5 = Hdf5File.open(Fixtures.path("vds.h5"))) {
+            Dataset cols = h5.root().dataset("vds_cols");
+            assertArrayEquals(new long[] {4, 2}, cols.dataspace().dimensions());
+            // each source fills a (4,1) column block: col 0 <- src0, col 1 <- src1.
+            assertArrayEquals(new int[] {0, 10, 1, 11, 2, 12, 3, 13}, cols.readInts());
+        }
+    }
+
+    @Test
+    void assemblesStridedMappings() throws IOException {
+        try (Hdf5File h5 = Hdf5File.open(Fixtures.path("vds.h5"))) {
+            // source (0..3) lands on strided virtual indices 0,2,4,6; the rest keep fill value -1.
+            assertArrayEquals(new int[] {0, -1, 1, -1, 2, -1, 3, -1},
+                    h5.root().dataset("vds_step").readInts());
+        }
+    }
 }

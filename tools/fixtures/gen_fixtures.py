@@ -201,6 +201,13 @@ def build_vds(out):
         gap[0] = h5py.VirtualSource("vds_src0.h5", "data", shape=(4,))
         gap[2] = h5py.VirtualSource("vds_src1.h5", "data", shape=(4,))
         f.create_virtual_dataset("vds_gap", gap, fillvalue=-1)
+        cols = h5py.VirtualLayout(shape=(4, 2), dtype="i4")  # each source fills a column (a (4,1) block)
+        cols[:, 0] = h5py.VirtualSource("vds_src0.h5", "data", shape=(4,))
+        cols[:, 1] = h5py.VirtualSource("vds_src1.h5", "data", shape=(4,))
+        f.create_virtual_dataset("vds_cols", cols, fillvalue=-1)
+        step = h5py.VirtualLayout(shape=(8,), dtype="i4")  # strided: source lands on indices 0,2,4,6
+        step[0:8:2] = h5py.VirtualSource("vds_src0.h5", "data", shape=(4,))
+        f.create_virtual_dataset("vds_step", step, fillvalue=-1)
 
 
 def build_references(f):
