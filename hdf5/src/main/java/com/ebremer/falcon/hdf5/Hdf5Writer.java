@@ -1,6 +1,7 @@
 package com.ebremer.falcon.hdf5;
 
 import com.ebremer.falcon.hdf5.checksum.Lookup3;
+import com.ebremer.falcon.hdf5.filter.Aec;
 import com.ebremer.falcon.hdf5.filter.Filters;
 import com.ebremer.falcon.hdf5.write.GrowBuffer;
 import java.io.ByteArrayOutputStream;
@@ -222,6 +223,17 @@ public final class Hdf5Writer implements AutoCloseable {
             return this;
         }
 
+        /**
+         * Compresses integer chunks with the szip filter (pure-Java CCSDS extended-Rice encoder, no
+         * preprocessing). Chunked {@code int32} datasets only. Note: this environment's h5py has szip
+         * disabled, so verify round-trips with Falcon (or libaec), not h5py.
+         */
+        public DatasetWriter szip() {
+            requireChunked();
+            spec.szip = true;
+            return this;
+        }
+
         private void requireChunked() {
             if (spec.chunkShape == null) {
                 throw new IllegalStateException("filters require a chunked dataset");
@@ -285,7 +297,7 @@ public final class Hdf5Writer implements AutoCloseable {
         writeMessage(messages, 5, 0x01, new byte[] {0x03, 0x0a}); // fill value: default 0
         writeMessage(messages, 8, 0x00, layout);
         if (dataset.shuffle || dataset.deflateLevel >= 0 || dataset.fletcher32 || dataset.scaleOffset
-                || dataset.nbitPrecision >= 0) {
+                || dataset.nbitPrecision >= 0 || dataset.szip) {
             writeMessage(messages, 11, 0x00, filterPipelineBody(dataset));
         }
         for (AttributeSpec attribute : dataset.attributes) {
@@ -303,13 +315,15 @@ public final class Hdf5Writer implements AutoCloseable {
     private static byte[] writeChunkedStorage(GrowBuffer buf, DatasetSpec dataset) {
         List<byte[]> chunks = splitChunks(dataset);
         boolean filtered = dataset.shuffle || dataset.deflateLevel >= 0 || dataset.fletcher32
-                || dataset.scaleOffset || dataset.nbitPrecision >= 0;
+                || dataset.scaleOffset || dataset.nbitPrecision >= 0 || dataset.szip;
         long[] chunkAddresses = new long[chunks.size()];
         int[] chunkSizes = new int[chunks.size()];
         for (int i = 0; i < chunks.size(); i++) {
             byte[] block;
             if (dataset.scaleOffset) {
                 block = scaleOffsetEncode(chunks.get(i), dataset.elementSize);
+            } else if (dataset.szip) {
+                block = szipEncode(chunks.get(i), dataset.elementSize);
             } else if (dataset.nbitPrecision >= 0) {
                 block = nbitEncode(chunks.get(i), dataset.elementSize, dataset.nbitPrecision);
             } else {
@@ -379,6 +393,13 @@ public final class Hdf5Writer implements AutoCloseable {
     private static byte[] filterPipelineBody(DatasetSpec dataset) {
         GrowBuffer b = new GrowBuffer();
         b.u8(2); // version
+        if (dataset.szip) {
+            b.u8(1);
+            // szip client data: option mask (EC + LSB, no NN/MSB), pixels-per-block, bits-per-pixel,
+            // pixels-per-scanline (= block size, so one block per reference-sample interval).
+            writeFilter(b, Filters.SZIP, 0, 0x0c, 8, dataset.elementSize * 8, 8);
+            return b.toByteArray();
+        }
         if (dataset.nbitPrecision >= 0) {
             b.u8(1);
             int elements = 1;
@@ -492,6 +513,20 @@ public final class Hdf5Writer implements AutoCloseable {
             }
         }
         return out;
+    }
+
+    /** Szip encode: read each element as an unsigned sample and run the AEC entropy coder (block size 8). */
+    private static byte[] szipEncode(byte[] chunk, int elementSize) {
+        int elements = chunk.length / elementSize;
+        long[] samples = new long[elements];
+        for (int i = 0; i < elements; i++) {
+            long v = 0;
+            for (int b = 0; b < elementSize; b++) {
+                v |= (long) (chunk[i * elementSize + b] & 0xff) << (8 * b);
+            }
+            samples[i] = v;
+        }
+        return Aec.encode(samples, elementSize * 8, 8);
     }
 
     private static long signedLittleEndian(byte[] data, int offset, int size) {
@@ -901,6 +936,7 @@ public final class Hdf5Writer implements AutoCloseable {
         boolean shuffle;
         boolean fletcher32;
         boolean scaleOffset;
+        boolean szip;
         int nbitPrecision = -1;         // -1 = no n-bit filter
 
         DatasetSpec(String name, byte[] datatype, int elementSize, long[] shape, long[] chunkShape,

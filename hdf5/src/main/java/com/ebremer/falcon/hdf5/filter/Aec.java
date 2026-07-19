@@ -25,6 +25,58 @@ public final class Aec {
     }
 
     /**
+     * Encodes {@code samples} (treated as unsigned {@code bitsPerSample}-bit values) into an AEC
+     * bitstream, without preprocessing. Each block of {@code blockSize} samples is emitted in whichever
+     * mode is smaller: sample-splitting with the cost-optimal {@code k}, or uncompressed. The output is
+     * decoded by {@link #decode} (and by libaec) with {@code flags = 0} and matching parameters.
+     */
+    public static byte[] encode(long[] samples, int bitsPerSample, int blockSize) {
+        int idLen = idLen(bitsPerSample);
+        int idMax = (1 << idLen) - 1;
+        int maxSplitK = Math.min(bitsPerSample - 1, idMax - 2);
+        BitWriter out = new BitWriter();
+        long[] block = new long[blockSize];
+        for (int start = 0; start < samples.length; start += blockSize) {
+            int count = Math.min(blockSize, samples.length - start);
+            for (int i = 0; i < blockSize; i++) {
+                block[i] = i < count ? samples[start + i] : 0; // pad the final block with zeros
+            }
+
+            int bestK = -1;
+            long bestCost = (long) blockSize * bitsPerSample; // uncompressed cost
+            for (int k = 0; k <= maxSplitK; k++) {
+                long cost = (long) blockSize * k;
+                for (long v : block) {
+                    cost += (v >>> k) + 1; // fundamental sequence: (v>>k) zeros plus a stop bit
+                }
+                if (cost < bestCost) {
+                    bestCost = cost;
+                    bestK = k;
+                }
+            }
+
+            if (bestK < 0) { // uncompressed
+                out.write(idMax, idLen);
+                for (long v : block) {
+                    out.write(v, bitsPerSample);
+                }
+            } else {
+                out.write(bestK + 1, idLen);
+                for (long v : block) {
+                    out.writeFundamental(v >>> bestK);
+                }
+                if (bestK > 0) {
+                    long mask = (1L << bestK) - 1;
+                    for (long v : block) {
+                        out.write(v & mask, bestK);
+                    }
+                }
+            }
+        }
+        return out.toByteArray();
+    }
+
+    /**
      * Decodes {@code sampleCount} samples of {@code bitsPerSample}-bit data from an AEC bitstream.
      *
      * @param blockSize samples per block (libaec {@code block_size})
@@ -147,6 +199,41 @@ public final class Aec {
             m--;
         }
         return m;
+    }
+
+    /** Most-significant-first bit writer, growing its buffer as needed. */
+    private static final class BitWriter {
+        private byte[] data = new byte[64];
+        private int bit;
+
+        void write(long value, int n) {
+            for (int i = n - 1; i >= 0; i--) {
+                writeBit((int) ((value >>> i) & 1));
+            }
+        }
+
+        /** Fundamental sequence: {@code value} zero bits followed by a single one bit. */
+        void writeFundamental(long value) {
+            for (long i = 0; i < value; i++) {
+                writeBit(0);
+            }
+            writeBit(1);
+        }
+
+        private void writeBit(int b) {
+            int index = bit >> 3;
+            if (index >= data.length) {
+                data = java.util.Arrays.copyOf(data, data.length * 2);
+            }
+            if (b != 0) {
+                data[index] |= 1 << (7 - (bit & 7));
+            }
+            bit++;
+        }
+
+        byte[] toByteArray() {
+            return java.util.Arrays.copyOf(data, (bit + 7) >> 3);
+        }
     }
 
     /** Most-significant-first bit reader over a byte array. */

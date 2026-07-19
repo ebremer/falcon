@@ -139,6 +139,27 @@ class WriteTest {
     }
 
     @Test
+    void roundTripSzipDataset() throws IOException {
+        // h5py has szip disabled in this environment, so this verifies Falcon's own szip round-trip
+        // (its AEC decoder is validated byte-for-byte against libaec).
+        Path file = Files.createTempFile("falcon-szip", ".h5");
+        try {
+            int[] data = new int[64];
+            for (int i = 0; i < 64; i++) {
+                data[i] = 1000 + i * 3;
+            }
+            try (Hdf5Writer w = Hdf5Writer.create(file)) {
+                w.intChunkedDataset("z", data, new long[] {64}, new long[] {16}).szip();
+            }
+            try (Hdf5File h5 = Hdf5File.open(file)) {
+                assertArrayEquals(data, h5.root().dataset("z").readInts());
+            }
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    @Test
     void roundTripSubgroupsAndStrings() throws IOException {
         Path file = Files.createTempFile("falcon-tree", ".h5");
         try {
