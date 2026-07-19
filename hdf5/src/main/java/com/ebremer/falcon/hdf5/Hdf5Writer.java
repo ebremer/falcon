@@ -41,6 +41,9 @@ public final class Hdf5Writer implements AutoCloseable {
     private static final int SUPERBLOCK_SIZE = 48;
 
     private static final byte[] DATATYPE_INT32 = {0x10, 0x08, 0, 0, 4, 0, 0, 0, 0, 0, 0x20, 0};
+    private static final byte[] DATATYPE_FLOAT32 = {
+        0x11, 0x20, 0x1f, 0, 4, 0, 0, 0, 0, 0, 0x20, 0, 0x17, 0x08, 0, 0x17, 0x7f, 0, 0, 0
+    };
     private static final byte[] DATATYPE_FLOAT64 = {
         0x11, 0x20, 0x3f, 0, 8, 0, 0, 0, 0, 0, 0x40, 0, 0x34, 0x0b, 0, 0x34, (byte) 0xff, 0x03, 0, 0
     };
@@ -103,6 +106,18 @@ public final class Hdf5Writer implements AutoCloseable {
 
     public DatasetWriter referenceDataset(String name, long[] shape, String[] targets) {
         return rootWriter.referenceDataset(name, shape, targets);
+    }
+
+    public DatasetWriter float32ArrayDataset(String name, long[] shape, int[] arrayDims, float[] data) {
+        return rootWriter.float32ArrayDataset(name, shape, arrayDims, data);
+    }
+
+    public DatasetWriter int32ArrayDataset(String name, long[] shape, int[] arrayDims, int[] data) {
+        return rootWriter.int32ArrayDataset(name, shape, arrayDims, data);
+    }
+
+    public DatasetWriter complexDataset(String name, long[] shape, double[] real, double[] imaginary) {
+        return rootWriter.complexDataset(name, shape, real, imaginary);
     }
 
     public GroupWriter group(String name) {
@@ -199,6 +214,39 @@ public final class Hdf5Writer implements AutoCloseable {
         public DatasetWriter enumDataset(String name, long[] shape, EnumType type, int[] values) {
             requireElementCount(shape, values.length);
             return addDataset(new DatasetSpec(name, enumDatatype(type), 4, shape, null, intBytes(values), null));
+        }
+
+        /**
+         * A dataset whose every element is a fixed-shape {@code float32} array. {@code data} holds all
+         * elements' sub-arrays concatenated row-major (element count &times; {@code prod(arrayDims)} values).
+         */
+        public DatasetWriter float32ArrayDataset(String name, long[] shape, int[] arrayDims, float[] data) {
+            int perElement = product(arrayDims);
+            requireArrayData(shape, perElement, data.length);
+            return addDataset(new DatasetSpec(name, arrayDatatype(arrayDims, 4, DATATYPE_FLOAT32),
+                    perElement * 4, shape, null, float32Bytes(data), null));
+        }
+
+        /** A dataset whose every element is a fixed-shape {@code int32} array (see {@link #float32ArrayDataset}). */
+        public DatasetWriter int32ArrayDataset(String name, long[] shape, int[] arrayDims, int[] data) {
+            int perElement = product(arrayDims);
+            requireArrayData(shape, perElement, data.length);
+            return addDataset(new DatasetSpec(name, arrayDatatype(arrayDims, 4, DATATYPE_INT32),
+                    perElement * 4, shape, null, intBytes(data), null));
+        }
+
+        /** A native complex-number dataset (128-bit: {@code float64} real and imaginary parts). */
+        public DatasetWriter complexDataset(String name, long[] shape, double[] real, double[] imaginary) {
+            requireElementCount(shape, real.length);
+            if (imaginary.length != real.length) {
+                throw new IllegalArgumentException("real and imaginary parts differ in length");
+            }
+            byte[] data = new byte[real.length * 16];
+            for (int i = 0; i < real.length; i++) {
+                putDoubleLittleEndian(data, i * 16, real[i]);
+                putDoubleLittleEndian(data, i * 16 + 8, imaginary[i]);
+            }
+            return addDataset(new DatasetSpec(name, complex128Datatype(), 16, shape, null, data, null));
         }
 
         /**
@@ -1056,6 +1104,69 @@ public final class Hdf5Writer implements AutoCloseable {
             b.bytes(fields[i].datatype);
         }
         return b.toByteArray();
+    }
+
+    /** Builds an array (class 10, version 5) datatype message with the given element shape and base. */
+    private static byte[] arrayDatatype(int[] arrayDims, int baseSize, byte[] base) {
+        GrowBuffer b = new GrowBuffer();
+        b.u8(0x5A); // version 5, class 10 (array)
+        b.u8(0);
+        b.u8(0);
+        b.u8(0);
+        b.u32(product(arrayDims) * baseSize);
+        b.u8(arrayDims.length); // rank
+        for (int dimension : arrayDims) {
+            b.u32(dimension);
+        }
+        b.bytes(base);
+        return b.toByteArray();
+    }
+
+    /** Builds a native complex (class 11, version 5) datatype message over a {@code float64} base. */
+    private static byte[] complex128Datatype() {
+        GrowBuffer b = new GrowBuffer();
+        b.u8(0x5B); // version 5, class 11 (complex)
+        b.u8(0x01);
+        b.u8(0);
+        b.u8(0);
+        b.u32(16);
+        b.bytes(DATATYPE_FLOAT64);
+        return b.toByteArray();
+    }
+
+    private static int product(int[] values) {
+        int p = 1;
+        for (int v : values) {
+            p *= v;
+        }
+        return p;
+    }
+
+    private static void requireArrayData(long[] shape, int perElement, int dataLength) {
+        long expected = elementCount(shape) * perElement;
+        if (dataLength != expected) {
+            throw new IllegalArgumentException(
+                    "array dataset expects " + expected + " values but data has " + dataLength);
+        }
+    }
+
+    private static void putDoubleLittleEndian(byte[] out, int offset, double value) {
+        long v = Double.doubleToLongBits(value);
+        for (int b = 0; b < 8; b++) {
+            out[offset + b] = (byte) (v >>> (8 * b));
+        }
+    }
+
+    private static byte[] float32Bytes(float[] data) {
+        byte[] out = new byte[data.length * 4];
+        for (int i = 0; i < data.length; i++) {
+            int v = Float.floatToIntBits(data[i]);
+            out[i * 4] = (byte) v;
+            out[i * 4 + 1] = (byte) (v >>> 8);
+            out[i * 4 + 2] = (byte) (v >>> 16);
+            out[i * 4 + 3] = (byte) (v >>> 24);
+        }
+        return out;
     }
 
     /** Builds an enumerated (class 8, version 5) datatype message over a 32-bit base type. */

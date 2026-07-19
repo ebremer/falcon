@@ -244,6 +244,57 @@ class WriteTest {
     }
 
     @Test
+    void roundTripArrayDataset() throws IOException {
+        Path file = Files.createTempFile("falcon-array", ".h5");
+        try {
+            float[] data = {0, 1, 2, 3, 4, 5, 10, 11, 12, 13, 14, 15}; // two 2x3 elements
+            try (Hdf5Writer w = Hdf5Writer.create(file)) {
+                w.float32ArrayDataset("arr", new long[] {2}, new int[] {2, 3}, data);
+            }
+            try (Hdf5File h5 = Hdf5File.open(file)) {
+                Dataset ds = h5.root().dataset("arr");
+                Datatype.Array type = (Datatype.Array) ds.datatype();
+                assertEquals(24, type.size());
+                assertArrayEquals(new int[] {2, 3}, type.dimensions());
+                assertTrue(type.base() instanceof Datatype.FloatingPoint);
+                ByteBuffer raw = ByteBuffer.wrap(ds.readRawBytes()).order(ByteOrder.LITTLE_ENDIAN);
+                float[] got = new float[12];
+                for (int i = 0; i < 12; i++) {
+                    got[i] = raw.getFloat(i * 4);
+                }
+                assertArrayEquals(data, got, 0f);
+            }
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    @Test
+    void roundTripComplexDataset() throws IOException {
+        Path file = Files.createTempFile("falcon-complex", ".h5");
+        try {
+            double[] real = {1, 3, -5};
+            double[] imaginary = {2, -4, 0};
+            try (Hdf5Writer w = Hdf5Writer.create(file)) {
+                w.complexDataset("cx", new long[] {3}, real, imaginary);
+            }
+            try (Hdf5File h5 = Hdf5File.open(file)) {
+                Dataset ds = h5.root().dataset("cx");
+                Datatype.Complex type = (Datatype.Complex) ds.datatype();
+                assertEquals(16, type.size());
+                assertTrue(type.base() instanceof Datatype.FloatingPoint);
+                ByteBuffer raw = ByteBuffer.wrap(ds.readRawBytes()).order(ByteOrder.LITTLE_ENDIAN);
+                for (int i = 0; i < 3; i++) {
+                    assertEquals(real[i], raw.getDouble(i * 16));
+                    assertEquals(imaginary[i], raw.getDouble(i * 16 + 8));
+                }
+            }
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    @Test
     void roundTripReferenceDataset() throws IOException {
         Path file = Files.createTempFile("falcon-refs", ".h5");
         try {
