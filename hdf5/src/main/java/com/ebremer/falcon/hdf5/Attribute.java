@@ -1,12 +1,10 @@
 package com.ebremer.falcon.hdf5;
 
 import com.ebremer.falcon.hdf5.data.Elements;
+import com.ebremer.falcon.hdf5.data.VlenStrings;
 import com.ebremer.falcon.hdf5.datatype.Datatype;
-import com.ebremer.falcon.hdf5.heap.GlobalHeap;
 import com.ebremer.falcon.hdf5.io.FileContext;
-import com.ebremer.falcon.hdf5.io.HdfBuffer;
 import java.lang.foreign.MemorySegment;
-import java.nio.charset.StandardCharsets;
 
 /**
  * A named attribute on a {@link Hdf5Object}: a small typed, shaped value. Read it with the typed
@@ -92,21 +90,7 @@ public final class Attribute {
     }
 
     private String[] readVariableLengthStrings(Datatype.VariableLength vlen) {
-        int count = count();
-        int stride = vlen.size();
-        var charset = vlen.characterSet() == Datatype.CharacterSet.UTF8
-                ? StandardCharsets.UTF_8 : StandardCharsets.US_ASCII;
-        HdfBuffer buf = ctx.buffer();
-        String[] out = new String[count];
-        for (int i = 0; i < count; i++) {
-            long p = dataOffset + (long) i * stride;
-            long length = buf.getUnsignedInt(p);
-            long collection = buf.getAddress(p + 4, ctx.sizeOfOffsets());
-            int index = (int) buf.getUnsignedInt(p + 4 + ctx.sizeOfOffsets());
-            byte[] bytes = GlobalHeap.readObject(ctx, collection, index);
-            out[i] = new String(bytes, 0, (int) Math.min(length, bytes.length), charset);
-        }
-        return out;
+        return VlenStrings.read(ctx, data(), count(), vlen);
     }
 
     private MemorySegment data() {

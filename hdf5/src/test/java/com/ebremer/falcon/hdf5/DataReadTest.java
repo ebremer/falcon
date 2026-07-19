@@ -80,6 +80,14 @@ class DataReadTest {
     }
 
     @Test
+    void variableLengthStrings() throws IOException {
+        try (Hdf5File f = Hdf5File.open(Fixtures.path("vlen_data.h5"))) {
+            assertArrayEquals(new String[] {"alpha", "beta", "gamma", "delta"},
+                    f.root().dataset("vstr").readStrings());
+        }
+    }
+
+    @Test
     void genericReadPicksNaturalType() {
         assertArrayEquals(new int[] {0, 1, 2, 3, 4}, (int[]) ds("c_i4").read());
         assertInstanceOf(double[].class, ds("c_f8").read());

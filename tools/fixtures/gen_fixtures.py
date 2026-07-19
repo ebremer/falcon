@@ -119,6 +119,12 @@ def build_attributes(f):
     d.attrs["scale"] = np.array([1.5, 2.5, 3.5], dtype="f8")
 
 
+def build_vlen(f):
+    """A variable-length UTF-8 string dataset (values live in the global heap)."""
+    f.create_dataset("vstr", data=np.array(["alpha", "beta", "gamma", "delta"],
+                                           dtype=h5py.string_dtype("utf-8")))
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     with h5py.File(os.path.join(OUT, "old_style_groups.h5"), "w") as f:
@@ -134,6 +140,8 @@ def main():
     build_nbit(os.path.join(OUT, "nbit_data.h5"))
     with h5py.File(os.path.join(OUT, "attributes.h5"), "w") as f:
         build_attributes(f)
+    with h5py.File(os.path.join(OUT, "vlen_data.h5"), "w") as f:
+        build_vlen(f)
     print("wrote fixtures to", OUT)
     print("h5py", h5py.__version__, "| bundled HDF5", h5py.version.hdf5_version)
 

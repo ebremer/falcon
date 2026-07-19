@@ -2,6 +2,7 @@ package com.ebremer.falcon.hdf5;
 
 import com.ebremer.falcon.hdf5.data.ChunkedReader;
 import com.ebremer.falcon.hdf5.data.Elements;
+import com.ebremer.falcon.hdf5.data.VlenStrings;
 import com.ebremer.falcon.hdf5.datatype.Datatype;
 import com.ebremer.falcon.hdf5.filter.FilterPipeline;
 import com.ebremer.falcon.hdf5.filter.FilterPipelineMessage;
@@ -84,9 +85,13 @@ public final class Dataset extends Hdf5Object {
         return Elements.toDoubles(rawData(), elementCount(), datatype());
     }
 
-    /** Reads every element of a fixed-length string datatype. */
+    /** Reads every element of a fixed-length or variable-length string datatype. */
     public String[] readStrings() {
-        return Elements.toStrings(rawData(), elementCount(), datatype());
+        Datatype type = datatype();
+        if (type instanceof Datatype.VariableLength vlen && vlen.kind() == Datatype.VlenKind.STRING) {
+            return VlenStrings.read(ctx, rawData(), elementCount(), vlen);
+        }
+        return Elements.toStrings(rawData(), elementCount(), type);
     }
 
     /** The dataset's raw storage bytes (decoded from the layout; not yet de-filtered). */
@@ -104,6 +109,7 @@ public final class Dataset extends Hdf5Object {
             case Datatype.FixedPoint fp -> fp.size() <= 4 ? readInts() : readLongs();
             case Datatype.FloatingPoint fp -> readDoubles();
             case Datatype.StringType st -> readStrings();
+            case Datatype.VariableLength v when v.kind() == Datatype.VlenKind.STRING -> readStrings();
             default -> throw new HdfUnsupportedException(
                     "reading datatype class " + type.typeClass() + " is not yet supported: " + path());
         };
