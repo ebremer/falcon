@@ -2,6 +2,7 @@ package com.ebremer.falcon.hdf5;
 
 import com.ebremer.falcon.hdf5.checksum.Lookup3;
 import com.ebremer.falcon.hdf5.write.GrowBuffer;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -10,6 +11,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.zip.Deflater;
 
 /**
  * Writes a valid HDF5 file in the modern format: a version-3 (checksummed) superblock, version-2
@@ -76,6 +78,14 @@ public final class Hdf5Writer implements AutoCloseable {
         return rootWriter.stringDataset(name, data, shape);
     }
 
+    public DatasetWriter intChunkedDataset(String name, int[] data, long[] shape, long[] chunkShape) {
+        return rootWriter.intChunkedDataset(name, data, shape, chunkShape);
+    }
+
+    public DatasetWriter doubleChunkedDataset(String name, double[] data, long[] shape, long[] chunkShape) {
+        return rootWriter.doubleChunkedDataset(name, data, shape, chunkShape);
+    }
+
     public GroupWriter group(String name) {
         return rootWriter.group(name);
     }
@@ -106,12 +116,24 @@ public final class Hdf5Writer implements AutoCloseable {
 
         public DatasetWriter intDataset(String name, int[] data, long[] shape) {
             requireElementCount(shape, data.length);
-            return addDataset(new DatasetSpec(name, DATATYPE_INT32, shape, intBytes(data), null));
+            return addDataset(new DatasetSpec(name, DATATYPE_INT32, 4, shape, null, intBytes(data), null));
         }
 
         public DatasetWriter doubleDataset(String name, double[] data, long[] shape) {
             requireElementCount(shape, data.length);
-            return addDataset(new DatasetSpec(name, DATATYPE_FLOAT64, shape, doubleBytes(data), null));
+            return addDataset(new DatasetSpec(name, DATATYPE_FLOAT64, 8, shape, null, doubleBytes(data), null));
+        }
+
+        /** A chunked {@code int32} dataset (fixed-array index). */
+        public DatasetWriter intChunkedDataset(String name, int[] data, long[] shape, long[] chunkShape) {
+            requireElementCount(shape, data.length);
+            return addDataset(new DatasetSpec(name, DATATYPE_INT32, 4, shape, chunkShape, intBytes(data), null));
+        }
+
+        /** A chunked {@code float64} dataset (fixed-array index). */
+        public DatasetWriter doubleChunkedDataset(String name, double[] data, long[] shape, long[] chunkShape) {
+            requireElementCount(shape, data.length);
+            return addDataset(new DatasetSpec(name, DATATYPE_FLOAT64, 8, shape, chunkShape, doubleBytes(data), null));
         }
 
         /** A variable-length UTF-8 string dataset (values stored in a global heap). */
@@ -121,7 +143,7 @@ public final class Hdf5Writer implements AutoCloseable {
             for (String s : data) {
                 bytes.add(s.getBytes(StandardCharsets.UTF_8));
             }
-            return addDataset(new DatasetSpec(name, DATATYPE_VLEN_STRING, shape, null, bytes));
+            return addDataset(new DatasetSpec(name, DATATYPE_VLEN_STRING, 16, shape, null, null, bytes));
         }
 
         public GroupWriter group(String name) {
@@ -149,12 +171,21 @@ public final class Hdf5Writer implements AutoCloseable {
         }
     }
 
-    /** Attaches attributes to a dataset. */
+    /** Attaches attributes and (for chunked datasets) filters to a dataset. */
     public static final class DatasetWriter {
         private final DatasetSpec spec;
 
         private DatasetWriter(DatasetSpec spec) {
             this.spec = spec;
+        }
+
+        /** Compresses each chunk with deflate (gzip) at the given level (0&ndash;9). Chunked datasets only. */
+        public DatasetWriter deflate(int level) {
+            if (spec.chunkShape == null) {
+                throw new IllegalStateException("deflate requires a chunked dataset");
+            }
+            spec.deflateLevel = level;
+            return this;
         }
 
         public DatasetWriter intAttribute(String name, int[] data, long[] shape) {
@@ -187,16 +218,22 @@ public final class Hdf5Writer implements AutoCloseable {
     }
 
     private static long writeDataset(GrowBuffer buf, DatasetSpec dataset) {
-        byte[] data = dataset.data;
-        if (dataset.vlenStrings != null) {
+        byte[] layout;
+        if (dataset.chunkShape != null) {
+            layout = writeChunkedStorage(buf, dataset);
+        } else {
+            byte[] data = dataset.data;
+            if (dataset.vlenStrings != null) {
+                buf.align(8);
+                long collection = buf.position();
+                int[] indices = writeGlobalHeap(buf, dataset.vlenStrings);
+                data = vlenIds(dataset.vlenStrings, collection, indices);
+            }
             buf.align(8);
-            long collection = buf.position();
-            int[] indices = writeGlobalHeap(buf, dataset.vlenStrings);
-            data = vlenIds(dataset.vlenStrings, collection, indices);
+            long dataAddress = buf.position();
+            buf.bytes(data);
+            layout = contiguousLayoutBody(dataAddress, data.length);
         }
-        buf.align(8);
-        long dataAddress = buf.position();
-        buf.bytes(data);
         buf.align(8);
         long headerAddress = buf.position();
 
@@ -204,12 +241,199 @@ public final class Hdf5Writer implements AutoCloseable {
         writeMessage(messages, 1, 0x00, dataspaceBody(dataset.shape));
         writeMessage(messages, 3, 0x01, dataset.datatype);
         writeMessage(messages, 5, 0x01, new byte[] {0x03, 0x0a}); // fill value: default 0
-        writeMessage(messages, 8, 0x00, contiguousLayoutBody(dataAddress, data.length));
+        writeMessage(messages, 8, 0x00, layout);
+        if (dataset.deflateLevel >= 0) {
+            writeMessage(messages, 11, 0x00, deflatePipelineBody(dataset.deflateLevel));
+        }
         for (AttributeSpec attribute : dataset.attributes) {
             writeMessage(messages, 12, 0x00, attributeBody(attribute));
         }
         writeObjectHeader(buf, messages.toByteArray());
         return headerAddress;
+    }
+
+    /**
+     * Writes chunked storage: each chunk's (fill-padded) data block, then a fixed-array index (a
+     * {@code "FADB"} data block listing chunk addresses in row-major order, and its {@code "FAHD"}
+     * header). Returns the version-4 chunked data-layout message body.
+     */
+    private static byte[] writeChunkedStorage(GrowBuffer buf, DatasetSpec dataset) {
+        List<byte[]> chunks = splitChunks(dataset);
+        boolean filtered = dataset.deflateLevel >= 0;
+        long[] chunkAddresses = new long[chunks.size()];
+        int[] chunkSizes = new int[chunks.size()];
+        for (int i = 0; i < chunks.size(); i++) {
+            byte[] block = filtered ? deflate(chunks.get(i), dataset.deflateLevel) : chunks.get(i);
+            buf.align(8);
+            chunkAddresses[i] = buf.position();
+            chunkSizes[i] = block.length;
+            buf.bytes(block);
+        }
+
+        int offsets = 8;
+        int lengths = 8;
+        int clientId = filtered ? 1 : 0;
+        int entrySize = filtered ? offsets + lengths + 4 : offsets; // filtered: address + stored size + mask
+        int dataBlockSize = 6 + offsets + chunks.size() * entrySize + 4;
+        buf.align(8);
+        long dataBlockAddress = buf.position();
+        long headerAddress = align8(dataBlockAddress + dataBlockSize);
+
+        // Fixed-array data block: signature, version, client id, heap header address, entries, checksum.
+        buf.bytes(new byte[] {'F', 'A', 'D', 'B'});
+        buf.u8(0);
+        buf.u8(clientId);
+        buf.u64(headerAddress);
+        for (int i = 0; i < chunks.size(); i++) {
+            buf.u64(chunkAddresses[i]);
+            if (filtered) {
+                buf.u64(chunkSizes[i]);
+                buf.u32(0); // filter mask: all filters applied
+            }
+        }
+        buf.u32(buf.checksum((int) dataBlockAddress, buf.position()));
+
+        // Fixed-array header: signature, version, client id, entry size, page bits, max entries,
+        // data block address, checksum.
+        buf.align(8);
+        int headerStart = buf.position();
+        buf.bytes(new byte[] {'F', 'A', 'H', 'D'});
+        buf.u8(0);
+        buf.u8(clientId);
+        buf.u8(entrySize);
+        buf.u8(10);                    // page bits (data block is not paged for these sizes)
+        buf.u64(chunks.size());        // max entries
+        buf.u64(dataBlockAddress);
+        buf.u32(buf.checksum(headerStart, buf.position()));
+
+        return chunkedLayoutBody(dataset.chunkShape, dataset.elementSize, headerAddress, filtered);
+    }
+
+    private static byte[] deflatePipelineBody(int level) {
+        GrowBuffer b = new GrowBuffer();
+        b.u8(2);       // filter pipeline message version
+        b.u8(1);       // number of filters
+        b.u16(1);      // filter identifier: deflate
+        b.u16(1);      // flags
+        b.u16(1);      // number of client-data values
+        b.u32(level);  // client data: compression level
+        return b.toByteArray();
+    }
+
+    private static byte[] deflate(byte[] data, int level) {
+        Deflater deflater = new Deflater(level);
+        deflater.setInput(data);
+        deflater.finish();
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        byte[] scratch = new byte[1024];
+        while (!deflater.finished()) {
+            out.write(scratch, 0, deflater.deflate(scratch));
+        }
+        deflater.end();
+        return out.toByteArray();
+    }
+
+    /** Splits a dataset's row-major data into full-size, fill-padded chunks in row-major chunk order. */
+    private static List<byte[]> splitChunks(DatasetSpec dataset) {
+        int rank = dataset.shape.length;
+        int elementSize = dataset.elementSize;
+        int[] grid = new int[rank];
+        int chunkElements = 1;
+        for (int d = 0; d < rank; d++) {
+            grid[d] = (int) ((dataset.shape[d] + dataset.chunkShape[d] - 1) / dataset.chunkShape[d]);
+            chunkElements *= (int) dataset.chunkShape[d];
+        }
+        long[] datasetStride = rowMajorStride(dataset.shape);
+        long[] chunkStride = rowMajorStride(dataset.chunkShape);
+
+        int chunkCount = 1;
+        for (int g : grid) {
+            chunkCount *= g;
+        }
+        List<byte[]> chunks = new ArrayList<>(chunkCount);
+        int[] gridCoord = new int[rank];
+        for (int c = 0; c < chunkCount; c++) {
+            byte[] chunk = new byte[chunkElements * elementSize];
+            int[] local = new int[rank];
+            for (int e = 0; e < chunkElements; e++) {
+                boolean inBounds = true;
+                long globalIndex = 0;
+                for (int d = 0; d < rank; d++) {
+                    long global = gridCoord[d] * dataset.chunkShape[d] + local[d];
+                    if (global >= dataset.shape[d]) {
+                        inBounds = false;
+                        break;
+                    }
+                    globalIndex += global * datasetStride[d];
+                }
+                if (inBounds) {
+                    System.arraycopy(dataset.data, (int) (globalIndex * elementSize),
+                            chunk, e * elementSize, elementSize);
+                }
+                increment(local, dataset.chunkShape);
+            }
+            chunks.add(chunk);
+            increment(gridCoord, grid);
+        }
+        return chunks;
+    }
+
+    private static byte[] chunkedLayoutBody(long[] chunkShape, int elementSize, long fixedArrayHeaderAddress,
+                                            boolean filtered) {
+        int rank = chunkShape.length;
+        long maxDim = elementSize;
+        for (long c : chunkShape) {
+            maxDim = Math.max(maxDim, c);
+        }
+        int encodedLength = (63 - Long.numberOfLeadingZeros(maxDim)) / 8 + 1;
+        GrowBuffer b = new GrowBuffer();
+        // Filtered fixed-array entries use an 8-byte stored-size field, which the library expects for
+        // layout version 5; unfiltered chunks use version 4.
+        b.u8(filtered ? 5 : 4);      // version
+        b.u8(2);                     // layout class: chunked
+        b.u8(0);                     // flags
+        b.u8(rank + 1);              // dimensionality (chunk dims + element size)
+        b.u8(encodedLength);
+        for (long c : chunkShape) {
+            b.uvar(c, encodedLength);
+        }
+        b.uvar(elementSize, encodedLength);
+        b.u8(3);                     // index type: fixed array
+        b.u8(10);                    // page bits
+        b.u64(fixedArrayHeaderAddress);
+        return b.toByteArray();
+    }
+
+    private static long[] rowMajorStride(long[] dims) {
+        long[] stride = new long[dims.length];
+        long s = 1;
+        for (int i = dims.length - 1; i >= 0; i--) {
+            stride[i] = s;
+            s *= dims[i];
+        }
+        return stride;
+    }
+
+    private static void increment(int[] coord, long[] extent) {
+        for (int d = coord.length - 1; d >= 0; d--) {
+            if (++coord[d] < extent[d]) {
+                return;
+            }
+            coord[d] = 0;
+        }
+    }
+
+    private static void increment(int[] coord, int[] extent) {
+        for (int d = coord.length - 1; d >= 0; d--) {
+            if (++coord[d] < extent[d]) {
+                return;
+            }
+            coord[d] = 0;
+        }
+    }
+
+    private static int align8(long n) {
+        return (int) ((n + 7) & ~7L);
     }
 
     private static void writeGroupHeader(GrowBuffer buf, Map<String, Long> children,
@@ -419,15 +643,21 @@ public final class Hdf5Writer implements AutoCloseable {
     private static final class DatasetSpec {
         final String name;
         final byte[] datatype;
+        final int elementSize;
         final long[] shape;
+        final long[] chunkShape;        // null for contiguous storage
         final byte[] data;              // inline element bytes, or null for vlen strings
         final List<byte[]> vlenStrings; // vlen-string values, or null
         final List<AttributeSpec> attributes = new ArrayList<>();
+        int deflateLevel = -1;          // -1 = no compression
 
-        DatasetSpec(String name, byte[] datatype, long[] shape, byte[] data, List<byte[]> vlenStrings) {
+        DatasetSpec(String name, byte[] datatype, int elementSize, long[] shape, long[] chunkShape,
+                    byte[] data, List<byte[]> vlenStrings) {
             this.name = name;
             this.datatype = datatype;
+            this.elementSize = elementSize;
             this.shape = shape;
+            this.chunkShape = chunkShape;
             this.data = data;
             this.vlenStrings = vlenStrings;
         }

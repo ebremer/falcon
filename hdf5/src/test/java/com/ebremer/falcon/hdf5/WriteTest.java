@@ -40,6 +40,46 @@ class WriteTest {
         }
     }
 
+    private static int[] range(int n) {
+        int[] a = new int[n];
+        for (int i = 0; i < n; i++) {
+            a[i] = i;
+        }
+        return a;
+    }
+
+    @Test
+    void roundTripChunkedDatasets() throws IOException {
+        Path file = Files.createTempFile("falcon-chunked", ".h5");
+        try {
+            try (Hdf5Writer w = Hdf5Writer.create(file)) {
+                w.intChunkedDataset("c", range(10), new long[] {10}, new long[] {4}); // 3 chunks, last partial
+                w.intChunkedDataset("grid", range(24), new long[] {4, 6}, new long[] {2, 3}); // 2x2 chunks
+            }
+            try (Hdf5File h5 = Hdf5File.open(file)) {
+                assertArrayEquals(range(10), h5.root().dataset("c").readInts());
+                assertArrayEquals(range(24), h5.root().dataset("grid").readInts());
+            }
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    @Test
+    void roundTripDeflateChunkedDataset() throws IOException {
+        Path file = Files.createTempFile("falcon-deflate", ".h5");
+        try {
+            try (Hdf5Writer w = Hdf5Writer.create(file)) {
+                w.intChunkedDataset("z", range(100), new long[] {100}, new long[] {16}).deflate(6);
+            }
+            try (Hdf5File h5 = Hdf5File.open(file)) {
+                assertArrayEquals(range(100), h5.root().dataset("z").readInts());
+            }
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
     @Test
     void roundTripSubgroupsAndStrings() throws IOException {
         Path file = Files.createTempFile("falcon-tree", ".h5");

@@ -10,9 +10,10 @@ writers of scientific-data formats.
 > virtual datasets (full external-source assembly), and object metadata. **Write path (H7) started**:
 > `Hdf5Writer` emits a valid modern-format file — v3 (checksummed) superblock, v2 (checksummed) object
 > headers, a **nested group tree**, contiguous **int32 / float64 / variable-length-string** datasets
-> (strings via a global heap), and scalar/array **attributes** on groups and datasets — read back
-> identically by Falcon *and h5py*. Remaining: chunked + filter *encode*, more datatypes, older
-> formats, plus the minor read-side completeness messages.
+> (strings via a global heap), **chunked** datasets (fixed-array index) with **deflate** encode, and
+> scalar/array **attributes** on groups and datasets — read back identically by Falcon *and h5py*.
+> Remaining: the other filter encoders (shuffle/fletcher32/nbit/scaleoffset/szip), more datatypes,
+> older formats, plus the minor read-side completeness messages.
 
 ## Program roadmap (Falcon)
 
@@ -265,10 +266,12 @@ Each stage ends with a **milestone** and concrete **acceptance criteria**. "Refe
 - Remaining write breadth: chunked storage + filter *encode*, more datatypes, and old-style formats.
 
 ### H8 — Write path breadth (incl. szip encode)
-- Chunked write + filter pipeline **encode**: deflate/shuffle/fletcher32/nbit/scaleoffset + **szip
-  encode** (§9); dense + compact group/attribute storage; all datatype classes
-  (compound/array/vlen/enum/reference/complex); fill-value policies; user-selectable chunk shape,
-  filter chain, and layout.
+- **Chunked write ✓** (fixed-array index; boundary chunks fill-padded) + **deflate encode ✓** (filtered
+  fixed array, client id 1; layout version 5 for the 8-byte stored-size entry; filter-pipeline message).
+  `writer.intChunkedDataset(...).deflate(level)`.
+- Remaining filter **encode**: shuffle/fletcher32/nbit/scaleoffset + **szip encode** (§9); dense +
+  compact group/attribute storage; all datatype classes (compound/array/vlen/enum/reference/complex);
+  fill-value policies; user-selectable chunk shape, filter chain, and layout.
 - **Milestone:** round-trip parity across the full fixture matrix.
 - **Acceptance:** for every fixture, `Falcon-write → h5py-read` and `h5py-write → Falcon-read` agree on
   structure + data; property-based random round-trips pass.
