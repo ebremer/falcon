@@ -23,10 +23,22 @@ public sealed interface DataLayout {
     }
 
     /**
-     * Chunked storage (layout class 2). {@code indexAddress} points at the chunk index (a version-1
-     * B-tree for the formats read in stage H4); {@code chunkDimensions} is the chunk shape in
-     * elements; {@code elementSize} is the size of one element in bytes.
+     * Chunked storage (layout class 2). {@code indexType} selects the chunk index
+     * ({@link #INDEX_V1_BTREE} for version-3 layouts, or one of the version-4/5 index types);
+     * {@code indexAddress} points at that index (or, for a single-chunk index, at the chunk itself);
+     * {@code chunkDimensions} is the chunk shape in elements; {@code elementSize} is one element's
+     * size in bytes.
      */
-    record Chunked(long indexAddress, int[] chunkDimensions, int elementSize) implements DataLayout {
+    record Chunked(int indexType, long indexAddress, int[] chunkDimensions, int elementSize)
+            implements DataLayout {
     }
+
+    /** Version-3 layout: a version-1 B-tree index. */
+    int INDEX_V1_BTREE = 0;
+    /** Version-4/5 index types. */
+    int INDEX_SINGLE_CHUNK = 1;
+    int INDEX_IMPLICIT = 2;
+    int INDEX_FIXED_ARRAY = 3;
+    int INDEX_EXTENSIBLE_ARRAY = 4;
+    int INDEX_V2_BTREE = 5;
 }

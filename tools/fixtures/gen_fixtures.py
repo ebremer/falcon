@@ -139,6 +139,16 @@ def build_dense_attrs(f):
         d.attrs[f"attr{i:02d}"] = np.int32(i * 10)
 
 
+def build_chunk_indexes(f):
+    """Chunked datasets triggering the version-4/5 chunk index types (single/fixed/extensible/v2btree)."""
+    f.create_dataset("single", data=np.arange(5, dtype="i4"), chunks=(5,))                        # single chunk
+    f.create_dataset("implicit", data=np.arange(10, dtype="i4"), chunks=(5,))                     # -> fixed array
+    f.create_dataset("fixed", data=np.arange(20, dtype="i4"), chunks=(5,), compression="gzip")    # fixed array
+    f.create_dataset("extensible", data=np.arange(12, dtype="i4"), maxshape=(None,), chunks=(4,)) # extensible array
+    f.create_dataset("btree2", data=np.arange(16, dtype="i4").reshape(4, 4),
+                     maxshape=(None, None), chunks=(2, 2))                                          # v2 B-tree
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     with h5py.File(os.path.join(OUT, "old_style_groups.h5"), "w") as f:
@@ -160,6 +170,8 @@ def main():
         build_dense_links(f)
     with h5py.File(os.path.join(OUT, "dense_attrs.h5"), "w", libver="latest") as f:
         build_dense_attrs(f)
+    with h5py.File(os.path.join(OUT, "chunk_indexes.h5"), "w", libver="latest") as f:
+        build_chunk_indexes(f)
     print("wrote fixtures to", OUT)
     print("h5py", h5py.__version__, "| bundled HDF5", h5py.version.hdf5_version)
 

@@ -80,6 +80,13 @@ class DataReadChunkedTest {
     }
 
     @Test
+    void singleChunkIndex() throws IOException {
+        try (Hdf5File h5 = Hdf5File.open(Fixtures.path("chunk_indexes.h5"))) {
+            assertArrayEquals(range(5), h5.root().dataset("single").readInts());
+        }
+    }
+
+    @Test
     void nbitReducedPrecision() throws IOException {
         // 16-bit-precision unsigned stored in 4 bytes: n-bit packs only the significant bits.
         try (Hdf5File f = Hdf5File.open(Fixtures.path("nbit_data.h5"))) {

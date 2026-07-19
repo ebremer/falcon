@@ -55,7 +55,8 @@ public final class DataLayoutMessage {
                     default -> throw new HdfFormatException("unknown data layout class " + layoutClass + " at " + off);
                 };
             }
-            case 4: {
+            case 4:
+            case 5: {
                 int layoutClass = buf.getUnsignedByte(off + 1);
                 long p = off + 2;
                 return switch (layoutClass) {
@@ -65,8 +66,7 @@ public final class DataLayoutMessage {
                     }
                     case 1 -> new DataLayout.Contiguous(
                             buf.getAddress(p, offsets), buf.getUnsignedValue(p + offsets, lengths));
-                    case 2 -> throw new HdfUnsupportedException(
-                            "version-4 chunked layout (extensible chunk indexes) is implemented in stage H5");
+                    case 2 -> parseChunkedV4(ctx, off);
                     default -> throw new HdfFormatException("unknown data layout class " + layoutClass + " at " + off);
                 };
             }
@@ -88,6 +88,46 @@ public final class DataLayoutMessage {
             p += 4;
         }
         int elementSize = (int) buf.getUnsignedInt(p);
-        return new DataLayout.Chunked(indexAddress, chunkDimensions, elementSize);
+        return new DataLayout.Chunked(DataLayout.INDEX_V1_BTREE, indexAddress, chunkDimensions, elementSize);
+    }
+
+    /**
+     * Version-4/5 chunked layout: {@code flags(1) · dimensionality(1) · dim-size-encoded-length(1) ·
+     * chunk dimensions (last is the element size) · index type(1) · index-specific fields}. The
+     * chunk index address is extracted per index type.
+     */
+    private static DataLayout parseChunkedV4(FileContext ctx, long off) {
+        HdfBuffer buf = ctx.buffer();
+        int offsets = ctx.sizeOfOffsets();
+        int lengths = ctx.sizeOfLengths();
+        int flags = buf.getUnsignedByte(off + 2);
+        int dimensionality = buf.getUnsignedByte(off + 3);
+        int encodedLength = buf.getUnsignedByte(off + 4);
+        long p = off + 5;
+        int rank = dimensionality - 1;
+        int[] chunkDimensions = new int[rank];
+        for (int i = 0; i < rank; i++) {
+            chunkDimensions[i] = (int) buf.getUnsignedValue(p, encodedLength);
+            p += encodedLength;
+        }
+        int elementSize = (int) buf.getUnsignedValue(p, encodedLength);
+        p += encodedLength;
+
+        int indexType = buf.getUnsignedByte(p);
+        p += 1;
+        long indexAddress = switch (indexType) {
+            case DataLayout.INDEX_SINGLE_CHUNK -> {
+                if ((flags & 0x02) != 0) {
+                    p += lengths + 4; // filtered single chunk: size + filter mask
+                }
+                yield buf.getAddress(p, offsets);
+            }
+            case DataLayout.INDEX_IMPLICIT -> buf.getAddress(p, offsets);
+            case DataLayout.INDEX_FIXED_ARRAY -> buf.getAddress(p + 1, offsets); // page bits, then address
+            case DataLayout.INDEX_EXTENSIBLE_ARRAY -> buf.getAddress(p + 5, offsets); // 5 param bytes, then address
+            case DataLayout.INDEX_V2_BTREE -> buf.getAddress(p + 6, offsets); // node size(4)+split+merge, then address
+            default -> throw new HdfFormatException("unknown chunk index type " + indexType + " at " + off);
+        };
+        return new DataLayout.Chunked(indexType, indexAddress, chunkDimensions, elementSize);
     }
 }
