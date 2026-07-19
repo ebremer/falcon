@@ -29,15 +29,17 @@ public final class Superblock {
     private final int sizeOfOffsets;
     private final int sizeOfLengths;
     private final long baseAddress;
+    private final long superblockExtensionAddress;
     private final long endOfFileAddress;
     private final long rootObjectHeaderAddress;
 
-    private Superblock(int version, int sizeOfOffsets, int sizeOfLengths,
-                       long baseAddress, long endOfFileAddress, long rootObjectHeaderAddress) {
+    private Superblock(int version, int sizeOfOffsets, int sizeOfLengths, long baseAddress,
+                       long superblockExtensionAddress, long endOfFileAddress, long rootObjectHeaderAddress) {
         this.version = version;
         this.sizeOfOffsets = sizeOfOffsets;
         this.sizeOfLengths = sizeOfLengths;
         this.baseAddress = baseAddress;
+        this.superblockExtensionAddress = superblockExtensionAddress;
         this.endOfFileAddress = endOfFileAddress;
         this.rootObjectHeaderAddress = rootObjectHeaderAddress;
     }
@@ -56,6 +58,15 @@ public final class Superblock {
 
     public long baseAddress() {
         return baseAddress;
+    }
+
+    /**
+     * Address of the superblock extension object header (versions 2–3), or
+     * {@link HdfBuffer#UNDEFINED_ADDRESS} if the file has none. The extension carries file-level
+     * metadata messages (File Space Info, B-tree K Values, Driver Info, Shared Message Table).
+     */
+    public long superblockExtensionAddress() {
+        return superblockExtensionAddress;
     }
 
     public long endOfFileAddress() {
@@ -99,13 +110,17 @@ public final class Superblock {
         // Root group symbol-table entry: link-name offset (O), then object-header address (O).
         long rootEntry = addressesStart + 4L * sizeOfOffsets;
         long rootObjectHeader = buf.getAddress(rootEntry + sizeOfOffsets, sizeOfOffsets);
-        return new Superblock(version, sizeOfOffsets, sizeOfLengths, baseAddress, endOfFile, rootObjectHeader);
+        // Versions 0–1 have no superblock extension.
+        return new Superblock(version, sizeOfOffsets, sizeOfLengths, baseAddress,
+                HdfBuffer.UNDEFINED_ADDRESS, endOfFile, rootObjectHeader);
     }
 
     private static Superblock parseChecksummed(HdfBuffer buf, long addr, int version) {
         int sizeOfOffsets = buf.getUnsignedByte(addr + 9);
         int sizeOfLengths = buf.getUnsignedByte(addr + 10);
+        // Addresses in order: base, superblock extension, end-of-file, root group object header.
         long baseAddress = buf.getAddress(addr + 12, sizeOfOffsets);
+        long extension = buf.getAddress(addr + 12 + sizeOfOffsets, sizeOfOffsets);
         long endOfFile = buf.getAddress(addr + 12 + 2L * sizeOfOffsets, sizeOfOffsets);
         long rootObjectHeader = buf.getAddress(addr + 12 + 3L * sizeOfOffsets, sizeOfOffsets);
         long checksumOffset = addr + 12 + 4L * sizeOfOffsets;
@@ -115,6 +130,7 @@ public final class Superblock {
             throw new HdfFormatException(String.format(
                     "superblock checksum mismatch: stored=0x%08x computed=0x%08x", stored, computed));
         }
-        return new Superblock(version, sizeOfOffsets, sizeOfLengths, baseAddress, endOfFile, rootObjectHeader);
+        return new Superblock(version, sizeOfOffsets, sizeOfLengths, baseAddress,
+                extension, endOfFile, rootObjectHeader);
     }
 }

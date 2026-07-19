@@ -242,6 +242,18 @@ def build_committed_types(f):
     e[...] = np.array([2, 0, 1], dtype="i4")
 
 
+def build_freespace(out):
+    """A file using the free-space-manager strategy with persisted free space: a File Space Info
+    message (type 23) in the superblock extension plus FSHD free-space managers. Deleting a dataset
+    leaves persisted free-space sections."""
+    with h5py.File(os.path.join(out, "free_space.h5"), "w", libver="latest",
+                   fs_strategy="fsm", fs_persist=True, fs_threshold=1) as f:
+        f.create_dataset("keep", data=np.arange(50, dtype="i4"))
+        f.create_dataset("scratch", data=np.arange(100, dtype="f8"))
+        f.create_dataset("more", data=np.arange(40, dtype="i4"))
+        del f["scratch"]  # frees space -> persisted free-space section(s)
+
+
 def build_external(out):
     """A contiguous dataset whose raw data lives in two external raw files (External File List, msg 7).
     h5py writes the data through, creating the .bin files next to the .h5; the second slot starts at a
@@ -301,6 +313,7 @@ def main():
     with h5py.File(os.path.join(OUT, "committed_types_old.h5"), "w", libver="earliest") as f:
         build_committed_types(f)  # v0 superblock + symbol-table groups + v1 object headers
     build_external(OUT)
+    build_freespace(OUT)
     print("wrote fixtures to", OUT)
     print("h5py", h5py.__version__, "| bundled HDF5", h5py.version.hdf5_version)
 
