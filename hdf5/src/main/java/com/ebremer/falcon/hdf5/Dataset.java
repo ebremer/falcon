@@ -16,8 +16,10 @@ import com.ebremer.falcon.hdf5.layout.DataLayout;
 import com.ebremer.falcon.hdf5.layout.DataLayoutMessage;
 import com.ebremer.falcon.hdf5.message.DataspaceMessage;
 import com.ebremer.falcon.hdf5.message.DatatypeMessage;
+import com.ebremer.falcon.hdf5.message.ExternalFileList;
 import com.ebremer.falcon.hdf5.message.FillValueMessage;
 import java.lang.foreign.MemorySegment;
+import java.nio.file.Path;
 
 /**
  * A dataset in the HDF5 hierarchy: a typed, shaped array of elements.
@@ -240,6 +242,12 @@ public final class Dataset extends Hdf5Object {
             case DataLayout.Contiguous c -> {
                 long byteCount = (long) elementCount() * datatype().size();
                 if (c.address() == HdfBuffer.UNDEFINED_ADDRESS) {
+                    HeaderMessage external = header().find(MessageType.EXTERNAL_DATA_FILES);
+                    if (external != null) {
+                        Path directory = ctx.path() == null ? null : ctx.path().getParent();
+                        yield MemorySegment.ofArray(ExternalFileList.parse(ctx, external.bodyOffset())
+                                .readData(directory, byteCount));
+                    }
                     yield fillSegment(byteCount);
                 }
                 yield ctx.buffer().segment().asSlice(c.address(), byteCount);

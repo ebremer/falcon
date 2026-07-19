@@ -242,6 +242,26 @@ def build_committed_types(f):
     e[...] = np.array([2, 0, 1], dtype="i4")
 
 
+def build_external(out):
+    """A contiguous dataset whose raw data lives in two external raw files (External File List, msg 7).
+    h5py writes the data through, creating the .bin files next to the .h5; the second slot starts at a
+    non-zero offset within its file."""
+    old = os.getcwd()
+    os.chdir(out)  # relative external names resolve next to the .h5 file
+    try:
+        with h5py.File("external.h5", "w", libver="latest") as f:
+            dcpl = h5py.h5p.create(h5py.h5p.DATASET_CREATE)
+            dcpl.set_external(b"external_a.bin", 0, 24)   # 6 int32 from the file start
+            dcpl.set_external(b"external_b.bin", 16, 24)  # 6 int32, 16 bytes into the file
+            space = h5py.h5s.create_simple((12,))
+            tid = h5py.h5t.py_create(np.dtype("<i4"))
+            dsid = h5py.h5d.create(f.id, b"ext", tid, space, dcpl)
+            dsid.write(h5py.h5s.ALL, h5py.h5s.ALL, np.arange(12, dtype="<i4"))
+            dsid.close()
+    finally:
+        os.chdir(old)
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     with h5py.File(os.path.join(OUT, "old_style_groups.h5"), "w") as f:
@@ -280,6 +300,7 @@ def main():
         build_metadata(f)
     with h5py.File(os.path.join(OUT, "committed_types_old.h5"), "w", libver="earliest") as f:
         build_committed_types(f)  # v0 superblock + symbol-table groups + v1 object headers
+    build_external(OUT)
     print("wrote fixtures to", OUT)
     print("h5py", h5py.__version__, "| bundled HDF5", h5py.version.hdf5_version)
 
