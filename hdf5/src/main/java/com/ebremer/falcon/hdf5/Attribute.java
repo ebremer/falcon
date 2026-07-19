@@ -66,6 +66,9 @@ public final class Attribute {
                         + vlen.base().typeClass() + " is not yet supported: " + name);
             };
         }
+        if (datatype instanceof Datatype.Reference ref && ref.kind() == Datatype.ReferenceKind.OBJECT) {
+            return readObjectReferences();
+        }
         throw new HdfUnsupportedException(
                 "reading attribute datatype " + datatype.typeClass() + " is not yet supported: " + name);
     }
@@ -123,6 +126,14 @@ public final class Attribute {
             return vlen;
         }
         throw new HdfUnsupportedException("readVlen* requires a variable-length sequence attribute: " + name);
+    }
+
+    /** Resolves an object-reference attribute to the object(s) it points at (null for a null reference). */
+    public Hdf5Object[] readObjectReferences() {
+        if (!(datatype instanceof Datatype.Reference ref) || ref.kind() != Datatype.ReferenceKind.OBJECT) {
+            throw new HdfUnsupportedException("readObjectReferences requires an object-reference attribute: " + name);
+        }
+        return Hdf5Object.resolveObjectReferences(ctx, data(), count(), datatype.size());
     }
 
     private String[] readVariableLengthStrings(Datatype.VariableLength vlen) {

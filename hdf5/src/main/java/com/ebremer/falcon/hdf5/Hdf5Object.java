@@ -9,6 +9,7 @@ import com.ebremer.falcon.hdf5.io.FileContext;
 import com.ebremer.falcon.hdf5.io.HdfBuffer;
 import com.ebremer.falcon.hdf5.message.AttributeInfoMessage;
 import com.ebremer.falcon.hdf5.message.AttributeMessage;
+import java.lang.foreign.MemorySegment;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -91,6 +92,42 @@ public abstract sealed class Hdf5Object permits Group, Dataset, CommittedDatatyp
     }
 
     public abstract boolean isGroup();
+
+    /**
+     * Builds the object at {@code objectHeaderAddress}, classifying it from its header as a group, a
+     * dataset, or a committed datatype. Shared by group traversal and object-reference resolution.
+     */
+    static Hdf5Object classify(FileContext ctx, String name, String parentPath, long objectHeaderAddress) {
+        ObjectHeader header = ObjectHeader.parse(ctx, objectHeaderAddress);
+        boolean isGroup = header.contains(MessageType.SYMBOL_TABLE)
+                || header.contains(MessageType.LINK_INFO)
+                || header.contains(MessageType.GROUP_INFO)
+                || header.contains(MessageType.LINK);
+        if (isGroup) {
+            return Group.child(ctx, name, parentPath, objectHeaderAddress);
+        }
+        // A committed (named) datatype has a datatype message but no dataspace.
+        if (header.contains(MessageType.DATATYPE) && !header.contains(MessageType.DATASPACE)) {
+            return CommittedDatatype.child(ctx, name, parentPath, objectHeaderAddress);
+        }
+        return Dataset.child(ctx, name, parentPath, objectHeaderAddress);
+    }
+
+    /**
+     * Resolves an object-reference buffer: each {@code stride}-byte element is a target object-header
+     * address, resolved to the object it points at (or {@code null} for a null reference). Resolved
+     * objects carry no reconstructed name/path; identify them via {@link #objectHeaderAddress()}.
+     */
+    static Hdf5Object[] resolveObjectReferences(FileContext ctx, MemorySegment data, int count, int stride) {
+        HdfBuffer buffer = new HdfBuffer(data);
+        int offsets = ctx.sizeOfOffsets();
+        Hdf5Object[] out = new Hdf5Object[count];
+        for (int i = 0; i < count; i++) {
+            long address = buffer.getAddress((long) i * stride, offsets);
+            out[i] = address == HdfBuffer.UNDEFINED_ADDRESS ? null : classify(ctx, "", "", address);
+        }
+        return out;
+    }
 
     /** Joins a parent path and a child name into an absolute path. */
     static String childPath(String parentPath, String childName) {

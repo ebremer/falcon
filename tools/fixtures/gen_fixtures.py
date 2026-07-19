@@ -178,6 +178,19 @@ def build_chunk_indexes(f):
                      maxshape=(None, None), chunks=(2, 2))                                          # 400 chunks -> BTIN nodes
 
 
+def build_references(f):
+    """Object references: a dataset and an attribute of references to a dataset, a group, and a nested
+    dataset."""
+    f.create_dataset("target_a", data=np.arange(5, dtype="i4"))
+    g = f.create_group("target_g")
+    g.create_dataset("inner", data=np.arange(3, dtype="i4"))
+    refs = f.create_dataset("refs", (3,), dtype=h5py.ref_dtype)
+    refs[0] = f["target_a"].ref
+    refs[1] = f["target_g"].ref
+    refs[2] = f["target_g/inner"].ref
+    refs.attrs["points_to"] = f["target_a"].ref
+
+
 def build_ea_paged(f):
     """A single-unlimited-dimension dataset with enough chunks (150000) that the extensible-array
     index grows data blocks larger than the page size, forcing paged (checksummed-page) storage."""
@@ -228,6 +241,8 @@ def main():
         build_ea_paged(f)
     with h5py.File(os.path.join(OUT, "committed_types.h5"), "w", libver="latest") as f:
         build_committed_types(f)
+    with h5py.File(os.path.join(OUT, "references.h5"), "w", libver="latest") as f:
+        build_references(f)
     with h5py.File(os.path.join(OUT, "committed_types_old.h5"), "w", libver="earliest") as f:
         build_committed_types(f)  # v0 superblock + symbol-table groups + v1 object headers
     print("wrote fixtures to", OUT)

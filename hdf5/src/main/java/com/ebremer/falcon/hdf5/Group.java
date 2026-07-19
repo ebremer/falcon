@@ -148,19 +148,7 @@ public final class Group extends Hdf5Object {
 
     /** Builds a child by classifying the target object header as a group, dataset, or committed type. */
     private Hdf5Object createChild(String name, long objectHeaderAddress) {
-        ObjectHeader child = ObjectHeader.parse(ctx, objectHeaderAddress);
-        boolean isGroup = child.contains(MessageType.SYMBOL_TABLE)
-                || child.contains(MessageType.LINK_INFO)
-                || child.contains(MessageType.GROUP_INFO)
-                || child.contains(MessageType.LINK);
-        if (isGroup) {
-            return Group.child(ctx, name, path(), objectHeaderAddress);
-        }
-        // A committed (named) datatype has a datatype message but no dataspace or data layout.
-        if (child.contains(MessageType.DATATYPE) && !child.contains(MessageType.DATASPACE)) {
-            return CommittedDatatype.child(ctx, name, path(), objectHeaderAddress);
-        }
-        return Dataset.child(ctx, name, path(), objectHeaderAddress);
+        return classify(ctx, name, path(), objectHeaderAddress);
     }
 
     private List<Hdf5Object> loadOldStyleChildren(HeaderMessage symbolTable) {

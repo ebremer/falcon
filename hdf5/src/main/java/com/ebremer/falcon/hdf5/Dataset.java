@@ -135,6 +135,18 @@ public final class Dataset extends Hdf5Object {
                 "readVlen* requires a variable-length sequence datatype: " + path());
     }
 
+    /**
+     * Reads an object-reference dataset, resolving each element to the object it points at (a group,
+     * dataset, or committed datatype), or {@code null} for a null reference.
+     */
+    public Hdf5Object[] readObjectReferences() {
+        Datatype type = datatype();
+        if (!(type instanceof Datatype.Reference ref) || ref.kind() != Datatype.ReferenceKind.OBJECT) {
+            throw new HdfUnsupportedException("readObjectReferences requires an object-reference datatype: " + path());
+        }
+        return resolveObjectReferences(ctx, rawData(), elementCount(), type.size());
+    }
+
     /** The dataset's raw storage bytes (decoded from the layout; not yet de-filtered). */
     public byte[] readRawBytes() {
         return Elements.toRawBytes(rawData(), (long) elementCount() * datatype().size());
@@ -152,6 +164,7 @@ public final class Dataset extends Hdf5Object {
             case Datatype.StringType st -> readStrings();
             case Datatype.VariableLength v when v.kind() == Datatype.VlenKind.STRING -> readStrings();
             case Datatype.VariableLength v -> readVlenSequence(v);
+            case Datatype.Reference r when r.kind() == Datatype.ReferenceKind.OBJECT -> readObjectReferences();
             default -> throw new HdfUnsupportedException(
                     "reading datatype class " + type.typeClass() + " is not yet supported: " + path());
         };
