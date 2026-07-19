@@ -109,6 +109,25 @@ public final class Dataset extends Hdf5Object {
         };
     }
 
+    /**
+     * Selects a rectangular hyperslab: {@code offset} and {@code count} give the start and size in
+     * each dimension. Reading the returned {@link Selection} yields only those elements.
+     */
+    public Selection select(long[] offset, long[] count) {
+        long[] dims = dataspace().dimensions();
+        if (offset.length != dims.length || count.length != dims.length) {
+            throw new IllegalArgumentException(
+                    "selection rank " + offset.length + " does not match dataset rank " + dims.length);
+        }
+        for (int d = 0; d < dims.length; d++) {
+            if (offset[d] < 0 || count[d] < 0 || offset[d] + count[d] > dims[d]) {
+                throw new IllegalArgumentException("selection out of bounds in dimension " + d
+                        + ": offset=" + offset[d] + " count=" + count[d] + " dim=" + dims[d]);
+            }
+        }
+        return new Selection(this, offset, count);
+    }
+
     // --------------------------------------------------------------- internals
 
     private DataLayout layout() {
@@ -141,7 +160,7 @@ public final class Dataset extends Hdf5Object {
         return filterPipeline;
     }
 
-    private MemorySegment rawData() {
+    MemorySegment rawData() {
         return switch (layout()) {
             case DataLayout.Compact c -> MemorySegment.ofArray(c.data());
             case DataLayout.Contiguous c -> {
