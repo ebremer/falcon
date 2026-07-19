@@ -67,6 +67,8 @@ public final class DataLayoutMessage {
                     case 1 -> new DataLayout.Contiguous(
                             buf.getAddress(p, offsets), buf.getUnsignedValue(p + offsets, lengths));
                     case 2 -> parseChunkedV4(ctx, off);
+                    case 3 -> new DataLayout.Virtual(
+                            buf.getAddress(p, offsets), (int) buf.getUnsignedInt(p + offsets));
                     default -> throw new HdfFormatException("unknown data layout class " + layoutClass + " at " + off);
                 };
             }

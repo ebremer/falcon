@@ -33,6 +33,14 @@ public sealed interface DataLayout {
             implements DataLayout {
     }
 
+    /**
+     * Virtual storage (layout class 3): the dataset's data is assembled from selections of other
+     * datasets. The mapping list lives in the global-heap object at {@code globalHeapAddress}/{@code
+     * index}.
+     */
+    record Virtual(long globalHeapAddress, int index) implements DataLayout {
+    }
+
     /** Version-3 layout: a version-1 B-tree index. */
     int INDEX_V1_BTREE = 0;
     /** Version-4/5 index types. */

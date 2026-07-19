@@ -178,6 +178,22 @@ def build_chunk_indexes(f):
                      maxshape=(None, None), chunks=(2, 2))                                          # 400 chunks -> BTIN nodes
 
 
+def build_vds(out):
+    """A virtual dataset assembling two external source files, plus one with an unmapped (fill) row."""
+    for k in range(2):
+        with h5py.File(os.path.join(out, f"vds_src{k}.h5"), "w") as f:
+            f.create_dataset("data", data=(np.arange(4, dtype="i4") + 10 * k))
+    with h5py.File(os.path.join(out, "vds.h5"), "w", libver="latest") as f:
+        full = h5py.VirtualLayout(shape=(2, 4), dtype="i4")
+        full[0] = h5py.VirtualSource("vds_src0.h5", "data", shape=(4,))
+        full[1] = h5py.VirtualSource("vds_src1.h5", "data", shape=(4,))
+        f.create_virtual_dataset("vds", full, fillvalue=-1)
+        gap = h5py.VirtualLayout(shape=(3, 4), dtype="i4")  # row 1 left unmapped -> fill value
+        gap[0] = h5py.VirtualSource("vds_src0.h5", "data", shape=(4,))
+        gap[2] = h5py.VirtualSource("vds_src1.h5", "data", shape=(4,))
+        f.create_virtual_dataset("vds_gap", gap, fillvalue=-1)
+
+
 def build_references(f):
     """Object references: a dataset and an attribute of references to a dataset, a group, and a nested
     dataset."""
@@ -248,6 +264,7 @@ def main():
         build_committed_types(f)
     with h5py.File(os.path.join(OUT, "references.h5"), "w", libver="latest") as f:
         build_references(f)
+    build_vds(OUT)
     with h5py.File(os.path.join(OUT, "committed_types_old.h5"), "w", libver="earliest") as f:
         build_committed_types(f)  # v0 superblock + symbol-table groups + v1 object headers
     print("wrote fixtures to", OUT)

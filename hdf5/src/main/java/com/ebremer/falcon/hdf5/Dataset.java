@@ -250,6 +250,11 @@ public final class Dataset extends Hdf5Object {
                         ctx, chunked, dims, datatype().size(), filterPipeline(), fillValue());
                 yield MemorySegment.ofArray(assembled);
             }
+            case DataLayout.Virtual virtual -> {
+                byte[] assembled = VirtualDataset.assemble(
+                        ctx, virtual, dataspace().dimensions(), datatype().size(), fillValue());
+                yield MemorySegment.ofArray(assembled);
+            }
         };
     }
 

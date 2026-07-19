@@ -41,7 +41,7 @@ public final class Hdf5File implements AutoCloseable {
                         "non-zero base address (user block) is not yet supported: " + superblock.baseAddress());
             }
             FileContext ctx = new FileContext(mapped.buffer(),
-                    superblock.sizeOfOffsets(), superblock.sizeOfLengths());
+                    superblock.sizeOfOffsets(), superblock.sizeOfLengths(), path);
             Group root = Group.root(ctx, superblock.rootObjectHeaderAddress());
             return new Hdf5File(mapped, superblock, root);
         } catch (RuntimeException e) {
