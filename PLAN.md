@@ -3,16 +3,17 @@
 **Falcon** is a multi-module Maven umbrella for **pure-JDK 25, zero-runtime-dependency** readers and
 writers of scientific-data formats.
 
-> **Status: H5 in progress — 93 tests green.** H0–H4 done (chunked storage + all six filters incl.
-> pure-Java szip, hyperslab). H5 so far: **new-style groups** (compact + **dense**) and **attributes**
-> (compact + **dense**) via the **fractal heap + v2 B-tree** + **global heap**, **vlen string
-> datasets**, the **newer chunk indexes** (version-4/5 layout: single-chunk, **fixed array**,
-> **extensible array** incl. secondary blocks, and **v2-B-tree** — non-filtered + filtered),
-> **vlen sequences** (ragged int/long/float/double arrays, datasets + attributes),
-> **shared/committed (named) datatypes** (datasets, attributes, and navigable committed-type objects),
-> and the **large-set structures**: deep v2 B-trees (internal **BTIN** nodes), **indirect-block
-> fractal heaps** (doubling table), and **paged extensible-array data blocks**. Remaining H5: the
-> SOHM shared-message heap, and nested indirect fractal-heap blocks (only for extreme heaps).
+> **Status: H6 in progress — 102 tests green.** **H0–H5 complete**: superblock/headers/groups (old +
+> new style), all datatype classes, compact/contiguous/chunked storage with every chunk index
+> (v1-B-tree, single-chunk, fixed/extensible array, v2-B-tree) at any scale, all six filters (incl.
+> pure-Java szip), hyperslabs, dense links/attributes via fractal heap + v2 B-tree + global heap, vlen
+> strings & sequences, committed datatypes, and the large-set structures (deep BTIN B-trees,
+> indirect-block fractal heaps, paged EA data blocks). H6 so far: **object references** and **region
+> references** (resolved to navigable objects / selections), **virtual datasets** (full assembly from
+> external source files, honouring fill), and **object metadata** (comment, modification time,
+> reference count). Remaining: superblock-extension messages (File Space Info, Driver Info, B-tree K
+> Values), the SOHM shared-message heap, and nested indirect fractal-heap blocks (only for extreme
+> heaps).
 
 ## Program roadmap (Falcon)
 
@@ -236,11 +237,19 @@ Each stage ends with a **milestone** and concrete **acceptance criteria**. "Refe
   and shared-datatype fixtures.
 
 ### H6 — Advanced read & completeness
-- **Virtual datasets**: layout class 3 + **global heap block for VDS**; **reference** decode (object +
-  region; revised & backward-compat encodings).
-- Superblock **extension**, **File Space Info (23)**, **B-tree K Values (19)**, **Driver Info (20)**;
-  **Object Comment (13)**, **Modification Time (18)** + **old (14)**, **Object Reference Count (22)**;
-  **free-space manager** (read).
+- **Virtual datasets ✓**: layout class 3 + the global-heap mapping block; `VirtualDataset` opens each
+  source file (relative to the VDS), reads its selection, and scatters it into the virtual layout,
+  honouring the fill value. Regular-hyperslab / all selections; strided-pattern & unlimited mappings
+  later.
+- **References ✓**: **object references** (8-byte object-header address → navigable `Hdf5Object` via
+  `readObjectReferences()`) and **region references** (global-heap ID → dataset + serialized selection
+  → `Selection` via `readRegionReferences()`), on datasets and attributes. Revised (`H5R_ref_t`)
+  encoding later.
+- **Object metadata ✓**: **Object Comment (13)**, **Modification Time (18)** + version-2 header-prefix
+  time, **Object Reference Count (22)** + version-1 prefix count — via `comment()` /
+  `modificationTime()` / `referenceCount()` on every object.
+- Remaining: superblock **extension**, **File Space Info (23)**, **B-tree K Values (19)**, **Driver
+  Info (20)**, old modification time **(14)**, **free-space manager** (read).
 - **Milestone:** complete read coverage of every message type and structure in the spec.
 - **Acceptance:** a broad corpus (h5py-generated across all matrices) reads without `Unsupported`
   errors; VDS resolves against source datasets.
