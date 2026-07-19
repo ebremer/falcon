@@ -348,6 +348,29 @@ class WriteTest {
     }
 
     @Test
+    void roundTripDenseAttributes() throws IOException {
+        Path file = Files.createTempFile("falcon-dense-attrs", ".h5");
+        try {
+            try (Hdf5Writer w = Hdf5Writer.create(file)) {
+                Hdf5Writer.DatasetWriter d = w.intDataset("d", new int[] {1, 2, 3}, new long[] {3});
+                for (int i = 0; i < 12; i++) { // > 8 attributes -> dense storage (fractal heap + v2 B-tree)
+                    d.intAttribute(String.format("attr%02d", i), new int[] {i * 10}, new long[] {});
+                }
+            }
+            try (Hdf5File h5 = Hdf5File.open(file)) {
+                Dataset d = h5.root().dataset("d");
+                assertEquals(12, d.attributes().size());
+                for (int i = 0; i < 12; i++) {
+                    assertArrayEquals(new int[] {i * 10},
+                            d.attribute(String.format("attr%02d", i)).orElseThrow().readInts());
+                }
+            }
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    @Test
     void roundTripDoubleDatasetAndAttribute() throws IOException {
         Path file = Files.createTempFile("falcon-write-f8", ".h5");
         try {

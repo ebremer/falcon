@@ -37,8 +37,29 @@ public final class Hdf5Writer implements AutoCloseable {
     private static final byte[] HDF5_SIGNATURE = {(byte) 0x89, 'H', 'D', 'F', '\r', '\n', 0x1a, '\n'};
     private static final byte[] OHDR_SIGNATURE = {'O', 'H', 'D', 'R'};
     private static final byte[] GCOL_SIGNATURE = {'G', 'C', 'O', 'L'};
+    private static final byte[] FRHP_SIGNATURE = {'F', 'R', 'H', 'P'};
+    private static final byte[] FHDB_SIGNATURE = {'F', 'H', 'D', 'B'};
+    private static final byte[] BTHD_SIGNATURE = {'B', 'T', 'H', 'D'};
+    private static final byte[] BTLF_SIGNATURE = {'B', 'T', 'L', 'F'};
     private static final long UNDEFINED = -1L;
     private static final int SUPERBLOCK_SIZE = 48;
+
+    // Above this many links/attributes, the writer switches from compact header messages to dense
+    // storage (a fractal heap indexed by a version-2 B-tree), matching the library's default threshold.
+    private static final int MAX_COMPACT = 8;
+    // Fractal-heap parameters chosen to match h5py's heap-id layout: an 8-byte managed id carries a
+    // 5-byte offset (40-bit heap) and a 2-byte length.
+    private static final int HEAP_ID_LENGTH = 8;
+    private static final int HEAP_OFFSET_SIZE = 5;
+    private static final int HEAP_LENGTH_SIZE = 2;
+    private static final int HEAP_MAX_BITS = 40;
+    private static final int HEAP_TABLE_WIDTH = 4;
+    private static final int HEAP_MAX_DIRECT_BLOCK = 65536;
+    private static final int HEAP_MAX_MANAGED_OBJECT = 4096;
+    // v2 B-tree record types and sizes for dense storage.
+    private static final int BT2_ATTR_NAME = 8;   // 17-byte record: heap id(8) + flags(1) + corder(4) + hash(4)
+    private static final int BT2_LINK_NAME = 5;    // 11-byte record: hash(4) + heap id(7)
+    private static final int BT2_NODE_SIZE = 512;
 
     private static final byte[] DATATYPE_INT32 = {0x10, 0x08, 0, 0, 4, 0, 0, 0, 0, 0, 0x20, 0};
     private static final byte[] DATATYPE_FLOAT32 = {
@@ -466,9 +487,11 @@ public final class Hdf5Writer implements AutoCloseable {
             children.put(dataset.name, address);
             objectAddresses.put(groupPath + "/" + dataset.name, address);
         }
+        byte[] attributeInfo = group.attributes.size() > MAX_COMPACT
+                ? writeDenseAttributes(buf, group.attributes) : null;
         buf.align(8);
         long headerAddress = buf.position();
-        writeGroupHeader(buf, children, group.attributes);
+        writeGroupHeader(buf, children, group.attributes, attributeInfo);
         return headerAddress;
     }
 
@@ -516,6 +539,9 @@ public final class Hdf5Writer implements AutoCloseable {
             buf.bytes(data);
             layout = contiguousLayoutBody(dataAddress, data.length);
         }
+        // Dense attribute structures are written before the object header so it can reference them.
+        byte[] attributeInfo = dataset.attributes.size() > MAX_COMPACT
+                ? writeDenseAttributes(buf, dataset.attributes) : null;
         buf.align(8);
         long headerAddress = buf.position();
 
@@ -530,8 +556,12 @@ public final class Hdf5Writer implements AutoCloseable {
                 || dataset.nbitPrecision >= 0 || dataset.szip) {
             writeMessage(messages, 11, 0x00, filterPipelineBody(dataset));
         }
-        for (AttributeSpec attribute : dataset.attributes) {
-            writeMessage(messages, 12, 0x00, attributeBody(attribute));
+        if (attributeInfo != null) {
+            writeMessage(messages, 21, 0x00, attributeInfo);
+        } else {
+            for (AttributeSpec attribute : dataset.attributes) {
+                writeMessage(messages, 12, 0x00, attributeBody(attribute));
+            }
         }
         writeObjectHeader(buf, messages.toByteArray());
         return headerAddress;
@@ -950,15 +980,19 @@ public final class Hdf5Writer implements AutoCloseable {
     }
 
     private static void writeGroupHeader(GrowBuffer buf, Map<String, Long> children,
-                                         List<AttributeSpec> attributes) {
+                                         List<AttributeSpec> attributes, byte[] attributeInfo) {
         GrowBuffer messages = new GrowBuffer();
         writeMessage(messages, 2, 0x00, linkInfoBody());
         writeMessage(messages, 10, 0x01, new byte[] {0, 0});
         for (Map.Entry<String, Long> child : children.entrySet()) {
             writeMessage(messages, 6, 0x00, linkBody(child.getKey(), child.getValue()));
         }
-        for (AttributeSpec attribute : attributes) {
-            writeMessage(messages, 12, 0x00, attributeBody(attribute));
+        if (attributeInfo != null) {
+            writeMessage(messages, 21, 0x00, attributeInfo);
+        } else {
+            for (AttributeSpec attribute : attributes) {
+                writeMessage(messages, 12, 0x00, attributeBody(attribute));
+            }
         }
         writeObjectHeader(buf, messages.toByteArray());
     }
@@ -1012,6 +1046,165 @@ public final class Hdf5Writer implements AutoCloseable {
             buf.u8(0);        // materialize the free space
         }
         return indices;
+    }
+
+    /** A written fractal heap: its header address and the fixed-width heap id of each stored object. */
+    private record FractalHeapResult(long headerAddress, List<byte[]> ids) {
+    }
+
+    /**
+     * Writes a fractal heap holding {@code objects} in a single checksummed direct block (the form the
+     * library uses for a modest dense set), and returns its header address and each object's managed
+     * heap id. Larger sets that would need indirect blocks are rejected.
+     */
+    private static FractalHeapResult writeFractalHeap(GrowBuffer buf, List<byte[]> objects) {
+        int directHeader = 4 + 1 + 8 + HEAP_OFFSET_SIZE + 4; // FHDB: sig, version, heap header, block offset, checksum
+        int objectBytes = 0;
+        for (byte[] object : objects) {
+            objectBytes += object.length;
+        }
+        int used = directHeader + objectBytes;
+        int blockSize = Math.max(512, Integer.highestOneBit(used - 1) << 1); // smallest power of two >= used
+        if (blockSize > HEAP_MAX_DIRECT_BLOCK) {
+            throw new HdfUnsupportedException("dense storage set too large for a single fractal-heap block");
+        }
+
+        List<byte[]> ids = new ArrayList<>();
+        int offset = directHeader;
+        for (byte[] object : objects) {
+            ids.add(heapId(offset, object.length));
+            offset += object.length;
+        }
+
+        buf.align(8);
+        int directBlock = buf.position();
+        buf.bytes(FHDB_SIGNATURE);
+        buf.u8(0);
+        int heapHeaderPatch = buf.position();
+        buf.u64(0);                       // heap header address (patched once the header is written)
+        buf.uvar(0, HEAP_OFFSET_SIZE);    // block offset
+        int checksumPatch = buf.position();
+        buf.u32(0);                       // whole-block checksum (patched below)
+        for (byte[] object : objects) {
+            buf.bytes(object);
+        }
+        while (buf.position() - directBlock < blockSize) {
+            buf.u8(0);                    // zero-fill the remainder of the direct block
+        }
+
+        buf.align(8);
+        int headerAddress = buf.position();
+        buf.bytes(FRHP_SIGNATURE);
+        buf.u8(0);
+        buf.u16(HEAP_ID_LENGTH);
+        buf.u16(0);                       // I/O filter length
+        buf.u8(0x02);                     // flags: direct blocks are checksummed
+        buf.u32(HEAP_MAX_MANAGED_OBJECT);
+        buf.u64(0);                       // next huge object id
+        buf.u64(UNDEFINED);               // huge-object v2 B-tree address
+        buf.u64((long) blockSize - used); // free space in managed blocks
+        buf.u64(UNDEFINED);               // managed-block free-space manager address
+        buf.u64(blockSize);               // managed space
+        buf.u64(blockSize);               // allocated managed space
+        buf.u64(used);                    // managed-space iterator offset
+        buf.u64(objects.size());          // number of managed objects
+        buf.u64(0);                       // huge object size
+        buf.u64(0);                       // number of huge objects
+        buf.u64(0);                       // tiny object size
+        buf.u64(0);                       // number of tiny objects
+        buf.u16(HEAP_TABLE_WIDTH);
+        buf.u64(blockSize);               // starting block size (== the single direct block)
+        buf.u64(HEAP_MAX_DIRECT_BLOCK);   // maximum direct block size
+        buf.u16(HEAP_MAX_BITS);           // maximum heap size (bits)
+        buf.u16(1);                       // starting rows in the root indirect block
+        buf.u64(directBlock);             // root block address
+        buf.u16(0);                       // current rows (0 => the root is a single direct block)
+        buf.u32(buf.checksum(headerAddress, buf.position()));
+
+        buf.patchU64(heapHeaderPatch, headerAddress);
+        buf.patchU32(checksumPatch, buf.checksum(directBlock, directBlock + blockSize));
+        return new FractalHeapResult(headerAddress, ids);
+    }
+
+    /** A managed heap id: {@code type/version byte(0) · offset · length}. */
+    private static byte[] heapId(int offset, int length) {
+        GrowBuffer b = new GrowBuffer();
+        b.u8(0); // managed object (type 0)
+        b.uvar(offset, HEAP_OFFSET_SIZE);
+        b.uvar(length, HEAP_LENGTH_SIZE);
+        return b.toByteArray();
+    }
+
+    /** Writes a version-2 B-tree with a single leaf holding {@code records} (already sorted); returns its header. */
+    private static long writeV2BTree(GrowBuffer buf, int type, int recordSize, List<byte[]> records) {
+        buf.align(8);
+        int leaf = buf.position();
+        buf.bytes(BTLF_SIGNATURE);
+        buf.u8(0);
+        buf.u8(type);
+        for (byte[] record : records) {
+            buf.bytes(record);
+        }
+        // The checksum sits immediately after the records (covering the prefix + records)...
+        buf.u32(buf.checksum(leaf, buf.position()));
+        // ...then the node is padded out to the fixed node size it is allocated at on disk.
+        while (buf.position() - leaf < BT2_NODE_SIZE) {
+            buf.u8(0);
+        }
+
+        buf.align(8);
+        int header = buf.position();
+        buf.bytes(BTHD_SIGNATURE);
+        buf.u8(0);
+        buf.u8(type);
+        buf.u32(BT2_NODE_SIZE);
+        buf.u16(recordSize);
+        buf.u16(0);            // depth (single leaf)
+        buf.u8(100);           // split percent
+        buf.u8(40);            // merge percent
+        buf.u64(leaf);         // root node address
+        buf.u16(records.size()); // records in the root node
+        buf.u64(records.size()); // total records in the tree
+        buf.u32(buf.checksum(header, buf.position()));
+        return header;
+    }
+
+    /**
+     * Writes an object's attributes densely (fractal heap of attribute messages + a name-indexed v2
+     * B-tree) and returns the Attribute Info (message 21) body pointing at them.
+     */
+    private static byte[] writeDenseAttributes(GrowBuffer buf, List<AttributeSpec> attributes) {
+        List<byte[]> objects = new ArrayList<>();
+        for (AttributeSpec attribute : attributes) {
+            objects.add(attributeBody(attribute));
+        }
+        FractalHeapResult heap = writeFractalHeap(buf, objects);
+
+        record Hashed(int hash, byte[] record) {
+        }
+        List<Hashed> hashed = new ArrayList<>();
+        for (int i = 0; i < attributes.size(); i++) {
+            int hash = Lookup3.hashLittle(attributes.get(i).name().getBytes(StandardCharsets.UTF_8));
+            GrowBuffer r = new GrowBuffer();
+            r.bytes(heap.ids().get(i));  // heap id (8)
+            r.u8(0);                     // message flags
+            r.u32(0x0000FFFF);           // creation order (untracked)
+            r.u32(hash);                 // name hash
+            hashed.add(new Hashed(hash, r.toByteArray()));
+        }
+        hashed.sort((x, y) -> Integer.compareUnsigned(x.hash(), y.hash())); // v2 B-tree orders by hash
+        List<byte[]> records = new ArrayList<>();
+        for (Hashed h : hashed) {
+            records.add(h.record());
+        }
+        long btree = writeV2BTree(buf, BT2_ATTR_NAME, 17, records);
+
+        GrowBuffer b = new GrowBuffer();
+        b.u8(0);       // version
+        b.u8(0);       // flags: no creation-order index
+        b.u64(heap.headerAddress());
+        b.u64(btree);
+        return b.toByteArray();
     }
 
     private static byte[] vlenIds(List<byte[]> payloads, int[] elementCounts, long collection, int[] indices) {
