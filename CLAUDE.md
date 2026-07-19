@@ -67,9 +67,11 @@ mvn -pl hdf5 compile       # compile just the hdf5 module
 - Reference the spec section in a comment when implementing a non-obvious on-disk structure.
 - Every roadmap stage lands with tests: unit tests plus conformance tests against reference `.h5`
   files generated with **h5py** (3.16.0 / HDF5 2.0.0 is installed locally — the reference oracle).
-- Test fixtures live in `hdf5/src/test/resources/fixtures/`; regenerate with
+- Test fixtures live in `hdf5/src/test/resources/fixtures/`; regenerate `.h5` files with
   `python tools/fixtures/gen_fixtures.py`. Fixture bytes are stable enough that tests assert structure,
-  not incidental addresses.
+  not incidental addresses. The AEC/szip reference vectors (`aec_vectors.txt`, `szip_chunks.txt`) come
+  from **libaec** via `tools/fixtures/gen_aec_vectors.py` (needs `pip install imagecodecs`, a dev-time
+  tool like h5py — not a Falcon dependency).
 - Match the style of surrounding code; keep the public API small and documented with Javadoc.
 - License: **Apache-2.0** (`LICENSE` at the repo root). New source files may carry the standard
   Apache header; keep `Copyright <year> Erich Bremer`.

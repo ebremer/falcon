@@ -24,14 +24,53 @@ public final class Filters {
     private Filters() {
     }
 
-    public static byte[] decode(FilterPipeline.Filter filter, byte[] data, int elementSize) {
+    // szip option-mask bits (H5Zszip.c)
+    private static final int SZ_LSB_MASK = 0x08;
+    private static final int SZ_MSB_MASK = 0x10;
+    private static final int SZ_NN_MASK = 0x20;
+
+    public static byte[] decode(FilterPipeline.Filter filter, byte[] data, int elementSize, int uncompressedSize) {
         return switch (filter.id()) {
             case DEFLATE -> inflate(data);
             case SHUFFLE -> unshuffle(data, filter.clientData().length > 0 ? filter.clientData()[0] : elementSize);
             case FLETCHER32 -> stripFletcher32(data);
+            case SZIP -> szip(data, filter.clientData(), elementSize, uncompressedSize);
             default -> throw new HdfUnsupportedException(
                     "HDF5 filter id " + filter.id() + " is not yet supported (arrives in a later H4 increment)");
         };
+    }
+
+    /**
+     * Decodes an szip-compressed chunk (filter id 4) via the pure-Java {@link Aec} decoder, mapping
+     * the filter's client data ({@code mask, pixelsPerBlock, bitsPerPixel, pixelsPerScanline}) to AEC
+     * parameters and packing the decoded samples back to bytes in the chunk's byte order.
+     */
+    private static byte[] szip(byte[] data, int[] clientData, int elementSize, int uncompressedSize) {
+        if (clientData.length < 4) {
+            throw new HdfFormatException("szip filter requires 4 client-data values, got " + clientData.length);
+        }
+        int optionMask = clientData[0];
+        int pixelsPerBlock = clientData[1];
+        int bitsPerPixel = clientData[2];
+        int pixelsPerScanline = clientData[3];
+
+        int flags = (optionMask & SZ_NN_MASK) != 0 ? Aec.FLAG_PREPROCESS : 0;
+        boolean mostSignificantFirst = (optionMask & SZ_MSB_MASK) != 0;
+        int samples = uncompressedSize / elementSize;
+        int rsi = pixelsPerBlock == 0 ? 1 : pixelsPerScanline / pixelsPerBlock;
+
+        long[] values = Aec.decode(data, samples, bitsPerPixel, pixelsPerBlock, rsi, flags);
+
+        byte[] out = new byte[uncompressedSize];
+        for (int i = 0; i < samples; i++) {
+            long v = values[i];
+            int base = i * elementSize;
+            for (int b = 0; b < elementSize; b++) {
+                int shift = mostSignificantFirst ? (elementSize - 1 - b) * 8 : b * 8;
+                out[base + b] = (byte) (v >>> shift);
+            }
+        }
+        return out;
     }
 
     /** Inflates a zlib-wrapped deflate stream (HDF5 {@code deflate} / gzip filter). */

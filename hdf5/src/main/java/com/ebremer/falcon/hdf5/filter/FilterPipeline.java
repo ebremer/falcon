@@ -26,13 +26,13 @@ public final class FilterPipeline {
      * Decodes one chunk by applying the pipeline's filters in reverse, skipping any whose bit is set
      * in {@code filterMask}.
      */
-    public byte[] decode(byte[] chunk, int filterMask, int elementSize) {
+    public byte[] decode(byte[] chunk, int filterMask, int elementSize, int uncompressedSize) {
         byte[] data = chunk;
         for (int i = filters.size() - 1; i >= 0; i--) {
             if ((filterMask & (1 << i)) != 0) {
                 continue;
             }
-            data = Filters.decode(filters.get(i), data, elementSize);
+            data = Filters.decode(filters.get(i), data, elementSize, uncompressedSize);
         }
         return data;
     }

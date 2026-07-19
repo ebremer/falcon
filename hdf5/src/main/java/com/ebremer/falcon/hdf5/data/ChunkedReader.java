@@ -29,10 +29,16 @@ public final class ChunkedReader {
 
         int rank = datasetDims.length;
         int[] chunkDims = layout.chunkDimensions();
+        int chunkElements = 1;
+        for (int d : chunkDims) {
+            chunkElements *= d;
+        }
+        int chunkBytes = chunkElements * elementSize;
         List<ChunkRecord> chunks = ChunkBTreeV1.read(ctx, layout.indexAddress(), rank);
         for (ChunkRecord chunk : chunks) {
             byte[] raw = ctx.buffer().getBytes(chunk.address(), chunk.size());
-            byte[] bytes = pipeline == null ? raw : pipeline.decode(raw, chunk.filterMask(), elementSize);
+            byte[] bytes = pipeline == null ? raw
+                    : pipeline.decode(raw, chunk.filterMask(), elementSize, chunkBytes);
             copyChunk(output, datasetDims, chunkDims, chunk.offset(), bytes, elementSize);
         }
         return output;
