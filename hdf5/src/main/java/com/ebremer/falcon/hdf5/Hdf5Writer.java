@@ -10,6 +10,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -53,6 +54,8 @@ public final class Hdf5Writer implements AutoCloseable {
     private final Path path;
     private final GroupSpec root = new GroupSpec();
     private final GroupWriter rootWriter = new GroupWriter(root);
+    private final Map<String, Long> objectAddresses = new HashMap<>();     // absolute path -> object header address
+    private final List<PendingReference> pendingReferences = new ArrayList<>();
     private boolean written;
 
     private Hdf5Writer(Path path) {
@@ -98,6 +101,10 @@ public final class Hdf5Writer implements AutoCloseable {
         return rootWriter.enumDataset(name, shape, type, values);
     }
 
+    public DatasetWriter referenceDataset(String name, long[] shape, String[] targets) {
+        return rootWriter.referenceDataset(name, shape, targets);
+    }
+
     public GroupWriter group(String name) {
         return rootWriter.group(name);
     }
@@ -110,7 +117,9 @@ public final class Hdf5Writer implements AutoCloseable {
         written = true;
         GrowBuffer buf = new GrowBuffer();
         buf.reserve(SUPERBLOCK_SIZE);
-        long rootAddress = writeGroup(buf, root);
+        long rootAddress = writeGroup(buf, root, "");
+        objectAddresses.put("/", rootAddress);
+        resolveReferences(buf);
         long endOfFile = buf.position();
         buf.patchBytes(0, superblock(rootAddress, endOfFile));
         Files.write(path, buf.toByteArray());
@@ -190,6 +199,20 @@ public final class Hdf5Writer implements AutoCloseable {
         public DatasetWriter enumDataset(String name, long[] shape, EnumType type, int[] values) {
             requireElementCount(shape, values.length);
             return addDataset(new DatasetSpec(name, enumDatatype(type), 4, shape, null, intBytes(values), null));
+        }
+
+        /**
+         * An object-reference dataset. Each target is an absolute path ({@code "/name"} or
+         * {@code "/group/name"}) to another object in this file, or {@code null} for a null reference.
+         * Targets may be defined before or after this dataset; addresses are resolved when the file is
+         * written (an unresolved target path is an error).
+         */
+        public DatasetWriter referenceDataset(String name, long[] shape, String[] targets) {
+            requireElementCount(shape, targets.length);
+            DatasetSpec spec = new DatasetSpec(name, DATATYPE_OBJECT_REFERENCE, 8, shape, null,
+                    new byte[targets.length * 8], null);
+            spec.referenceTargets = java.util.Arrays.asList(targets);
+            return addDataset(spec);
         }
 
         public GroupWriter group(String name) {
@@ -344,13 +367,17 @@ public final class Hdf5Writer implements AutoCloseable {
 
     // --------------------------------------------------------------- serialization
 
-    private static long writeGroup(GrowBuffer buf, GroupSpec group) {
+    private long writeGroup(GrowBuffer buf, GroupSpec group, String groupPath) {
         Map<String, Long> children = new LinkedHashMap<>();
         for (GroupSpec subgroup : group.groups) {
-            children.put(subgroup.name, writeGroup(buf, subgroup));
+            long address = writeGroup(buf, subgroup, groupPath + "/" + subgroup.name);
+            children.put(subgroup.name, address);
+            objectAddresses.put(groupPath + "/" + subgroup.name, address);
         }
         for (DatasetSpec dataset : group.datasets) {
-            children.put(dataset.name, writeDataset(buf, dataset));
+            long address = writeDataset(buf, dataset);
+            children.put(dataset.name, address);
+            objectAddresses.put(groupPath + "/" + dataset.name, address);
         }
         buf.align(8);
         long headerAddress = buf.position();
@@ -358,7 +385,31 @@ public final class Hdf5Writer implements AutoCloseable {
         return headerAddress;
     }
 
-    private static long writeDataset(GrowBuffer buf, DatasetSpec dataset) {
+    /** Patches each pending object reference with the resolved header address of its target object. */
+    private void resolveReferences(GrowBuffer buf) {
+        for (PendingReference reference : pendingReferences) {
+            Long address = objectAddresses.get(reference.targetPath);
+            if (address == null) {
+                throw new IllegalArgumentException("reference target does not exist: " + reference.targetPath);
+            }
+            buf.patchU64(reference.offset, address);
+        }
+    }
+
+    /** Queues each non-null target for address patching; a null target keeps the all-zeros placeholder
+     * (the encoding h5py uses for a null object reference). */
+    private void recordReferences(List<String> targets, int dataAddress) {
+        for (int i = 0; i < targets.size(); i++) {
+            if (targets.get(i) != null) {
+                pendingReferences.add(new PendingReference(dataAddress + i * 8, targets.get(i)));
+            }
+        }
+    }
+
+    private record PendingReference(int offset, String targetPath) {
+    }
+
+    private long writeDataset(GrowBuffer buf, DatasetSpec dataset) {
         byte[] layout;
         if (dataset.chunkShape != null) {
             layout = writeChunkedStorage(buf, dataset);
@@ -372,6 +423,9 @@ public final class Hdf5Writer implements AutoCloseable {
             }
             buf.align(8);
             long dataAddress = buf.position();
+            if (dataset.referenceTargets != null) {
+                recordReferences(dataset.referenceTargets, (int) dataAddress);
+            }
             buf.bytes(data);
             layout = contiguousLayoutBody(dataAddress, data.length);
         }
@@ -1067,6 +1121,7 @@ public final class Hdf5Writer implements AutoCloseable {
         final long[] chunkShape;        // null for contiguous storage
         final byte[] data;              // inline element bytes, or null for vlen strings
         final List<byte[]> vlenStrings; // vlen-string values, or null
+        List<String> referenceTargets;  // object-reference target paths, or null
         final List<AttributeSpec> attributes = new ArrayList<>();
         int deflateLevel = -1;          // -1 = no compression
         boolean shuffle;

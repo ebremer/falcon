@@ -2,6 +2,8 @@ package com.ebremer.falcon.hdf5;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.ebremer.falcon.hdf5.datatype.Datatype;
 import java.io.IOException;
@@ -235,6 +237,32 @@ class WriteTest {
                 ByteBuffer raw = ByteBuffer.wrap(ds.readRawBytes()).order(ByteOrder.LITTLE_ENDIAN);
                 assertArrayEquals(new int[] {2, 0, 1},
                         new int[] {raw.getInt(0), raw.getInt(4), raw.getInt(8)});
+            }
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    @Test
+    void roundTripReferenceDataset() throws IOException {
+        Path file = Files.createTempFile("falcon-refs", ".h5");
+        try {
+            try (Hdf5Writer w = Hdf5Writer.create(file)) {
+                w.intDataset("target_a", new int[] {0, 1, 2, 3, 4}, new long[] {5});
+                Hdf5Writer.GroupWriter g = w.group("target_g");
+                g.intDataset("inner", new int[] {7, 8, 9}, new long[] {3});
+                w.referenceDataset("refs", new long[] {5},
+                        new String[] {"/target_a", "/target_g", "/target_g/inner", "/later", null});
+                w.intDataset("later", new int[] {42}, new long[] {1}); // target defined after the ref dataset
+            }
+            try (Hdf5File h5 = Hdf5File.open(file)) {
+                Hdf5Object[] refs = h5.root().dataset("refs").readObjectReferences();
+                assertEquals(5, refs.length);
+                assertArrayEquals(new int[] {0, 1, 2, 3, 4}, ((Dataset) refs[0]).readInts());
+                assertTrue(refs[1].isGroup());
+                assertArrayEquals(new int[] {7, 8, 9}, ((Dataset) refs[2]).readInts());
+                assertArrayEquals(new int[] {42}, ((Dataset) refs[3]).readInts()); // forward reference resolved
+                assertNull(refs[4]); // null reference
             }
         } finally {
             Files.deleteIfExists(file);

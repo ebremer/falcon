@@ -152,7 +152,10 @@ public abstract sealed class Hdf5Object permits Group, Dataset, CommittedDatatyp
         Hdf5Object[] out = new Hdf5Object[count];
         for (int i = 0; i < count; i++) {
             long address = buffer.getAddress((long) i * stride, offsets);
-            out[i] = address == HdfBuffer.UNDEFINED_ADDRESS ? null : classify(ctx, "", "", address);
+            // A null object reference is stored as an all-zero (address 0, where the superblock lives,
+            // never an object) or all-ones (undefined) address.
+            out[i] = (address == HdfBuffer.UNDEFINED_ADDRESS || address == 0)
+                    ? null : classify(ctx, "", "", address);
         }
         return out;
     }
