@@ -153,6 +153,15 @@ class DataReadChunkedTest {
     }
 
     @Test
+    void extensibleArrayPagedDataBlocks() throws IOException {
+        // 150000 chunks grow extensible-array data blocks past the page size into paged storage
+        // (each page individually checksummed, tracked by a bitmap in the secondary block).
+        try (Hdf5File h5 = Hdf5File.open(Fixtures.path("ea_paged.h5"))) {
+            assertArrayEquals(range(150000), h5.root().dataset("d").readInts());
+        }
+    }
+
+    @Test
     void nbitReducedPrecision() throws IOException {
         // 16-bit-precision unsigned stored in 4 bytes: n-bit packs only the significant bits.
         try (Hdf5File f = Hdf5File.open(Fixtures.path("nbit_data.h5"))) {

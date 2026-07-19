@@ -178,6 +178,12 @@ def build_chunk_indexes(f):
                      maxshape=(None, None), chunks=(2, 2))                                          # 400 chunks -> BTIN nodes
 
 
+def build_ea_paged(f):
+    """A single-unlimited-dimension dataset with enough chunks (150000) that the extensible-array
+    index grows data blocks larger than the page size, forcing paged (checksummed-page) storage."""
+    f.create_dataset("d", data=np.arange(150000, dtype="i4"), maxshape=(None,), chunks=(1,))
+
+
 def build_committed_types(f):
     """A committed (named) datatype shared by two datasets and by an attribute, plus a second
     committed enum type used by a dataset."""
@@ -218,6 +224,8 @@ def main():
         build_dense_attrs(f)
     with h5py.File(os.path.join(OUT, "chunk_indexes.h5"), "w", libver="latest") as f:
         build_chunk_indexes(f)
+    with h5py.File(os.path.join(OUT, "ea_paged.h5"), "w", libver="latest") as f:
+        build_ea_paged(f)
     with h5py.File(os.path.join(OUT, "committed_types.h5"), "w", libver="latest") as f:
         build_committed_types(f)
     with h5py.File(os.path.join(OUT, "committed_types_old.h5"), "w", libver="earliest") as f:

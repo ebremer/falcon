@@ -3,15 +3,16 @@
 **Falcon** is a multi-module Maven umbrella for **pure-JDK 25, zero-runtime-dependency** readers and
 writers of scientific-data formats.
 
-> **Status: H5 in progress — 90 tests green.** H0–H4 done (chunked storage + all six filters incl.
+> **Status: H5 in progress — 93 tests green.** H0–H4 done (chunked storage + all six filters incl.
 > pure-Java szip, hyperslab). H5 so far: **new-style groups** (compact + **dense**) and **attributes**
 > (compact + **dense**) via the **fractal heap + v2 B-tree** + **global heap**, **vlen string
 > datasets**, the **newer chunk indexes** (version-4/5 layout: single-chunk, **fixed array**,
 > **extensible array** incl. secondary blocks, and **v2-B-tree** — non-filtered + filtered),
-> **vlen sequences** (ragged int/long/float/double arrays, datasets + attributes), and
-> **shared/committed (named) datatypes** (datasets, attributes, and navigable committed-type objects).
-> Remaining H5: indirect-block heaps / deeper B-trees & paged data blocks (very large sets), and the
-> SOHM shared-message heap.
+> **vlen sequences** (ragged int/long/float/double arrays, datasets + attributes),
+> **shared/committed (named) datatypes** (datasets, attributes, and navigable committed-type objects),
+> and the **large-set structures**: deep v2 B-trees (internal **BTIN** nodes), **indirect-block
+> fractal heaps** (doubling table), and **paged extensible-array data blocks**. Remaining H5: the
+> SOHM shared-message heap, and nested indirect fractal-heap blocks (only for extreme heaps).
 
 ## Program roadmap (Falcon)
 
@@ -217,8 +218,9 @@ Each stage ends with a **milestone** and concrete **acceptance criteria**. "Refe
   (`FAHD`/`FADB`, type 3), **extensible array** (`EAHD`/`EAIB`/`EASB`/`EADB`, type 4, incl. secondary
   blocks), and **v2-B-tree** (`BTHD`/`BTLF`, type 5, records 10/11) — each for non-filtered and
   filtered chunks. `index.{FixedArray,ExtensibleArray,ChunkBTreeV2}`. Implicit (type 2) throws
-  unsupported (h5py emits a fixed array instead). Deferred to "very large" work: deep v2 B-trees with
-  `BTIN` internal nodes and paged extensible-array data blocks.
+  unsupported (h5py emits a fixed array instead). **Large-set structures done**: deep v2 B-trees with
+  `BTIN` internal nodes, indirect-block fractal heaps (doubling table), and paged extensible-array data
+  blocks (checksummed pages + a page-init bitmap in the secondary block).
 - **Attribute (12)** + **Attribute Info (21)**; **global heap** for variable-length data. **Vlen ✓**:
   both flavours of class-9 data resolve through the global heap — **strings** (`data.VlenStrings`) and
   **sequences / ragged arrays** (`data.VlenSequences`: int/long/float/double rows incl. empty rows),
@@ -330,7 +332,7 @@ zero-dependency, pure-JDK guarantee intact.
 | Chunked — v1 B-tree (type 1) | H4 |
 | Chunked — single-chunk / fixed array / extensible array / v2 B-tree (v4/v5 layout) | **H5 ✓** |
 | Chunked — implicit index (h5py emits fixed array instead; untestable) | throws unsupported |
-| Chunked — deep v2 B-trees (BTIN) / paged EA data blocks (very large sets) | later |
+| Chunked — deep v2 B-trees (BTIN) / paged EA data blocks (very large sets) | **H5 ✓** |
 | Virtual (VDS) | H6 |
 
 ### 10.4 Filters (all built-in; **szip included**)

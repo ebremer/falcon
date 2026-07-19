@@ -26,7 +26,8 @@ import java.util.List;
  * elements each; a super block is addressed directly from the index block when its data-block count is
  * below {@code sblkMinPtrs}, and via a secondary block otherwise. Element encoding matches the fixed
  * array: an address for unfiltered chunks (client id 0), or address + stored size + filter mask for
- * filtered chunks (client id 1). Paged data blocks (very large chunks) are a later increment.
+ * filtered chunks (client id 1). Very large data blocks are <b>paged</b> (split into fixed-size,
+ * individually checksummed pages), with a page-init bitmap in the owning secondary block.
  */
 public final class ExtensibleArray {
 
@@ -95,10 +96,6 @@ public final class ExtensibleArray {
         for (int u = 0; u < nsblks && linear < maxIndexSet; u++) {
             int ndblks = superBlockDataBlocks(u);
             long dblkNelmts = (long) (1 << ((u + 1) / 2)) * dblkMinElmts;
-            if (dblkNelmts > pageElmts) {
-                throw new HdfUnsupportedException(
-                        "paged extensible-array data blocks are implemented in a later increment");
-            }
             long[] dblkAddrs = new long[ndblks];
             if (ndblks < sblkMinPtrs) {
                 for (int k = 0; k < ndblks; k++) {
@@ -115,6 +112,12 @@ public final class ExtensibleArray {
                         throw new HdfFormatException("expected extensible array secondary block 'EASB' at " + secondary);
                     }
                     long ptrs = secondary + 6 + offsets + offsetBytes; // sig, ver, client, header addr, block offset
+                    if (dblkNelmts > pageElmts) {
+                        // Paged data blocks: a page-init bitmap (ceil(pages-per-block / 8) bytes per data
+                        // block) precedes the data-block address list.
+                        long pagesPerBlock = dblkNelmts / pageElmts;
+                        ptrs += (long) ndblks * ((pagesPerBlock + 7) / 8);
+                    }
                     for (int k = 0; k < ndblks; k++) {
                         dblkAddrs[k] = buf.getAddress(ptrs + (long) k * offsets, offsets);
                     }
@@ -122,11 +125,14 @@ public final class ExtensibleArray {
             }
             for (int k = 0; k < ndblks && linear < maxIndexSet; k++) {
                 long addr = dblkAddrs[k];
-                long dataBase = addr == HdfBuffer.UNDEFINED_ADDRESS ? -1
-                        : validateDataBlock(buf, addr) + 6 + offsets + offsetBytes;
+                boolean allocated = addr != HdfBuffer.UNDEFINED_ADDRESS;
+                if (allocated) {
+                    validateDataBlock(buf, addr);
+                }
                 for (long j = 0; j < dblkNelmts && linear < maxIndexSet; j++, linear++) {
-                    if (dataBase >= 0) {
-                        addRecord(chunks, buf, dataBase + j * elemSize, linear,
+                    if (allocated) {
+                        long element = elementAddress(addr, j, dblkNelmts, pageElmts, elemSize, offsets, offsetBytes);
+                        addRecord(chunks, buf, element, linear,
                                 clientId, offsets, lengths, chunkBytes, chunksPerDim, chunkDims);
                     }
                 }
@@ -140,6 +146,22 @@ public final class ExtensibleArray {
             throw new HdfFormatException("expected extensible array data block 'EADB' at " + addr);
         }
         return addr;
+    }
+
+    /**
+     * Address of element {@code j} within a data block. A small block stores its elements contiguously
+     * after the block prefix; a large block is <b>paged</b> — after the prefix, each page is a 4-byte
+     * checksum followed by {@code pageElmts} elements.
+     */
+    private static long elementAddress(long dataBlock, long j, long dblkNelmts, int pageElmts,
+                                       int elemSize, int offsets, int offsetBytes) {
+        long base = dataBlock + 6 + offsets + offsetBytes; // signature, version, client id, header, block offset
+        if (dblkNelmts > pageElmts) {
+            long page = j / pageElmts;
+            long index = j % pageElmts;
+            return base + 4 + page * ((long) pageElmts * elemSize + 4) + index * elemSize;
+        }
+        return base + j * elemSize;
     }
 
     /** Number of data blocks in super block {@code u}. */
