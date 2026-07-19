@@ -3,6 +3,7 @@ package com.ebremer.falcon.hdf5.data;
 import com.ebremer.falcon.hdf5.HdfUnsupportedException;
 import com.ebremer.falcon.hdf5.btree.ChunkBTreeV1;
 import com.ebremer.falcon.hdf5.filter.FilterPipeline;
+import com.ebremer.falcon.hdf5.index.ExtensibleArray;
 import com.ebremer.falcon.hdf5.index.FixedArray;
 import com.ebremer.falcon.hdf5.io.FileContext;
 import com.ebremer.falcon.hdf5.layout.ChunkRecord;
@@ -42,6 +43,8 @@ public final class ChunkedReader {
                     List.of(new ChunkRecord(new long[rank], layout.indexAddress(), chunkBytes, 0));
             case DataLayout.INDEX_FIXED_ARRAY ->
                     FixedArray.readChunks(ctx, layout.indexAddress(), chunkBytes, datasetDims, chunkDims);
+            case DataLayout.INDEX_EXTENSIBLE_ARRAY ->
+                    ExtensibleArray.readChunks(ctx, layout.indexAddress(), chunkBytes, datasetDims, chunkDims);
             default -> throw new HdfUnsupportedException(
                     "chunk index type " + layout.indexType() + " is implemented in a later increment");
         };

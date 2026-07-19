@@ -103,6 +103,30 @@ class DataReadChunkedTest {
     }
 
     @Test
+    void extensibleArrayInline() throws IOException {
+        // 3 chunks: all element pointers live inline in the extensible-array index block.
+        try (Hdf5File h5 = Hdf5File.open(Fixtures.path("chunk_indexes.h5"))) {
+            assertArrayEquals(range(12), h5.root().dataset("extensible").readInts());
+        }
+    }
+
+    @Test
+    void extensibleArrayDataBlocks() throws IOException {
+        // 300 chunks: pointers spill from the index block into data blocks and a secondary block.
+        try (Hdf5File h5 = Hdf5File.open(Fixtures.path("chunk_indexes.h5"))) {
+            assertArrayEquals(range(1200), h5.root().dataset("extensible_big").readInts());
+        }
+    }
+
+    @Test
+    void extensibleArrayFiltered() throws IOException {
+        // gzip-filtered extensible array: elements carry address + stored size + filter mask.
+        try (Hdf5File h5 = Hdf5File.open(Fixtures.path("chunk_indexes.h5"))) {
+            assertArrayEquals(range(200), h5.root().dataset("extensible_gz").readInts());
+        }
+    }
+
+    @Test
     void nbitReducedPrecision() throws IOException {
         // 16-bit-precision unsigned stored in 4 bytes: n-bit packs only the significant bits.
         try (Hdf5File f = Hdf5File.open(Fixtures.path("nbit_data.h5"))) {

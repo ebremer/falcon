@@ -145,6 +145,10 @@ def build_chunk_indexes(f):
     f.create_dataset("implicit", data=np.arange(10, dtype="i4"), chunks=(5,))                     # -> fixed array
     f.create_dataset("fixed", data=np.arange(20, dtype="i4"), chunks=(5,), compression="gzip")    # fixed array
     f.create_dataset("extensible", data=np.arange(12, dtype="i4"), maxshape=(None,), chunks=(4,)) # extensible array
+    # larger extensible arrays: exercise data blocks + a secondary block, and filtered entries
+    f.create_dataset("extensible_big", data=np.arange(1200, dtype="i4"), maxshape=(None,), chunks=(4,))
+    f.create_dataset("extensible_gz", data=np.arange(200, dtype="i4"), maxshape=(None,),
+                     chunks=(5,), compression="gzip")
     f.create_dataset("btree2", data=np.arange(16, dtype="i4").reshape(4, 4),
                      maxshape=(None, None), chunks=(2, 2))                                          # v2 B-tree
 
