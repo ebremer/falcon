@@ -1,7 +1,13 @@
 package com.ebremer.falcon.hdf5;
 
+import com.ebremer.falcon.hdf5.header.HeaderMessage;
+import com.ebremer.falcon.hdf5.header.MessageType;
 import com.ebremer.falcon.hdf5.header.ObjectHeader;
 import com.ebremer.falcon.hdf5.io.FileContext;
+import com.ebremer.falcon.hdf5.message.AttributeMessage;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
 
 /**
  * An object in the HDF5 hierarchy &mdash; a {@link Group} or a {@link Dataset} &mdash; identified by
@@ -43,6 +49,27 @@ public abstract sealed class Hdf5Object permits Group, Dataset {
     /** The file address of this object's header. */
     public long objectHeaderAddress() {
         return objectHeaderAddress;
+    }
+
+    /** This object's attributes stored compactly in its header (dense attribute storage arrives later). */
+    public List<Attribute> attributes() {
+        List<Attribute> out = new ArrayList<>();
+        for (HeaderMessage message : header().messages()) {
+            if (message.type() == MessageType.ATTRIBUTE) {
+                out.add(AttributeMessage.parse(ctx, message));
+            }
+        }
+        return out;
+    }
+
+    /** The attribute with the given name, if present. */
+    public Optional<Attribute> attribute(String name) {
+        for (Attribute attribute : attributes()) {
+            if (attribute.name().equals(name)) {
+                return Optional.of(attribute);
+            }
+        }
+        return Optional.empty();
     }
 
     public abstract boolean isGroup();

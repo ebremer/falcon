@@ -108,6 +108,17 @@ def build_nbit(path):
     f.close()
 
 
+def build_attributes(f):
+    """Attributes on the root, a group, and a dataset (string, scalar int/long, float array)."""
+    f.attrs["title"] = "hello"
+    f.attrs["version"] = np.int32(3)
+    g = f.create_group("grp")
+    g.attrs["count"] = np.int64(42)
+    d = f.create_dataset("data", data=np.arange(6, dtype="i4"))
+    d.attrs["units"] = "meters"
+    d.attrs["scale"] = np.array([1.5, 2.5, 3.5], dtype="f8")
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     with h5py.File(os.path.join(OUT, "old_style_groups.h5"), "w") as f:
@@ -121,6 +132,8 @@ def main():
     with h5py.File(os.path.join(OUT, "chunked_data.h5"), "w") as f:
         build_chunked(f)
     build_nbit(os.path.join(OUT, "nbit_data.h5"))
+    with h5py.File(os.path.join(OUT, "attributes.h5"), "w") as f:
+        build_attributes(f)
     print("wrote fixtures to", OUT)
     print("h5py", h5py.__version__, "| bundled HDF5", h5py.version.hdf5_version)
 

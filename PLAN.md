@@ -3,11 +3,11 @@
 **Falcon** is a multi-module Maven umbrella for **pure-JDK 25, zero-runtime-dependency** readers and
 writers of scientific-data formats.
 
-> **Status: H4 essentially complete — 63 tests green; H5 is next.** H0–H3 done. H4: chunked storage
-> (v1 B-tree index) with **all six built-in filters** — deflate, shuffle, fletcher32, **szip** (pure-Java
-> CCSDS 121.0, validated vs libaec), **scaleoffset**, **nbit** — plus **hyperslab** (partial) reads.
-> The newer chunk indexes (single / implicit / fixed-array / extensible-array / v2-B-tree) pair with
-> new-style groups in **H5**; signed szip and the szip encoder come later.
+> **Status: H5 in progress — 69 tests green.** H0–H4 done (chunked storage + all six filters incl.
+> pure-Java szip, hyperslab). H5 so far: **new-style groups** (compact Link messages) and
+> **attributes** (compact) with the **global heap** (vlen strings). Remaining H5: dense storage
+> (fractal heap + v2 B-trees) for large groups/attrs, vlen datasets, the newer chunk indexes, and
+> shared/committed datatypes.
 
 ## Program roadmap (Falcon)
 
