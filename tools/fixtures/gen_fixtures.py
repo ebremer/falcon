@@ -166,6 +166,8 @@ def build_chunk_indexes(f):
                      maxshape=(None, None), chunks=(2, 2))                                          # v2 B-tree
     f.create_dataset("btree2_gz", data=np.arange(64, dtype="i4").reshape(8, 8),
                      maxshape=(None, None), chunks=(2, 2), compression="gzip")                      # v2 B-tree, filtered
+    f.create_dataset("btree2_deep", data=np.arange(1600, dtype="i4").reshape(40, 40),
+                     maxshape=(None, None), chunks=(2, 2))                                          # 400 chunks -> BTIN nodes
 
 
 def build_committed_types(f):

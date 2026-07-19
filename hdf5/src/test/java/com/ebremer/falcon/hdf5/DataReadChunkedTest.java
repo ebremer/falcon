@@ -145,6 +145,14 @@ class DataReadChunkedTest {
     }
 
     @Test
+    void v2BTreeIndexDeep() throws IOException {
+        // 400 chunks push the v2 B-tree past a single leaf into internal (BTIN) nodes.
+        try (Hdf5File h5 = Hdf5File.open(Fixtures.path("chunk_indexes.h5"))) {
+            assertArrayEquals(range(1600), h5.root().dataset("btree2_deep").readInts());
+        }
+    }
+
+    @Test
     void nbitReducedPrecision() throws IOException {
         // 16-bit-precision unsigned stored in 4 bytes: n-bit packs only the significant bits.
         try (Hdf5File f = Hdf5File.open(Fixtures.path("nbit_data.h5"))) {
