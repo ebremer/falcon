@@ -1,6 +1,7 @@
 package com.ebremer.falcon.hdf5;
 
 import com.ebremer.falcon.hdf5.checksum.Lookup3;
+import com.ebremer.falcon.hdf5.filter.Filters;
 import com.ebremer.falcon.hdf5.write.GrowBuffer;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -181,11 +182,29 @@ public final class Hdf5Writer implements AutoCloseable {
 
         /** Compresses each chunk with deflate (gzip) at the given level (0&ndash;9). Chunked datasets only. */
         public DatasetWriter deflate(int level) {
-            if (spec.chunkShape == null) {
-                throw new IllegalStateException("deflate requires a chunked dataset");
-            }
+            requireChunked();
             spec.deflateLevel = level;
             return this;
+        }
+
+        /** Byte-shuffles each chunk (grouping like-position bytes) to improve compression. Chunked only. */
+        public DatasetWriter shuffle() {
+            requireChunked();
+            spec.shuffle = true;
+            return this;
+        }
+
+        /** Appends a Fletcher-32 checksum to each stored chunk. Chunked datasets only. */
+        public DatasetWriter fletcher32() {
+            requireChunked();
+            spec.fletcher32 = true;
+            return this;
+        }
+
+        private void requireChunked() {
+            if (spec.chunkShape == null) {
+                throw new IllegalStateException("filters require a chunked dataset");
+            }
         }
 
         public DatasetWriter intAttribute(String name, int[] data, long[] shape) {
@@ -242,8 +261,8 @@ public final class Hdf5Writer implements AutoCloseable {
         writeMessage(messages, 3, 0x01, dataset.datatype);
         writeMessage(messages, 5, 0x01, new byte[] {0x03, 0x0a}); // fill value: default 0
         writeMessage(messages, 8, 0x00, layout);
-        if (dataset.deflateLevel >= 0) {
-            writeMessage(messages, 11, 0x00, deflatePipelineBody(dataset.deflateLevel));
+        if (dataset.shuffle || dataset.deflateLevel >= 0 || dataset.fletcher32) {
+            writeMessage(messages, 11, 0x00, filterPipelineBody(dataset));
         }
         for (AttributeSpec attribute : dataset.attributes) {
             writeMessage(messages, 12, 0x00, attributeBody(attribute));
@@ -259,11 +278,11 @@ public final class Hdf5Writer implements AutoCloseable {
      */
     private static byte[] writeChunkedStorage(GrowBuffer buf, DatasetSpec dataset) {
         List<byte[]> chunks = splitChunks(dataset);
-        boolean filtered = dataset.deflateLevel >= 0;
+        boolean filtered = dataset.shuffle || dataset.deflateLevel >= 0 || dataset.fletcher32;
         long[] chunkAddresses = new long[chunks.size()];
         int[] chunkSizes = new int[chunks.size()];
         for (int i = 0; i < chunks.size(); i++) {
-            byte[] block = filtered ? deflate(chunks.get(i), dataset.deflateLevel) : chunks.get(i);
+            byte[] block = applyFilters(chunks.get(i), dataset);
             buf.align(8);
             chunkAddresses[i] = buf.position();
             chunkSizes[i] = block.length;
@@ -309,15 +328,97 @@ public final class Hdf5Writer implements AutoCloseable {
         return chunkedLayoutBody(dataset.chunkShape, dataset.elementSize, headerAddress, filtered);
     }
 
-    private static byte[] deflatePipelineBody(int level) {
+    /** Applies the dataset's filter chain to a chunk, in write order: shuffle, deflate, fletcher32. */
+    private static byte[] applyFilters(byte[] chunk, DatasetSpec dataset) {
+        byte[] block = chunk;
+        if (dataset.shuffle) {
+            block = shuffle(block, dataset.elementSize);
+        }
+        if (dataset.deflateLevel >= 0) {
+            block = deflate(block, dataset.deflateLevel);
+        }
+        if (dataset.fletcher32) {
+            block = appendFletcher32(block);
+        }
+        return block;
+    }
+
+    /** The filter-pipeline message, listing the filters in the order they are applied on write. */
+    private static byte[] filterPipelineBody(DatasetSpec dataset) {
         GrowBuffer b = new GrowBuffer();
-        b.u8(2);       // filter pipeline message version
-        b.u8(1);       // number of filters
-        b.u16(1);      // filter identifier: deflate
-        b.u16(1);      // flags
-        b.u16(1);      // number of client-data values
-        b.u32(level);  // client data: compression level
+        b.u8(2); // version
+        int count = (dataset.shuffle ? 1 : 0) + (dataset.deflateLevel >= 0 ? 1 : 0) + (dataset.fletcher32 ? 1 : 0);
+        b.u8(count);
+        if (dataset.shuffle) {
+            writeFilter(b, Filters.SHUFFLE, 1, dataset.elementSize);
+        }
+        if (dataset.deflateLevel >= 0) {
+            writeFilter(b, Filters.DEFLATE, 1, dataset.deflateLevel);
+        }
+        if (dataset.fletcher32) {
+            writeFilter(b, Filters.FLETCHER32, 0);
+        }
         return b.toByteArray();
+    }
+
+    private static void writeFilter(GrowBuffer b, int id, int flags, int... clientData) {
+        b.u16(id);
+        b.u16(flags);
+        b.u16(clientData.length);
+        for (int value : clientData) {
+            b.u32(value);
+        }
+    }
+
+    /** Groups the {@code j}-th byte of every element together (the shuffle filter's forward transform). */
+    private static byte[] shuffle(byte[] data, int elementSize) {
+        if (elementSize <= 1) {
+            return data;
+        }
+        int elements = data.length / elementSize;
+        byte[] out = new byte[data.length];
+        int p = 0;
+        for (int b = 0; b < elementSize; b++) {
+            for (int i = 0; i < elements; i++) {
+                out[p++] = data[i * elementSize + b];
+            }
+        }
+        return out;
+    }
+
+    /** Appends the 4-byte (little-endian) Fletcher-32 checksum HDF5 uses. */
+    private static byte[] appendFletcher32(byte[] data) {
+        long sum1 = 0;
+        long sum2 = 0;
+        int words = data.length / 2;
+        int i = 0;
+        while (words > 0) {
+            int batch = Math.min(words, 360);
+            words -= batch;
+            do {
+                int word = ((data[i] & 0xff) << 8) | (data[i + 1] & 0xff);
+                sum1 += word;
+                sum2 += sum1;
+                i += 2;
+            } while (--batch > 0);
+            sum1 = (sum1 & 0xffff) + (sum1 >>> 16);
+            sum2 = (sum2 & 0xffff) + (sum2 >>> 16);
+        }
+        if ((data.length & 1) != 0) {
+            sum1 += (data[i] & 0xff) << 8;
+            sum2 += sum1;
+            sum1 = (sum1 & 0xffff) + (sum1 >>> 16);
+            sum2 = (sum2 & 0xffff) + (sum2 >>> 16);
+        }
+        sum1 = (sum1 & 0xffff) + (sum1 >>> 16);
+        sum2 = (sum2 & 0xffff) + (sum2 >>> 16);
+        long checksum = (sum2 << 16) | sum1;
+        byte[] out = java.util.Arrays.copyOf(data, data.length + 4);
+        out[data.length] = (byte) checksum;
+        out[data.length + 1] = (byte) (checksum >>> 8);
+        out[data.length + 2] = (byte) (checksum >>> 16);
+        out[data.length + 3] = (byte) (checksum >>> 24);
+        return out;
     }
 
     private static byte[] deflate(byte[] data, int level) {
@@ -650,6 +751,8 @@ public final class Hdf5Writer implements AutoCloseable {
         final List<byte[]> vlenStrings; // vlen-string values, or null
         final List<AttributeSpec> attributes = new ArrayList<>();
         int deflateLevel = -1;          // -1 = no compression
+        boolean shuffle;
+        boolean fletcher32;
 
         DatasetSpec(String name, byte[] datatype, int elementSize, long[] shape, long[] chunkShape,
                     byte[] data, List<byte[]> vlenStrings) {

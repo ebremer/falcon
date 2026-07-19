@@ -81,6 +81,26 @@ class WriteTest {
     }
 
     @Test
+    void roundTripFilteredChunkedDatasets() throws IOException {
+        Path file = Files.createTempFile("falcon-filters", ".h5");
+        try {
+            try (Hdf5Writer w = Hdf5Writer.create(file)) {
+                w.intChunkedDataset("shuf", range(50), new long[] {50}, new long[] {8}).shuffle();
+                w.intChunkedDataset("flet", range(50), new long[] {50}, new long[] {8}).fletcher32();
+                w.intChunkedDataset("all", range(50), new long[] {50}, new long[] {8})
+                        .shuffle().deflate(4).fletcher32();
+            }
+            try (Hdf5File h5 = Hdf5File.open(file)) {
+                assertArrayEquals(range(50), h5.root().dataset("shuf").readInts());
+                assertArrayEquals(range(50), h5.root().dataset("flet").readInts());
+                assertArrayEquals(range(50), h5.root().dataset("all").readInts());
+            }
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    @Test
     void roundTripSubgroupsAndStrings() throws IOException {
         Path file = Files.createTempFile("falcon-tree", ".h5");
         try {
