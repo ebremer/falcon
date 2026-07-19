@@ -3,11 +3,11 @@
 **Falcon** is a multi-module Maven umbrella for **pure-JDK 25, zero-runtime-dependency** readers and
 writers of scientific-data formats.
 
-> **Status: H5 in progress — 71 tests green.** H0–H4 done (chunked storage + all six filters incl.
-> pure-Java szip, hyperslab). H5 so far: **new-style groups** — compact Link messages **and dense
-> storage via the fractal heap + v2 B-tree** — **attributes** (compact) with the **global heap**, and
-> **vlen string datasets**. Remaining H5: dense attributes (reuses the fractal heap), indirect-block
-> heaps / deeper B-trees (very large sets), the newer chunk indexes, shared datatypes, vlen sequences.
+> **Status: H5 in progress — 72 tests green.** H0–H4 done (chunked storage + all six filters incl.
+> pure-Java szip, hyperslab). H5 so far: **new-style groups** (compact + **dense**) and **attributes**
+> (compact + **dense**) via the **fractal heap + v2 B-tree** + **global heap**, plus **vlen string
+> datasets**. Remaining H5: indirect-block heaps / deeper B-trees (very large sets), the newer chunk
+> indexes, shared/committed datatypes, and vlen sequences.
 
 ## Program roadmap (Falcon)
 

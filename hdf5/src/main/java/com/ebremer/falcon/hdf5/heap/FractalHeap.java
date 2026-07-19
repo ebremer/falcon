@@ -78,8 +78,12 @@ public final class FractalHeap {
         return new FractalHeap(ctx, idLength, offsetSize, lengthSize, rootBlock, currentRows);
     }
 
-    /** Reads the bytes of the managed object named by {@code heapId}. */
-    public byte[] readObject(byte[] heapId) {
+    /** The file address and length of a managed heap object. */
+    public record HeapObject(long address, int length) {
+    }
+
+    /** Locates the managed object named by {@code heapId} (its file address and length). */
+    public HeapObject locate(byte[] heapId) {
         int type = (heapId[0] >> 4) & 0x03;
         if (type != 0) {
             throw new HdfUnsupportedException("only managed fractal-heap objects are supported (id type " + type + ")");
@@ -90,7 +94,13 @@ public final class FractalHeap {
         }
         long offset = readLittleEndian(heapId, 1, offsetSize);
         int length = (int) readLittleEndian(heapId, 1 + offsetSize, lengthSize);
-        return ctx.buffer().getBytes(rootBlockAddress + offset, length);
+        return new HeapObject(rootBlockAddress + offset, length);
+    }
+
+    /** Reads the bytes of the managed object named by {@code heapId}. */
+    public byte[] readObject(byte[] heapId) {
+        HeapObject object = locate(heapId);
+        return ctx.buffer().getBytes(object.address(), object.length());
     }
 
     private static long readLittleEndian(byte[] b, int off, int n) {

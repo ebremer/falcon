@@ -1,11 +1,16 @@
 package com.ebremer.falcon.hdf5;
 
+import com.ebremer.falcon.hdf5.btree.BTreeV2;
 import com.ebremer.falcon.hdf5.header.HeaderMessage;
 import com.ebremer.falcon.hdf5.header.MessageType;
 import com.ebremer.falcon.hdf5.header.ObjectHeader;
+import com.ebremer.falcon.hdf5.heap.FractalHeap;
 import com.ebremer.falcon.hdf5.io.FileContext;
+import com.ebremer.falcon.hdf5.io.HdfBuffer;
+import com.ebremer.falcon.hdf5.message.AttributeInfoMessage;
 import com.ebremer.falcon.hdf5.message.AttributeMessage;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 
@@ -51,12 +56,25 @@ public abstract sealed class Hdf5Object permits Group, Dataset {
         return objectHeaderAddress;
     }
 
-    /** This object's attributes stored compactly in its header (dense attribute storage arrives later). */
+    /** This object's attributes (compact header messages and/or dense fractal-heap storage). */
     public List<Attribute> attributes() {
+        ObjectHeader header = header();
         List<Attribute> out = new ArrayList<>();
-        for (HeaderMessage message : header().messages()) {
+        for (HeaderMessage message : header.messages()) {
             if (message.type() == MessageType.ATTRIBUTE) {
                 out.add(AttributeMessage.parse(ctx, message));
+            }
+        }
+        HeaderMessage attributeInfo = header.find(MessageType.ATTRIBUTE_INFO);
+        if (attributeInfo != null) {
+            long fractalHeap = AttributeInfoMessage.fractalHeapAddress(ctx, attributeInfo);
+            if (fractalHeap != HdfBuffer.UNDEFINED_ADDRESS) {
+                FractalHeap heap = FractalHeap.parse(ctx, fractalHeap);
+                for (byte[] record : BTreeV2.readRecords(ctx, AttributeInfoMessage.nameBTreeAddress(ctx, attributeInfo))) {
+                    // attribute-name-index record (type 8): the heap ID comes first.
+                    FractalHeap.HeapObject object = heap.locate(Arrays.copyOfRange(record, 0, heap.idLength()));
+                    out.add(AttributeMessage.parse(ctx, object.address(), object.length()));
+                }
             }
         }
         return out;

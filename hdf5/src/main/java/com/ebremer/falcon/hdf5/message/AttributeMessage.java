@@ -20,8 +20,12 @@ public final class AttributeMessage {
     }
 
     public static Attribute parse(FileContext ctx, HeaderMessage message) {
+        return parse(ctx, message.bodyOffset(), message.bodySize());
+    }
+
+    /** Parses an attribute message body of {@code bodySize} bytes at file offset {@code base}. */
+    public static Attribute parse(FileContext ctx, long base, int bodySize) {
         HdfBuffer buf = ctx.buffer();
-        long base = message.bodyOffset();
         int version = buf.getUnsignedByte(base);
         int nameSize = buf.getUnsignedShort(base + 2);
         int datatypeSize = buf.getUnsignedShort(base + 4);
@@ -42,7 +46,7 @@ public final class AttributeMessage {
 
         Datatype datatype = DatatypeMessage.parse(buf, datatypeOffset);
         Dataspace dataspace = DataspaceMessage.parse(ctx, dataspaceOffset);
-        int dataSize = (int) (base + message.bodySize() - dataOffset);
+        int dataSize = (int) (base + bodySize - dataOffset);
         return new Attribute(ctx, name, datatype, dataspace, dataOffset, dataSize);
     }
 

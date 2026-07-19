@@ -4,6 +4,9 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import java.io.IOException;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 import org.junit.jupiter.api.AfterAll;
@@ -52,6 +55,20 @@ class AttributeTest {
     void groupLongAttribute() {
         assertArrayEquals(new long[] {42},
                 h5.root().group("grp").attribute("count").orElseThrow().readLongs());
+    }
+
+    @Test
+    void denseAttributesViaFractalHeap() throws IOException {
+        try (Hdf5File dense = Hdf5File.open(Fixtures.path("dense_attrs.h5"))) {
+            List<Attribute> attrs = dense.root().dataset("d").attributes();
+            assertEquals(20, attrs.size());
+            Map<String, Integer> byName = new HashMap<>();
+            for (Attribute a : attrs) {
+                byName.put(a.name(), ((int[]) a.read())[0]);
+            }
+            assertEquals(0, byName.get("attr00"));
+            assertEquals(190, byName.get("attr19"));
+        }
     }
 
     @Test
