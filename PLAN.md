@@ -3,18 +3,21 @@
 **Falcon** is a multi-module Maven umbrella for **pure-JDK 25, zero-runtime-dependency** readers and
 writers of scientific-data formats.
 
-> **Status: H7 in progress — 104 tests green.** **Read path (H0–H6) complete**: superblock/headers/
-> groups (old + new style), all datatype classes, compact/contiguous/chunked storage with every chunk
-> index at any scale, all six filters (incl. pure-Java szip), hyperslabs, dense links/attributes,
-> vlen strings & sequences, committed datatypes, the large-set structures, object + region references,
-> virtual datasets (full external-source assembly), and object metadata. **Write path (H7) started**:
-> `Hdf5Writer` emits a valid modern-format file — v3 (checksummed) superblock, v2 (checksummed) object
-> headers, a **nested group tree**, contiguous **int32 / float64 / variable-length-string** datasets
-> (strings via a global heap), **chunked** datasets (fixed-array index) with **all six built-in filters
-> encoded** (deflate, shuffle, fletcher32, scale-offset, n-bit, and pure-Java **szip**), and scalar/array
-> **attributes** on groups and datasets — read back identically by Falcon *and h5py* (szip verified via
-> libaec, since h5py's szip is disabled here). Remaining: more write datatypes, older formats, plus the
-> minor read-side completeness messages.
+> **Status: read path complete (H0–H6); write path through H8 — 121 tests green.** **Read (H0–H6):**
+> every superblock/header/group form, all datatype classes, compact / contiguous / **external-file** /
+> chunked storage with **every** chunk index at any scale (v1 B-tree, single-chunk, **implicit**, fixed
+> array, extensible array, v2 B-tree), all six filters (incl. pure-Java szip), hyperslabs, dense
+> links/attributes, vlen strings & sequences, committed datatypes, the large-set structures, object +
+> region references, virtual datasets (external-source assembly incl. **strided / multi-block**
+> mappings), the **superblock extension** (**File Space Info** + **free-space managers**), and **every**
+> object-header message type. **Write (H7–H8):** `Hdf5Writer` emits a valid modern-format file — v3
+> (checksummed) superblock, v2 (checksummed) object headers, a **nested group tree**, contiguous
+> **int32 / float64 / variable-length-string** datasets (strings via a global heap), **chunked**
+> datasets (fixed-array index) with **all six built-in filters encoded** (deflate, shuffle, fletcher32,
+> scale-offset, n-bit, and pure-Java **szip**), and scalar/array **attributes** — read back identically
+> by Falcon *and h5py* (szip verified via libaec, since h5py's szip is disabled here). Remaining: more
+> write datatypes + older formats; and a few read edge cases (SOHM shared messages, float scale-offset,
+> compound n-bit, signed szip, the revised reference encoding).
 
 ## Program roadmap (Falcon)
 
@@ -188,9 +191,11 @@ Each stage ends with a **milestone** and concrete **acceptance criteria**. "Refe
   byte-level tests. (h5py stores complex as a compound `{r,i}`, so native class 11 has no h5py fixture.)
 - Mapping decoded elements to Java values arrives with the data-read stages (H3–H4).
 
-### H3 — Contiguous & compact data reads  ✅ **done** (external data files deferred)
+### H3 — Contiguous & compact data reads  ✅ **done**
 - **Data Layout message (8)**: compact + contiguous for versions 3/4 (tested) and 1/2 (best-effort);
-  **Fill Value (5)** v1–v3 + **old (4)**. **External Data Files (7)** deferred to a later stage.
+  **Fill Value (5)** v1–v3 + **old (4)**. **External Data Files (7) ✓** (H6): a contiguous dataset whose
+  raw data lives in external raw files (`message.ExternalFileList`), read via the slot table + a local
+  heap of file names, resolved relative to the `.h5` file.
 - Decode raw bytes → typed Java arrays for atomic types honoring byte order/precision.
 - **Shipped:** `layout.DataLayout` / `DataLayoutMessage`, `message.FillValueMessage`, `data.Elements`;
   `Dataset.readInts/readLongs/readFloats/readDoubles/readStrings/readRawBytes/read()`.
@@ -219,8 +224,9 @@ Each stage ends with a **milestone** and concrete **acceptance criteria**. "Refe
 - **Newer chunk indexes ✓** (version-4/5 Data Layout): **single-chunk** (type 1), **fixed array**
   (`FAHD`/`FADB`, type 3), **extensible array** (`EAHD`/`EAIB`/`EASB`/`EADB`, type 4, incl. secondary
   blocks), and **v2-B-tree** (`BTHD`/`BTLF`, type 5, records 10/11) — each for non-filtered and
-  filtered chunks. `index.{FixedArray,ExtensibleArray,ChunkBTreeV2}`. Implicit (type 2) throws
-  unsupported (h5py emits a fixed array instead). **Large-set structures done**: deep v2 B-trees with
+  filtered chunks. `index.{FixedArray,ExtensibleArray,ChunkBTreeV2}`. **Implicit (type 2) ✓**
+  (`index.ImplicitIndex`): chunks laid out contiguously in row-major grid order at a base address, with
+  no on-disk index (early allocation, no filters, fixed dims). **Large-set structures done**: deep v2 B-trees with
   `BTIN` internal nodes, indirect-block fractal heaps (doubling table), and paged extensible-array data
   blocks (checksummed pages + a page-init bitmap in the secondary block).
 - **Attribute (12)** + **Attribute Info (21)**; **global heap** for variable-length data. **Vlen ✓**:
@@ -237,11 +243,12 @@ Each stage ends with a **milestone** and concrete **acceptance criteria**. "Refe
 - **Acceptance:** listings + attribute values + vlen data match h5py for dense-storage, large-group,
   and shared-datatype fixtures.
 
-### H6 — Advanced read & completeness
+### H6 — Advanced read & completeness  ✅ **done** (a few edge cases noted below)
 - **Virtual datasets ✓**: layout class 3 + the global-heap mapping block; `VirtualDataset` opens each
   source file (relative to the VDS), reads its selection, and scatters it into the virtual layout,
-  honouring the fill value. Regular-hyperslab / all selections; strided-pattern & unlimited mappings
-  later.
+  honouring the fill value. Selections resolve via a general gather-scatter over enumerated element
+  offsets, so **regular hyperslabs incl. strided / multi-block** patterns work (ALL + single-block are a
+  special case); unlimited-extent selection patterns still throw a clear unsupported error.
 - **References ✓**: **object references** (8-byte object-header address → navigable `Hdf5Object` via
   `readObjectReferences()`) and **region references** (global-heap ID → dataset + serialized selection
   → `Selection` via `readRegionReferences()`), on datasets and attributes. Revised (`H5R_ref_t`)
@@ -249,11 +256,18 @@ Each stage ends with a **milestone** and concrete **acceptance criteria**. "Refe
 - **Object metadata ✓**: **Object Comment (13)**, **Modification Time (18)** + version-2 header-prefix
   time, **Object Reference Count (22)** + version-1 prefix count — via `comment()` /
   `modificationTime()` / `referenceCount()` on every object.
-- Remaining: superblock **extension**, **File Space Info (23)**, **B-tree K Values (19)**, **Driver
-  Info (20)**, old modification time **(14)**, **free-space manager** (read).
-- **Milestone:** complete read coverage of every message type and structure in the spec.
-- **Acceptance:** a broad corpus (h5py-generated across all matrices) reads without `Unsupported`
-  errors; VDS resolves against source datasets.
+- **Superblock extension ✓** (`Superblock.superblockExtensionAddress`): the extension object header is
+  reached and its messages read. **File Space Info (23) ✓** + **free-space managers (FSHD) ✓** via
+  `Hdf5File.fileSpaceInfo()` — strategy, page size, threshold, persist flag, end-of-file address, and
+  total free space / section count (validated against h5py's `H5Fget_freespace`); the variable-bit-width
+  FSSE section list is not decoded (no reader value). **Old modification time (14) ✓** feeds
+  `modificationTime()`; **B-tree K Values (19) ✓** and **Driver Info (20) ✓** have spec-layout parsers
+  (`message.{ObjectModificationTimeMessage,BTreeKValuesMessage,DriverInfoMessage}`), pinned by hand-built
+  unit tests since no local HDF5 build emits them.
+- **Milestone met:** every object-header message type parses; every structure on a read path is covered.
+- **Deferred read edge cases** (each isolated, none block real files): SOHM shared-message dedup (msg 15
+  — this h5py can't emit it, so untestable here); the revised `H5R_ref_t` reference encoding; float
+  scale-offset and compound n-bit decode; signed-integer szip; multi-file drivers (family/multi/split).
 
 ### H7 — Write path foundations
 - **File-space allocation**: end-of-file bump allocator ✓ (`write.GrowBuffer`, append + patch +
@@ -330,7 +344,7 @@ zero-dependency, pure-JDK guarantee intact.
 | 4 | Fill Value (old) | H3 | 16 | Object Header Continuation | H1 |
 | 5 | Fill Value | H3 | 17 | Symbol Table | H1 |
 | 6 | Link | H5 | 18 | Object Modification Time | H6 |
-| 7 | External Data Files | H3 | 19 | B-tree 'K' Values | H6 |
+| 7 | External Data Files | H6 | 19 | B-tree 'K' Values | H6 |
 | 8 | Data Layout | H3/H4 | 20 | Driver Info | H6 |
 | 9 | Bogus (testing) | — | 21 | Attribute Info | H5 |
 | 10 | Group Info | H5 | 22 | Object Reference Count | H6 |
@@ -350,9 +364,10 @@ zero-dependency, pure-JDK guarantee intact.
 | Layout / index | Stage |
 |---|---|
 | Compact, Contiguous | H3 |
+| Contiguous — external raw files (External File List) | **H6 ✓** |
 | Chunked — v1 B-tree (type 1) | H4 |
 | Chunked — single-chunk / fixed array / extensible array / v2 B-tree (v4/v5 layout) | **H5 ✓** |
-| Chunked — implicit index (h5py emits fixed array instead; untestable) | throws unsupported |
+| Chunked — implicit index (v4/v5 layout, type 2) | **H6 ✓** |
 | Chunked — deep v2 B-trees (BTIN) / paged EA data blocks (very large sets) | **H5 ✓** |
 | Virtual (VDS) | H6 |
 
