@@ -7,6 +7,9 @@ import com.ebremer.falcon.hdf5.header.MessageType;
 import com.ebremer.falcon.hdf5.header.ObjectHeader;
 import com.ebremer.falcon.hdf5.heap.LocalHeap;
 import com.ebremer.falcon.hdf5.io.FileContext;
+import com.ebremer.falcon.hdf5.io.HdfBuffer;
+import com.ebremer.falcon.hdf5.message.LinkInfoMessage;
+import com.ebremer.falcon.hdf5.message.LinkMessage;
 import com.ebremer.falcon.hdf5.message.SymbolTableMessage;
 import java.util.ArrayList;
 import java.util.List;
@@ -93,10 +96,43 @@ public final class Group extends Hdf5Object {
         if (header.contains(MessageType.LINK_INFO)
                 || header.contains(MessageType.LINK)
                 || header.contains(MessageType.GROUP_INFO)) {
-            throw new HdfUnsupportedException(
-                    "new-style (link) group storage is implemented in stage H5: " + displayPath());
+            return loadNewStyleChildren(header);
         }
         return List.of();
+    }
+
+    private List<Hdf5Object> loadNewStyleChildren(ObjectHeader header) {
+        HeaderMessage linkInfo = header.find(MessageType.LINK_INFO);
+        if (linkInfo != null
+                && LinkInfoMessage.fractalHeapAddress(ctx, linkInfo) != HdfBuffer.UNDEFINED_ADDRESS) {
+            throw new HdfUnsupportedException(
+                    "dense (fractal-heap) link storage is implemented in a later H5 increment: " + displayPath());
+        }
+        // Compact storage: the links are Link messages in this object header.
+        List<Hdf5Object> result = new ArrayList<>();
+        for (HeaderMessage message : header.messages()) {
+            if (message.type() != MessageType.LINK) {
+                continue;
+            }
+            LinkMessage link = LinkMessage.parse(ctx, message);
+            if (link.linkType() == LinkMessage.HARD) {
+                result.add(createChild(link.name(), link.targetAddress()));
+            }
+            // soft/external links are resolved in a later increment
+        }
+        return result;
+    }
+
+    /** Builds a child by classifying the target object header as a group or a dataset. */
+    private Hdf5Object createChild(String name, long objectHeaderAddress) {
+        ObjectHeader child = ObjectHeader.parse(ctx, objectHeaderAddress);
+        boolean isGroup = child.contains(MessageType.SYMBOL_TABLE)
+                || child.contains(MessageType.LINK_INFO)
+                || child.contains(MessageType.GROUP_INFO)
+                || child.contains(MessageType.LINK);
+        return isGroup
+                ? Group.child(ctx, name, path(), objectHeaderAddress)
+                : Dataset.child(ctx, name, path(), objectHeaderAddress);
     }
 
     private List<Hdf5Object> loadOldStyleChildren(HeaderMessage symbolTable) {

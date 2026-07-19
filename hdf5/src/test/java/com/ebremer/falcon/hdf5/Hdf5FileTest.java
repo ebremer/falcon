@@ -2,7 +2,6 @@ package com.ebremer.falcon.hdf5;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
@@ -50,11 +49,21 @@ class Hdf5FileTest {
     }
 
     @Test
-    void newStyleGroupsReportedUnsupportedUntilStageH5() throws IOException {
+    void listsNewStyleGroupTreeViaLinkMessages() throws IOException {
         try (Hdf5File h5 = Hdf5File.open(Fixtures.path("new_style_groups.h5"))) {
             assertEquals(3, h5.superblockVersion());
-            assertTrue(h5.root().isGroup());
-            assertThrows(HdfUnsupportedException.class, () -> h5.root().childNames());
+
+            Map<String, Boolean> tree = new TreeMap<>();
+            walk(h5.root(), tree);
+
+            Map<String, Boolean> expected = new TreeMap<>();
+            expected.put("/alpha", true);
+            expected.put("/alpha/beta", true);
+            expected.put("/alpha/beta/gamma", false);
+            expected.put("/alpha/delta", false);
+            expected.put("/empty", true);
+            expected.put("/root_ds", false);
+            assertEquals(expected, tree);
         }
     }
 
