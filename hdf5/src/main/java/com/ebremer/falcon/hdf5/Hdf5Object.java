@@ -1,5 +1,6 @@
 package com.ebremer.falcon.hdf5;
 
+import com.ebremer.falcon.hdf5.header.ObjectHeader;
 import com.ebremer.falcon.hdf5.io.FileContext;
 
 /**
@@ -12,12 +13,21 @@ public abstract sealed class Hdf5Object permits Group, Dataset {
     private final String name;
     private final String path;
     private final long objectHeaderAddress;
+    private ObjectHeader header; // parsed lazily, then cached
 
     Hdf5Object(FileContext ctx, String name, String path, long objectHeaderAddress) {
         this.ctx = ctx;
         this.name = name;
         this.path = path;
         this.objectHeaderAddress = objectHeaderAddress;
+    }
+
+    /** This object's header, parsed on first use. */
+    ObjectHeader header() {
+        if (header == null) {
+            header = ObjectHeader.parse(ctx, objectHeaderAddress);
+        }
+        return header;
     }
 
     /** The object's local link name ({@code ""} for the root group). */

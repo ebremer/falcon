@@ -12,4 +12,5 @@
  */
 module com.ebremer.falcon.hdf5 {
     exports com.ebremer.falcon.hdf5;
+    exports com.ebremer.falcon.hdf5.datatype;
 }

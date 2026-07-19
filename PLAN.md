@@ -3,9 +3,9 @@
 **Falcon** is a multi-module Maven umbrella for **pure-JDK 25, zero-runtime-dependency** readers and
 writers of scientific-data formats.
 
-> **Status: stages H0–H1 complete and green — 23 tests pass; H2 is next.**
-> Falcon opens real HDF5 files and lists old-style group trees (validated against h5py). Superblock
-> v0–v3 and object headers v1 & v2 are parsed; new-style (link) groups are detected and deferred to H5.
+> **Status: stages H0–H2 complete and green — 39 tests pass; H3 is next.**
+> Falcon opens HDF5 files, lists old-style group trees, and fully describes any dataset's datatype
+> (all 12 classes) and dataspace. New-style (link) groups are detected and deferred to H5.
 
 ## Program roadmap (Falcon)
 
@@ -167,13 +167,17 @@ Each stage ends with a **milestone** and concrete **acceptance criteria**. "Refe
 - **Acceptance met:** the full group tree of an old-style fixture matches h5py; superblock v0 & v3 and
   object headers v1 & v2 parse against committed fixtures. Fixtures via `tools/fixtures/gen_fixtures.py`.
 
-### H2 — Datatypes & dataspaces
+### H2 — Datatypes & dataspaces  ✅ **done**
 - **Datatype message (3)**, versions 1–5, all classes 0–11 (fixed/float/time/string/bitfield/opaque/
   compound/reference/enum/vlen/array/complex), incl. nested compound/array/vlen.
-- **Dataspace message (1)**, v1 & v2 (scalar/simple/null, dims + max dims).
-- Decoders mapping atomic types to Java primitives/`MemorySegment`; describe compound member layout.
-- **Milestone:** fully describe any dataset's type + shape.
-- **Acceptance:** type/shape reports match h5py `.dtype`/`.shape` for a fixture matrix covering every class.
+- **Dataspace message (1)**, v1 & v2 (scalar/simple/null, dims + max dims, unlimited).
+- **Shipped:** sealed `datatype.Datatype` model (record per class) + `DatatypeClass`; public
+  `Dataspace`; internal `message.DatatypeMessage` (recursive) + `message.DataspaceMessage`;
+  `Dataset.datatype()` / `Dataset.dataspace()`.
+- **Acceptance met:** decoded type/shape match h5py for a fixture (`datatypes.h5`) covering classes
+  0/1/3/5/6/7/8/9/10 (LE+BE, signed/unsigned, nested, unlimited); classes 2/4/11 covered by
+  byte-level tests. (h5py stores complex as a compound `{r,i}`, so native class 11 has no h5py fixture.)
+- Mapping decoded elements to Java values arrives with the data-read stages (H3–H4).
 
 ### H3 — Contiguous & compact data reads
 - **Data Layout message (8)** v1–v4 for contiguous + compact; **Fill Value (5)** + **old (4)**;

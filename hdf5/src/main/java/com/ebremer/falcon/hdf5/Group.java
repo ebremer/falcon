@@ -85,7 +85,7 @@ public final class Group extends Hdf5Object {
     }
 
     private List<Hdf5Object> loadChildren() {
-        ObjectHeader header = ObjectHeader.parse(ctx, objectHeaderAddress());
+        ObjectHeader header = header();
         HeaderMessage symbolTable = header.find(MessageType.SYMBOL_TABLE);
         if (symbolTable != null) {
             return loadOldStyleChildren(symbolTable);
