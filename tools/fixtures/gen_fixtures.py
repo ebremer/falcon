@@ -56,6 +56,28 @@ def build_types(f):
     f.create_dataset("array_std", shape=(4,), dtype=np.dtype(("f4", (2, 3))))
 
 
+def _compact(f, name, arr):
+    space = h5py.h5s.create_simple(arr.shape)
+    tid = h5py.h5t.py_create(arr.dtype, logical=True)
+    dcpl = h5py.h5p.create(h5py.h5p.DATASET_CREATE)
+    dcpl.set_layout(h5py.h5d.COMPACT)
+    dsid = h5py.h5d.create(f.id, name.encode(), tid, space, dcpl)
+    dsid.write(h5py.h5s.ALL, h5py.h5s.ALL, np.ascontiguousarray(arr))
+
+
+def build_data(f):
+    """Contiguous, compact, and unallocated datasets for the H3 read path."""
+    f.create_dataset("c_i4", data=np.arange(5, dtype="i4"))
+    f.create_dataset("c_f8", data=np.array([1.5, 2.5, 3.5, -4.25], dtype="f8"))
+    f.create_dataset("c_be_i4", data=np.arange(5, dtype=">i4"))
+    f.create_dataset("c_f4", data=np.array([0.5, 1.5, 2.5], dtype="f4"))
+    f.create_dataset("c_u1", data=np.array([1, 2, 255], dtype="u1"))
+    f.create_dataset("c_2d", data=np.arange(6, dtype="i4").reshape(2, 3))
+    f.create_dataset("c_str", data=np.array([b"abc", b"de", b"fghij", b""], dtype="S5"))
+    _compact(f, "compact_i4", np.array([10, 20, 30], dtype="i4"))
+    f.create_dataset("unwritten", shape=(4,), dtype="i4", fillvalue=7)
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     with h5py.File(os.path.join(OUT, "old_style_groups.h5"), "w") as f:
@@ -64,6 +86,8 @@ def main():
         build(f)
     with h5py.File(os.path.join(OUT, "datatypes.h5"), "w") as f:
         build_types(f)
+    with h5py.File(os.path.join(OUT, "data_contiguous.h5"), "w") as f:
+        build_data(f)
     print("wrote fixtures to", OUT)
     print("h5py", h5py.__version__, "| bundled HDF5", h5py.version.hdf5_version)
 

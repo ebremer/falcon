@@ -3,9 +3,10 @@
 **Falcon** is a multi-module Maven umbrella for **pure-JDK 25, zero-runtime-dependency** readers and
 writers of scientific-data formats.
 
-> **Status: stages H0–H2 complete and green — 39 tests pass; H3 is next.**
-> Falcon opens HDF5 files, lists old-style group trees, and fully describes any dataset's datatype
-> (all 12 classes) and dataspace. New-style (link) groups are detected and deferred to H5.
+> **Status: stages H0–H3 complete and green — 49 tests pass; H4 is next.**
+> Falcon opens HDF5 files, lists old-style group trees, describes any dataset's type/shape, and reads
+> contiguous & compact data (ints/floats/strings, LE+BE, fill values) into Java arrays. New-style
+> (link) groups → H5; chunked storage → H4.
 
 ## Program roadmap (Falcon)
 
@@ -179,13 +180,15 @@ Each stage ends with a **milestone** and concrete **acceptance criteria**. "Refe
   byte-level tests. (h5py stores complex as a compound `{r,i}`, so native class 11 has no h5py fixture.)
 - Mapping decoded elements to Java values arrives with the data-read stages (H3–H4).
 
-### H3 — Contiguous & compact data reads
-- **Data Layout message (8)** v1–v4 for contiguous + compact; **Fill Value (5)** + **old (4)**;
-  **External Data Files (7)**.
-- Decode raw bytes → typed Java arrays for atomic types (honoring per-datatype byte order/precision).
-- **Milestone:** read complete data of contiguous & compact datasets.
-- **Acceptance:** values equal h5py reads across integer/float/string fixtures, incl. non-native byte
-  order and fill-value gaps.
+### H3 — Contiguous & compact data reads  ✅ **done** (external data files deferred)
+- **Data Layout message (8)**: compact + contiguous for versions 3/4 (tested) and 1/2 (best-effort);
+  **Fill Value (5)** v1–v3 + **old (4)**. **External Data Files (7)** deferred to a later stage.
+- Decode raw bytes → typed Java arrays for atomic types honoring byte order/precision.
+- **Shipped:** `layout.DataLayout` / `DataLayoutMessage`, `message.FillValueMessage`, `data.Elements`;
+  `Dataset.readInts/readLongs/readFloats/readDoubles/readStrings/readRawBytes/read()`.
+- **Acceptance met:** values byte-for-byte equal to h5py across int (LE+BE, signed/unsigned),
+  float32/64, 2-D, and fixed-length-string fixtures; an unallocated dataset reads back its fill value;
+  compact storage reads correctly.
 
 ### H4 — Chunked storage & filters (incl. szip decode)
 - Chunked layout + all index types (Appendix C): **v1 B-tree type 1**, **single chunk**, **implicit**,
