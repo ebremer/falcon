@@ -3,9 +3,9 @@
 **Falcon** is a multi-module Maven umbrella for **pure-JDK 25, zero-runtime-dependency** readers and
 writers of scientific-data formats.
 
-> **Status: stage H0 (foundations) complete and green — 16 tests pass; H1 is next.**
-> The `io` and `checksum` packages are implemented and tested. Nothing in the HDF5 roadmap beyond H0
-> is implemented yet.
+> **Status: stages H0–H1 complete and green — 23 tests pass; H2 is next.**
+> Falcon opens real HDF5 files and lists old-style group trees (validated against h5py). Superblock
+> v0–v3 and object headers v1 & v2 are parsed; new-style (link) groups are detected and deferred to H5.
 
 ## Program roadmap (Falcon)
 
@@ -155,13 +155,17 @@ Each stage ends with a **milestone** and concrete **acceptance criteria**. "Refe
   **and** a real HDF5 v3 superblock checksum written by h5py; maps a file and reads arbitrary
   offsets/widths.
 
-### H1 — Vertical slice: open a file, walk old-style groups
-- Superblock **v0–v3** (locate root group; validate signature + checksum).
+### H1 — Vertical slice: open a file, walk old-style groups  ✅ **done**
+- Superblock **v0–v3** (locate root group; validate signature + lookup3 checksum on v2/v3).
 - Object header **v1 & v2** prefix, message iteration, **Continuation (16)** and **NIL (0)**.
 - **Symbol Table message (17)** → **v1 B-tree type 0** + **Symbol Table Node** + **Symbol Table
   Entry** + **Local Heap** for group link names.
-- **Milestone:** open a real `.h5`, print the group tree by name.
-- **Acceptance:** group listing matches h5py for a fixture with nested old-style groups.
+- **Shipped:** `superblock.Superblock`, `header.ObjectHeader`/`HeaderMessage`/`MessageType`,
+  `message.SymbolTableMessage`, `btree.GroupBTreeV1`, `group.SymbolTableNode`/`SymbolTableEntry`,
+  `heap.LocalHeap`, `io.FileContext`; public `Hdf5File`/`Group`/`Dataset`/`Hdf5Object`,
+  `HdfUnsupportedException`. New-style (link) groups are detected and deferred to H5.
+- **Acceptance met:** the full group tree of an old-style fixture matches h5py; superblock v0 & v3 and
+  object headers v1 & v2 parse against committed fixtures. Fixtures via `tools/fixtures/gen_fixtures.py`.
 
 ### H2 — Datatypes & dataspaces
 - **Datatype message (3)**, versions 1–5, all classes 0–11 (fixed/float/time/string/bitfield/opaque/
