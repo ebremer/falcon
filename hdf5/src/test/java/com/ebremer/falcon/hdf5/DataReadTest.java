@@ -88,6 +88,34 @@ class DataReadTest {
     }
 
     @Test
+    void variableLengthIntSequences() throws IOException {
+        // ragged int32 rows, including an empty row.
+        try (Hdf5File f = Hdf5File.open(Fixtures.path("vlen_data.h5"))) {
+            int[][] expected = {{10}, {20, 21}, {}, {30, 31, 32}};
+            assertArrayEquals(expected, f.root().dataset("vseq_i4").readVlenInts());
+            // read() picks the natural int[][] representation for a <=4-byte fixed-point base.
+            assertArrayEquals(expected, (int[][]) f.root().dataset("vseq_i4").read());
+        }
+    }
+
+    @Test
+    void variableLengthLongSequences() throws IOException {
+        try (Hdf5File f = Hdf5File.open(Fixtures.path("vlen_data.h5"))) {
+            long[][] expected = {{1}, {2, 3}, {4, 5, 6}};
+            assertArrayEquals(expected, f.root().dataset("vseq_i8").readVlenLongs());
+        }
+    }
+
+    @Test
+    void variableLengthDoubleSequences() throws IOException {
+        // ragged float64 rows, including an empty row.
+        try (Hdf5File f = Hdf5File.open(Fixtures.path("vlen_data.h5"))) {
+            double[][] expected = {{1.5, 2.5}, {}, {9.25}};
+            assertArrayEquals(expected, f.root().dataset("vseq_f8").readVlenDoubles());
+        }
+    }
+
+    @Test
     void genericReadPicksNaturalType() {
         assertArrayEquals(new int[] {0, 1, 2, 3, 4}, (int[]) ds("c_i4").read());
         assertInstanceOf(double[].class, ds("c_f8").read());

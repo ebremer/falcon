@@ -52,6 +52,15 @@ class AttributeTest {
     }
 
     @Test
+    void datasetVlenSequenceAttribute() {
+        // ragged int32 attribute (with an empty row) resolved through the global heap.
+        Attribute ragged = h5.root().dataset("data").attribute("ragged").orElseThrow();
+        int[][] expected = {{1, 2}, {}, {3, 4, 5}};
+        assertArrayEquals(expected, ragged.readVlenInts());
+        assertArrayEquals(expected, (int[][]) ragged.read());
+    }
+
+    @Test
     void groupLongAttribute() {
         assertArrayEquals(new long[] {42},
                 h5.root().group("grp").attribute("count").orElseThrow().readLongs());

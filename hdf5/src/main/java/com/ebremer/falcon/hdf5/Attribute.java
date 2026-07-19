@@ -1,6 +1,7 @@
 package com.ebremer.falcon.hdf5;
 
 import com.ebremer.falcon.hdf5.data.Elements;
+import com.ebremer.falcon.hdf5.data.VlenSequences;
 import com.ebremer.falcon.hdf5.data.VlenStrings;
 import com.ebremer.falcon.hdf5.datatype.Datatype;
 import com.ebremer.falcon.hdf5.io.FileContext;
@@ -54,8 +55,16 @@ public final class Attribute {
         if (datatype instanceof Datatype.StringType) {
             return readStrings();
         }
-        if (datatype instanceof Datatype.VariableLength vlen && vlen.kind() == Datatype.VlenKind.STRING) {
-            return readStrings();
+        if (datatype instanceof Datatype.VariableLength vlen) {
+            if (vlen.kind() == Datatype.VlenKind.STRING) {
+                return readStrings();
+            }
+            return switch (vlen.base()) {
+                case Datatype.FixedPoint fp -> fp.size() <= 4 ? readVlenInts() : readVlenLongs();
+                case Datatype.FloatingPoint fp -> readVlenDoubles();
+                default -> throw new HdfUnsupportedException("reading attribute variable-length sequences of "
+                        + vlen.base().typeClass() + " is not yet supported: " + name);
+            };
         }
         throw new HdfUnsupportedException(
                 "reading attribute datatype " + datatype.typeClass() + " is not yet supported: " + name);
@@ -87,6 +96,33 @@ public final class Attribute {
     /** Convenience for a scalar string attribute. */
     public String readString() {
         return readStrings()[0];
+    }
+
+    /** Reads a variable-length sequence attribute, one {@code int[]} row per element. */
+    public int[][] readVlenInts() {
+        return VlenSequences.toInts(ctx, data(), count(), requireVlenSequence());
+    }
+
+    /** Reads a variable-length sequence attribute, one {@code long[]} row per element. */
+    public long[][] readVlenLongs() {
+        return VlenSequences.toLongs(ctx, data(), count(), requireVlenSequence());
+    }
+
+    /** Reads a variable-length sequence attribute, one {@code double[]} row per element. */
+    public double[][] readVlenDoubles() {
+        return VlenSequences.toDoubles(ctx, data(), count(), requireVlenSequence());
+    }
+
+    /** Reads a variable-length sequence attribute, one {@code float[]} row per element. */
+    public float[][] readVlenFloats() {
+        return VlenSequences.toFloats(ctx, data(), count(), requireVlenSequence());
+    }
+
+    private Datatype.VariableLength requireVlenSequence() {
+        if (datatype instanceof Datatype.VariableLength vlen && vlen.kind() == Datatype.VlenKind.SEQUENCE) {
+            return vlen;
+        }
+        throw new HdfUnsupportedException("readVlen* requires a variable-length sequence attribute: " + name);
     }
 
     private String[] readVariableLengthStrings(Datatype.VariableLength vlen) {

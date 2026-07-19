@@ -117,12 +117,25 @@ def build_attributes(f):
     d = f.create_dataset("data", data=np.arange(6, dtype="i4"))
     d.attrs["units"] = "meters"
     d.attrs["scale"] = np.array([1.5, 2.5, 3.5], dtype="f8")
+    ragged = np.empty(3, dtype=object)
+    ragged[0] = np.array([1, 2], dtype=np.int32)
+    ragged[1] = np.array([], dtype=np.int32)
+    ragged[2] = np.array([3, 4, 5], dtype=np.int32)
+    d.attrs.create("ragged", data=ragged, dtype=h5py.vlen_dtype(np.int32))
 
 
 def build_vlen(f):
-    """A variable-length UTF-8 string dataset (values live in the global heap)."""
+    """Variable-length datasets whose values live in the global heap: a UTF-8 string dataset, plus
+    numeric sequence (ragged array) datasets over int32/int64/float64 base types, each including an
+    empty row."""
     f.create_dataset("vstr", data=np.array(["alpha", "beta", "gamma", "delta"],
                                            dtype=h5py.string_dtype("utf-8")))
+    di = f.create_dataset("vseq_i4", (4,), dtype=h5py.vlen_dtype(np.int32))
+    di[0] = [10]; di[1] = [20, 21]; di[2] = []; di[3] = [30, 31, 32]
+    dl = f.create_dataset("vseq_i8", (3,), dtype=h5py.vlen_dtype(np.int64))
+    dl[0] = [1]; dl[1] = [2, 3]; dl[2] = [4, 5, 6]
+    dd = f.create_dataset("vseq_f8", (3,), dtype=h5py.vlen_dtype(np.float64))
+    dd[0] = [1.5, 2.5]; dd[1] = []; dd[2] = [9.25]
 
 
 def build_dense_links(f):

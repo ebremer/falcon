@@ -2,6 +2,7 @@ package com.ebremer.falcon.hdf5;
 
 import com.ebremer.falcon.hdf5.data.ChunkedReader;
 import com.ebremer.falcon.hdf5.data.Elements;
+import com.ebremer.falcon.hdf5.data.VlenSequences;
 import com.ebremer.falcon.hdf5.data.VlenStrings;
 import com.ebremer.falcon.hdf5.datatype.Datatype;
 import com.ebremer.falcon.hdf5.filter.FilterPipeline;
@@ -94,6 +95,44 @@ public final class Dataset extends Hdf5Object {
         return Elements.toStrings(rawData(), elementCount(), type);
     }
 
+    /** Reads a variable-length sequence (ragged) datatype, one {@code int[]} row per element. */
+    public int[][] readVlenInts() {
+        return VlenSequences.toInts(ctx, rawData(), elementCount(), requireVlenSequence());
+    }
+
+    /** Reads a variable-length sequence (ragged) datatype, one {@code long[]} row per element. */
+    public long[][] readVlenLongs() {
+        return VlenSequences.toLongs(ctx, rawData(), elementCount(), requireVlenSequence());
+    }
+
+    /** Reads a variable-length sequence (ragged) datatype, one {@code double[]} row per element. */
+    public double[][] readVlenDoubles() {
+        return VlenSequences.toDoubles(ctx, rawData(), elementCount(), requireVlenSequence());
+    }
+
+    /** Reads a variable-length sequence (ragged) datatype, one {@code float[]} row per element. */
+    public float[][] readVlenFloats() {
+        return VlenSequences.toFloats(ctx, rawData(), elementCount(), requireVlenSequence());
+    }
+
+    /** Reads a vlen sequence into its most natural boxed 2-D array, by base type. */
+    private Object readVlenSequence(Datatype.VariableLength vlen) {
+        return switch (vlen.base()) {
+            case Datatype.FixedPoint fp -> fp.size() <= 4 ? readVlenInts() : readVlenLongs();
+            case Datatype.FloatingPoint fp -> readVlenDoubles();
+            default -> throw new HdfUnsupportedException(
+                    "reading variable-length sequences of " + vlen.base().typeClass() + " is not yet supported: " + path());
+        };
+    }
+
+    private Datatype.VariableLength requireVlenSequence() {
+        if (datatype() instanceof Datatype.VariableLength vlen && vlen.kind() == Datatype.VlenKind.SEQUENCE) {
+            return vlen;
+        }
+        throw new HdfUnsupportedException(
+                "readVlen* requires a variable-length sequence datatype: " + path());
+    }
+
     /** The dataset's raw storage bytes (decoded from the layout; not yet de-filtered). */
     public byte[] readRawBytes() {
         return Elements.toRawBytes(rawData(), (long) elementCount() * datatype().size());
@@ -110,6 +149,7 @@ public final class Dataset extends Hdf5Object {
             case Datatype.FloatingPoint fp -> readDoubles();
             case Datatype.StringType st -> readStrings();
             case Datatype.VariableLength v when v.kind() == Datatype.VlenKind.STRING -> readStrings();
+            case Datatype.VariableLength v -> readVlenSequence(v);
             default -> throw new HdfUnsupportedException(
                     "reading datatype class " + type.typeClass() + " is not yet supported: " + path());
         };
