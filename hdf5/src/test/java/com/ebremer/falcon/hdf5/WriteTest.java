@@ -41,6 +41,31 @@ class WriteTest {
     }
 
     @Test
+    void roundTripSubgroupsAndStrings() throws IOException {
+        Path file = Files.createTempFile("falcon-tree", ".h5");
+        try {
+            try (Hdf5Writer w = Hdf5Writer.create(file)) {
+                w.intDataset("top", new int[] {1, 2}, new long[] {2});
+                Hdf5Writer.GroupWriter run = w.group("run");
+                run.doubleDataset("signal", new double[] {0.5, 1.5, 2.5}, new long[] {3});
+                run.stringDataset("labels", new String[] {"alpha", "beta", "gamma"}, new long[] {3});
+                run.intAttribute("count", new int[] {3}, new long[] {});
+                run.group("nested").intDataset("inner", new int[] {7, 8, 9}, new long[] {3});
+            }
+            try (Hdf5File h5 = Hdf5File.open(file)) {
+                assertArrayEquals(new int[] {1, 2}, h5.root().dataset("top").readInts());
+                Group run = h5.root().group("run");
+                assertArrayEquals(new double[] {0.5, 1.5, 2.5}, run.dataset("signal").readDoubles());
+                assertArrayEquals(new String[] {"alpha", "beta", "gamma"}, run.dataset("labels").readStrings());
+                assertArrayEquals(new int[] {3}, run.attribute("count").orElseThrow().readInts());
+                assertArrayEquals(new int[] {7, 8, 9}, run.group("nested").dataset("inner").readInts());
+            }
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    @Test
     void roundTripDoubleDatasetAndAttribute() throws IOException {
         Path file = Files.createTempFile("falcon-write-f8", ".h5");
         try {
