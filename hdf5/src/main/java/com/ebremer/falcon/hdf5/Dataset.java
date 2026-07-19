@@ -1,7 +1,10 @@
 package com.ebremer.falcon.hdf5;
 
+import com.ebremer.falcon.hdf5.data.ChunkedReader;
 import com.ebremer.falcon.hdf5.data.Elements;
 import com.ebremer.falcon.hdf5.datatype.Datatype;
+import com.ebremer.falcon.hdf5.filter.FilterPipeline;
+import com.ebremer.falcon.hdf5.filter.FilterPipelineMessage;
 import com.ebremer.falcon.hdf5.header.HeaderMessage;
 import com.ebremer.falcon.hdf5.header.MessageType;
 import com.ebremer.falcon.hdf5.io.FileContext;
@@ -25,6 +28,8 @@ public final class Dataset extends Hdf5Object {
     private Datatype datatype;
     private Dataspace dataspace;
     private DataLayout layout;
+    private FilterPipeline filterPipeline;
+    private boolean filterPipelineResolved;
     private byte[] fillValue;
     private boolean fillValueResolved;
 
@@ -126,6 +131,16 @@ public final class Dataset extends Hdf5Object {
         return fillValue;
     }
 
+    private FilterPipeline filterPipeline() {
+        if (!filterPipelineResolved) {
+            HeaderMessage message = header().find(MessageType.FILTER_PIPELINE);
+            filterPipeline = message == null ? null
+                    : FilterPipelineMessage.parse(ctx.buffer(), message.bodyOffset());
+            filterPipelineResolved = true;
+        }
+        return filterPipeline;
+    }
+
     private MemorySegment rawData() {
         return switch (layout()) {
             case DataLayout.Compact c -> MemorySegment.ofArray(c.data());
@@ -136,8 +151,12 @@ public final class Dataset extends Hdf5Object {
                 }
                 yield ctx.buffer().segment().asSlice(c.address(), byteCount);
             }
-            case DataLayout.Chunked chunked -> throw new HdfUnsupportedException(
-                    "chunked storage is implemented in stage H4: " + path());
+            case DataLayout.Chunked chunked -> {
+                long[] dims = dataspace().dimensions();
+                byte[] assembled = ChunkedReader.assemble(
+                        ctx, chunked, dims, datatype().size(), filterPipeline(), fillValue());
+                yield MemorySegment.ofArray(assembled);
+            }
         };
     }
 

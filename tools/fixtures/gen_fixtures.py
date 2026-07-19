@@ -78,6 +78,20 @@ def build_data(f):
     f.create_dataset("unwritten", shape=(4,), dtype="i4", fillvalue=7)
 
 
+def build_chunked(f):
+    """Chunked + filtered datasets (earliest libver -> v1 B-tree chunk index) for H4."""
+    f.create_dataset("chunk_i4", data=np.arange(10, dtype="i4"), chunks=(3,))
+    f.create_dataset("chunk_2d", data=np.arange(24, dtype="i4").reshape(4, 6), chunks=(2, 3))
+    f.create_dataset("gzip_i4", data=np.arange(20, dtype="i4"), chunks=(5,),
+                     compression="gzip", compression_opts=4)
+    f.create_dataset("gzip_f8", data=(np.arange(12, dtype="f8") * 0.25), chunks=(4,),
+                     compression="gzip")
+    f.create_dataset("shuffle_i4", data=np.arange(20, dtype="i4"), chunks=(5,),
+                     shuffle=True, compression="gzip")
+    f.create_dataset("fletcher_i4", data=np.arange(20, dtype="i4"), chunks=(5,), fletcher32=True)
+    f.create_dataset("scaleoffset_i4", data=np.arange(20, dtype="i4"), chunks=(5,), scaleoffset=0)
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     with h5py.File(os.path.join(OUT, "old_style_groups.h5"), "w") as f:
@@ -88,6 +102,8 @@ def main():
         build_types(f)
     with h5py.File(os.path.join(OUT, "data_contiguous.h5"), "w") as f:
         build_data(f)
+    with h5py.File(os.path.join(OUT, "chunked_data.h5"), "w") as f:
+        build_chunked(f)
     print("wrote fixtures to", OUT)
     print("h5py", h5py.__version__, "| bundled HDF5", h5py.version.hdf5_version)
 

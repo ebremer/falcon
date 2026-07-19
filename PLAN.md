@@ -3,10 +3,10 @@
 **Falcon** is a multi-module Maven umbrella for **pure-JDK 25, zero-runtime-dependency** readers and
 writers of scientific-data formats.
 
-> **Status: stages H0–H3 complete and green — 49 tests pass; H4 is next.**
-> Falcon opens HDF5 files, lists old-style group trees, describes any dataset's type/shape, and reads
-> contiguous & compact data (ints/floats/strings, LE+BE, fill values) into Java arrays. New-style
-> (link) groups → H5; chunked storage → H4.
+> **Status: H4 in progress — 55 tests green.** H0–H3 done. H4 increment 1 done: chunked storage
+> (v1 B-tree index, 1-D/2-D, boundary chunks) with the **deflate / shuffle / fletcher32** filters.
+> Next in H4: scaleoffset / nbit / szip filters and hyperslab reads. New-style (link) groups and the
+> newer chunk indexes → H5.
 
 ## Program roadmap (Falcon)
 
