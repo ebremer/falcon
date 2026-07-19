@@ -87,6 +87,22 @@ class DataReadChunkedTest {
     }
 
     @Test
+    void fixedArrayIndexUnfiltered() throws IOException {
+        // 10 elements in two chunks of 5, indexed by a fixed array (client id 0).
+        try (Hdf5File h5 = Hdf5File.open(Fixtures.path("chunk_indexes.h5"))) {
+            assertArrayEquals(range(10), h5.root().dataset("implicit").readInts());
+        }
+    }
+
+    @Test
+    void fixedArrayIndexFiltered() throws IOException {
+        // 20 elements in four gzip chunks, fixed array with filtered entries (client id 1).
+        try (Hdf5File h5 = Hdf5File.open(Fixtures.path("chunk_indexes.h5"))) {
+            assertArrayEquals(range(20), h5.root().dataset("fixed").readInts());
+        }
+    }
+
+    @Test
     void nbitReducedPrecision() throws IOException {
         // 16-bit-precision unsigned stored in 4 bytes: n-bit packs only the significant bits.
         try (Hdf5File f = Hdf5File.open(Fixtures.path("nbit_data.h5"))) {
