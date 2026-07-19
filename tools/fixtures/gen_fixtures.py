@@ -145,6 +145,14 @@ def build_dense_links(f):
         g.create_dataset(f"link{i:02d}", data=np.int32(i))
 
 
+def build_dense_links_big(f):
+    """A group with enough links to push its link fractal heap into indirect blocks and its name index
+    into a multi-level (internal-node) v2 B-tree."""
+    g = f.create_group("big")
+    for i in range(600):
+        g.create_dataset(f"link{i:04d}", data=np.int32(i))
+
+
 def build_dense_attrs(f):
     """A dataset with enough attributes to force dense (fractal-heap + v2 B-tree) storage."""
     d = f.create_dataset("d", data=np.arange(3, dtype="i4"))
@@ -204,6 +212,8 @@ def main():
         build_vlen(f)
     with h5py.File(os.path.join(OUT, "dense_links.h5"), "w", libver="latest") as f:
         build_dense_links(f)
+    with h5py.File(os.path.join(OUT, "dense_links_big.h5"), "w", libver="latest") as f:
+        build_dense_links_big(f)
     with h5py.File(os.path.join(OUT, "dense_attrs.h5"), "w", libver="latest") as f:
         build_dense_attrs(f)
     with h5py.File(os.path.join(OUT, "chunk_indexes.h5"), "w", libver="latest") as f:

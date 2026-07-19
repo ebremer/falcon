@@ -80,6 +80,22 @@ class Hdf5FileTest {
         }
     }
 
+    @Test
+    void listsLargeDenseGroupViaIndirectFractalHeap() throws IOException {
+        // 600 links: the name index becomes a multi-level v2 B-tree and the link heap grows indirect
+        // blocks (a doubling table of direct blocks).
+        try (Hdf5File h5 = Hdf5File.open(Fixtures.path("dense_links_big.h5"))) {
+            Group big = h5.root().group("big");
+            List<String> names = big.childNames().stream().sorted().toList();
+            assertEquals(600, names.size());
+            assertEquals("link0000", names.get(0));
+            assertEquals("link0599", names.get(599));
+            // Resolve two links' data through the heap-ID mapping across different doubling-table rows.
+            assertArrayEquals(new int[] {0}, big.dataset("link0000").readInts());
+            assertArrayEquals(new int[] {599}, big.dataset("link0599").readInts());
+        }
+    }
+
     private static void walk(Group group, Map<String, Boolean> out) {
         for (Hdf5Object object : group.children()) {
             out.put(object.path(), object.isGroup());
