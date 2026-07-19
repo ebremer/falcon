@@ -87,6 +87,16 @@ class DataReadChunkedTest {
     }
 
     @Test
+    void implicitIndex() throws IOException {
+        // Early allocation + no filter + fixed dims -> implicit index: chunks laid out contiguously,
+        // with no on-disk index. The 2-D case exercises row-major chunk ordering.
+        try (Hdf5File h5 = Hdf5File.open(Fixtures.path("implicit.h5"))) {
+            assertArrayEquals(range(20), h5.root().dataset("impl_1d").readInts());
+            assertArrayEquals(range(24), h5.root().dataset("impl_2d").readInts());
+        }
+    }
+
+    @Test
     void fixedArrayIndexUnfiltered() throws IOException {
         // 10 elements in two chunks of 5, indexed by a fixed array (client id 0).
         try (Hdf5File h5 = Hdf5File.open(Fixtures.path("chunk_indexes.h5"))) {

@@ -6,6 +6,7 @@ import com.ebremer.falcon.hdf5.filter.FilterPipeline;
 import com.ebremer.falcon.hdf5.index.ChunkBTreeV2;
 import com.ebremer.falcon.hdf5.index.ExtensibleArray;
 import com.ebremer.falcon.hdf5.index.FixedArray;
+import com.ebremer.falcon.hdf5.index.ImplicitIndex;
 import com.ebremer.falcon.hdf5.io.FileContext;
 import com.ebremer.falcon.hdf5.layout.ChunkRecord;
 import com.ebremer.falcon.hdf5.layout.DataLayout;
@@ -42,6 +43,8 @@ public final class ChunkedReader {
             case DataLayout.INDEX_V1_BTREE -> ChunkBTreeV1.read(ctx, layout.indexAddress(), rank);
             case DataLayout.INDEX_SINGLE_CHUNK ->
                     List.of(new ChunkRecord(new long[rank], layout.indexAddress(), chunkBytes, 0));
+            case DataLayout.INDEX_IMPLICIT ->
+                    ImplicitIndex.readChunks(layout.indexAddress(), chunkBytes, datasetDims, chunkDims);
             case DataLayout.INDEX_FIXED_ARRAY ->
                     FixedArray.readChunks(ctx, layout.indexAddress(), chunkBytes, datasetDims, chunkDims);
             case DataLayout.INDEX_EXTENSIBLE_ARRAY ->

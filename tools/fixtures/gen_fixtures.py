@@ -249,6 +249,30 @@ def build_committed_types(f):
     e[...] = np.array([2, 0, 1], dtype="i4")
 
 
+def build_implicit(path):
+    """Chunked datasets with early allocation, no filter, and fixed dimensions -> the implicit chunk
+    index (version-4/5 layout, index type 2). h5py's high level always emits a fixed array, so this
+    uses the low-level dcpl with ALLOC_TIME_EARLY; the 2-D case exercises row-major chunk ordering."""
+    fapl = h5py.h5p.create(h5py.h5p.FILE_ACCESS)
+    fapl.set_libver_bounds(h5py.h5f.LIBVER_LATEST, h5py.h5f.LIBVER_LATEST)
+    fid = h5py.h5f.create(path.encode(), h5py.h5f.ACC_TRUNC, h5py.h5p.DEFAULT, fapl)
+    f = h5py.File(fid)
+    tid = h5py.h5t.py_create(np.dtype("<i4"))
+    dc = h5py.h5p.create(h5py.h5p.DATASET_CREATE)
+    dc.set_chunk((5,))
+    dc.set_alloc_time(h5py.h5d.ALLOC_TIME_EARLY)
+    d = h5py.h5d.create(f.id, b"impl_1d", tid, h5py.h5s.create_simple((20,)), dc)
+    d.write(h5py.h5s.ALL, h5py.h5s.ALL, np.arange(20, dtype="<i4"))
+    d.close()
+    dc2 = h5py.h5p.create(h5py.h5p.DATASET_CREATE)
+    dc2.set_chunk((2, 3))
+    dc2.set_alloc_time(h5py.h5d.ALLOC_TIME_EARLY)
+    d2 = h5py.h5d.create(f.id, b"impl_2d", tid, h5py.h5s.create_simple((4, 6)), dc2)
+    d2.write(h5py.h5s.ALL, h5py.h5s.ALL, np.arange(24, dtype="<i4").reshape(4, 6))
+    d2.close()
+    f.close()
+
+
 def build_freespace(out):
     """A file using the free-space-manager strategy with persisted free space: a File Space Info
     message (type 23) in the superblock extension plus FSHD free-space managers. Deleting a dataset
@@ -321,6 +345,7 @@ def main():
         build_committed_types(f)  # v0 superblock + symbol-table groups + v1 object headers
     build_external(OUT)
     build_freespace(OUT)
+    build_implicit(os.path.join(OUT, "implicit.h5"))
     print("wrote fixtures to", OUT)
     print("h5py", h5py.__version__, "| bundled HDF5", h5py.version.hdf5_version)
 
