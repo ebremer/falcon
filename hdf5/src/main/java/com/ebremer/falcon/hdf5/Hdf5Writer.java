@@ -120,6 +120,14 @@ public final class Hdf5Writer implements AutoCloseable {
         return rootWriter.complexDataset(name, shape, real, imaginary);
     }
 
+    public DatasetWriter intSequenceDataset(String name, long[] shape, int[][] rows) {
+        return rootWriter.intSequenceDataset(name, shape, rows);
+    }
+
+    public DatasetWriter doubleSequenceDataset(String name, long[] shape, double[][] rows) {
+        return rootWriter.doubleSequenceDataset(name, shape, rows);
+    }
+
     public GroupWriter group(String name) {
         return rootWriter.group(name);
     }
@@ -247,6 +255,37 @@ public final class Hdf5Writer implements AutoCloseable {
                 putDoubleLittleEndian(data, i * 16 + 8, imaginary[i]);
             }
             return addDataset(new DatasetSpec(name, complex128Datatype(), 16, shape, null, data, null));
+        }
+
+        /** A variable-length {@code int32} sequence (ragged array) dataset; {@code rows[i]} is element i. */
+        public DatasetWriter intSequenceDataset(String name, long[] shape, int[][] rows) {
+            requireElementCount(shape, rows.length);
+            List<byte[]> payloads = new ArrayList<>();
+            int[] counts = new int[rows.length];
+            for (int i = 0; i < rows.length; i++) {
+                payloads.add(intBytes(rows[i]));
+                counts[i] = rows[i].length;
+            }
+            return addVlenSequence(name, shape, DATATYPE_INT32, payloads, counts);
+        }
+
+        /** A variable-length {@code float64} sequence (ragged array) dataset; {@code rows[i]} is element i. */
+        public DatasetWriter doubleSequenceDataset(String name, long[] shape, double[][] rows) {
+            requireElementCount(shape, rows.length);
+            List<byte[]> payloads = new ArrayList<>();
+            int[] counts = new int[rows.length];
+            for (int i = 0; i < rows.length; i++) {
+                payloads.add(doubleBytes(rows[i]));
+                counts[i] = rows[i].length;
+            }
+            return addVlenSequence(name, shape, DATATYPE_FLOAT64, payloads, counts);
+        }
+
+        private DatasetWriter addVlenSequence(String name, long[] shape, byte[] base,
+                                              List<byte[]> payloads, int[] counts) {
+            DatasetSpec spec = new DatasetSpec(name, vlenSequenceDatatype(base), 16, shape, null, null, payloads);
+            spec.vlenElementCounts = counts;
+            return addDataset(spec);
         }
 
         /**
@@ -467,7 +506,7 @@ public final class Hdf5Writer implements AutoCloseable {
                 buf.align(8);
                 long collection = buf.position();
                 int[] indices = writeGlobalHeap(buf, dataset.vlenStrings);
-                data = vlenIds(dataset.vlenStrings, collection, indices);
+                data = vlenIds(dataset.vlenStrings, dataset.vlenElementCounts, collection, indices);
             }
             buf.align(8);
             long dataAddress = buf.position();
@@ -975,10 +1014,11 @@ public final class Hdf5Writer implements AutoCloseable {
         return indices;
     }
 
-    private static byte[] vlenIds(List<byte[]> strings, long collection, int[] indices) {
+    private static byte[] vlenIds(List<byte[]> payloads, int[] elementCounts, long collection, int[] indices) {
         GrowBuffer b = new GrowBuffer();
-        for (int i = 0; i < strings.size(); i++) {
-            b.u32(strings.get(i).length); // byte length of the string
+        for (int i = 0; i < payloads.size(); i++) {
+            // A vlen ID's length field is the string's byte length or the sequence's element count.
+            b.u32(elementCounts != null ? elementCounts[i] : payloads.get(i).length);
             b.u64(collection);
             b.u32(indices[i]);
         }
@@ -1106,6 +1146,18 @@ public final class Hdf5Writer implements AutoCloseable {
         return b.toByteArray();
     }
 
+    /** Builds a variable-length sequence (class 9, version 1) datatype message over the given base. */
+    private static byte[] vlenSequenceDatatype(byte[] base) {
+        GrowBuffer b = new GrowBuffer();
+        b.u8(0x19); // version 1, class 9 (variable-length)
+        b.u8(0x00); // bit field: vlen type 0 = sequence (1 would be string)
+        b.u8(0x00);
+        b.u8(0x00);
+        b.u32(16); // size = the 16-byte global-heap id
+        b.bytes(base);
+        return b.toByteArray();
+    }
+
     /** Builds an array (class 10, version 5) datatype message with the given element shape and base. */
     private static byte[] arrayDatatype(int[] arrayDims, int baseSize, byte[] base) {
         GrowBuffer b = new GrowBuffer();
@@ -1230,8 +1282,9 @@ public final class Hdf5Writer implements AutoCloseable {
         final int elementSize;
         final long[] shape;
         final long[] chunkShape;        // null for contiguous storage
-        final byte[] data;              // inline element bytes, or null for vlen strings
-        final List<byte[]> vlenStrings; // vlen-string values, or null
+        final byte[] data;              // inline element bytes, or null for vlen strings/sequences
+        final List<byte[]> vlenStrings; // vlen payloads (string bytes or sequence element bytes), or null
+        int[] vlenElementCounts;        // per-element sequence lengths (element counts); null for strings
         List<String> referenceTargets;  // object-reference target paths, or null
         final List<AttributeSpec> attributes = new ArrayList<>();
         int deflateLevel = -1;          // -1 = no compression

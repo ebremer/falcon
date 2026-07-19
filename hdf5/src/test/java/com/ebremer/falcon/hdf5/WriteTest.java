@@ -295,6 +295,33 @@ class WriteTest {
     }
 
     @Test
+    void roundTripVlenSequenceDatasets() throws IOException {
+        Path file = Files.createTempFile("falcon-seq", ".h5");
+        try {
+            int[][] ints = {{10}, {20, 21}, {}, {30, 31, 32}}; // includes an empty row
+            double[][] doubles = {{1.5, 2.5}, {}, {9.25}};
+            try (Hdf5Writer w = Hdf5Writer.create(file)) {
+                w.intSequenceDataset("vi", new long[] {4}, ints);
+                w.doubleSequenceDataset("vd", new long[] {3}, doubles);
+            }
+            try (Hdf5File h5 = Hdf5File.open(file)) {
+                int[][] gi = h5.root().dataset("vi").readVlenInts();
+                assertEquals(4, gi.length);
+                for (int i = 0; i < 4; i++) {
+                    assertArrayEquals(ints[i], gi[i]);
+                }
+                double[][] gd = h5.root().dataset("vd").readVlenDoubles();
+                assertEquals(3, gd.length);
+                for (int i = 0; i < 3; i++) {
+                    assertArrayEquals(doubles[i], gd[i], 0.0);
+                }
+            }
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    @Test
     void roundTripReferenceDataset() throws IOException {
         Path file = Files.createTempFile("falcon-refs", ".h5");
         try {
