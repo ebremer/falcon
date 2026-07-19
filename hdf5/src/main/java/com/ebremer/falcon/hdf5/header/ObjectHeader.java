@@ -62,7 +62,13 @@ public final class ObjectHeader {
         }
         HeaderMessage message = find(MessageType.OBJECT_MODIFICATION_TIME);
         if (message != null) {
-            return java.util.OptionalLong.of(message.body().getUnsignedInt(4)); // version(1), reserved(3), seconds(4)
+            return java.util.OptionalLong.of(
+                    com.ebremer.falcon.hdf5.message.ObjectModificationTimeMessage.epochSeconds(message.body()));
+        }
+        HeaderMessage old = find(MessageType.OBJECT_MODIFICATION_TIME_OLD);
+        if (old != null) {
+            return java.util.OptionalLong.of(
+                    com.ebremer.falcon.hdf5.message.ObjectModificationTimeMessage.epochSecondsOld(old.body()));
         }
         return java.util.OptionalLong.empty();
     }
