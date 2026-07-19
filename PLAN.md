@@ -15,7 +15,8 @@ writers of scientific-data formats.
 > **int32 / float64 / string / compound / enum / object-reference / array / vlen-sequence / native
 > complex** datasets (vlen via a global heap; references resolved across objects, forward refs
 > included), **chunked** datasets (fixed-array index) with **all six built-in filters encoded** (deflate,
-> shuffle, fletcher32, scale-offset, n-bit, and pure-Java **szip**), and scalar/array **attributes** —
+> shuffle, fletcher32, scale-offset, n-bit, and pure-Java **szip**), and scalar/array **attributes**,
+> switching groups and objects to **dense storage** (fractal heap + v2 B-tree) past 8 links/attributes —
 > read back identically by Falcon *and h5py* (szip verified via libaec, since h5py's szip is disabled
 > here). Remaining: a few write datatypes (bitfield / opaque / time / fixed-length string) + older
 > formats; and a few read edge cases (SOHM shared messages, float scale-offset, compound n-bit, signed
@@ -301,9 +302,14 @@ Each stage ends with a **milestone** and concrete **acceptance criteria**. "Refe
   (class 10: fixed-shape sub-arrays), `intSequenceDataset` / `doubleSequenceDataset` (class 9 ragged
   arrays via the global heap, element-count ids), and `complexDataset` (class 11 native complex128).
   h5py reads them as subarray / vlen / native-complex dtypes.
+- **Dense storage write ✓**: past 8 links/attributes an object switches from compact header messages
+  to dense storage &mdash; a fractal heap (single checksummed direct block) of Link/Attribute message
+  bodies plus a name-indexed v2 B-tree (type 5 links / type 8 attributes), referenced from a Link Info
+  or Attribute Info message. Generic `writeFractalHeap` / `writeV2BTree` helpers; h5py-verified
+  (listing, iteration, and lookup-by-name). Indirect-block heaps (very large sets) still throw.
 - Remaining write breadth: the last few datatype classes (bitfield / opaque / time / fixed-length
-  string); dense + compact group/attribute storage; fill-value policies; user-selectable layout; szip
-  preprocessing + zero-block / second-extension modes for better ratios.
+  string); fill-value policies; user-selectable layout; szip preprocessing + zero-block /
+  second-extension modes for better ratios.
 - **Milestone:** round-trip parity across the full fixture matrix.
 - **Acceptance:** for every fixture, `Falcon-write → h5py-read` and `h5py-write → Falcon-read` agree on
   structure + data; property-based random round-trips pass.
