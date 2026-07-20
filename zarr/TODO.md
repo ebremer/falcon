@@ -9,7 +9,7 @@ is left, and why.
 | Item | Status |
 |---|---|
 | **zstd (decode)** | ✅ **Done.** Pure-Java, from RFC 8878; validated against 18 libzstd frames. This was the important one — zarr-python compresses with zstd by default, so Falcon can now read real-world stores. |
-| **zstd (encode)** | Not started. Needs a full compressor (match finder + FSE/Huffman encoders); much larger than the decoder. Falcon writes `gzip` or raw, which every implementation reads, so this is a nice-to-have. |
+| **zstd (encode)** | ✅ **Done.** A real LZ77 + FSE compressor (predefined tables, raw literals) in pure Java; `ArraySpec.zstd()` writes it. Validated by round-trip through the decoder and, crucially, by libzstd (numcodecs) reading Falcon's frames -- so a Falcon-written zstd array is readable by zarr-python. See `tools/fixtures/check_zstd_encoder.py`. |
 | **blosc (decode)** | ✅ **Done.** Container, block/split layout, byte shuffle **and bit-shuffle**, and the `blosclz`/`lz4`/`lz4hc`/`zlib`/`zstd` internal compressors; validated against 51 c-blosc buffers plus 7 zarr-python fixtures. The only internal codec left is `snappy` (removed from modern c-blosc; refused with `ZarrUnsupportedException` rather than mis-decoded). |
 | **blosc (encode)** | Not started, same reasoning as zstd encode. |
 | **Zarr v2 read-compat** | ✅ **Done (read).** `.zarray`/`.zgroup`/`.zattrs` are translated into the v3 model on open; NumPy dtype strings, the `.`/`/` dimension separator, and the `gzip`/`zstd`/`blosc` compressors are mapped. Validated against 12 zarr-python v2 fixtures plus a hand-built group hierarchy. **Not** supported: Fortran order for rank>1, v2 filters (delta/etc.), the `zlib` compressor, and writing v2 — each refused with a clear error. |

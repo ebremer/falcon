@@ -63,6 +63,9 @@ public final class ArraySpec {
         if (b.gzipLevel != null) {
             inner.add(named("gzip", JsonObject.builder().put("level", b.gzipLevel).build()));
         }
+        if (b.zstd) {
+            inner.add(named("zstd", JsonObject.builder().put("level", 0).put("checksum", false).build()));
+        }
         if (b.crc32c) {
             inner.add(named("crc32c", null));
         }
@@ -157,6 +160,7 @@ public final class ArraySpec {
         private String separator;
         private ByteOrder endian = ByteOrder.LITTLE_ENDIAN;
         private Integer gzipLevel;
+        private boolean zstd;
         private boolean crc32c;
         private long[] subChunkShape;
         private boolean indexAtStart;
@@ -203,6 +207,12 @@ public final class ArraySpec {
         /** Compresses chunks with {@code gzip} at the given level (0&ndash;9). */
         public Builder gzip(int level) {
             this.gzipLevel = level;
+            return this;
+        }
+
+        /** Compresses chunks with {@code zstd} (Falcon's pure-Java encoder; libzstd/zarr-python read it). */
+        public Builder zstd() {
+            this.zstd = true;
             return this;
         }
 

@@ -3,6 +3,7 @@ package com.ebremer.falcon.zarr.codec;
 import com.ebremer.falcon.zarr.ZarrFormatException;
 import com.ebremer.falcon.zarr.ZarrUnsupportedException;
 import com.ebremer.falcon.zarr.codec.zstd.ZstdDecoder;
+import com.ebremer.falcon.zarr.codec.zstd.ZstdEncoder;
 import com.ebremer.falcon.zarr.codec.zstd.ZstdFormatException;
 import com.ebremer.falcon.zarr.json.JsonObject;
 
@@ -11,8 +12,9 @@ import com.ebremer.falcon.zarr.json.JsonObject;
  * (see {@link ZstdDecoder}) so the module stays dependency-free. This matters for interoperability:
  * zarr-python compresses with zstd by default, so most Zarr v3 stores in the wild need it.
  *
- * <p>Only decoding is implemented. Writing zstd would need a full compressor; Falcon writes with
- * {@code gzip} or no compression instead, both of which every Zarr implementation reads.
+ * <p>Both directions are implemented in pure Java: {@link ZstdDecoder} reads and {@link ZstdEncoder}
+ * writes. The encoder is a real LZ77 + FSE compressor using the format's predefined tables and raw
+ * literals; its frames are read by libzstd (zarr-python).
  */
 final class ZstdCodec implements BytesBytesCodec {
 
@@ -41,7 +43,6 @@ final class ZstdCodec implements BytesBytesCodec {
 
     @Override
     public byte[] encode(byte[] input) {
-        throw new ZarrUnsupportedException(
-                "writing zstd is not supported; create the array with gzip or no compression");
+        return ZstdEncoder.compress(input);
     }
 }

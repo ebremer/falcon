@@ -158,6 +158,20 @@ class ZarrWriteTest {
     // ---- metadata ---------------------------------------------------------------------------------
 
     @Test
+    void roundTripsWithZstd() {
+        MemoryStore store = new MemoryStore();
+        ZarrArray a = Zarr.createArray(store, ArraySpec.builder(new long[] {64}, DataType.INT32)
+                .chunkShape(16).zstd().build());
+        int[] data = new int[64];
+        for (int i = 0; i < 64; i++) {
+            data[i] = i % 7;
+        }
+        a.writeInts(data);
+        assertTrue(store.get("c/0").orElseThrow().length < 16 * 4, "zstd should compress the chunk");
+        assertArrayEquals(data, Zarr.openArray(store).readInts());
+    }
+
+    @Test
     void writtenMetadataIsSpecOrdered() {
         MemoryStore store = new MemoryStore();
         Zarr.createArray(store, ArraySpec.builder(new long[] {4}, DataType.INT32).chunkShape(2).build());
