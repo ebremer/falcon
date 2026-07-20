@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.ebremer</groupId>
+        <artifactId>falcon</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>zarr</artifactId>
+    <packaging>jar</packaging>
+
+    <name>Falcon Zarr</name>
+    <description>A pure-JDK 25, zero-runtime-dependency reader and writer for the Zarr storage format,
+        implementing the Zarr v3 core specification.</description>
+
+    <dependencies>
+        <!-- Test only. The main artifact depends on nothing beyond java.base. -->
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+</project>

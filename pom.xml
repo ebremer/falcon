@@ -32,7 +32,7 @@
 
     <modules>
         <module>hdf5</module>
-        <!-- <module>zarr</module>  Planned — Falcon Phase 2 (see PLAN.md §12). Pinned for now. -->
+        <module>zarr</module>  <!-- Falcon Phase 2 — Zarr v3 (see zarr/PLAN.md). -->
     </modules>
 
     <properties>
