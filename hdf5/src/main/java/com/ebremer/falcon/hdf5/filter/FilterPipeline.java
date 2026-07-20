@@ -1,5 +1,7 @@
 package com.ebremer.falcon.hdf5.filter;
 
+import com.ebremer.falcon.hdf5.HdfException;
+import com.ebremer.falcon.hdf5.HdfFormatException;
 import java.util.List;
 
 /**
@@ -32,7 +34,15 @@ public final class FilterPipeline {
             if ((filterMask & (1 << i)) != 0) {
                 continue;
             }
-            data = Filters.decode(filters.get(i), data, elementSize, uncompressedSize);
+            Filter filter = filters.get(i);
+            try {
+                data = Filters.decode(filter, data, elementSize, uncompressedSize);
+            } catch (HdfException e) {
+                throw e;
+            } catch (RuntimeException e) {
+                // A corrupt chunk or bad filter parameters can drive a decode out of bounds; report it typed.
+                throw new HdfFormatException("filter id " + filter.id() + " failed to decode a chunk", e);
+            }
         }
         return data;
     }

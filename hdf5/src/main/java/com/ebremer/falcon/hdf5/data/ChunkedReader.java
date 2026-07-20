@@ -1,5 +1,6 @@
 package com.ebremer.falcon.hdf5.data;
 
+import com.ebremer.falcon.hdf5.HdfFormatException;
 import com.ebremer.falcon.hdf5.HdfUnsupportedException;
 import com.ebremer.falcon.hdf5.btree.ChunkBTreeV1;
 import com.ebremer.falcon.hdf5.filter.FilterPipeline;
@@ -29,16 +30,16 @@ public final class ChunkedReader {
         for (long d : datasetDims) {
             elements *= d;
         }
-        byte[] output = new byte[Math.toIntExact(elements * elementSize)];
+        byte[] output = new byte[Elements.checkedByteCount(elements, elementSize)];
         tileFill(output, fill, elementSize);
 
         int rank = datasetDims.length;
         int[] chunkDims = layout.chunkDimensions();
-        int chunkElements = 1;
+        long chunkElements = 1;
         for (int d : chunkDims) {
             chunkElements *= d;
         }
-        int chunkBytes = chunkElements * elementSize;
+        int chunkBytes = Elements.checkedByteCount(chunkElements, elementSize);
         List<ChunkRecord> chunks = switch (layout.indexType()) {
             case DataLayout.INDEX_V1_BTREE -> ChunkBTreeV1.read(ctx, layout.indexAddress(), rank);
             case DataLayout.INDEX_SINGLE_CHUNK ->
@@ -58,6 +59,9 @@ public final class ChunkedReader {
             byte[] raw = ctx.buffer().getBytes(chunk.address(), chunk.size());
             byte[] bytes = pipeline == null ? raw
                     : pipeline.decode(raw, chunk.filterMask(), elementSize, chunkBytes);
+            if (bytes.length < chunkBytes) {
+                throw new HdfFormatException("decoded chunk is " + bytes.length + " bytes, expected " + chunkBytes);
+            }
             copyChunk(output, datasetDims, chunkDims, chunk.offset(), bytes, elementSize);
         }
         return output;

@@ -70,7 +70,7 @@ public final class ExternalFileList {
      * taken. If an external file is shorter than its slot promises, the missing bytes stay zero.
      */
     public byte[] readData(Path baseDirectory, long byteCount) {
-        byte[] out = new byte[Math.toIntExact(byteCount)];
+        byte[] out = new byte[com.ebremer.falcon.hdf5.data.Elements.checkedInt(byteCount)];
         int pos = 0;
         for (int i = 0; i < names.length && pos < out.length; i++) {
             Path file = baseDirectory == null ? Path.of(names[i]) : baseDirectory.resolve(names[i]);

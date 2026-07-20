@@ -1,5 +1,6 @@
 package com.ebremer.falcon.hdf5.data;
 
+import com.ebremer.falcon.hdf5.HdfFormatException;
 import com.ebremer.falcon.hdf5.HdfUnsupportedException;
 import com.ebremer.falcon.hdf5.datatype.Datatype;
 import java.lang.foreign.MemorySegment;
@@ -14,6 +15,26 @@ import java.nio.charset.StandardCharsets;
 public final class Elements {
 
     private Elements() {
+    }
+
+    /** A non-negative {@code long} that fits in an {@code int}, or {@link HdfFormatException} (corrupt input). */
+    public static int checkedInt(long value) {
+        if (value < 0 || value > Integer.MAX_VALUE) {
+            throw new HdfFormatException("value out of range (corrupt input?): " + value);
+        }
+        return (int) value;
+    }
+
+    /** {@code count * elementSize} as an {@code int}, rejecting overflow or out-of-range values (corrupt input). */
+    public static int checkedByteCount(long count, int elementSize) {
+        if (count < 0 || elementSize < 0) {
+            throw new HdfFormatException("negative element count/size (corrupt input?): " + count + " x " + elementSize);
+        }
+        long bytes = count * elementSize;
+        if ((elementSize != 0 && bytes / elementSize != count) || bytes > Integer.MAX_VALUE) {
+            throw new HdfFormatException("dataset too large or corrupt: " + count + " x " + elementSize);
+        }
+        return (int) bytes;
     }
 
     private static final ValueLayout.OfShort LE_SHORT = ValueLayout.JAVA_SHORT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
@@ -124,7 +145,7 @@ public final class Elements {
     }
 
     public static byte[] toRawBytes(MemorySegment data, long byteCount) {
-        byte[] out = new byte[Math.toIntExact(byteCount)];
+        byte[] out = new byte[checkedInt(byteCount)];
         MemorySegment.copy(data, ValueLayout.JAVA_BYTE, 0, out, 0, out.length);
         return out;
     }

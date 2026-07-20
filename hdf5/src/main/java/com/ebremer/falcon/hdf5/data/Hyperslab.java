@@ -19,7 +19,7 @@ public final class Hyperslab {
         for (long c : count) {
             total *= c;
         }
-        byte[] out = new byte[Math.toIntExact(total * elementSize)];
+        byte[] out = new byte[Elements.checkedByteCount(total, elementSize)];
         if (rank == 0) {
             MemorySegment.copy(source, ValueLayout.JAVA_BYTE, 0, out, 0, elementSize);
             return out;

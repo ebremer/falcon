@@ -259,7 +259,7 @@ public final class Dataset extends Hdf5Object {
                     }
                     yield fillSegment(byteCount);
                 }
-                yield ctx.buffer().segment().asSlice(c.address(), byteCount);
+                yield ctx.buffer().segmentSlice(c.address(), byteCount);
             }
             case DataLayout.Chunked chunked -> {
                 long[] dims = dataspace().dimensions();
@@ -279,7 +279,7 @@ public final class Dataset extends Hdf5Object {
     private MemorySegment fillSegment(long byteCount) {
         int elementSize = datatype().size();
         byte[] fill = fillValue();
-        byte[] raw = new byte[Math.toIntExact(byteCount)];
+        byte[] raw = new byte[Elements.checkedInt(byteCount)];
         if (fill != null && fill.length > 0) {
             for (int off = 0; off + elementSize <= raw.length; off += elementSize) {
                 System.arraycopy(fill, 0, raw, off, Math.min(elementSize, fill.length));

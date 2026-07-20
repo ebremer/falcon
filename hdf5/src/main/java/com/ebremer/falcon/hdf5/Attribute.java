@@ -141,10 +141,10 @@ public final class Attribute {
     }
 
     private MemorySegment data() {
-        return ctx.buffer().segment().asSlice(dataOffset, dataSize);
+        return ctx.buffer().segmentSlice(dataOffset, dataSize);
     }
 
     private int count() {
-        return Math.toIntExact(dataspace.elementCount());
+        return com.ebremer.falcon.hdf5.data.Elements.checkedInt(dataspace.elementCount());
     }
 }

@@ -71,6 +71,6 @@ public final class Selection {
         for (long c : count) {
             n *= c;
         }
-        return Math.toIntExact(n);
+        return com.ebremer.falcon.hdf5.data.Elements.checkedInt(n);
     }
 }

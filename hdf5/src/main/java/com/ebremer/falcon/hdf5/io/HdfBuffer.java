@@ -178,6 +178,12 @@ public final class HdfBuffer {
         return new HdfBuffer(segment.asSlice(off, len));
     }
 
+    /** A bounds-checked slice of the backing segment (throws {@link HdfFormatException} if out of range). */
+    public MemorySegment segmentSlice(long off, long len) {
+        checkRange(off, len);
+        return segment.asSlice(off, len);
+    }
+
     // ---------------------------------------------------------- cursor reads
 
     public byte readByte() {
@@ -235,9 +241,11 @@ public final class HdfBuffer {
     }
 
     private void checkRange(long off, long len) {
-        if (off < 0 || len < 0 || off + len > segment.byteSize()) {
+        long size = segment.byteSize();
+        // Overflow-safe: never compute off+len (a corrupt address near Long.MAX would wrap negative).
+        if (off < 0 || len < 0 || off > size || len > size - off) {
             throw new HdfFormatException(
-                    "read out of bounds: offset=" + off + " length=" + len + " size=" + segment.byteSize());
+                    "read out of bounds: offset=" + off + " length=" + len + " size=" + size);
         }
     }
 }

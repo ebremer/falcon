@@ -39,7 +39,7 @@ final class VirtualDataset {
         for (long d : virtualDims) {
             elements *= d;
         }
-        byte[] output = new byte[Math.toIntExact(elements * elementSize)];
+        byte[] output = new byte[com.ebremer.falcon.hdf5.data.Elements.checkedByteCount(elements, elementSize)];
         tileFill(output, fill, elementSize);
 
         byte[] block = GlobalHeap.readObject(ctx, layout.globalHeapAddress(), layout.index());
@@ -117,12 +117,12 @@ final class VirtualDataset {
             long[][] indices = new long[rank][];
             for (int d = 0; d < rank; d++) {
                 if (type == SEL_ALL) {
-                    indices[d] = new long[Math.toIntExact(dims[d])];
+                    indices[d] = new long[com.ebremer.falcon.hdf5.data.Elements.checkedInt(dims[d])];
                     for (int i = 0; i < indices[d].length; i++) {
                         indices[d][i] = i;
                     }
                 } else {
-                    indices[d] = new long[Math.toIntExact(count[d] * block[d])];
+                    indices[d] = new long[com.ebremer.falcon.hdf5.data.Elements.checkedInt(count[d] * block[d])];
                     int k = 0;
                     for (long j = 0; j < count[d]; j++) {
                         for (long b = 0; b < block[d]; b++) {
@@ -141,7 +141,7 @@ final class VirtualDataset {
             for (long[] index : indices) {
                 total *= index.length;
             }
-            long[] offsets = new long[Math.toIntExact(total)];
+            long[] offsets = new long[com.ebremer.falcon.hdf5.data.Elements.checkedInt(total)];
             int[] cursor = new int[rank];
             for (int i = 0; i < offsets.length; i++) {
                 long flat = 0;
