@@ -1,0 +1,20 @@
+{
+ "name": "v2_partial_fill",
+ "shape": [
+  10
+ ],
+ "dtype": "i4",
+ "values": [
+  0,
+  1,
+  2,
+  3,
+  7,
+  7,
+  7,
+  7,
+  7,
+  7
+ ],
+ "attributes": {}
+}

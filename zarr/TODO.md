@@ -12,7 +12,7 @@ is left, and why.
 | **zstd (encode)** | Not started. Needs a full compressor (match finder + FSE/Huffman encoders); much larger than the decoder. Falcon writes `gzip` or raw, which every implementation reads, so this is a nice-to-have. |
 | **blosc (decode)** | ✅ **Mostly done.** Container, block/split layout, byte shuffle, and the `lz4`/`lz4hc`/`zlib`/`zstd` internal compressors; validated against 40 c-blosc buffers. **Not** implemented: the `blosclz` and `snappy` internal codecs and the **bit-shuffle** filter — each is refused with `ZarrUnsupportedException` rather than mis-decoded. |
 | **blosc (encode)** | Not started, same reasoning as zstd encode. |
-| **Zarr v2 read-compat** | Not started. `.zgroup`/`.zarray`/`.zattrs`, v2 dtype strings (`<i4`, `\|u1`, …), v2 chunk keys (already implemented as a v3 key encoding), and the v2 compressor/filter mapping. zarr-python can write v2 fixtures (`zarr_format=2`), so it is verifiable. |
+| **Zarr v2 read-compat** | ✅ **Done (read).** `.zarray`/`.zgroup`/`.zattrs` are translated into the v3 model on open; NumPy dtype strings, the `.`/`/` dimension separator, and the `gzip`/`zstd`/`blosc` compressors are mapped. Validated against 12 zarr-python v2 fixtures plus a hand-built group hierarchy. **Not** supported: Fortran order for rank>1, v2 filters (delta/etc.), the `zlib` compressor, and writing v2 — each refused with a clear error. |
 | **ZipStore** | Not started. Small: `java.util.zip` over the existing `Store` SPI. |
 | **HttpStore (read-only)** | Not started. `java.net.http` with HTTP `Range` requests; the `Store.getRange`/`size` contract already fits. Needs a test server (`jdk.httpserver`). |
 

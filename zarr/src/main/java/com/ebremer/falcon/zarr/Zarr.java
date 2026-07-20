@@ -25,16 +25,16 @@ public final class Zarr {
     /**
      * Opens the root node of the hierarchy in {@code store}.
      *
-     * @throws ZarrFormatException      if there is no root {@code zarr.json} or it is malformed
-     * @throws ZarrUnsupportedException if the store is Zarr v2 or uses an unimplemented feature
+     * <p>Both Zarr v3 (a {@code zarr.json} at each node) and Zarr v2 ({@code .zarray}/{@code .zgroup}
+     * with a sidecar {@code .zattrs}) are read; v2 metadata is translated into the v3 model on open.
+     *
+     * @throws ZarrFormatException      if there is no root node metadata or it is malformed
+     * @throws ZarrUnsupportedException if the store uses an unimplemented feature
      */
     public static ZarrNode open(Store store) {
-        if (!store.exists("zarr.json")) {
-            if (store.exists(".zgroup") || store.exists(".zarray") || store.exists(".zattrs")) {
-                throw new ZarrUnsupportedException(
-                        "this looks like a Zarr v2 store; v2 support is planned (see PLAN.md, stage Z8)");
-            }
-            throw new ZarrFormatException("no root zarr.json found: not a Zarr v3 store");
+        if (!ZarrNode.hasNode(store, "")) {
+            throw new ZarrFormatException(
+                    "no root zarr.json, .zarray, or .zgroup found: not a Zarr store");
         }
         return ZarrNode.open(store, "");
     }

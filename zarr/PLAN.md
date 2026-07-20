@@ -11,10 +11,11 @@ It is **Falcon Phase 2**; the HDF5 module (Phase 1) is the sibling and the templ
 > compressors the ecosystem actually uses are decoded by hand-written, pure-Java implementations: a
 > **Zstandard** decoder (RFC 8878, validated against 18 libzstd frames — zarr-python's default) and a
 > **Blosc** decoder (container + `lz4`/`lz4hc`/`zlib`/`zstd` + byte shuffle, validated against 40
-> c-blosc buffers). Corrupt-input fuzzing is in place. 201 tests green.
+> c-blosc buffers). Zarr **v2 stores are read** too (`.zarray`/`.zgroup`/`.zattrs` translated to the v3 model).
+> Corrupt-input fuzzing is in place. 215 tests green.
 >
 > **Remaining** (tracked in [`TODO.md`](TODO.md)): zstd/blosc *encode*; blosc's `blosclz`/`snappy` and
-> bit-shuffle; Zarr v2 read-compat; Zip and HTTP stores; and from Z9 the decoded-chunk cache, a
+> bit-shuffle; Zip and HTTP stores; and from Z9 the decoded-chunk cache, a
 > streaming block API, a user guide, and benchmarks.
 
 ---
@@ -116,7 +117,7 @@ abstraction — Zarr keeps its own model and HDF5 is untouched.
 | Encoding | Key example (coords 1,2) | Separator | Stage |
 |---|---|---|---|
 | `default` | `c/1/2` (0-d: `c`) | `/` (default) or `.` | Z3 |
-| `v2` | `1.2` | `.` (default) or `/` | Z3 (v2 read-compat: Z8) |
+| `v2` | `1.2` | `.` (default) or `/` | Z3 (v2 store read-compat: Z8 ✅) |
 
 ### 5.3 Codecs
 | Codec | Kind | Approach | Decode | Encode |

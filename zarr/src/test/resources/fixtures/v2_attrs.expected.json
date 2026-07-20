@@ -1,0 +1,17 @@
+{
+ "name": "v2_attrs",
+ "shape": [
+  4
+ ],
+ "dtype": "i4",
+ "values": [
+  0,
+  1,
+  2,
+  3
+ ],
+ "attributes": {
+  "units": "K",
+  "n": 3
+ }
+}

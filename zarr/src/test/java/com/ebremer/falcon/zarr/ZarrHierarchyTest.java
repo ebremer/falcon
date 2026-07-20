@@ -106,10 +106,13 @@ class ZarrHierarchyTest {
     }
 
     @Test
-    void zarrV2StoreIsReportedUnsupported() {
+    void zarrV2GroupIsOpenedViaTranslation() {
         MemoryStore store = new MemoryStore();
         put(store, ".zgroup", "{\"zarr_format\":2}");
-        assertThrows(ZarrUnsupportedException.class, () -> Zarr.open(store));
+        put(store, ".zattrs", "{\"note\":\"v2\"}");
+        ZarrNode root = Zarr.open(store);
+        assertTrue(root.isGroup());
+        assertEquals("v2", root.asGroup().attributes().get("note").asString());
     }
 
     @Test

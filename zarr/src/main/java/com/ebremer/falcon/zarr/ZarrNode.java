@@ -5,7 +5,9 @@ import com.ebremer.falcon.zarr.metadata.ArrayMetadata;
 import com.ebremer.falcon.zarr.metadata.GroupMetadata;
 import com.ebremer.falcon.zarr.metadata.Metadata;
 import com.ebremer.falcon.zarr.metadata.NodeMetadata;
+import com.ebremer.falcon.zarr.metadata.V2Metadata;
 import com.ebremer.falcon.zarr.store.Store;
+import java.util.Optional;
 
 /**
  * A node in a Zarr hierarchy: either a {@link ZarrGroup} or a {@link ZarrArray}. Every node is located
@@ -74,19 +76,50 @@ public abstract sealed class ZarrNode permits ZarrGroup, ZarrArray {
         return path.isEmpty() ? "/" : path;
     }
 
-    /** The metadata key ({@code zarr.json}) for a node at {@code path}. */
+    /** The metadata key ({@code zarr.json}) for a v3 node at {@code path}. */
     static String metadataKey(String path) {
-        return path.isEmpty() ? "zarr.json" : path + "/zarr.json";
+        return key(path, "zarr.json");
     }
 
-    /** Reads and classifies the node at {@code path}, dispatching on its {@code node_type}. */
+    /** A store key {@code name} beneath {@code path} ({@code name} itself for the root). */
+    static String key(String path, String name) {
+        return path.isEmpty() ? name : path + "/" + name;
+    }
+
+    /** Whether a node (v3 or v2) exists at {@code path}. */
+    static boolean hasNode(Store store, String path) {
+        return store.exists(key(path, "zarr.json"))
+                || store.exists(key(path, V2Metadata.ZARRAY))
+                || store.exists(key(path, V2Metadata.ZGROUP));
+    }
+
+    /** Reads and classifies the node at {@code path}: v3 {@code zarr.json} first, then v2 metadata. */
     static ZarrNode open(Store store, String path) {
-        byte[] json = store.get(metadataKey(path)).orElseThrow(
-                () -> new ZarrFormatException("no zarr.json at '" + (path.isEmpty() ? "/" : path) + "'"));
-        NodeMetadata meta = Metadata.parse(json, metadataKey(path));
+        NodeMetadata meta = loadMetadata(store, path);
         return switch (meta) {
             case GroupMetadata g -> new ZarrGroup(store, path, g);
             case ArrayMetadata a -> new ZarrArray(store, path, a);
         };
+    }
+
+    private static NodeMetadata loadMetadata(Store store, String path) {
+        Optional<byte[]> v3 = store.get(key(path, "zarr.json"));
+        if (v3.isPresent()) {
+            return Metadata.parse(v3.get(), metadataKey(path));
+        }
+        Optional<byte[]> zarray = store.get(key(path, V2Metadata.ZARRAY));
+        if (zarray.isPresent()) {
+            return V2Metadata.parseArray(zarray.get(), attrs(store, path), key(path, V2Metadata.ZARRAY));
+        }
+        Optional<byte[]> zgroup = store.get(key(path, V2Metadata.ZGROUP));
+        if (zgroup.isPresent()) {
+            return V2Metadata.parseGroup(zgroup.get(), attrs(store, path), key(path, V2Metadata.ZGROUP));
+        }
+        throw new ZarrFormatException(
+                "no zarr.json, .zarray, or .zgroup at '" + (path.isEmpty() ? "/" : path) + "'");
+    }
+
+    private static byte[] attrs(Store store, String path) {
+        return store.get(key(path, V2Metadata.ZATTRS)).orElse(null);
     }
 }

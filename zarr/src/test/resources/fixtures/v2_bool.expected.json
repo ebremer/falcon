@@ -1,0 +1,16 @@
+{
+ "name": "v2_bool",
+ "shape": [
+  6
+ ],
+ "dtype": "b1",
+ "values": [
+  true,
+  false,
+  true,
+  false,
+  true,
+  false
+ ],
+ "attributes": {}
+}

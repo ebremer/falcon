@@ -1,0 +1,15 @@
+{
+ "name": "v2_uint8",
+ "shape": [
+  5
+ ],
+ "dtype": "u1",
+ "values": [
+  0,
+  1,
+  2,
+  3,
+  4
+ ],
+ "attributes": {}
+}

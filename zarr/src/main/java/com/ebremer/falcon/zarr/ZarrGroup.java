@@ -40,9 +40,12 @@ public final class ZarrGroup extends ZarrNode {
         String dir = path.isEmpty() ? "" : path + "/";
         List<String> names = new ArrayList<>();
         for (String entry : store.listDir(dir)) {
-            // A child is a subdirectory ("<name>/") that has its own zarr.json.
-            if (entry.endsWith("/") && store.exists(entry + "zarr.json")) {
-                names.add(entry.substring(dir.length(), entry.length() - 1));
+            // A child is a subdirectory ("<name>/") that holds its own node metadata (v3 or v2).
+            if (entry.endsWith("/")) {
+                String childPath = entry.substring(0, entry.length() - 1);
+                if (ZarrNode.hasNode(store, childPath)) {
+                    names.add(entry.substring(dir.length(), entry.length() - 1));
+                }
             }
         }
         return names; // listDir returns sorted entries, so names are already sorted
@@ -51,7 +54,7 @@ public final class ZarrGroup extends ZarrNode {
     /** The direct child with the given name, if present. */
     public Optional<ZarrNode> child(String childName) {
         String childPath = childPath(childName);
-        if (!store.exists(ZarrNode.metadataKey(childPath))) {
+        if (!ZarrNode.hasNode(store, childPath)) {
             return Optional.empty();
         }
         return Optional.of(ZarrNode.open(store, childPath));
