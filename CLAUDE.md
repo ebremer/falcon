@@ -61,7 +61,7 @@ mvn -pl hdf5 compile       # compile just the hdf5 module
 
 ## Conventions
 
-- HDF5 code lives under `com.ebremer.falcon.hdf5.*`; sub-packages by format concern (see `PLAN.md` §6).
+- HDF5 code lives under `com.ebremer.falcon.hdf5.*`; sub-packages by format concern (see `hdf5/PLAN.md` §6).
 - Shared abstractions (byte I/O, checksums, the array/datatype/chunk model) may be promoted to a
   future `com.ebremer.falcon.core` module when the Zarr module lands — keep them cohesive.
 - Reference the spec section in a comment when implementing a non-obvious on-disk structure.

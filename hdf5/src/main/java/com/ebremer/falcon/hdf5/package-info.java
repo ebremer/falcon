@@ -5,7 +5,7 @@
  * headers, header messages, datatypes, dataspaces, data layout, and filters) lives in sub-packages
  * of {@code com.ebremer.falcon.hdf5} and is not exported.
  *
- * <p>See {@code PLAN.md} at the repository root for the phased roadmap, and {@code CLAUDE.md} for
+ * <p>See {@code hdf5/PLAN.md} for the phased roadmap, and {@code CLAUDE.md} for
  * project conventions.
  *
  * @see <a href="https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html">HDF5 File

@@ -191,4 +191,4 @@ Catch `HdfException` to handle any Falcon read/write failure.
 SOHM shared-message deduplication, the revised `H5R_ref_t` reference encoding, unlimited-pattern virtual
 datasets, and multi-file drivers (family/multi/split). On the write side, the bitfield/opaque/time
 datatype classes and indirect-block dense storage are not yet emitted. See
-[`PLAN.md`](../PLAN.md) for the full roadmap.
+[`PLAN.md`](PLAN.md) for the full roadmap.

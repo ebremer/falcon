@@ -4,7 +4,8 @@ Status snapshot: the **`hdf5` module is 1.0-ready** — read-complete (H0–H6),
 H9-essentially-complete (robustness, >2 GB, performance, streaming API, CI, docs). 144 tests green.
 
 Nothing below is required for a solid 1.0. Items are grouped by whether they are actionable now, blocked
-by this environment, or explicit non-goals. See [`../PLAN.md`](../PLAN.md) for the full roadmap.
+by this environment, or explicit non-goals. See [`PLAN.md`](PLAN.md) for the full roadmap, or the umbrella
+[`../PLAN.md`](../PLAN.md) for the program-level view.
 
 ## Unimplemented features (summary)
 

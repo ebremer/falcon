@@ -5,7 +5,7 @@ package com.ebremer.falcon.hdf5;
  *
  * <p>Targets the <em>HDF5 File Format Specification, Version 4.0</em> (as shipped with HDF5 2.0).
  * This class intentionally contains no format logic; the reader/writer entry points are added as the
- * roadmap in {@code PLAN.md} is implemented.
+ * roadmap in {@code hdf5/PLAN.md} is implemented.
  */
 public final class Hdf5 {
 
