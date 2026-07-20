@@ -68,7 +68,10 @@ public final class Hdf5Writer implements AutoCloseable {
     private static final int BT2_LINK_NAME = 5;    // 11-byte record: hash(4) + heap id(7)
     private static final int BT2_NODE_SIZE = 512;
 
+    private static final byte[] DATATYPE_INT8 = {0x10, 0x08, 0, 0, 1, 0, 0, 0, 0, 0, 0x08, 0};
+    private static final byte[] DATATYPE_INT16 = {0x10, 0x08, 0, 0, 2, 0, 0, 0, 0, 0, 0x10, 0};
     private static final byte[] DATATYPE_INT32 = {0x10, 0x08, 0, 0, 4, 0, 0, 0, 0, 0, 0x20, 0};
+    private static final byte[] DATATYPE_INT64 = {0x10, 0x08, 0, 0, 8, 0, 0, 0, 0, 0, 0x40, 0};
     private static final byte[] DATATYPE_FLOAT32 = {
         0x11, 0x20, 0x1f, 0, 4, 0, 0, 0, 0, 0, 0x20, 0, 0x17, 0x08, 0, 0x17, 0x7f, 0, 0, 0
     };
@@ -130,6 +133,26 @@ public final class Hdf5Writer implements AutoCloseable {
 
     public DatasetWriter stringDataset(String name, String[] data, long[] shape) {
         return rootWriter.stringDataset(name, data, shape);
+    }
+
+    public DatasetWriter byteDataset(String name, byte[] data, long[] shape) {
+        return rootWriter.byteDataset(name, data, shape);
+    }
+
+    public DatasetWriter shortDataset(String name, short[] data, long[] shape) {
+        return rootWriter.shortDataset(name, data, shape);
+    }
+
+    public DatasetWriter longDataset(String name, long[] data, long[] shape) {
+        return rootWriter.longDataset(name, data, shape);
+    }
+
+    public DatasetWriter floatDataset(String name, float[] data, long[] shape) {
+        return rootWriter.floatDataset(name, data, shape);
+    }
+
+    public DatasetWriter fixedStringDataset(String name, String[] data, long[] shape) {
+        return rootWriter.fixedStringDataset(name, data, shape);
     }
 
     public DatasetWriter intChunkedDataset(String name, int[] data, long[] shape, long[] chunkShape) {
@@ -215,6 +238,53 @@ public final class Hdf5Writer implements AutoCloseable {
         public DatasetWriter doubleDataset(String name, double[] data, long[] shape) {
             requireElementCount(shape, data.length);
             return addDataset(new DatasetSpec(name, DATATYPE_FLOAT64, 8, shape, null, doubleBytes(data), null));
+        }
+
+        /** A signed 8-bit integer dataset. */
+        public DatasetWriter byteDataset(String name, byte[] data, long[] shape) {
+            requireElementCount(shape, data.length);
+            return addDataset(new DatasetSpec(name, DATATYPE_INT8, 1, shape, null, data.clone(), null));
+        }
+
+        /** A signed 16-bit integer dataset. */
+        public DatasetWriter shortDataset(String name, short[] data, long[] shape) {
+            requireElementCount(shape, data.length);
+            return addDataset(new DatasetSpec(name, DATATYPE_INT16, 2, shape, null, shortBytes(data), null));
+        }
+
+        /** A signed 64-bit integer dataset. */
+        public DatasetWriter longDataset(String name, long[] data, long[] shape) {
+            requireElementCount(shape, data.length);
+            return addDataset(new DatasetSpec(name, DATATYPE_INT64, 8, shape, null, longBytes(data), null));
+        }
+
+        /** A 32-bit floating-point dataset. */
+        public DatasetWriter floatDataset(String name, float[] data, long[] shape) {
+            requireElementCount(shape, data.length);
+            return addDataset(new DatasetSpec(name, DATATYPE_FLOAT32, 4, shape, null, float32Bytes(data), null));
+        }
+
+        /**
+         * A fixed-length string dataset. Each element is stored in {@code length} bytes (the longest
+         * string's byte length if not given), null-padded; longer strings are truncated.
+         */
+        public DatasetWriter fixedStringDataset(String name, String[] data, long[] shape) {
+            int length = 1;
+            for (String s : data) {
+                length = Math.max(length, s.getBytes(StandardCharsets.US_ASCII).length);
+            }
+            return fixedStringDataset(name, data, shape, length);
+        }
+
+        /** A fixed-length string dataset with an explicit per-element byte {@code length}. */
+        public DatasetWriter fixedStringDataset(String name, String[] data, long[] shape, int length) {
+            requireElementCount(shape, data.length);
+            byte[] bytes = new byte[data.length * length];
+            for (int i = 0; i < data.length; i++) {
+                byte[] s = data[i].getBytes(StandardCharsets.US_ASCII);
+                System.arraycopy(s, 0, bytes, i * length, Math.min(s.length, length));
+            }
+            return addDataset(new DatasetSpec(name, fixedStringDatatype(length), length, shape, null, bytes, null));
         }
 
         /** A chunked {@code int32} dataset (fixed-array index). */
@@ -1706,6 +1776,36 @@ public final class Hdf5Writer implements AutoCloseable {
             out[i * 4 + 3] = (byte) (v >>> 24);
         }
         return out;
+    }
+
+    private static byte[] shortBytes(short[] data) {
+        byte[] out = new byte[data.length * 2];
+        for (int i = 0; i < data.length; i++) {
+            out[i * 2] = (byte) data[i];
+            out[i * 2 + 1] = (byte) (data[i] >>> 8);
+        }
+        return out;
+    }
+
+    private static byte[] longBytes(long[] data) {
+        byte[] out = new byte[data.length * 8];
+        for (int i = 0; i < data.length; i++) {
+            for (int b = 0; b < 8; b++) {
+                out[i * 8 + b] = (byte) (data[i] >>> (8 * b));
+            }
+        }
+        return out;
+    }
+
+    /** A fixed-length string (class 3) datatype message: null-padded, ASCII, of the given byte size. */
+    private static byte[] fixedStringDatatype(int size) {
+        GrowBuffer b = new GrowBuffer();
+        b.u8(0x13); // version 1, class 3 (string)
+        b.u8(0x01); // bit field: null-pad, ASCII
+        b.u8(0);
+        b.u8(0);
+        b.u32(size);
+        return b.toByteArray();
     }
 
     private static byte[] doubleBytes(double[] data) {

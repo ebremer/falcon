@@ -190,6 +190,29 @@ class WriteTest {
     }
 
     @Test
+    void roundTripAtomicDatatypes() throws IOException {
+        Path file = Files.createTempFile("falcon-atoms", ".h5");
+        try {
+            try (Hdf5Writer w = Hdf5Writer.create(file)) {
+                w.byteDataset("i1", new byte[] {-128, 0, 127}, new long[] {3});
+                w.shortDataset("i2", new short[] {-30000, 0, 30000}, new long[] {3});
+                w.longDataset("i8", new long[] {-9000000000L, 0, 9000000000L}, new long[] {3});
+                w.floatDataset("f4", new float[] {0.5f, -1.25f, 3.5f}, new long[] {3});
+                w.fixedStringDataset("s", new String[] {"ab", "cde", ""}, new long[] {3});
+            }
+            try (Hdf5File h5 = Hdf5File.open(file)) {
+                assertArrayEquals(new int[] {-128, 0, 127}, h5.root().dataset("i1").readInts());
+                assertArrayEquals(new int[] {-30000, 0, 30000}, h5.root().dataset("i2").readInts());
+                assertArrayEquals(new long[] {-9000000000L, 0, 9000000000L}, h5.root().dataset("i8").readLongs());
+                assertArrayEquals(new float[] {0.5f, -1.25f, 3.5f}, h5.root().dataset("f4").readFloats(), 0f);
+                assertArrayEquals(new String[] {"ab", "cde", ""}, h5.root().dataset("s").readStrings());
+            }
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    @Test
     void roundTripCompoundDataset() throws IOException {
         Path file = Files.createTempFile("falcon-compound", ".h5");
         try {
