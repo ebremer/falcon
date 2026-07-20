@@ -248,11 +248,11 @@ class MetadataTest {
     @Test
     void unsupportedCodecIsDeferredToPipelineBuild() {
         // Parsing succeeds (the node can be described); the failure surfaces on data access.
-        ArrayMetadata blosc = array(VALID_ARRAY.replace(
+        ArrayMetadata unknown = array(VALID_ARRAY.replace(
                 "\"codecs\":[{\"name\":\"bytes\",\"configuration\":{\"endian\":\"little\"}}]",
-                "\"codecs\":[{\"name\":\"bytes\",\"configuration\":{\"endian\":\"little\"}},{\"name\":\"blosc\"}]"));
-        assertEquals(List.of("bytes", "blosc"), blosc.codecNames());
-        assertThrows(ZarrUnsupportedException.class, blosc::pipeline);
+                "\"codecs\":[{\"name\":\"bytes\",\"configuration\":{\"endian\":\"little\"}},{\"name\":\"pcodec\"}]"));
+        assertEquals(List.of("bytes", "pcodec"), unknown.codecNames());
+        assertThrows(ZarrUnsupportedException.class, unknown::pipeline);
 
         ArrayMetadata empty = array(VALID_ARRAY.replace(
                 "\"codecs\":[{\"name\":\"bytes\",\"configuration\":{\"endian\":\"little\"}}]", "\"codecs\":[]"));

@@ -10,7 +10,8 @@ is left, and why.
 |---|---|
 | **zstd (decode)** | ✅ **Done.** Pure-Java, from RFC 8878; validated against 18 libzstd frames. This was the important one — zarr-python compresses with zstd by default, so Falcon can now read real-world stores. |
 | **zstd (encode)** | Not started. Needs a full compressor (match finder + FSE/Huffman encoders); much larger than the decoder. Falcon writes `gzip` or raw, which every implementation reads, so this is a nice-to-have. |
-| **blosc** | Not started. Needs the blosc container plus blosclz and LZ4 block decoding and the shuffle/bitshuffle filters. Reference vectors are now easy to produce (`numcodecs.Blosc`), so this is unblocked. |
+| **blosc (decode)** | ✅ **Mostly done.** Container, block/split layout, byte shuffle, and the `lz4`/`lz4hc`/`zlib`/`zstd` internal compressors; validated against 40 c-blosc buffers. **Not** implemented: the `blosclz` and `snappy` internal codecs and the **bit-shuffle** filter — each is refused with `ZarrUnsupportedException` rather than mis-decoded. |
+| **blosc (encode)** | Not started, same reasoning as zstd encode. |
 | **Zarr v2 read-compat** | Not started. `.zgroup`/`.zarray`/`.zattrs`, v2 dtype strings (`<i4`, `\|u1`, …), v2 chunk keys (already implemented as a v3 key encoding), and the v2 compressor/filter mapping. zarr-python can write v2 fixtures (`zarr_format=2`), so it is verifiable. |
 | **ZipStore** | Not started. Small: `java.util.zip` over the existing `Store` SPI. |
 | **HttpStore (read-only)** | Not started. `java.net.http` with HTTP `Range` requests; the `Store.getRange`/`size` contract already fits. Needs a test server (`jdk.httpserver`). |

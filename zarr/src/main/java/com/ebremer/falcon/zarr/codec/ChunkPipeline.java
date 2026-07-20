@@ -93,8 +93,10 @@ public final class ChunkPipeline {
                         requireBytesCodec(bytesCodec, name);
                         byteCodecs.add(ZstdCodec.parse(config));
                     }
-                    case "blosc" -> throw new ZarrUnsupportedException(
-                            "the blosc codec is not yet supported (planned; see PLAN.md, stage Z8)");
+                    case "blosc" -> {
+                        requireBytesCodec(bytesCodec, name);
+                        byteCodecs.add(BloscCodec.parse(config));
+                    }
                     default -> throw new ZarrUnsupportedException("unknown codec: '" + name + "'");
                 }
             }

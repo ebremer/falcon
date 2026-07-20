@@ -65,6 +65,18 @@ case("zstd_sharded", (32,), (4,), "int32", shards=(16,), compressors=[ZstdCodec(
 # zarr-python's out-of-the-box defaults, whatever they may be
 case("zarr_python_defaults", (64,), (16,), "int32", serializer="auto", compressors="auto")
 
+# --- blosc, the other compressor Zarr stores commonly use --------------------------
+from zarr.codecs import BloscCodec, BloscShuffle  # noqa: E402
+
+case("blosc_lz4_int32", (200,), (32,), "int32",
+     compressors=[BloscCodec(cname="lz4", clevel=5, shuffle=BloscShuffle.shuffle)])
+case("blosc_zstd_float64", (10, 12), (5, 6), "float64",
+     compressors=[BloscCodec(cname="zstd", clevel=3, shuffle=BloscShuffle.shuffle)])
+case("blosc_noshuffle_int16", (150,), (64,), "int16",
+     compressors=[BloscCodec(cname="lz4", clevel=1, shuffle=BloscShuffle.noshuffle)])
+case("blosc_zlib_uint8", (300,), (128,), "uint8",
+     compressors=[BloscCodec(cname="zlib", clevel=6, shuffle=BloscShuffle.noshuffle)])
+
 
 def values_for(dtype, n):
     if dtype.kind == "b":

@@ -58,7 +58,9 @@ class ConformanceTest {
         "attrs_int32",
         // zstd is what zarr-python compresses with by default
         "zstd_int32", "zstd_float64_2d", "zstd_crc32c_int16", "zstd_sharded",
-        "zarr_python_defaults"})
+        "zarr_python_defaults",
+        // blosc, the other compressor Zarr stores commonly use
+        "blosc_lz4_int32", "blosc_zstd_float64", "blosc_noshuffle_int16", "blosc_zlib_uint8"})
     void readsZarrPythonFixture(String name) {
         JsonObject meta = expected(name);
         ZarrArray array = Zarr.open(fixture(name)).asArray();

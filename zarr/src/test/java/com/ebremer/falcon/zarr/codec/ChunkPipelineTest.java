@@ -209,16 +209,21 @@ class ChunkPipelineTest {
     @Test
     void unsupportedCodecsAreReported() {
         assertThrows(ZarrUnsupportedException.class,
-                () -> pipe(DataType.INT32, new long[] {3}, BYTES_LE, spec("{\"name\":\"blosc\"}")));
-        assertThrows(ZarrUnsupportedException.class,
                 () -> pipe(DataType.INT32, new long[] {3}, BYTES_LE, spec("{\"name\":\"mystery\"}")));
+        assertThrows(ZarrUnsupportedException.class,
+                () -> pipe(DataType.INT32, new long[] {3}, BYTES_LE, spec("{\"name\":\"pcodec\"}")));
     }
 
     @Test
-    void zstdReadsButDoesNotWrite() {
-        // zstd is decode-only: Falcon reads zarr-python's default output but writes gzip or raw.
-        ChunkPipeline p = pipe(DataType.INT32, new long[] {3}, BYTES_LE, spec("{\"name\":\"zstd\"}"));
-        assertThrows(ZarrUnsupportedException.class, () -> p.encode(new byte[12], new byte[4]));
+    void compressorsWithoutEncodersReadButDoNotWrite() {
+        // zstd and blosc are decode-only: Falcon reads what other implementations wrote, and writes
+        // gzip or raw, which everything reads.
+        for (String name : new String[] {"zstd", "blosc"}) {
+            ChunkPipeline p = pipe(DataType.INT32, new long[] {3}, BYTES_LE,
+                    spec("{\"name\":\"" + name + "\"}"));
+            assertThrows(ZarrUnsupportedException.class, () -> p.encode(new byte[12], new byte[4]),
+                    name + " must refuse to encode");
+        }
     }
 
     @Test

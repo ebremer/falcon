@@ -7,13 +7,15 @@ It is **Falcon Phase 2**; the HDF5 module (Phase 1) is the sibling and the templ
 [`PLAN.md`](../PLAN.md) for the umbrella roadmap.
 
 > **Status: Z0–Z7 complete; Z8/Z9 partially complete.** The module reads and writes Zarr v3 and is
-> **verified against zarr-python 3.2.1** — 21 conformance fixtures with expected-value sidecars, plus a
-> pure-Java **Zstandard decoder** (RFC 8878) validated against 18 libzstd frames, which is what makes
-> real-world interop work since zarr-python compresses with zstd by default. Corrupt-input fuzzing is in
-> place. 192 tests green.
+> **verified against zarr-python 3.2.1** — 25 conformance fixtures with expected-value sidecars. Both
+> compressors the ecosystem actually uses are decoded by hand-written, pure-Java implementations: a
+> **Zstandard** decoder (RFC 8878, validated against 18 libzstd frames — zarr-python's default) and a
+> **Blosc** decoder (container + `lz4`/`lz4hc`/`zlib`/`zstd` + byte shuffle, validated against 40
+> c-blosc buffers). Corrupt-input fuzzing is in place. 201 tests green.
 >
-> **Remaining** (tracked in [`TODO.md`](TODO.md)): zstd *encode*, blosc, Zarr v2 read-compat, Zip/HTTP
-> stores; and from Z9 the decoded-chunk cache, a streaming block API, a user guide, and benchmarks.
+> **Remaining** (tracked in [`TODO.md`](TODO.md)): zstd/blosc *encode*; blosc's `blosclz`/`snappy` and
+> bit-shuffle; Zarr v2 read-compat; Zip and HTTP stores; and from Z9 the decoded-chunk cache, a
+> streaming block API, a user guide, and benchmarks.
 
 ---
 
@@ -124,7 +126,7 @@ abstraction — Zarr keeps its own model and HDF5 is untouched.
 | `gzip` | bytes → bytes | `java.util.zip` (gzip container) | Z4 | Z7 |
 | `crc32c` | bytes → bytes | `java.util.zip.CRC32C` (4-byte LE trailer) | Z4 | Z7 |
 | `sharding_indexed` | array → bytes | hand-written (sub-chunks + offset/length index) | Z6 | Z7 |
-| `blosc` | bytes → bytes | **from scratch, pure Java** (blosclz/lz4 + shuffle) | Z8 | Z8 |
+| `blosc` | bytes → bytes | **from scratch, pure Java** (container + lz4/zlib/zstd + shuffle) | Z8 ✅ (partial) | not planned |
 | `zstd` | bytes → bytes | **from scratch, pure Java** (RFC 8878) | Z8 ✅ | not planned |
 
 ### 5.4 Stores
