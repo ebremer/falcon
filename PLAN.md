@@ -12,14 +12,15 @@ writers of scientific-data formats.
 > mappings), the **superblock extension** (**File Space Info** + **free-space managers**), and **every**
 > object-header message type. **Write (H7–H8):** `Hdf5Writer` emits a valid modern-format file — v3
 > (checksummed) superblock, v2 (checksummed) object headers, a **nested group tree**, contiguous
-> **int32 / float64 / string / compound / enum / object-reference / array / vlen-sequence / native
-> complex** datasets (vlen via a global heap; references resolved across objects, forward refs
-> included), **chunked** datasets (fixed-array index) with **all six built-in filters encoded** (deflate,
-> shuffle, fletcher32, scale-offset, n-bit, and pure-Java **szip**), and scalar/array **attributes**,
-> switching groups and objects to **dense storage** (fractal heap + v2 B-tree) past 8 links/attributes,
-> and optionally the **earliest on-disk format** (v0 superblock, symbol-table groups, v1 headers) —
-> read back identically by Falcon *and h5py* (szip verified via libaec, since h5py's szip is disabled
-> here). Remaining: a few write datatypes (bitfield / opaque / time / fixed-length string); and a few
+> **every common atomic width (int8/16/32/64, float32/64, fixed-length string) / vlen string / compound
+> / enum / object-reference / array / vlen-sequence / native complex** datasets (vlen via a global heap;
+> references resolved across objects, forward refs included), **chunked** datasets (fixed-array index)
+> with **all six built-in filters encoded** (deflate, shuffle, fletcher32, scale-offset, n-bit, and
+> pure-Java **szip**), **compact or contiguous** layout, **custom fill values**, and scalar/array
+> **attributes**, switching groups and objects to **dense storage** (fractal heap + v2 B-tree) past 8
+> links/attributes, and optionally the **earliest on-disk format** (v0 superblock, symbol-table groups,
+> v1 headers) — read back identically by Falcon *and h5py* (szip verified via libaec, since h5py's szip
+> is disabled here). Remaining: a couple of niche write datatypes (bitfield / opaque / time); and a few
 > read edge cases that this environment can't produce (SOHM shared messages, unlimited-pattern VDS, the
 > revised reference encoding).
 
@@ -317,11 +318,15 @@ Each stage ends with a **milestone** and concrete **acceptance criteria**. "Refe
   of names + version-1 group B-tree + symbol-table node sorted by name), and version-1 object headers
   (the datatype/dataspace/layout/fill/attribute message bodies are reused unchanged). Object-header
   writing is a shared `List<Message>` framed as v1 or v2 by format; node structures are allocated at
-  their fixed sizes. Scope: contiguous datasets, compact attributes, nested groups, &le; 2&middot;K=8
-  children per group; chunked/filtered/dense throw. h5py-verified.
-- Remaining write breadth: the last few datatype classes (bitfield / opaque / time / fixed-length
-  string); fill-value policies; user-selectable layout; szip preprocessing + zero-block /
-  second-extension modes for better ratios; multi-SNOD / larger symbol-table groups.
+  their fixed sizes. Scope: contiguous datasets, compact attributes, nested groups, **multi-node
+  symbol-table groups** (name-sorted children across &le; 256 per group); chunked/filtered/dense throw.
+  h5py-verified.
+- **More atomics / layout / fill ✓**: signed **int8/16/64**, **float32**, and **fixed-length string**
+  datasets; **compact** layout (`.compact()`, data inline in the header); **custom fill values**
+  (`.fillValue(long|double)`, exposed on read via `Dataset.fillValueBytes()`). All h5py-verified.
+- Remaining write breadth (niche): the last datatype classes (bitfield / opaque / time); indirect-block
+  fractal heaps (dense sets over one direct block, i.e. thousands of links/attrs); szip preprocessing +
+  zero-block / second-extension encode modes for better compression ratios.
 - **Milestone:** round-trip parity across the full fixture matrix.
 - **Acceptance:** for every fixture, `Falcon-write → h5py-read` and `h5py-write → Falcon-read` agree on
   structure + data; property-based random round-trips pass.
