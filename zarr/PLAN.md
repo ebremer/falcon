@@ -16,7 +16,7 @@ It is **Falcon Phase 2**; the HDF5 module (Phase 1) is the sibling and the templ
 > **ZIP** archive, and read-only **HTTP** (byte-range requests). A per-array decoded-chunk cache,
 > a streaming `blocks()` API, and a user guide round out the Z9 polish. 228 tests green.
 >
-> **Remaining** (tracked in [`TODO.md`](TODO.md)): blosc *encode*; blosc's `snappy` internal codec; and benchmarks and byte-range coalescing for sharding.
+> **Remaining** (tracked in [`TODO.md`](TODO.md)): blosc's `snappy` internal codec (decode); and benchmarks and byte-range coalescing for sharding.
 
 ---
 
@@ -127,7 +127,7 @@ abstraction — Zarr keeps its own model and HDF5 is untouched.
 | `gzip` | bytes → bytes | `java.util.zip` (gzip container) | Z4 | Z7 |
 | `crc32c` | bytes → bytes | `java.util.zip.CRC32C` (4-byte LE trailer) | Z4 | Z7 |
 | `sharding_indexed` | array → bytes | hand-written (sub-chunks + offset/length index) | Z6 | Z7 |
-| `blosc` | bytes → bytes | **from scratch, pure Java** (container + blosclz/lz4/zlib/zstd + byte/bit shuffle) | Z8 ✅ | not planned |
+| `blosc` | bytes → bytes | **from scratch, pure Java** (container + blosclz/lz4/zlib/zstd + byte/bit shuffle) | Z8 ✅ | Z8 ✅ (byte shuffle + zstd) |
 | `zstd` | bytes → bytes | **from scratch, pure Java** (RFC 8878) | Z8 ✅ | Z8 ✅ (LZ77 + FSE) |
 
 ### 5.4 Stores

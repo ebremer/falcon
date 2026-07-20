@@ -172,6 +172,20 @@ class ZarrWriteTest {
     }
 
     @Test
+    void roundTripsWithBlosc() {
+        MemoryStore store = new MemoryStore();
+        ZarrArray a = Zarr.createArray(store, ArraySpec.builder(new long[] {4, 6}, DataType.INT32)
+                .chunkShape(4, 6).blosc().build());
+        int[] data = new int[24];
+        for (int i = 0; i < 24; i++) {
+            data[i] = i % 5;
+        }
+        a.writeInts(data);
+        assertTrue(store.get("c/0/0").orElseThrow().length < 24 * 4, "blosc should compress the chunk");
+        assertArrayEquals(data, Zarr.openArray(store).readInts());
+    }
+
+    @Test
     void writtenMetadataIsSpecOrdered() {
         MemoryStore store = new MemoryStore();
         Zarr.createArray(store, ArraySpec.builder(new long[] {4}, DataType.INT32).chunkShape(2).build());

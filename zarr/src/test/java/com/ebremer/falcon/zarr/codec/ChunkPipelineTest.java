@@ -222,10 +222,10 @@ class ChunkPipelineTest {
     }
 
     @Test
-    void bloscIsStillDecodeOnly() {
-        // blosc has no encoder yet: Falcon reads it but writes gzip/zstd/raw instead.
-        ChunkPipeline p = pipe(DataType.INT32, new long[] {3}, BYTES_LE, spec("{\"name\":\"blosc\"}"));
-        assertThrows(ZarrUnsupportedException.class, () -> p.encode(new byte[12], new byte[4]));
+    void bloscEncodesAndRoundTripsThroughThePipeline() {
+        ChunkPipeline p = pipe(DataType.INT32, new long[] {4}, BYTES_LE, spec("{\"name\":\"blosc\"}"));
+        byte[] elements = ints(LITTLE_ENDIAN, 5, 5, 5, 5);
+        assertArrayEquals(elements, p.decode(p.encode(elements, new byte[4])));
     }
 
     @Test

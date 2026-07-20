@@ -1,8 +1,8 @@
 package com.ebremer.falcon.zarr.codec;
 
 import com.ebremer.falcon.zarr.ZarrFormatException;
-import com.ebremer.falcon.zarr.ZarrUnsupportedException;
 import com.ebremer.falcon.zarr.codec.blosc.BloscDecoder;
+import com.ebremer.falcon.zarr.codec.blosc.BloscEncoder;
 import com.ebremer.falcon.zarr.codec.blosc.BloscFormatException;
 import com.ebremer.falcon.zarr.json.JsonObject;
 
@@ -14,14 +14,21 @@ import com.ebremer.falcon.zarr.json.JsonObject;
  * layout &mdash; is recorded in the buffer's own header, so the codec's {@code configuration} (which
  * describes how the <em>encoder</em> was set up) is not consulted when reading.
  *
- * <p>Only decoding is implemented, and only for the {@code lz4}, {@code lz4hc}, {@code zlib}, and
- * {@code zstd} internal compressors with byte-shuffle or no shuffle; {@code blosclz}, {@code snappy},
- * and bit-shuffle are reported as unsupported rather than mis-decoded.
+ * <p>Reading supports the {@code blosclz}/{@code lz4}/{@code lz4hc}/{@code zlib}/{@code zstd} internal
+ * compressors with byte- or bit-shuffle. Writing uses byte-shuffle plus zstd (see
+ * {@link BloscEncoder}); the element size for the shuffle comes from the array's data type, supplied
+ * when the pipeline is built.
  */
 final class BloscCodec implements BytesBytesCodec {
 
-    static BloscCodec parse(JsonObject configuration) {
-        return new BloscCodec();
+    private final int elementSize;
+
+    private BloscCodec(int elementSize) {
+        this.elementSize = elementSize;
+    }
+
+    static BloscCodec parse(JsonObject configuration, int elementSize) {
+        return new BloscCodec(elementSize);
     }
 
     @Override
@@ -31,7 +38,8 @@ final class BloscCodec implements BytesBytesCodec {
 
     @Override
     public long encodedSize(long decodedSize) {
-        throw new ZarrUnsupportedException("blosc has no fixed encoded size, so it cannot encode a shard index");
+        throw new com.ebremer.falcon.zarr.ZarrUnsupportedException(
+                "blosc has no fixed encoded size, so it cannot encode a shard index");
     }
 
     @Override
@@ -45,7 +53,6 @@ final class BloscCodec implements BytesBytesCodec {
 
     @Override
     public byte[] encode(byte[] input) {
-        throw new ZarrUnsupportedException(
-                "writing blosc is not supported; create the array with gzip or no compression");
+        return BloscEncoder.compress(input, elementSize);
     }
 }

@@ -13,6 +13,27 @@ final class Shuffle {
     }
 
     /**
+     * Applies the byte shuffle: groups the first byte of every element, then the second, and so on. The
+     * inverse of {@link #unshuffle}. Trailing bytes that do not form a whole element are copied through.
+     */
+    static void shuffle(byte[] src, int srcOff, byte[] dst, int dstOff, int length, int typeSize) {
+        if (typeSize <= 1) {
+            System.arraycopy(src, srcOff, dst, dstOff, length);
+            return;
+        }
+        int elements = length / typeSize;
+        int remainder = length % typeSize;
+        for (int element = 0; element < elements; element++) {
+            for (int b = 0; b < typeSize; b++) {
+                dst[dstOff + b * elements + element] = src[srcOff + element * typeSize + b];
+            }
+        }
+        if (remainder > 0) {
+            System.arraycopy(src, srcOff + length - remainder, dst, dstOff + length - remainder, remainder);
+        }
+    }
+
+    /**
      * Undoes the byte shuffle: {@code src} holds all first bytes, then all second bytes, and so on.
      *
      * @param typeSize the element size the block was shuffled with

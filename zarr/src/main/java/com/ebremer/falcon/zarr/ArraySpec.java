@@ -66,6 +66,13 @@ public final class ArraySpec {
         if (b.zstd) {
             inner.add(named("zstd", JsonObject.builder().put("level", 0).put("checksum", false).build()));
         }
+        if (b.blosc) {
+            boolean shuffle = b.dataType.byteCount() > 1;
+            inner.add(named("blosc", JsonObject.builder()
+                    .put("cname", "zstd").put("clevel", 5)
+                    .put("shuffle", shuffle ? "shuffle" : "noshuffle")
+                    .put("typesize", b.dataType.byteCount()).put("blocksize", 0).build()));
+        }
         if (b.crc32c) {
             inner.add(named("crc32c", null));
         }
@@ -161,6 +168,7 @@ public final class ArraySpec {
         private ByteOrder endian = ByteOrder.LITTLE_ENDIAN;
         private Integer gzipLevel;
         private boolean zstd;
+        private boolean blosc;
         private boolean crc32c;
         private long[] subChunkShape;
         private boolean indexAtStart;
@@ -213,6 +221,12 @@ public final class ArraySpec {
         /** Compresses chunks with {@code zstd} (Falcon's pure-Java encoder; libzstd/zarr-python read it). */
         public Builder zstd() {
             this.zstd = true;
+            return this;
+        }
+
+        /** Compresses chunks with {@code blosc} (byte-shuffle + zstd; c-blosc/zarr-python read it). */
+        public Builder blosc() {
+            this.blosc = true;
             return this;
         }
 
