@@ -6,10 +6,12 @@ It is **Falcon Phase 2**; the HDF5 module (Phase 1) is the sibling and the templ
 (reader-before-writer, thin vertical slice first, every stage gated by conformance tests). See the root
 [`PLAN.md`](../PLAN.md) for the umbrella roadmap.
 
-> **Status: Z0 complete.** The Maven module builds in the reactor; the foundations are in place — a
-> hand-written JSON reader/writer (`json`), the `Store` SPI with `MemoryStore` and `FileSystemStore`
-> (`store`), and the `ZarrException` hierarchy — with 30 unit tests green. Next: **Z1** (metadata +
-> hierarchy read).
+> **Status: Z1 complete.** On top of the Z0 foundations (JSON, store SPI, errors), the module now parses
+> `zarr.json` into typed `GroupMetadata`/`ArrayMetadata` (internal `metadata` package) and exposes a
+> read-only hierarchy — `Zarr.open(store)` → `ZarrNode` / `ZarrGroup` / `ZarrArray`, with shape, data
+> type, chunk shape, fill value, codecs, and dimension names. The `json` and `store` packages are now
+> exported (attributes/fill values are JSON; callers supply a store). 63 unit tests green. Next: **Z2**
+> (data types + fill values).
 
 ---
 
@@ -148,7 +150,7 @@ store written by zarr-python (§8). Stages are dependency-ordered.
 - **Acceptance:** `mvn -pl zarr test` green; JSON parses the canonical special values and re-serializes
   byte-stable; `MemoryStore`/`FileSystemStore` pass get/set/delete/list unit tests, including byte ranges.
 
-### Z1 — Metadata & hierarchy (read)
+### Z1 — Metadata & hierarchy (read) ✅ *done*
 - **Metadata parse**: `ArrayMetadata` (`zarr_format`=3, `node_type`="array", `shape`, `data_type`,
   `chunk_grid`, `chunk_key_encoding`, `fill_value`, `codecs`, plus optional `attributes`,
   `dimension_names`, `storage_transformers`) and `GroupMetadata` (`zarr_format`, `node_type`,

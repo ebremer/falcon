@@ -1,0 +1,38 @@
+package com.ebremer.falcon.zarr.metadata;
+
+import com.ebremer.falcon.zarr.ZarrFormatException;
+import com.ebremer.falcon.zarr.json.Json;
+import com.ebremer.falcon.zarr.json.JsonException;
+import com.ebremer.falcon.zarr.json.JsonObject;
+import com.ebremer.falcon.zarr.json.JsonValue;
+
+/** Parses a {@code zarr.json} document into typed {@link NodeMetadata}. */
+public final class Metadata {
+
+    private Metadata() {
+    }
+
+    /**
+     * Parses the UTF-8 {@code zarr.json} bytes of one node. {@code key} is the store key the bytes came
+     * from, used only in diagnostics.
+     *
+     * @throws ZarrFormatException if the JSON is malformed or violates the array/group schema
+     * @throws com.ebremer.falcon.zarr.ZarrUnsupportedException if the node uses an unimplemented feature
+     */
+    public static NodeMetadata parse(byte[] json, String key) {
+        JsonValue root;
+        try {
+            root = Json.parse(json);
+        } catch (JsonException e) {
+            throw new ZarrFormatException("malformed JSON in '" + key + "': " + e.getMessage(), e);
+        }
+        JsonObject o = Fields.object(root, key);
+        String nodeType = Fields.string(Fields.require(o, "node_type", key), key + ".node_type");
+        return switch (nodeType) {
+            case "group" -> GroupMetadata.parse(o, key);
+            case "array" -> ArrayMetadata.parse(o, key);
+            default -> throw new ZarrFormatException(
+                    key + ": node_type must be 'array' or 'group', was '" + nodeType + "'");
+        };
+    }
+}

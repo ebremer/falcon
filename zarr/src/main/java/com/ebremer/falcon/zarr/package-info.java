@@ -1,8 +1,11 @@
 /**
  * Public API for Falcon's Zarr reader/writer (Zarr v3 core specification).
  *
- * <p>Scaffolding only for now &mdash; the implementation is built out per the stages in
- * {@code zarr/PLAN.md} (Falcon Phase 2). The entry points, hierarchy ({@code ZarrGroup} /
- * {@code ZarrArray}), and data model land in stage Z0/Z1.
+ * <p>{@link com.ebremer.falcon.zarr.Zarr#open} reads a hierarchy from a
+ * {@link com.ebremer.falcon.zarr.store.Store} and returns its root
+ * {@link com.ebremer.falcon.zarr.ZarrNode} &mdash; a {@link com.ebremer.falcon.zarr.ZarrGroup} or a
+ * {@link com.ebremer.falcon.zarr.ZarrArray}. Groups navigate to their children; arrays describe their
+ * shape, data type, chunk shape, fill value, and codecs. Reading element data arrives in a later stage
+ * (see {@code zarr/PLAN.md}).
  */
 package com.ebremer.falcon.zarr;

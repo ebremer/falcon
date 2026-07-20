@@ -9,9 +9,12 @@
  * (e.g. {@code blosc}, {@code zstd}) are implemented from scratch in pure Java, mirroring the HDF5
  * module's {@code szip} decision.
  *
- * <p>Only the public API package is exported; the store, metadata, codec, and chunk machinery is
- * encapsulated.
+ * <p>The public API package is exported, along with the {@code json} model (Zarr attributes and fill
+ * values are arbitrary JSON) and the {@code store} SPI (callers supply a store to open). The metadata,
+ * codec, and chunk machinery stays encapsulated.
  */
 module com.ebremer.falcon.zarr {
     exports com.ebremer.falcon.zarr;
+    exports com.ebremer.falcon.zarr.json;
+    exports com.ebremer.falcon.zarr.store;
 }
