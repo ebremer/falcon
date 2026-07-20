@@ -138,17 +138,22 @@ public final class Filters {
     }
 
     private static final int NBIT_ATOMIC = 1;
+    private static final int NBIT_COMPOUND = 3;
 
     /**
-     * Decodes an n-bit chunk (filter id 5) for an atomic datatype. The filter drops each element's
-     * padding bits, packing only its {@code precision} significant bits (at bit {@code offset},
-     * MSB-first, from the start of the chunk); decoding restores full-width, zero-padded elements in
-     * the datatype's byte order. Client data: {@code [total, flag, nelmts, ATOMIC, size, order,
-     * precision, offset]}. Only atomic datatypes are supported (compound n-bit is future work).
+     * Decodes an n-bit chunk (filter id 5). The filter drops each element's padding bits, packing only
+     * the {@code precision} significant bits (at bit {@code offset}, MSB-first, from the chunk start);
+     * decoding restores full-width, zero-padded elements in the datatype's byte order. Atomic client
+     * data: {@code [total, flag, nelmts, ATOMIC, size, order, precision, offset]}; compound datatypes
+     * ({@code clientData[3] == 3}) pack each record's atomic members in turn.
      */
     private static byte[] nbit(byte[] data, int[] clientData, int uncompressedSize) {
-        if (clientData.length < 8 || clientData[3] != NBIT_ATOMIC) {
-            throw new HdfUnsupportedException("only atomic n-bit datatypes are supported");
+        int typeClass = clientData.length > 3 ? clientData[3] : NBIT_ATOMIC;
+        if (typeClass == NBIT_COMPOUND) {
+            return nbitCompound(data, clientData, uncompressedSize);
+        }
+        if (clientData.length < 8 || typeClass != NBIT_ATOMIC) {
+            throw new HdfUnsupportedException("n-bit datatype class " + typeClass + " is not supported");
         }
         int size = clientData[4];
         boolean bigEndian = clientData[5] == 1;
@@ -157,21 +162,57 @@ public final class Filters {
         int elements = uncompressedSize / size;
 
         byte[] out = new byte[uncompressedSize]; // padding bits stay zero
-        long bit = 0;
+        long[] bit = {0};
         for (int i = 0; i < elements; i++) {
-            long significant = 0;
-            for (int b = 0; b < precision; b++) {
-                significant = (significant << 1) | ((data[(int) (bit >> 3)] >> (7 - (int) (bit & 7))) & 1);
-                bit++;
-            }
-            long value = significant << offset;
-            int base = i * size;
-            for (int b = 0; b < size; b++) {
-                int shift = bigEndian ? (size - 1 - b) * 8 : b * 8;
-                out[base + b] = (byte) (value >>> shift);
+            unpackMember(data, bit, out, i * size, size, bigEndian, precision, offset);
+        }
+        return out;
+    }
+
+    /**
+     * Decodes a compound n-bit chunk: each record's atomic members are packed in turn, each member's
+     * {@code precision} bits (MSB-first) restored full-width and zero-padded at its byte {@code offset}
+     * within the record. Compound client data: {@code [total, flag, nelmts, COMPOUND, size, member
+     * count]} then, per member, {@code [offset, ATOMIC, size, order, precision, bit offset]}.
+     */
+    private static byte[] nbitCompound(byte[] data, int[] clientData, int uncompressedSize) {
+        int recordSize = clientData[4];
+        int members = clientData[5];
+        int elements = uncompressedSize / recordSize;
+        byte[] out = new byte[uncompressedSize];
+        long[] bit = {0};
+        for (int i = 0; i < elements; i++) {
+            int p = 6;
+            for (int m = 0; m < members; m++) {
+                int memberOffset = clientData[p];
+                if (clientData[p + 1] != NBIT_ATOMIC) {
+                    throw new HdfUnsupportedException("nested n-bit compound members are not supported");
+                }
+                int memberSize = clientData[p + 2];
+                boolean bigEndian = clientData[p + 3] == 1;
+                int precision = clientData[p + 4];
+                int bitOffset = clientData[p + 5];
+                unpackMember(data, bit, out, i * recordSize + memberOffset, memberSize,
+                        bigEndian, precision, bitOffset);
+                p += 6;
             }
         }
         return out;
+    }
+
+    /** Unpacks one atomic member's {@code precision} bits (MSB-first) into {@code out} at {@code base}. */
+    private static void unpackMember(byte[] data, long[] bit, byte[] out, int base, int size,
+                                     boolean bigEndian, int precision, int bitOffset) {
+        long significant = 0;
+        for (int b = 0; b < precision; b++) {
+            significant = (significant << 1) | ((data[(int) (bit[0] >> 3)] >> (7 - (int) (bit[0] & 7))) & 1);
+            bit[0]++;
+        }
+        long value = significant << bitOffset;
+        for (int b = 0; b < size; b++) {
+            int shift = bigEndian ? (size - 1 - b) * 8 : b * 8;
+            out[base + b] = (byte) (value >>> shift);
+        }
     }
 
     private static long readLittleEndian(byte[] d, int off, int n) {

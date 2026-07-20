@@ -3,6 +3,8 @@ package com.ebremer.falcon.hdf5;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -188,6 +190,24 @@ class DataReadChunkedTest {
         // 16-bit-precision unsigned stored in 4 bytes: n-bit packs only the significant bits.
         try (Hdf5File f = Hdf5File.open(Fixtures.path("nbit_data.h5"))) {
             assertArrayEquals(range(20), f.root().dataset("nbit_u").readInts());
+        }
+    }
+
+    @Test
+    void compoundNbit() throws IOException {
+        // Compound n-bit: a 12-bit int16 (@0) and a 20-bit uint32 (@2) per 8-byte record. Falcon has no
+        // compound-to-Java decode, so read the restored raw bytes and interpret each member's bits.
+        try (Hdf5File f = Hdf5File.open(Fixtures.path("compound_nbit.h5"))) {
+            ByteBuffer raw = ByteBuffer.wrap(f.root().dataset("c").readRawBytes()).order(ByteOrder.LITTLE_ENDIAN);
+            int[] a = new int[4];
+            long[] b = new long[4];
+            for (int i = 0; i < 4; i++) {
+                int av = raw.getShort(i * 8) & 0xFFF;       // 12 significant bits
+                a[i] = (av & 0x800) != 0 ? av - 0x1000 : av; // signed 12-bit
+                b[i] = raw.getInt(i * 8 + 2) & 0xFFFFF;      // 20 significant bits (unsigned)
+            }
+            assertArrayEquals(new int[] {1, -2, 3, -4}, a);
+            assertArrayEquals(new long[] {10, 20, 30, 40}, b);
         }
     }
 }

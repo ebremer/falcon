@@ -113,6 +113,26 @@ def build_nbit(path):
     f.close()
 
 
+def build_compound_nbit(path):
+    """A compound n-bit dataset: a 12-bit-precision int16 and a 20-bit-precision uint32 member packed
+    into an 8-byte record (via the low-level filter API)."""
+    tid = h5py.h5t.create(h5py.h5t.COMPOUND, 8)
+    a = h5py.h5t.STD_I16LE.copy(); a.set_precision(12)
+    b = h5py.h5t.STD_U32LE.copy(); b.set_precision(20)
+    tid.insert(b"a", 0, a)
+    tid.insert(b"b", 2, b)
+    dc = h5py.h5p.create(h5py.h5p.DATASET_CREATE)
+    dc.set_chunk((4,))
+    dc.set_filter(h5py.h5z.FILTER_NBIT, h5py.h5z.FLAG_MANDATORY, ())
+    f = h5py.File(path, "w")
+    dsid = h5py.h5d.create(f.id, b"c", tid, h5py.h5s.create_simple((4,)), dc)
+    data = np.zeros(4, dtype=np.dtype([("a", "<i2"), ("b", "<u4")]))
+    data["a"] = [1, -2, 3, -4]; data["b"] = [10, 20, 30, 40]
+    dsid.write(h5py.h5s.ALL, h5py.h5s.ALL, data)
+    dsid.close()
+    f.close()
+
+
 def build_attributes(f):
     """Attributes on the root, a group, and a dataset (string, scalar int/long, float array)."""
     f.attrs["title"] = "hello"
@@ -323,6 +343,7 @@ def main():
     with h5py.File(os.path.join(OUT, "chunked_data.h5"), "w") as f:
         build_chunked(f)
     build_nbit(os.path.join(OUT, "nbit_data.h5"))
+    build_compound_nbit(os.path.join(OUT, "compound_nbit.h5"))
     with h5py.File(os.path.join(OUT, "attributes.h5"), "w") as f:
         build_attributes(f)
     with h5py.File(os.path.join(OUT, "vlen_data.h5"), "w") as f:
