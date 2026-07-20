@@ -6,13 +6,12 @@ It is **Falcon Phase 2**; the HDF5 module (Phase 1) is the sibling and the templ
 (reader-before-writer, thin vertical slice first, every stage gated by conformance tests). See the root
 [`PLAN.md`](../PLAN.md) for the umbrella roadmap.
 
-> **Status: Z2 complete.** On top of Z0 (JSON, store SPI, errors) and Z1 (metadata + hierarchy), the
-> module now models every core data type (`DataType`/`DataTypeKind`, exported `datatype` package) —
-> bool, the signed/unsigned integers, float16/32/64, complex64/128, and the raw `r<N>` family — with a
-> byte-level fill-value codec (JSON ↔ element bytes, both byte orders, incl. NaN/±Infinity, the `0x…`
-> hex form, complex `[re, im]`, and raw). `zarr.json` parsing resolves and validates the data type and
-> fill value; `ZarrArray.dataType()`/`fillValueBytes(order)` surface them. 83 unit tests green. Next:
-> **Z3** (chunk grid + chunk key encoding).
+> **Status: Z3 complete.** On top of Z0–Z2, the module now has the chunk machinery (internal `chunk`
+> package): `RegularChunkGrid` (grid shape = `ceil(shape/chunk_shape)`, chunk origin, edge-chunk extent,
+> coordinate↔index) and `ChunkKeyEncoding` (`default`/`v2`, both separators, the rank-0 cases).
+> `zarr.json` parsing resolves these into typed objects, and `ZarrArray` surfaces `gridShape()`,
+> `chunkCount()`, and `chunkKey(coords…)` (the full store key, path-prefixed). 99 unit tests green.
+> Next: **Z4** (codec pipeline — decode).
 
 ---
 
@@ -172,7 +171,7 @@ store written by zarr-python (§8). Stages are dependency-ordered.
 - **Milestone:** every data type's element bytes and fill value are correct.
 - **Acceptance:** byte-level tests per type (incl. NaN/Inf fills, complex, raw); values match zarr-python.
 
-### Z3 — Chunk grid & chunk key encoding
+### Z3 — Chunk grid & chunk key encoding ✅ *done*
 - **Regular chunk grid**: `chunk_shape`; grid dimensions = `ceil(shape/chunk_shape)`; chunk-coordinate ↔
   key math; **edge chunks** are full `chunk_shape` in the decoded form (the out-of-bounds remainder is
   fill).

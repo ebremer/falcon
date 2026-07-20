@@ -2,6 +2,8 @@ package com.ebremer.falcon.zarr.metadata;
 
 import com.ebremer.falcon.zarr.ZarrFormatException;
 import com.ebremer.falcon.zarr.ZarrUnsupportedException;
+import com.ebremer.falcon.zarr.chunk.ChunkKeyEncoding;
+import com.ebremer.falcon.zarr.chunk.RegularChunkGrid;
 import com.ebremer.falcon.zarr.datatype.DataType;
 import com.ebremer.falcon.zarr.json.JsonArray;
 import com.ebremer.falcon.zarr.json.JsonObject;
@@ -31,26 +33,20 @@ public final class ArrayMetadata implements NodeMetadata {
             "zarr_format", "node_type", "shape", "data_type", "chunk_grid", "chunk_key_encoding",
             "fill_value", "codecs", "attributes", "dimension_names", "storage_transformers");
 
-    private final long[] shape;
+    private final RegularChunkGrid grid;
     private final DataType dataType;
-    private final NamedConfig chunkGrid;
-    private final long[] chunkShape;
-    private final NamedConfig chunkKeyEncoding;
-    private final String separator;
+    private final ChunkKeyEncoding chunkKeyEncoding;
     private final JsonValue fillValue;
     private final List<NamedConfig> codecs;
     private final JsonObject attributes;
     private final String[] dimensionNames; // null if absent; individual entries may be null (unnamed)
 
-    ArrayMetadata(long[] shape, DataType dataType, NamedConfig chunkGrid, long[] chunkShape,
-                  NamedConfig chunkKeyEncoding, String separator, JsonValue fillValue,
-                  List<NamedConfig> codecs, JsonObject attributes, String[] dimensionNames) {
-        this.shape = shape;
+    ArrayMetadata(RegularChunkGrid grid, DataType dataType, ChunkKeyEncoding chunkKeyEncoding,
+                  JsonValue fillValue, List<NamedConfig> codecs, JsonObject attributes,
+                  String[] dimensionNames) {
+        this.grid = grid;
         this.dataType = dataType;
-        this.chunkGrid = chunkGrid;
-        this.chunkShape = chunkShape;
         this.chunkKeyEncoding = chunkKeyEncoding;
-        this.separator = separator;
         this.fillValue = fillValue;
         this.codecs = codecs;
         this.attributes = attributes;
@@ -83,10 +79,12 @@ public final class ArrayMetadata implements NodeMetadata {
             throw new ZarrFormatException(ctx + ": chunk_shape rank " + chunkShape.length
                     + " does not match array rank " + rank);
         }
+        RegularChunkGrid grid = new RegularChunkGrid(shape, chunkShape);
 
-        NamedConfig chunkKeyEncoding =
+        NamedConfig encodingConfig =
                 NamedConfig.parse(Fields.require(o, "chunk_key_encoding", ctx), ctx + ".chunk_key_encoding");
-        String separator = parseSeparator(chunkKeyEncoding, ctx);
+        ChunkKeyEncoding chunkKeyEncoding =
+                ChunkKeyEncoding.of(encodingConfig.name(), parseSeparator(encodingConfig, ctx));
 
         JsonValue fillValue = Fields.require(o, "fill_value", ctx);
         try {
@@ -110,8 +108,8 @@ public final class ArrayMetadata implements NodeMetadata {
         rejectStorageTransformers(o, ctx);
         Fields.checkUnknownFields(o, KNOWN, ctx);
 
-        return new ArrayMetadata(shape, dataType, chunkGrid, chunkShape, chunkKeyEncoding, separator,
-                fillValue, List.copyOf(codecs), attributes, dimensionNames);
+        return new ArrayMetadata(grid, dataType, chunkKeyEncoding, fillValue, List.copyOf(codecs),
+                attributes, dimensionNames);
     }
 
     private static String parseSeparator(NamedConfig encoding, String ctx) {
@@ -162,12 +160,12 @@ public final class ArrayMetadata implements NodeMetadata {
 
     /** The array shape (a defensive copy). */
     public long[] shape() {
-        return shape.clone();
+        return grid.arrayShape();
     }
 
     /** The number of dimensions. */
     public int rank() {
-        return shape.length;
+        return grid.rank();
     }
 
     /** The element data type. */
@@ -182,22 +180,22 @@ public final class ArrayMetadata implements NodeMetadata {
 
     /** The chunk shape (a defensive copy); same rank as {@link #shape()}, all entries positive. */
     public long[] chunkShape() {
-        return chunkShape.clone();
+        return grid.chunkShape();
     }
 
-    /** The chunk grid extension ({@code name} is always {@code "regular"} in Z1). */
-    public NamedConfig chunkGrid() {
-        return chunkGrid;
+    /** The regular chunk grid (grid arithmetic and edge-chunk handling). */
+    public RegularChunkGrid grid() {
+        return grid;
     }
 
-    /** The chunk key encoding extension ({@code "default"} or {@code "v2"}). */
-    public NamedConfig chunkKeyEncoding() {
+    /** The chunk key encoding ({@code default} or {@code v2}). */
+    public ChunkKeyEncoding chunkKeyEncoding() {
         return chunkKeyEncoding;
     }
 
     /** The chunk key separator ({@code "/"} or {@code "."}). */
     public String separator() {
-        return separator;
+        return chunkKeyEncoding.separator();
     }
 
     /** The raw fill value, decoded to the element type in Z2. */

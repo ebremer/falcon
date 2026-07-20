@@ -56,7 +56,7 @@ class MetadataTest {
         assertEquals(2, a.rank());
         assertEquals("float64", a.dataType().name());
         assertArrayEquals(new long[] {2, 3}, a.chunkShape());
-        assertEquals("regular", a.chunkGrid().name());
+        assertArrayEquals(new long[] {2, 2}, a.grid().gridShape()); // ceil([4,6]/[2,3])
         assertEquals("default", a.chunkKeyEncoding().name());
         assertEquals("/", a.separator());
         assertEquals(0, a.fillValue().asNumber().intValue());

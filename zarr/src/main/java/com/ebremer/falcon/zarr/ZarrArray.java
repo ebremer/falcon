@@ -51,6 +51,29 @@ public final class ZarrArray extends ZarrNode {
         return metadata.chunkShape();
     }
 
+    /** The number of chunks along each dimension (a defensive copy): {@code ceil(shape / chunkShape)}. */
+    public long[] gridShape() {
+        return metadata.grid().gridShape();
+    }
+
+    /** The total number of chunks in the grid. */
+    public long chunkCount() {
+        return metadata.grid().chunkCount();
+    }
+
+    /**
+     * The store key of the chunk at the given grid coordinates, including this array's path prefix
+     * (for example {@code "temperature/c/1/2"}).
+     *
+     * @throws IllegalArgumentException  if the wrong number of coordinates is given
+     * @throws IndexOutOfBoundsException if a coordinate lies outside the chunk grid
+     */
+    public String chunkKey(long... coords) {
+        metadata.grid().checkCoords(coords);
+        String relative = metadata.chunkKeyEncoding().encode(coords);
+        return path.isEmpty() ? relative : path + "/" + relative;
+    }
+
     /** The element data type. */
     public DataType dataType() {
         return metadata.dataType();

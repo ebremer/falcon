@@ -22,10 +22,14 @@ class ZarrHierarchyTest {
     private static final String PLAIN_GROUP = "{\"zarr_format\":3,\"node_type\":\"group\"}";
 
     private static String arrayDoc(String shape, String dtype, String chunks) {
+        return arrayDoc(shape, dtype, chunks, "{\"name\":\"default\"}");
+    }
+
+    private static String arrayDoc(String shape, String dtype, String chunks, String encoding) {
         return "{\"zarr_format\":3,\"node_type\":\"array\",\"shape\":" + shape
                 + ",\"data_type\":\"" + dtype + "\","
                 + "\"chunk_grid\":{\"name\":\"regular\",\"configuration\":{\"chunk_shape\":" + chunks + "}},"
-                + "\"chunk_key_encoding\":{\"name\":\"default\"},"
+                + "\"chunk_key_encoding\":" + encoding + ","
                 + "\"fill_value\":0,"
                 + "\"codecs\":[{\"name\":\"bytes\",\"configuration\":{\"endian\":\"little\"}}]}";
     }
@@ -123,6 +127,36 @@ class ZarrHierarchyTest {
         assertEquals(List.of("nested", "temperature"), group.childNames());
         assertArrayEquals(new long[] {4, 4}, group.array("temperature").shape());
         assertArrayEquals(new long[] {10}, group.group("nested").array("values").shape());
+    }
+
+    @Test
+    void chunkKeysAndGridArithmetic() {
+        MemoryStore store = new MemoryStore();
+        put(store, "zarr.json", PLAIN_GROUP);
+        // 10x10 array, 4x4 chunks -> 3x3 grid, default "/" encoding, under path "img".
+        put(store, "img/zarr.json", arrayDoc("[10,10]", "uint8", "[4,4]"));
+
+        ZarrArray img = Zarr.openGroup(store).array("img");
+        assertArrayEquals(new long[] {3, 3}, img.gridShape());
+        assertEquals(9, img.chunkCount());
+        assertEquals("img/c/0/0", img.chunkKey(0, 0));
+        assertEquals("img/c/2/1", img.chunkKey(2, 1));
+        assertThrows(IndexOutOfBoundsException.class, () -> img.chunkKey(3, 0));
+        assertThrows(IllegalArgumentException.class, () -> img.chunkKey(0));
+    }
+
+    @Test
+    void chunkKeyHonorsEncodingAndRootPath() {
+        MemoryStore store = new MemoryStore();
+        // Root array with v2 encoding and "." separator: chunk key has no path prefix and no "c".
+        put(store, "zarr.json",
+                arrayDoc("[6,6]", "int8", "[2,2]", "{\"name\":\"v2\",\"configuration\":{\"separator\":\".\"}}"));
+
+        ZarrArray root = Zarr.openArray(store);
+        assertEquals("v2", root.chunkKeyEncoding());
+        assertEquals(".", root.separator());
+        assertEquals("1.2", root.chunkKey(1, 2));
+        assertEquals("0.0", root.chunkKey(0, 0));
     }
 
     @Test
