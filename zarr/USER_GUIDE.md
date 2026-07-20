@@ -102,8 +102,9 @@ Writes are chunk-aligned: a chunk the write covers completely is stored directly
 (including every edge chunk) is read back, updated, and re-encoded. A chunk that ends up holding only the
 fill value is **not stored** — its absence *is* the fill, which is how Zarr represents empty chunks.
 
-`ArraySpec.builder` also offers `endian`, `crc32c()`, `sharding(subChunkShape)`, `dimensionNames(...)`,
-and `chunkKeyEncoding("default"|"v2")`.
+`ArraySpec.builder` also offers `endian`, `gzip(level)`, `zstd()`, `blosc()`, `crc32c()`,
+`sharding(subChunkShape)`, `dimensionNames(...)`, and `chunkKeyEncoding("default"|"v2")`. The `zstd` and
+`blosc` compressors are written by Falcon's own pure-Java encoders (libzstd / c-blosc read the output).
 
 ## Groups and hierarchy
 
@@ -190,13 +191,17 @@ opens fine). Implement `Store` yourself for other backends (object stores, datab
 
 ## What is and isn't supported
 
-**Supported:** Zarr v3 read and write; Zarr v2 read; all core data types; the regular chunk grid; both
-chunk key encodings; the codecs above; sharding with efficient byte-range reads; selections; the memory,
-filesystem, ZIP, and HTTP stores.
+**Supported:** Zarr v3 read *and* write; Zarr v2 read; all core data types plus variable-length `string`;
+the regular chunk grid; both chunk key encodings; every codec in the table above (including `zstd` and
+`blosc` written by Falcon's own encoders, and all of blosc's internal codecs + both shuffle filters on
+read); sharding with efficient byte-range reads; selections and block streaming; the memory, filesystem,
+ZIP, and HTTP stores.
 
-**Not supported** (see [`TODO.md`](TODO.md)): writing `zstd`/`blosc`; `blosc`'s `blosclz`/`snappy`/
-bit-shuffle; Zarr v2 *writing*, Fortran order, and v2 filters; consolidated metadata and other registered
-extensions.
+**Not supported** (see [`TODO.md`](TODO.md)): the `vlen-bytes` data type; Zarr v2 *writing*, Fortran
+(`"F"`) order, and v2 filters; unrecognized `must_understand` metadata, non-`regular` chunk grids,
+object/extension data types, and storage transformers; and cloud object stores (implement the `Store` SPI
+yourself — the byte-range contract fits). The `zstd`/`blosc` encoders are correct and interoperable but
+single-level (not tuned for ratio).
 
 Corrupt input (bad metadata, truncated or damaged chunks, malformed compressed streams) fails with a typed
 exception — `ZarrFormatException`, `ZarrUnsupportedException`, or `ZarrException` — never a JVM crash or an
