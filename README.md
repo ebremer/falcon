@@ -61,9 +61,12 @@ try (Hdf5Writer w = Hdf5Writer.create(Path.of("out.h5"))) {
 
 The reader handles every HDF5 structure (all superblock/header/group forms, chunk indexes, filters,
 vlen, references, virtual datasets); the writer covers the common datatypes, all six filters, compact
-and dense storage, and both the modern and earliest on-disk formats. See
+and dense storage, and both the modern and earliest on-disk formats.
+
+See the **[HDF5 User Guide](hdf5/USER_GUIDE.md)** for a full walkthrough (reading, hyperslabs, streaming,
+writing every datatype, error handling, and performance), or
 [`Hdf5File`](hdf5/src/main/java/com/ebremer/falcon/hdf5/Hdf5File.java) and
-[`Hdf5Writer`](hdf5/src/main/java/com/ebremer/falcon/hdf5/Hdf5Writer.java) for the full API.
+[`Hdf5Writer`](hdf5/src/main/java/com/ebremer/falcon/hdf5/Hdf5Writer.java) for the API.
 
 ## Design highlights
 
