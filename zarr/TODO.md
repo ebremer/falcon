@@ -12,7 +12,6 @@ What follows is what is **left**. None of it blocks reading or writing real Zarr
 | Item | Notes |
 |---|---|
 | **Benchmarks** | Not started. No throughput/latency measurements exist yet. |
-| **blosc `snappy` internal codec (decode)** | The one blosc internal codec not implemented (dropped from modern c-blosc). Refused with `ZarrUnsupportedException` rather than mis-decoded. |
 
 ## Refused with a clear error (read side)
 
@@ -22,8 +21,6 @@ Recognized but not implemented; each fails with `ZarrUnsupportedException`, neve
   top-level v2 `zlib` compressor (blosc's *internal* zlib is supported).
 - **Metadata extensions:** any field marked `must_understand: true` that Falcon does not recognize, a
   non-`regular` chunk grid, an object (extension) data type, and storage transformers.
-
-(For blosc, only `snappy` is left — listed above; `blosclz` and bit-shuffle both decode.)
 
 ## Out of scope / inherent limits
 

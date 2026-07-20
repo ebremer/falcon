@@ -16,7 +16,7 @@ It is **Falcon Phase 2**; the HDF5 module (Phase 1) is the sibling and the templ
 > **ZIP** archive, and read-only **HTTP** (byte-range requests). A per-array decoded-chunk cache,
 > a streaming `blocks()` API, and a user guide round out the Z9 polish. 228 tests green.
 >
-> **Remaining** (tracked in [`TODO.md`](TODO.md)): blosc's `snappy` internal codec (decode); and benchmarks and byte-range coalescing for sharding.
+> **Remaining** (tracked in [`TODO.md`](TODO.md)): and benchmarks and byte-range coalescing for sharding.
 
 ---
 

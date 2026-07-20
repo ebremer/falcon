@@ -5,7 +5,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import com.ebremer.falcon.zarr.ZarrUnsupportedException;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.URISyntaxException;
@@ -20,19 +19,17 @@ import org.junit.jupiter.api.Test;
  * Validates the from-scratch Blosc container decoder against reference buffers produced by
  * <b>c-blosc</b> (via numcodecs; see {@code tools/fixtures/gen_blosc_vectors.py}).
  *
- * <p>Vectors using an internal codec or filter Falcon does not implement ({@code blosclz},
- * {@code snappy}, bit-shuffle) must be reported as unsupported rather than silently mis-decoded, which
- * is asserted just as strictly as a correct decode.
+ * <p>Every internal codec and shuffle filter in the vector set decodes; an undefined internal codec must
+ * be reported as an error rather than silently mis-decoded, which is asserted just as strictly.
  */
 class BloscDecoderTest {
 
     private record Vector(String name, String cname, int clevel, String shuffle, int typeSize,
                           byte[] original, byte[] buffer) {
 
-        /** Whether Falcon implements this vector's internal codec (only snappy is not). */
+        /** Every internal codec in the vector set is implemented (blosclz/lz4/lz4hc/zlib/zstd). */
         boolean supported() {
-            boolean memcpyed = buffer.length >= 3 && (buffer[2] & 0x02) != 0;
-            return memcpyed || !cname.equals("snappy");
+            return true;
         }
     }
 
@@ -99,21 +96,20 @@ class BloscDecoderTest {
     }
 
     @Test
-    void anUnsupportedInternalCodecIsRefusedNotMisdecoded() {
-        // numcodecs does not emit snappy, so craft a minimal Blosc buffer that uses it: a single block
-        // whose one stream is "compressed" (so the decoder must invoke the internal codec).
+    void anUnknownInternalCodecIsRefusedNotMisdecoded() {
+        // Every defined internal codec (0..4) is now implemented, so craft a buffer using an undefined
+        // codec code (5): a single block whose one stream is "compressed" so the codec is invoked.
         byte[] buffer = new byte[27];
         buffer[0] = 2;          // version
         buffer[1] = 1;          // version of the internal codec format
-        buffer[2] = (byte) (2 << 5); // flags: internal codec 2 (snappy), no shuffle, no memcpy
+        buffer[2] = (byte) (5 << 5); // flags: internal codec 5 (undefined), no shuffle, no memcpy
         buffer[3] = 1;          // typesize
         putLe32(buffer, 4, 8);  // nbytes (decompressed)
         putLe32(buffer, 8, 8);  // blocksize
         putLe32(buffer, 12, 27); // cbytes (total)
         putLe32(buffer, 16, 20); // block 0 offset
         putLe32(buffer, 20, 3);  // stream compressed length (!= 8, so not stored raw)
-        // bytes 24..26 are the (unused) snappy payload
-        assertThrows(ZarrUnsupportedException.class, () -> BloscDecoder.decompress(buffer));
+        assertThrows(BloscFormatException.class, () -> BloscDecoder.decompress(buffer));
     }
 
     private static void putLe32(byte[] b, int off, int value) {

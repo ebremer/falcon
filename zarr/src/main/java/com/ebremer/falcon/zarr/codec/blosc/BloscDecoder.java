@@ -24,10 +24,10 @@ import java.util.zip.Inflater;
  * decision follows encoder-side heuristics, it is recovered here from the payload sizes rather than
  * re-derived, which is both simpler and robust across c-blosc versions.
  *
- * <p>Internal codecs supported: {@code lz4} and {@code lz4hc} (identical block format), {@code zlib}
- * (via {@code java.util.zip}), and {@code zstd} (via Falcon's own decoder). {@code blosclz} and
- * {@code snappy} are not implemented, nor is the bit-shuffle filter; each is reported as
- * {@link ZarrUnsupportedException} rather than decoded wrongly.
+ * <p>All of Blosc's internal codecs are supported: {@code blosclz}, {@code lz4}/{@code lz4hc} (identical
+ * block format), {@code zlib} (via {@code java.util.zip}), {@code zstd} (via Falcon's own decoder), and
+ * {@code snappy}; and both the byte- and bit-shuffle filters. A buffer using an undefined internal codec
+ * or an unsupported format version is reported as a format/unsupported error rather than decoded wrongly.
  */
 public final class BloscDecoder {
 
@@ -190,8 +190,7 @@ public final class BloscDecoder {
             }
             case COMPRESSOR_ZLIB -> zlib(src, srcOff, srcLen, dst, dstOff, dstLen);
             case COMPRESSOR_BLOSCLZ -> BloscLz.decompress(src, srcOff, srcLen, dst, dstOff, dstLen);
-            case COMPRESSOR_SNAPPY -> throw new ZarrUnsupportedException(
-                    "the Blosc internal codec 'snappy' is not supported (see zarr/TODO.md)");
+            case COMPRESSOR_SNAPPY -> Snappy.decompress(src, srcOff, srcLen, dst, dstOff, dstLen);
             default -> throw new BloscFormatException("unknown Blosc internal codec " + compressor);
         }
     }
