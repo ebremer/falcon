@@ -13,8 +13,8 @@ is left, and why.
 | **blosc (decode)** | ✅ **Mostly done.** Container, block/split layout, byte shuffle, and the `lz4`/`lz4hc`/`zlib`/`zstd` internal compressors; validated against 40 c-blosc buffers. **Not** implemented: the `blosclz` and `snappy` internal codecs and the **bit-shuffle** filter — each is refused with `ZarrUnsupportedException` rather than mis-decoded. |
 | **blosc (encode)** | Not started, same reasoning as zstd encode. |
 | **Zarr v2 read-compat** | ✅ **Done (read).** `.zarray`/`.zgroup`/`.zattrs` are translated into the v3 model on open; NumPy dtype strings, the `.`/`/` dimension separator, and the `gzip`/`zstd`/`blosc` compressors are mapped. Validated against 12 zarr-python v2 fixtures plus a hand-built group hierarchy. **Not** supported: Fortran order for rank>1, v2 filters (delta/etc.), the `zlib` compressor, and writing v2 — each refused with a clear error. |
-| **ZipStore** | Not started. Small: `java.util.zip` over the existing `Store` SPI. |
-| **HttpStore (read-only)** | Not started. `java.net.http` with HTTP `Range` requests; the `Store.getRange`/`size` contract already fits. Needs a test server (`jdk.httpserver`). |
+| **ZipStore** | ✅ **Done (read).** Opens a `.zip` archive as a store (`java.util.zip`); `ZipStore.pack(source, target)` builds one from any store. In-place writes into a ZIP are not supported (ZIP has no random update). |
+| **HttpStore (read-only)** | ✅ **Done.** GET/HEAD/`Range` over `java.net.HttpURLConnection` (kept in `java.base`, not `java.net.http`). Arrays (incl. sharded, via byte ranges) and named-child navigation work; directory listing does not exist over plain HTTP, so `list`/`listDir` are unsupported. |
 
 ## Z9 — API polish, performance, robustness, docs
 

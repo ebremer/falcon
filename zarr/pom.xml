@@ -26,4 +26,31 @@
             <scope>test</scope>
         </dependency>
     </dependencies>
+
+    <build>
+        <plugins>
+            <!-- HttpStoreTest uses the JDK's com.sun.net.httpserver as an in-process test server.
+                 That module is needed only to compile and run the tests; the shipped module-info
+                 still requires nothing beyond java.base. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <testCompilerArgument>--add-modules=jdk.httpserver</testCompilerArgument>
+                    <compilerArgs>
+                        <arg>--add-reads</arg>
+                        <arg>com.ebremer.falcon.zarr=jdk.httpserver</arg>
+                    </compilerArgs>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <argLine>--add-modules jdk.httpserver
+                        --add-reads com.ebremer.falcon.zarr=jdk.httpserver</argLine>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
 </project>
