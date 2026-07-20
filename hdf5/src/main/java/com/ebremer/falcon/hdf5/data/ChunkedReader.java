@@ -100,12 +100,20 @@ public final class ChunkedReader {
 
     private static byte[] readChunk(FileContext ctx, ChunkRecord chunk, FilterPipeline pipeline,
                                     int elementSize, int chunkBytes) {
+        if (pipeline == null) {
+            // Unfiltered chunks are a cheap copy straight from the memory mapping; no need to cache.
+            return ctx.buffer().getBytes(chunk.address(), chunk.size());
+        }
+        byte[] cached = ctx.chunkCache().get(chunk.address());
+        if (cached != null) {
+            return cached;
+        }
         byte[] raw = ctx.buffer().getBytes(chunk.address(), chunk.size());
-        byte[] bytes = pipeline == null ? raw
-                : pipeline.decode(raw, chunk.filterMask(), elementSize, chunkBytes);
+        byte[] bytes = pipeline.decode(raw, chunk.filterMask(), elementSize, chunkBytes);
         if (bytes.length < chunkBytes) {
             throw new HdfFormatException("decoded chunk is " + bytes.length + " bytes, expected " + chunkBytes);
         }
+        ctx.chunkCache().put(chunk.address(), bytes);
         return bytes;
     }
 

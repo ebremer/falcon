@@ -15,6 +15,7 @@ public final class FileContext {
     private final int sizeOfOffsets;
     private final int sizeOfLengths;
     private final Path path;
+    private ChunkCache chunkCache; // per-file decoded-chunk cache, created on first use
 
     public FileContext(HdfBuffer buffer, int sizeOfOffsets, int sizeOfLengths) {
         this(buffer, sizeOfOffsets, sizeOfLengths, null);
@@ -29,6 +30,14 @@ public final class FileContext {
 
     public HdfBuffer buffer() {
         return buffer;
+    }
+
+    /** This file's decoded-chunk cache (created lazily), shared across reads of the file. */
+    public ChunkCache chunkCache() {
+        if (chunkCache == null) {
+            chunkCache = new ChunkCache();
+        }
+        return chunkCache;
     }
 
     /** The file's path, or {@code null} if unknown (e.g. a buffer not backed by a file). */
