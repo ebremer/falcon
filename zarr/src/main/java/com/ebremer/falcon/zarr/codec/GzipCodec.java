@@ -1,6 +1,7 @@
 package com.ebremer.falcon.zarr.codec;
 
 import com.ebremer.falcon.zarr.ZarrFormatException;
+import com.ebremer.falcon.zarr.ZarrUnsupportedException;
 import com.ebremer.falcon.zarr.json.JsonObject;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -20,6 +21,11 @@ final class GzipCodec implements BytesBytesCodec {
     @Override
     public String name() {
         return "gzip";
+    }
+
+    @Override
+    public long encodedSize(long decodedSize) {
+        throw new ZarrUnsupportedException("gzip has no fixed encoded size, so it cannot encode a shard index");
     }
 
     @Override

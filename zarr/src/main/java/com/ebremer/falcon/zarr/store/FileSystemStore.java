@@ -9,6 +9,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.stream.Stream;
 
 /**
@@ -100,6 +101,19 @@ public final class FileSystemStore implements Store {
     @Override
     public boolean exists(String key) {
         return Files.isRegularFile(resolve(key));
+    }
+
+    @Override
+    public OptionalLong size(String key) {
+        Path path = resolve(key);
+        if (!Files.isRegularFile(path)) {
+            return OptionalLong.empty();
+        }
+        try {
+            return OptionalLong.of(Files.size(path));
+        } catch (IOException e) {
+            throw new ZarrException("failed to size key '" + key + "'", e);
+        }
     }
 
     @Override

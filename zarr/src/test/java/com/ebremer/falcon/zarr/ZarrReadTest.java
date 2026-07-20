@@ -237,6 +237,11 @@ class ZarrReadTest {
         }
 
         @Override
+        public java.util.OptionalLong size(String key) {
+            return delegate.size(key);
+        }
+
+        @Override
         public List<String> list() {
             return delegate.list();
         }

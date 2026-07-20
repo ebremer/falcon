@@ -17,6 +17,11 @@ final class Crc32cCodec implements BytesBytesCodec {
     }
 
     @Override
+    public long encodedSize(long decodedSize) {
+        return decodedSize + 4;
+    }
+
+    @Override
     public byte[] decode(byte[] input) {
         if (input.length < 4) {
             throw new ZarrFormatException("crc32c: chunk is shorter than the 4-byte checksum");

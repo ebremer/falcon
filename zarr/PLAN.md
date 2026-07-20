@@ -6,12 +6,11 @@ It is **Falcon Phase 2**; the HDF5 module (Phase 1) is the sibling and the templ
 (reader-before-writer, thin vertical slice first, every stage gated by conformance tests). See the root
 [`PLAN.md`](../PLAN.md) for the umbrella roadmap.
 
-> **Status: Z5 complete — the module reads arrays.** On top of Z0–Z4, the read path (internal `data`
-> package) assembles a hyperslab by touching only the chunks that overlap it, decoding each through the
-> codec pipeline (or filling an absent chunk) and copying the intersection into a flat C-order buffer;
-> `Elements` interprets that as `int[]`/`long[]`/`float[]`/`double[]`. `ZarrArray` exposes
-> `readDoubles()/readInts()/…` (whole array) and `select(offset, shape)` → `Selection` with the same
-> readers. 124 unit tests green. Next: **Z6** (sharding codec — read).
+> **Status: Z6 complete — the module is read-complete.** On top of Z0–Z5, the `sharding_indexed` codec
+> reads shards: it locates the `uint64` (offset, length) index at `index_location` `start`/`end`, decodes
+> it through `index_codecs`, and fetches **only the sub-chunks overlapping the requested region** via
+> store byte ranges (`Store.size()` + `getRange`); all-ones entries read as fill. 135 unit tests green.
+> Next: **Z7** (write path).
 
 ---
 
@@ -198,7 +197,7 @@ store written by zarr-python (§8). Stages are dependency-ordered.
 - **Acceptance:** whole-array and slab reads equal zarr-python for chunked, filtered, multi-dimensional,
   and partially-written (fill) arrays; a slab reads only its chunks.
 
-### Z6 — Sharding codec (read)
+### Z6 — Sharding codec (read) ✅ *done*
 - `sharding_indexed` (array→bytes): a shard packs many sub-chunks plus an **index** (per sub-chunk
   offset+length) encoded by `index_codecs` at `index_location` (`start`/`end`); read sub-chunks via the
   index using store **byte ranges**; inner `codecs` decode each sub-chunk; empty sub-chunks (all-ones
@@ -283,7 +282,7 @@ Z8  zstd/blosc + v2 + zip/http      ── "read compressed & v2 stores"
 Z9  API polish + perf + robustness  ── "Zarr module 1.0"
 ```
 
-Read-usable after **Z5** ✅; read-complete (incl. sharding) after **Z6**; write-complete after **Z7**.
+Read-usable after **Z5** ✅; read-complete (incl. sharding) after **Z6** ✅; write-complete after **Z7**.
 
 ## 10. Relationship to the HDF5 module and a future `core`
 

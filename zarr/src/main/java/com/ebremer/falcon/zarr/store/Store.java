@@ -2,6 +2,7 @@ package com.ebremer.falcon.zarr.store;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalLong;
 
 /**
  * A Zarr store: a map from string keys to byte sequences, with listing and partial (byte-range) reads.
@@ -35,6 +36,12 @@ public interface Store {
 
     /** True if {@code key} is present. */
     boolean exists(String key);
+
+    /**
+     * The size in bytes of the value under {@code key}, or empty if the key is absent. Needed to address
+     * a value's tail (a shard index stored at the end) without fetching the whole value.
+     */
+    OptionalLong size(String key);
 
     /** All keys in the store, sorted. */
     List<String> list();

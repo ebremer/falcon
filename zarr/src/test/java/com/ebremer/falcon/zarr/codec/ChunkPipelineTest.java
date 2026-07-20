@@ -185,8 +185,15 @@ class ChunkPipelineTest {
         assertThrows(ZarrUnsupportedException.class,
                 () -> pipe(DataType.INT32, new long[] {3}, BYTES_LE, spec("{\"name\":\"zstd\"}")));
         assertThrows(ZarrUnsupportedException.class,
-                () -> pipe(DataType.INT32, new long[] {3}, spec("{\"name\":\"sharding_indexed\"}")));
+                () -> pipe(DataType.INT32, new long[] {3}, BYTES_LE, spec("{\"name\":\"blosc\"}")));
         assertThrows(ZarrUnsupportedException.class,
                 () -> pipe(DataType.INT32, new long[] {3}, BYTES_LE, spec("{\"name\":\"mystery\"}")));
+    }
+
+    @Test
+    void shardingCodecRequiresItsConfiguration() {
+        // sharding_indexed is implemented (Z6), so a bare spec is malformed, not unsupported.
+        assertThrows(ZarrFormatException.class,
+                () -> pipe(DataType.INT32, new long[] {4}, spec("{\"name\":\"sharding_indexed\"}")));
     }
 }

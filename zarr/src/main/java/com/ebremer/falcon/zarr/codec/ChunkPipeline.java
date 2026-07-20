@@ -83,8 +83,12 @@ public final class ChunkPipeline {
                         requireBytesCodec(bytesCodec, name);
                         byteCodecs.add(new Crc32cCodec());
                     }
-                    case "sharding_indexed" -> throw new ZarrUnsupportedException(
-                            "the sharding_indexed codec is not yet supported (planned; see PLAN.md, stage Z6)");
+                    case "sharding_indexed" -> {
+                        if (bytesCodec != null) {
+                            throw new ZarrFormatException("more than one array->bytes codec");
+                        }
+                        bytesCodec = ShardingCodec.parse(config, dataType, boundaryShape);
+                    }
                     case "blosc", "zstd" -> throw new ZarrUnsupportedException(
                             "the " + name + " codec is not yet supported (planned; see PLAN.md, stage Z8)");
                     default -> throw new ZarrUnsupportedException("unknown codec: '" + name + "'");
@@ -118,19 +122,69 @@ public final class ChunkPipeline {
         return dataType;
     }
 
+    /** Whether the array&rarr;bytes codec is {@code sharding_indexed}. */
+    boolean isSharded() {
+        return bytesCodec instanceof ShardingCodec;
+    }
+
+    /** The encoded size of {@code rawLength} bytes after this pipeline's bytes&rarr;bytes codecs. */
+    long encodedLength(long rawLength) {
+        long length = rawLength;
+        for (BytesBytesCodec codec : byteCodecs) {
+            length = codec.encodedSize(length);
+        }
+        return length;
+    }
+
     /**
      * Decodes a chunk's stored bytes into its elements: a flat buffer of {@code elementsPerChunk} elements
-     * in C order, each primitive in {@link #elementOrder()}.
+     * in C order, each primitive in {@link #elementOrder()}. Empty sub-chunks of a shard decode as zeros;
+     * use {@link #decodeChunk} to supply the array's fill value.
      *
      * @throws ZarrFormatException if the bytes are truncated, fail a checksum, or otherwise malformed
      */
     public byte[] decode(byte[] stored) {
-        byte[] bytes = stored;
-        for (int i = byteCodecs.size() - 1; i >= 0; i--) {
-            bytes = byteCodecs.get(i).decode(bytes);
+        byte[] decoded = decodeChunk(ChunkBytes.of(stored), new byte[dataType.byteCount()],
+                new int[chunkShape.length], chunkShape);
+        if (decoded == null) {
+            throw new ZarrFormatException("chunk bytes were unexpectedly absent");
         }
+        return decoded;
+    }
+
+    /**
+     * Decodes the chunk read through {@code source}, returning its elements in C order.
+     *
+     * <p>{@code regionOrigin}/{@code regionShape} name the part of the chunk the caller needs: with a
+     * sharding codec and no other array-stage codecs, only the sub-chunks overlapping that region are
+     * fetched and decoded, and the rest of the returned buffer holds {@code fillElement}. Callers must
+     * not read outside the region they asked for.
+     *
+     * @return the chunk's elements, or {@code null} if the chunk is absent from the store
+     */
+    public byte[] decodeChunk(ChunkBytes source, byte[] fillElement, int[] regionOrigin, int[] regionShape) {
+        ChunkBytes effective = source;
+        if (!byteCodecs.isEmpty()) {
+            byte[] bytes = source.readAll().orElse(null);
+            if (bytes == null) {
+                return null;
+            }
+            for (int i = byteCodecs.size() - 1; i >= 0; i--) {
+                bytes = byteCodecs.get(i).decode(bytes);
+            }
+            effective = ChunkBytes.of(bytes);
+        }
+        // A transpose between the chunk and the bytes permutes axes, so a region expressed in logical
+        // coordinates does not map onto the encoded layout: decode the whole chunk in that case.
+        boolean wholeChunk = !arrayCodecs.isEmpty();
+        int[] origin = wholeChunk ? new int[boundaryShape.length] : regionOrigin;
+        int[] extent = wholeChunk ? boundaryShape : regionShape;
+
         int elementSize = dataType.byteCount();
-        ArrayValue array = bytesCodec.decode(bytes, boundaryShape, elementSize);
+        ArrayValue array = bytesCodec.decode(effective, boundaryShape, elementSize, fillElement, origin, extent);
+        if (array == null) {
+            return null;
+        }
         for (int i = arrayCodecs.size() - 1; i >= 0; i--) {
             array = arrayCodecs.get(i).decode(array, elementSize);
         }

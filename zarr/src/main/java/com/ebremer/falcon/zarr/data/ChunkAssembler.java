@@ -3,12 +3,14 @@ package com.ebremer.falcon.zarr.data;
 import com.ebremer.falcon.zarr.ZarrException;
 import com.ebremer.falcon.zarr.chunk.ChunkKeyEncoding;
 import com.ebremer.falcon.zarr.chunk.RegularChunkGrid;
+import com.ebremer.falcon.zarr.codec.ChunkBytes;
 import com.ebremer.falcon.zarr.codec.ChunkPipeline;
 import com.ebremer.falcon.zarr.datatype.DataType;
 import com.ebremer.falcon.zarr.metadata.ArrayMetadata;
 import com.ebremer.falcon.zarr.store.Store;
 import java.nio.ByteOrder;
 import java.util.Optional;
+import java.util.OptionalLong;
 
 /**
  * Reads a hyperslab from a chunked array by touching only the chunks that overlap the selection.
@@ -88,9 +90,19 @@ public final class ChunkAssembler {
         }
 
         long[] coord = firstChunk.clone();
+        int[] regionOrigin = new int[rank];
+        int[] regionShape = new int[rank];
         while (true) {
-            byte[] chunk = readChunk(store, arrayPath, meta, pipeline, encoding, coord,
-                    fillElement, chunkShape, elementSize);
+            // The part of this chunk the selection needs, in chunk-local coordinates.
+            for (int i = 0; i < rank; i++) {
+                long chunkOrigin = coord[i] * chunkShapeL[i];
+                long lo = Math.max(offset[i], chunkOrigin);
+                long hi = Math.min(selEnd[i], chunkOrigin + chunkShapeL[i]);
+                regionOrigin[i] = (int) (lo - chunkOrigin);
+                regionShape[i] = (int) (hi - lo);
+            }
+            byte[] chunk = readChunk(store, arrayPath, pipeline, encoding, coord,
+                    fillElement, chunkShape, elementSize, regionOrigin, regionShape);
             copyIntersection(out, selShape, offset, selEnd, coord, chunkShapeL, chunk, elementSize);
 
             int d = rank - 1;
@@ -107,15 +119,20 @@ public final class ChunkAssembler {
         return out;
     }
 
-    /** Fetches and decodes chunk {@code coord}; an absent chunk yields a fill-valued block. */
-    private static byte[] readChunk(Store store, String arrayPath, ArrayMetadata meta, ChunkPipeline pipeline,
+    /**
+     * Decodes chunk {@code coord}, passing the needed region through so a sharding codec can fetch only
+     * the sub-chunks that overlap it. An absent chunk yields a fill-valued block.
+     */
+    private static byte[] readChunk(Store store, String arrayPath, ChunkPipeline pipeline,
                                     ChunkKeyEncoding encoding, long[] coord, byte[] fillElement,
-                                    int[] chunkShape, int elementSize) {
+                                    int[] chunkShape, int elementSize,
+                                    int[] regionOrigin, int[] regionShape) {
         String relative = encoding.encode(coord);
         String key = arrayPath.isEmpty() ? relative : arrayPath + "/" + relative;
-        Optional<byte[]> stored = store.get(key);
-        if (stored.isPresent()) {
-            return pipeline.decode(stored.get());
+        byte[] decoded = pipeline.decodeChunk(new StoreChunkBytes(store, key), fillElement,
+                regionOrigin, regionShape);
+        if (decoded != null) {
+            return decoded;
         }
         int count = 1;
         for (int c : chunkShape) {
@@ -124,6 +141,25 @@ public final class ChunkAssembler {
         byte[] fill = new byte[count * elementSize];
         tile(fill, fillElement);
         return fill;
+    }
+
+    /** Byte-range access to one chunk in a store. */
+    private record StoreChunkBytes(Store store, String key) implements ChunkBytes {
+
+        @Override
+        public OptionalLong size() {
+            return store.size(key);
+        }
+
+        @Override
+        public Optional<byte[]> readAll() {
+            return store.get(key);
+        }
+
+        @Override
+        public Optional<byte[]> readRange(long offset, long length) {
+            return store.getRange(key, offset, length);
+        }
     }
 
     /** Copies chunk {@code coord}'s overlap with the selection into {@code out}. */

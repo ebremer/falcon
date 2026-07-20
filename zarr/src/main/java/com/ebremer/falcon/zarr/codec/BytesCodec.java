@@ -45,7 +45,12 @@ final class BytesCodec implements ArrayBytesCodec {
     }
 
     @Override
-    public ArrayValue decode(byte[] input, int[] shape, int elementSize) {
+    public ArrayValue decode(ChunkBytes source, int[] shape, int elementSize, byte[] fillElement,
+                             int[] regionOrigin, int[] regionShape) {
+        byte[] input = source.readAll().orElse(null);
+        if (input == null) {
+            return null;
+        }
         long expected = Pipelines.elementCount(shape) * (long) elementSize;
         if (input.length != expected) {
             throw new ZarrFormatException(

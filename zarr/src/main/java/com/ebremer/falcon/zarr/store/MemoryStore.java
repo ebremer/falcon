@@ -4,6 +4,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 
 /**
  * An in-memory {@link Store} backed by a map from key to bytes. Always writable. Values are copied in
@@ -45,6 +46,13 @@ public final class MemoryStore implements Store {
     public boolean exists(String key) {
         StoreKeys.validate(key);
         return data.containsKey(key);
+    }
+
+    @Override
+    public OptionalLong size(String key) {
+        StoreKeys.validate(key);
+        byte[] value = data.get(key);
+        return value == null ? OptionalLong.empty() : OptionalLong.of(value.length);
     }
 
     @Override
