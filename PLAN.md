@@ -16,11 +16,12 @@ writers of scientific-data formats.
 > complex** datasets (vlen via a global heap; references resolved across objects, forward refs
 > included), **chunked** datasets (fixed-array index) with **all six built-in filters encoded** (deflate,
 > shuffle, fletcher32, scale-offset, n-bit, and pure-Java **szip**), and scalar/array **attributes**,
-> switching groups and objects to **dense storage** (fractal heap + v2 B-tree) past 8 links/attributes —
+> switching groups and objects to **dense storage** (fractal heap + v2 B-tree) past 8 links/attributes,
+> and optionally the **earliest on-disk format** (v0 superblock, symbol-table groups, v1 headers) —
 > read back identically by Falcon *and h5py* (szip verified via libaec, since h5py's szip is disabled
-> here). Remaining: a few write datatypes (bitfield / opaque / time / fixed-length string) + older
-> formats; and a few read edge cases (SOHM shared messages, float scale-offset, compound n-bit, signed
-> szip, the revised reference encoding).
+> here). Remaining: a few write datatypes (bitfield / opaque / time / fixed-length string); and a few
+> read edge cases (SOHM shared messages, float scale-offset, compound n-bit, signed szip, the revised
+> reference encoding).
 
 ## Program roadmap (Falcon)
 
@@ -307,9 +308,16 @@ Each stage ends with a **milestone** and concrete **acceptance criteria**. "Refe
   bodies plus a name-indexed v2 B-tree (type 5 links / type 8 attributes), referenced from a Link Info
   or Attribute Info message. Generic `writeFractalHeap` / `writeV2BTree` helpers; h5py-verified
   (listing, iteration, and lookup-by-name). Indirect-block heaps (very large sets) still throw.
+- **Earliest-format write ✓** (`create(path, Format.EARLIEST)`): the original pre-1.8 format &mdash; a
+  version-0 superblock reaching the root through a symbol-table entry, symbol-table groups (local heap
+  of names + version-1 group B-tree + symbol-table node sorted by name), and version-1 object headers
+  (the datatype/dataspace/layout/fill/attribute message bodies are reused unchanged). Object-header
+  writing is a shared `List<Message>` framed as v1 or v2 by format; node structures are allocated at
+  their fixed sizes. Scope: contiguous datasets, compact attributes, nested groups, &le; 2&middot;K=8
+  children per group; chunked/filtered/dense throw. h5py-verified.
 - Remaining write breadth: the last few datatype classes (bitfield / opaque / time / fixed-length
   string); fill-value policies; user-selectable layout; szip preprocessing + zero-block /
-  second-extension modes for better ratios.
+  second-extension modes for better ratios; multi-SNOD / larger symbol-table groups.
 - **Milestone:** round-trip parity across the full fixture matrix.
 - **Acceptance:** for every fixture, `Falcon-write → h5py-read` and `h5py-write → Falcon-read` agree on
   structure + data; property-based random round-trips pass.
