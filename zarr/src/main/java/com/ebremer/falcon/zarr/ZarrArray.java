@@ -1,9 +1,11 @@
 package com.ebremer.falcon.zarr;
 
+import com.ebremer.falcon.zarr.datatype.DataType;
 import com.ebremer.falcon.zarr.json.JsonObject;
 import com.ebremer.falcon.zarr.json.JsonValue;
 import com.ebremer.falcon.zarr.metadata.ArrayMetadata;
 import com.ebremer.falcon.zarr.store.Store;
+import java.nio.ByteOrder;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
@@ -49,14 +51,19 @@ public final class ZarrArray extends ZarrNode {
         return metadata.chunkShape();
     }
 
-    /** The data-type name as written in {@code zarr.json} (for example {@code "float64"}). */
-    public String dataType() {
+    /** The element data type. */
+    public DataType dataType() {
         return metadata.dataType();
     }
 
-    /** The raw fill value; the typed decoding lands in Z2. */
+    /** The fill value, as raw JSON. See {@link #fillValueBytes(ByteOrder)} for the decoded element bytes. */
     public JsonValue fillValue() {
         return metadata.fillValue();
+    }
+
+    /** The fill value decoded to one element's bytes in the given order. */
+    public byte[] fillValueBytes(ByteOrder order) {
+        return metadata.fillValueBytes(order);
     }
 
     /** The codec names, in pipeline order. */
@@ -97,7 +104,7 @@ public final class ZarrArray extends ZarrNode {
 
     @Override
     public String toString() {
-        return "ZarrArray[" + display() + " " + dataType() + " shape=" + Arrays.toString(shape())
+        return "ZarrArray[" + display() + " " + dataType().name() + " shape=" + Arrays.toString(shape())
                 + " chunks=" + Arrays.toString(chunkShape()) + "]";
     }
 }

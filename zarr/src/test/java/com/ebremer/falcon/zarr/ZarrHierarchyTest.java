@@ -63,7 +63,7 @@ class ZarrHierarchyTest {
         assertEquals("temperature", temperature.path());
         assertArrayEquals(new long[] {4, 4}, temperature.shape());
         assertArrayEquals(new long[] {2, 2}, temperature.chunkShape());
-        assertEquals("float64", temperature.dataType());
+        assertEquals("float64", temperature.dataType().name());
         assertEquals(16, temperature.size());
         assertEquals(List.of("bytes"), temperature.codecNames());
 
@@ -71,7 +71,7 @@ class ZarrHierarchyTest {
         assertEquals("nested/values", values.path());
         assertEquals("values", values.name());
         assertArrayEquals(new long[] {10}, values.shape());
-        assertEquals("int32", values.dataType());
+        assertEquals("int32", values.dataType().name());
     }
 
     @Test
@@ -97,7 +97,7 @@ class ZarrHierarchyTest {
 
         ZarrNode root = Zarr.open(store);
         assertTrue(root.isArray());
-        assertEquals("uint8", Zarr.openArray(store).dataType());
+        assertEquals("uint8", Zarr.openArray(store).dataType().name());
         assertThrows(IllegalStateException.class, () -> Zarr.openGroup(store));
     }
 

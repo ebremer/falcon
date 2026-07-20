@@ -54,7 +54,7 @@ class MetadataTest {
         assertEquals(NodeType.ARRAY, a.nodeType());
         assertArrayEquals(new long[] {4, 6}, a.shape());
         assertEquals(2, a.rank());
-        assertEquals("float64", a.dataType());
+        assertEquals("float64", a.dataType().name());
         assertArrayEquals(new long[] {2, 3}, a.chunkShape());
         assertEquals("regular", a.chunkGrid().name());
         assertEquals("default", a.chunkKeyEncoding().name());
@@ -114,7 +114,7 @@ class MetadataTest {
     void ignoresUnknownFieldWithoutMustUnderstand() {
         ArrayMetadata a = array(VALID_ARRAY.replace(
                 "\"fill_value\":0", "\"fill_value\":0,\"future_hint\":{\"whatever\":true}"));
-        assertEquals("float64", a.dataType()); // parsed fine, unknown field ignored
+        assertEquals("float64", a.dataType().name()); // parsed fine, unknown field ignored
     }
 
     // ---- errors -----------------------------------------------------------------------------------
@@ -211,6 +211,24 @@ class MetadataTest {
         assertThrows(ZarrUnsupportedException.class, () -> array(VALID_ARRAY.replace(
                 "\"fill_value\":0",
                 "\"fill_value\":0,\"weird\":{\"must_understand\":true}")));
+    }
+
+    @Test
+    void rejectsFillValueIncompatibleWithDataType() {
+        // float64 array given a boolean fill value
+        ZarrFormatException e = assertThrows(ZarrFormatException.class,
+                () -> array(VALID_ARRAY.replace("\"fill_value\":0", "\"fill_value\":true")));
+        assertTrue(e.getMessage().contains("fill_value"));
+        // int16 fill out of range
+        assertThrows(ZarrFormatException.class, () -> array(VALID_ARRAY
+                .replace("\"data_type\":\"float64\"", "\"data_type\":\"int16\"")
+                .replace("\"fill_value\":0", "\"fill_value\":100000")));
+    }
+
+    @Test
+    void unknownDataTypeIsUnsupported() {
+        assertThrows(ZarrUnsupportedException.class,
+                () -> array(VALID_ARRAY.replace("\"data_type\":\"float64\"", "\"data_type\":\"float128\"")));
     }
 
     @Test

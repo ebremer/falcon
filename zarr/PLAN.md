@@ -6,12 +6,13 @@ It is **Falcon Phase 2**; the HDF5 module (Phase 1) is the sibling and the templ
 (reader-before-writer, thin vertical slice first, every stage gated by conformance tests). See the root
 [`PLAN.md`](../PLAN.md) for the umbrella roadmap.
 
-> **Status: Z1 complete.** On top of the Z0 foundations (JSON, store SPI, errors), the module now parses
-> `zarr.json` into typed `GroupMetadata`/`ArrayMetadata` (internal `metadata` package) and exposes a
-> read-only hierarchy — `Zarr.open(store)` → `ZarrNode` / `ZarrGroup` / `ZarrArray`, with shape, data
-> type, chunk shape, fill value, codecs, and dimension names. The `json` and `store` packages are now
-> exported (attributes/fill values are JSON; callers supply a store). 63 unit tests green. Next: **Z2**
-> (data types + fill values).
+> **Status: Z2 complete.** On top of Z0 (JSON, store SPI, errors) and Z1 (metadata + hierarchy), the
+> module now models every core data type (`DataType`/`DataTypeKind`, exported `datatype` package) —
+> bool, the signed/unsigned integers, float16/32/64, complex64/128, and the raw `r<N>` family — with a
+> byte-level fill-value codec (JSON ↔ element bytes, both byte orders, incl. NaN/±Infinity, the `0x…`
+> hex form, complex `[re, im]`, and raw). `zarr.json` parsing resolves and validates the data type and
+> fill value; `ZarrArray.dataType()`/`fillValueBytes(order)` surface them. 83 unit tests green. Next:
+> **Z3** (chunk grid + chunk key encoding).
 
 ---
 
@@ -163,7 +164,7 @@ store written by zarr-python (§8). Stages are dependency-ordered.
 - **Acceptance:** the hierarchy, shapes, data types, chunk shapes, fill values, and attributes match
   zarr-python for a fixture spanning nested groups + arrays.
 
-### Z2 — Data types & fill values
+### Z2 — Data types & fill values ✅ *done*
 - All core data types (§5.1): element size + byte layout; the `r*` raw type; a `DataType` model with a
   Java mapping (int/long/float/double/…).
 - **Fill-value JSON codec**: decode/encode per type — JSON numbers, the special-float strings, booleans,

@@ -15,6 +15,7 @@
  */
 module com.ebremer.falcon.zarr {
     exports com.ebremer.falcon.zarr;
+    exports com.ebremer.falcon.zarr.datatype;
     exports com.ebremer.falcon.zarr.json;
     exports com.ebremer.falcon.zarr.store;
 }

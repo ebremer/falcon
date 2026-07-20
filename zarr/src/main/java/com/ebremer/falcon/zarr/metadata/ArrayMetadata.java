@@ -2,10 +2,12 @@ package com.ebremer.falcon.zarr.metadata;
 
 import com.ebremer.falcon.zarr.ZarrFormatException;
 import com.ebremer.falcon.zarr.ZarrUnsupportedException;
+import com.ebremer.falcon.zarr.datatype.DataType;
 import com.ebremer.falcon.zarr.json.JsonArray;
 import com.ebremer.falcon.zarr.json.JsonObject;
 import com.ebremer.falcon.zarr.json.JsonString;
 import com.ebremer.falcon.zarr.json.JsonValue;
+import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -17,12 +19,11 @@ import java.util.Set;
  * Parsed array metadata: shape, data type, chunk grid, chunk key encoding, fill value, and codecs, plus
  * optional attributes and dimension names.
  *
- * <p>Z1 parses and validates the <em>structure</em> of every field, but defers semantic interpretation
- * to later stages: the {@code data_type} is kept as its spec name (the element layout lands in Z2), the
- * {@code fill_value} is kept as raw JSON (decoded in Z2), and the {@code codecs} are kept as
- * {@link NamedConfig}s (the pipeline is built in Z4). Only the {@code regular} chunk grid and the
- * {@code default}/{@code v2} chunk key encodings are recognized; anything else is reported as
- * {@link ZarrUnsupportedException}.
+ * <p>The {@code data_type} is resolved to a {@link DataType} and the {@code fill_value} is validated
+ * against it at parse time (though kept as raw JSON; {@link #fillValueBytes} decodes it on demand). The
+ * {@code codecs} are kept as {@link NamedConfig}s until the pipeline is built in Z4. Only the
+ * {@code regular} chunk grid and the {@code default}/{@code v2} chunk key encodings are recognized;
+ * anything else is reported as {@link ZarrUnsupportedException}.
  */
 public final class ArrayMetadata implements NodeMetadata {
 
@@ -31,7 +32,7 @@ public final class ArrayMetadata implements NodeMetadata {
             "fill_value", "codecs", "attributes", "dimension_names", "storage_transformers");
 
     private final long[] shape;
-    private final String dataType;
+    private final DataType dataType;
     private final NamedConfig chunkGrid;
     private final long[] chunkShape;
     private final NamedConfig chunkKeyEncoding;
@@ -41,7 +42,7 @@ public final class ArrayMetadata implements NodeMetadata {
     private final JsonObject attributes;
     private final String[] dimensionNames; // null if absent; individual entries may be null (unnamed)
 
-    ArrayMetadata(long[] shape, String dataType, NamedConfig chunkGrid, long[] chunkShape,
+    ArrayMetadata(long[] shape, DataType dataType, NamedConfig chunkGrid, long[] chunkShape,
                   NamedConfig chunkKeyEncoding, String separator, JsonValue fillValue,
                   List<NamedConfig> codecs, JsonObject attributes, String[] dimensionNames) {
         this.shape = shape;
@@ -68,7 +69,7 @@ public final class ArrayMetadata implements NodeMetadata {
             throw new ZarrUnsupportedException(
                     ctx + ".data_type: extension (object) data types are not yet supported");
         }
-        String dataType = Fields.string(dataTypeValue, ctx + ".data_type");
+        DataType dataType = DataType.of(Fields.string(dataTypeValue, ctx + ".data_type"));
 
         NamedConfig chunkGrid = NamedConfig.parse(Fields.require(o, "chunk_grid", ctx), ctx + ".chunk_grid");
         if (!chunkGrid.name().equals("regular")) {
@@ -88,6 +89,11 @@ public final class ArrayMetadata implements NodeMetadata {
         String separator = parseSeparator(chunkKeyEncoding, ctx);
 
         JsonValue fillValue = Fields.require(o, "fill_value", ctx);
+        try {
+            dataType.decodeFillValue(fillValue, ByteOrder.LITTLE_ENDIAN);
+        } catch (ZarrFormatException e) {
+            throw new ZarrFormatException(ctx + ".fill_value: " + e.getMessage(), e);
+        }
 
         JsonArray codecArray = Fields.array(Fields.require(o, "codecs", ctx), ctx + ".codecs");
         List<NamedConfig> codecs = new ArrayList<>(codecArray.size());
@@ -164,9 +170,14 @@ public final class ArrayMetadata implements NodeMetadata {
         return shape.length;
     }
 
-    /** The data-type name as written in {@code zarr.json} (for example {@code "float64"}). */
-    public String dataType() {
+    /** The element data type. */
+    public DataType dataType() {
         return dataType;
+    }
+
+    /** The fill value decoded to one element's bytes in the given order. */
+    public byte[] fillValueBytes(ByteOrder order) {
+        return dataType.decodeFillValue(fillValue, order);
     }
 
     /** The chunk shape (a defensive copy); same rank as {@link #shape()}, all entries positive. */
