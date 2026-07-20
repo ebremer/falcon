@@ -3,8 +3,8 @@
 **Falcon** is a multi-module Maven umbrella for **pure-JDK 25, zero-runtime-dependency** readers and
 writers of scientific-data formats.
 
-> **Status: read complete (H0–H6); write through H8; H9 (robustness / large-file / perf / CI) underway —
-> 141 tests green.** **Read (H0–H6):**
+> **Status: read complete (H0–H6); write through H8; H9 essentially complete (robustness, >2 GB, perf,
+> streaming API, CI, docs) — the HDF5 module is 1.0-ready. 144 tests green.** **Read (H0–H6):**
 > every superblock/header/group form, all datatype classes, compact / contiguous / **external-file** /
 > chunked storage with **every** chunk index at any scale (v1 B-tree, single-chunk, **implicit**, fixed
 > array, extensible array, v2 B-tree), all six filters (incl. pure-Java szip), hyperslabs, dense
@@ -332,7 +332,7 @@ Each stage ends with a **milestone** and concrete **acceptance criteria**. "Refe
 - **Acceptance:** for every fixture, `Falcon-write → h5py-read` and `h5py-write → Falcon-read` agree on
   structure + data; property-based random round-trips pass.
 
-### H9 — API polish, performance, docs  (in progress)
+### H9 — API polish, performance, docs  (essentially complete)
 - **Robustness ✓**: a corrupt-input fuzz test truncates and byte-flips 19 fixtures and forces a full
   read, asserting every failure is a typed `HdfException`/`IOException` &mdash; never a raw runtime
   exception, JVM crash, or hang. Fixes it drove: bounds-checked `HdfBuffer.segmentSlice` (+ overflow-safe
@@ -341,14 +341,19 @@ Each stage ends with a **milestone** and concrete **acceptance criteria**. "Refe
   short decoded chunk is rejected explicitly.
 - **Large-file ✓**: a test maps a sparse file and reads a marker past the 2 GB (`Integer.MAX_VALUE`)
   offset boundary that `MappedByteBuffer` can't cross &mdash; validating the FFM `MemorySegment` backend.
-- **Performance ✓ (partial)**: a hyperslab read of a chunked dataset now touches **only the chunks
-  overlapping the selection** (`ChunkedReader.assembleSelection`), instead of assembling the whole
-  dataset; contiguous selections already extract zero-copy. Remaining: chunk-cache reuse across reads,
-  benchmarks.
+- **Performance ✓**: a hyperslab / `blocks()` read of a chunked dataset touches **only the chunks
+  overlapping the selection** (`ChunkedReader.assembleSelection`) rather than assembling the whole
+  dataset (contiguous selections extract zero-copy), and a per-file **decoded-chunk LRU cache**
+  (`io.ChunkCache`, ~16 MB) reuses filter-decode results across reads.
+- **API ergonomics ✓**: scalar convenience reads (`Dataset.readInt/readLong/readDouble/readString`,
+  `Attribute.readInt/…`) and **block streaming** (`Dataset.blocks(rows)` &rarr; `Stream<Selection>`) for
+  processing a large dataset without materializing it whole.
 - **CI ✓**: GitHub Actions builds + tests the reactor on **JDK 25** (fixtures are committed and hermetic,
-  so no HDF5/h5py at build time). **Docs ✓**: README read/write usage examples.
-- Remaining: streaming / typed-convenience API ergonomics; a short user guide; mmap tuning + benchmarks.
-- **Milestone:** HDF5 module is 1.0-ready.
+  so no HDF5/h5py at build time). **Docs ✓**: README usage examples + a standalone
+  [user guide](hdf5/USER_GUIDE.md).
+- Remaining (optional polish): mmap-tuning benchmarks / a perf-regression harness.
+- **Milestone essentially met:** the module is 1.0-ready &mdash; read-complete, write-broad, hardened
+  against corrupt input, >2 GB-capable, documented, and CI-gated.
 
 ## 9. SZIP filter plan (in scope, pure Java)
 
