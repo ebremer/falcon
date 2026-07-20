@@ -33,8 +33,11 @@ Recognized but not implemented; each fails with `ZarrUnsupportedException`, neve
 
 ## Deferred by design
 
-- **`com.ebremer.falcon.core` extraction** — promoting the shared array/dtype/chunk model out of both the
-  hdf5 and zarr modules into one core module (see `zarr/PLAN.md` §10). A planned refactor, not a gap.
+- **`com.ebremer.falcon.core` extraction — investigated and deferred.** A survey of the two finished
+  modules found no shared *model* to extract: data types, byte I/O, checksums, and chunk indexing are all
+  format-specific and correctly separate (details in `zarr/PLAN.md` §10). The only mechanically-shareable
+  code is a ~40-line n-d block-copy kernel — too small to justify a module. Revisit if a third format or a
+  deliberate unified model emerges.
 
 ## Notes
 

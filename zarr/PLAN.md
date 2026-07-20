@@ -292,10 +292,26 @@ Read-usable after **Z5** ✅; read-complete (incl. sharding) after **Z6** ✅; w
 
 ## 10. Relationship to the HDF5 module and a future `core`
 
-Zarr and HDF5 share concepts — an N-dimensional typed array, chunk grids, filter/codec pipelines,
-selections, checksums (crc32c here, lookup3/fletcher32 there), and byte I/O. This module reuses the
-**patterns** proven in HDF5 (reader-before-writer, hermetic h5py/zarr-python fixtures, typed errors,
-touch-only-needed-chunks, a decoded-chunk cache, corrupt-input fuzzing) but keeps its own code until the
-shared array/dtype/chunk/selection model is stable enough to extract into
-**`com.ebremer.falcon.core`**, at which point both modules depend on it. That extraction is a deliberate,
-separate step — not a prerequisite for Zarr.
+Zarr and HDF5 share *concepts* — an N-dimensional typed array, chunk grids, filter/codec pipelines,
+selections, checksums, and byte I/O. This module reuses the **patterns** proven in HDF5
+(reader-before-writer, hermetic h5py/zarr-python fixtures, typed errors, touch-only-needed-chunks, a
+decoded-chunk cache, corrupt-input fuzzing).
+
+**Decision (both modules complete): a `com.ebremer.falcon.core` module is not extracted.** A survey of
+the two finished modules found that the concepts they share are implemented by *format-specific* code
+that should stay separate:
+
+- **Data types** — HDF5's `Datatype` models on-disk classes 0–11 with byte order from the datatype
+  message; Zarr's `DataType` names the core types and carries a fill-value JSON codec. Different models;
+  a shared abstraction would distort both.
+- **Byte I/O** — HDF5 uses `MemorySegment`/`Arena` (Foreign Function &amp; Memory, for &gt;2&nbsp;GB
+  memory-mapped files); Zarr uses `byte[]`/`ByteBuffer` over a key-value `Store` SPI. Different substrates.
+- **Checksums** — HDF5 hand-writes lookup3 and fletcher32; Zarr calls the JDK's `java.util.zip.CRC32C`.
+  No shared code.
+- **Chunk indexing** — HDF5's v1/v2 B-trees and fixed/extensible arrays vs Zarr's regular grid plus
+  sharding. Different.
+
+The only genuinely identical, mechanically-shareable code is a ~40-line N-dimensional row-major
+strided block copy (HDF5's `ChunkedReader.copyIntersection`, Zarr's `data.Blocks.copy`) — too small to
+justify a module and its cross-module dependency. A `core` module is therefore **deferred until a real
+shared model emerges** (for example a third format, or a deliberate unification effort); it is not a gap.
