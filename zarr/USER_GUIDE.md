@@ -144,12 +144,12 @@ Falcon implements the Zarr v3 codec pipeline `(array→array)* (array→bytes) (
 | `crc32c` (checksum) | ✅ | ✅ |
 | `sharding_indexed` | ✅ (byte-range) | ✅ |
 | `zstd` | ✅ | ✅ (pure-Java LZ77+FSE; libzstd reads it) |
-| `blosc` (lz4/lz4hc/zlib/zstd + byte shuffle) | ✅ | — write with gzip |
+| `blosc` (blosclz/lz4/lz4hc/zlib/zstd + byte/bit shuffle) | ✅ | — write with gzip/zstd |
 
 `blosc` is **decode-only**: Falcon reads it and writes `gzip`/`zstd`/raw instead. `zstd` is read *and*
 written by a pure-Java implementation (zarr-python compresses with zstd by default; libzstd reads Falcon's
-zstd frames). All compression codecs are hand-written in pure Java. `blosc`'s `blosclz`/`snappy` internal codecs and its bit-shuffle filter are not implemented
-and are reported clearly rather than mis-decoded.
+zstd frames). All compression codecs are hand-written in pure Java. The only blosc internal codec not implemented is
+`snappy` (dropped from modern c-blosc); it is reported clearly rather than mis-decoded.
 
 ## Stores
 
