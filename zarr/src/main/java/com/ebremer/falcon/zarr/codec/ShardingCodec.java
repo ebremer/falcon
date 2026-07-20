@@ -30,6 +30,13 @@ final class ShardingCodec implements ArrayBytesCodec {
     /** Both index fields all-ones marks an empty (fill) sub-chunk. */
     private static final long EMPTY = -1L;
 
+    /**
+     * Sub-chunk byte ranges separated by no more than this are fetched together (reading the small gap in
+     * between is cheaper than a second round trip). Sub-chunks are usually packed contiguously, so this
+     * mainly bridges the holes left by empty sub-chunks in a partial read.
+     */
+    private static final long MAX_COALESCE_GAP = 8 * 1024;
+
     private static final List<JsonObject> DEFAULT_INDEX_CODECS = List.of(
             Json.parse("{\"name\":\"bytes\",\"configuration\":{\"endian\":\"little\"}}").asObject(),
             Json.parse("{\"name\":\"crc32c\"}").asObject());
@@ -144,7 +151,7 @@ final class ShardingCodec implements ArrayBytesCodec {
             }
         }
 
-        // Only the sub-chunks overlapping the requested region.
+        // Collect the non-empty sub-chunks overlapping the requested region, with where each lands.
         int[] first = new int[rank];
         int[] last = new int[rank];
         for (int i = 0; i < rank; i++) {
@@ -152,6 +159,7 @@ final class ShardingCodec implements ArrayBytesCodec {
             last[i] = (regionOrigin[i] + regionShape[i] - 1) / subChunkShape[i];
         }
 
+        List<SubChunk> needed = new ArrayList<>();
         int[] coord = first.clone();
         while (true) {
             int linear = 0;
@@ -161,18 +169,11 @@ final class ShardingCodec implements ArrayBytesCodec {
             long offset = entries.getLong(linear * 16);
             long length = entries.getLong(linear * 16 + 8);
             if (offset != EMPTY || length != EMPTY) {
-                byte[] sub = source.readRange(offset, length).orElseThrow(
-                        () -> new ZarrFormatException("shard sub-chunk bytes are missing"));
-                if (sub.length != length) {
-                    throw new ZarrFormatException("shard sub-chunk is truncated: got " + sub.length
-                            + " of " + length + " bytes");
-                }
-                byte[] subElements = inner.decode(sub);
                 int[] origin = new int[rank];
                 for (int i = 0; i < rank; i++) {
                     origin[i] = coord[i] * subChunkShape[i];
                 }
-                copyBlock(subElements, subChunkShape, out, shape, origin, elementSize);
+                needed.add(new SubChunk(offset, length, origin));
             }
             int d = rank - 1;
             for (; d >= 0; d--) {
@@ -185,7 +186,55 @@ final class ShardingCodec implements ArrayBytesCodec {
                 break;
             }
         }
+
+        fetchCoalesced(source, needed, out, shape, elementSize);
         return new ArrayValue(out, shape);
+    }
+
+    /**
+     * Reads the sub-chunks in as few range requests as possible: sorted by offset, adjacent ranges (and
+     * ranges separated by only a small gap) are merged into one {@link ChunkBytes#readRange} and then
+     * sliced apart. A shard packs its sub-chunks contiguously, so a run of them usually needs a single
+     * fetch &mdash; which matters most over HTTP, where each fetch is a round trip.
+     */
+    private void fetchCoalesced(ChunkBytes source, List<SubChunk> needed, byte[] out, int[] shape,
+                                int elementSize) {
+        if (needed.isEmpty()) {
+            return;
+        }
+        needed.sort(java.util.Comparator.comparingLong(s -> s.offset));
+        int i = 0;
+        while (i < needed.size()) {
+            long groupStart = needed.get(i).offset;
+            long groupEnd = needed.get(i).offset + needed.get(i).length;
+            int j = i + 1;
+            while (j < needed.size() && needed.get(j).offset <= groupEnd + MAX_COALESCE_GAP) {
+                groupEnd = Math.max(groupEnd, needed.get(j).offset + needed.get(j).length);
+                j++;
+            }
+            long span = groupEnd - groupStart;
+            if (span > Integer.MAX_VALUE) {
+                throw new ZarrFormatException("shard range of " + span + " bytes is too large to read");
+            }
+            byte[] group = source.readRange(groupStart, span).orElseThrow(
+                    () -> new ZarrFormatException("shard sub-chunk bytes are missing"));
+            if (group.length != span) {
+                throw new ZarrFormatException("shard is truncated: got " + group.length
+                        + " of " + span + " bytes");
+            }
+            for (int k = i; k < j; k++) {
+                SubChunk s = needed.get(k);
+                int localOffset = (int) (s.offset - groupStart);
+                byte[] sub = java.util.Arrays.copyOfRange(group, localOffset,
+                        localOffset + (int) s.length);
+                copyBlock(inner.decode(sub), subChunkShape, out, shape, s.origin, elementSize);
+            }
+            i = j;
+        }
+    }
+
+    /** A non-empty sub-chunk to fetch: its byte range in the shard and where its elements land. */
+    private record SubChunk(long offset, long length, int[] origin) {
     }
 
     @Override

@@ -12,7 +12,6 @@ What follows is what is **left**. None of it blocks reading or writing real Zarr
 | Item | Notes |
 |---|---|
 | **Benchmarks** | Not started. No throughput/latency measurements exist yet. |
-| **Byte-range coalescing for sharding** | Sub-chunks are fetched individually; adjacent ranges could be merged into one request. Matters most over HTTP, where each fetch is a round trip. |
 | **blosc `snappy` internal codec (decode)** | The one blosc internal codec not implemented (dropped from modern c-blosc). Refused with `ZarrUnsupportedException` rather than mis-decoded. |
 
 ## Refused with a clear error (read side)
@@ -43,6 +42,9 @@ Recognized but not implemented; each fails with `ZarrUnsupportedException`, neve
 
 ## Notes
 
+- **Sharding byte-range coalescing** is done: a sharded read sorts the needed sub-chunk ranges and
+  merges adjacent ones (gaps up to 8&nbsp;KiB) into a single `readRange`, so a contiguous run of sub-chunks
+  is one fetch instead of N &mdash; the win is over HTTP, where each fetch is a round trip.
 - Both compression **encoders** (`zstd`, `blosc`) are implemented; `ArraySpec.zstd()` / `ArraySpec.blosc()`
   select them, and libzstd / c-blosc read Falcon's output. Falcon-written arrays are readable by
   zarr-python.

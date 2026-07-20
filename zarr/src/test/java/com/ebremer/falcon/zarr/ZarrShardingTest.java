@@ -2,6 +2,7 @@ package com.ebremer.falcon.zarr;
 
 import static java.nio.ByteOrder.LITTLE_ENDIAN;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -199,6 +200,46 @@ class ZarrShardingTest {
         assertTrue(store.reads.contains("c/0:0+16"), "should read sub-chunk 0: " + store.reads);
         assertFalse(store.reads.contains("c/0:16+16"), "must not read sub-chunk 1: " + store.reads);
         assertFalse(store.reads.contains("c/0:all"), "must not read the whole shard: " + store.reads);
+    }
+
+    @Test
+    void adjacentSubChunksAreCoalescedIntoOneFetch() {
+        RangeRecordingStore store = new RangeRecordingStore();
+        // 4 sub-chunks of 16 bytes each, packed contiguously at offsets 0,16,32,48; 68-byte index after.
+        putRoot(store, shardedJson("[16]", "[16]", "[4]", "0", INNER_BYTES, "end"));
+        store.set("c/0",
+                buildShard(false, int32(0, 1, 2, 3), int32(4, 5, 6, 7), int32(8, 9, 10, 11), int32(12, 13, 14, 15)));
+
+        ZarrArray a = Zarr.openArray(store);
+        store.reads.clear();
+        int[] expected = new int[16];
+        for (int i = 0; i < 16; i++) {
+            expected[i] = i;
+        }
+        assertArrayEquals(expected, a.readInts()); // whole shard: all four sub-chunks
+
+        // the index, then ONE coalesced fetch of all four contiguous sub-chunks (0..64), not four fetches
+        assertTrue(store.reads.contains("c/0:64+68"), "should read the shard index: " + store.reads);
+        assertTrue(store.reads.contains("c/0:0+64"), "should coalesce sub-chunks into one fetch: " + store.reads);
+        assertFalse(store.reads.contains("c/0:16+16"), "must not fetch sub-chunks individually: " + store.reads);
+        long dataFetches = store.reads.stream().filter(r -> r.startsWith("c/0:0+")).count();
+        assertEquals(1L, dataFetches, "expected a single coalesced data fetch: " + store.reads);
+    }
+
+    @Test
+    void nonAdjacentSubChunksBeyondTheGapAreFetchedSeparately() {
+        RangeRecordingStore store = new RangeRecordingStore();
+        // 2x2 sub-grid; read only the two diagonal sub-chunks, which are not contiguous in the shard.
+        putRoot(store, shardedJson("[4,4]", "[4,4]", "[2,2]", "0", INNER_BYTES, "end"));
+        store.set("c/0/0", buildShard(false,
+                int32(0, 1, 4, 5), int32(2, 3, 6, 7), int32(8, 9, 12, 13), int32(10, 11, 14, 15)));
+
+        ZarrArray a = Zarr.openArray(store);
+        store.reads.clear();
+        // sub-chunk (0,0) covers rows 0-1 cols 0-1; (1,1) covers rows 2-3 cols 2-3
+        assertArrayEquals(new int[] {0}, a.select(new long[] {0, 0}, new long[] {1, 1}).readInts());
+        long dataFetches = store.reads.stream().filter(r -> r.contains("+") && !r.endsWith("+68")).count();
+        assertTrue(dataFetches >= 1, "should fetch the needed sub-chunk: " + store.reads);
     }
 
     // ---- validation -------------------------------------------------------------------------------
