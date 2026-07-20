@@ -6,8 +6,10 @@ It is **Falcon Phase 2**; the HDF5 module (Phase 1) is the sibling and the templ
 (reader-before-writer, thin vertical slice first, every stage gated by conformance tests). See the root
 [`PLAN.md`](../PLAN.md) for the umbrella roadmap.
 
-> **Status: not started — module scaffolded.** The Maven module, `module-info`, and a placeholder public
-> API exist and build in the reactor. Implementation begins at stage Z0.
+> **Status: Z0 complete.** The Maven module builds in the reactor; the foundations are in place — a
+> hand-written JSON reader/writer (`json`), the `Store` SPI with `MemoryStore` and `FileSystemStore`
+> (`store`), and the `ZarrException` hierarchy — with 30 unit tests green. Next: **Z1** (metadata +
+> hierarchy read).
 
 ---
 
@@ -134,7 +136,7 @@ abstraction — Zarr keeps its own model and HDF5 is untouched.
 Each stage ends with a **milestone** and concrete **acceptance criteria**. "Reference store" = a Zarr v3
 store written by zarr-python (§8). Stages are dependency-ordered.
 
-### Z0 — Foundations
+### Z0 — Foundations ✅ *done*
 - **JSON**: `zarr.json` package — an immutable JSON value model (`JsonObject`/`JsonArray`/`JsonString`/
   `JsonNumber`/`JsonBool`/`JsonNull`), a recursive-descent `JsonReader`, and a `JsonWriter` (stable key
   order, UTF-8, minimal + pretty modes). Handles the special float encodings (`"NaN"`, `"Infinity"`,
