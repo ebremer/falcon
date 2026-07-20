@@ -89,8 +89,12 @@ public final class ChunkPipeline {
                         }
                         bytesCodec = ShardingCodec.parse(config, dataType, boundaryShape);
                     }
-                    case "blosc", "zstd" -> throw new ZarrUnsupportedException(
-                            "the " + name + " codec is not yet supported (planned; see PLAN.md, stage Z8)");
+                    case "zstd" -> {
+                        requireBytesCodec(bytesCodec, name);
+                        byteCodecs.add(ZstdCodec.parse(config));
+                    }
+                    case "blosc" -> throw new ZarrUnsupportedException(
+                            "the blosc codec is not yet supported (planned; see PLAN.md, stage Z8)");
                     default -> throw new ZarrUnsupportedException("unknown codec: '" + name + "'");
                 }
             }

@@ -17,7 +17,7 @@ zarr-python 3.x splits the codec chain across arguments:
 import json, os, shutil
 import numpy as np
 import zarr
-from zarr.codecs import BytesCodec, GzipCodec, Crc32cCodec, TransposeCodec
+from zarr.codecs import BytesCodec, GzipCodec, Crc32cCodec, TransposeCodec, ZstdCodec
 
 OUT = os.path.join("zarr", "src", "test", "resources", "fixtures")
 
@@ -56,6 +56,14 @@ case("sharded_2d_gzip", (4, 4), (2, 2), "int32", shards=(4, 4),
 # --- fill values and attributes ----------------------------------------------------
 case("partial_fill", (10,), (4,), "int32", fill_value=7, partial=True)
 case("attrs_int32", (4,), (2,), "int32", attrs={"units": "K", "n": 3})
+
+# --- zstd, which is what zarr-python compresses with by default --------------------
+case("zstd_int32", (100,), (16,), "int32", compressors=[ZstdCodec(level=3)])
+case("zstd_float64_2d", (12, 10), (5, 4), "float64", compressors=[ZstdCodec(level=9)])
+case("zstd_crc32c_int16", (40,), (7,), "int16", compressors=[ZstdCodec(level=1), Crc32cCodec()])
+case("zstd_sharded", (32,), (4,), "int32", shards=(16,), compressors=[ZstdCodec(level=5)])
+# zarr-python's out-of-the-box defaults, whatever they may be
+case("zarr_python_defaults", (64,), (16,), "int32", serializer="auto", compressors="auto")
 
 
 def values_for(dtype, n):

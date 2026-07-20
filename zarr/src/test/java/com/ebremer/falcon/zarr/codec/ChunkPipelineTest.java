@@ -209,11 +209,16 @@ class ChunkPipelineTest {
     @Test
     void unsupportedCodecsAreReported() {
         assertThrows(ZarrUnsupportedException.class,
-                () -> pipe(DataType.INT32, new long[] {3}, BYTES_LE, spec("{\"name\":\"zstd\"}")));
-        assertThrows(ZarrUnsupportedException.class,
                 () -> pipe(DataType.INT32, new long[] {3}, BYTES_LE, spec("{\"name\":\"blosc\"}")));
         assertThrows(ZarrUnsupportedException.class,
                 () -> pipe(DataType.INT32, new long[] {3}, BYTES_LE, spec("{\"name\":\"mystery\"}")));
+    }
+
+    @Test
+    void zstdReadsButDoesNotWrite() {
+        // zstd is decode-only: Falcon reads zarr-python's default output but writes gzip or raw.
+        ChunkPipeline p = pipe(DataType.INT32, new long[] {3}, BYTES_LE, spec("{\"name\":\"zstd\"}"));
+        assertThrows(ZarrUnsupportedException.class, () -> p.encode(new byte[12], new byte[4]));
     }
 
     @Test

@@ -55,7 +55,10 @@ class ConformanceTest {
         "plain_int32", "gzip_float64", "crc32c_int16", "gzip_crc32c_uint8", "bigendian_int32",
         "transpose_int32", "float32_nan_fill", "bool_array", "int64_array", "uint64_array",
         "float16_array", "uint16_2d", "sharded_int32", "sharded_2d_gzip", "partial_fill",
-        "attrs_int32"})
+        "attrs_int32",
+        // zstd is what zarr-python compresses with by default
+        "zstd_int32", "zstd_float64_2d", "zstd_crc32c_int16", "zstd_sharded",
+        "zarr_python_defaults"})
     void readsZarrPythonFixture(String name) {
         JsonObject meta = expected(name);
         ZarrArray array = Zarr.open(fixture(name)).asArray();
