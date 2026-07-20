@@ -2,6 +2,7 @@ package com.ebremer.falcon.hdf5;
 
 import com.ebremer.falcon.hdf5.data.ChunkedReader;
 import com.ebremer.falcon.hdf5.data.Elements;
+import com.ebremer.falcon.hdf5.data.Hyperslab;
 import com.ebremer.falcon.hdf5.data.VlenSequences;
 import com.ebremer.falcon.hdf5.data.VlenStrings;
 import com.ebremer.falcon.hdf5.datatype.Datatype;
@@ -273,6 +274,21 @@ public final class Dataset extends Hdf5Object {
                 yield MemorySegment.ofArray(assembled);
             }
         };
+    }
+
+    /**
+     * The raw bytes of the hyperslab {@code [offset, offset+count)}, flattened row-major. For chunked
+     * datasets only the chunks overlapping the selection are read and de-filtered; other layouts extract
+     * from the (zero-copy or already-assembled) full data.
+     */
+    MemorySegment selectionData(long[] offset, long[] count) {
+        int elementSize = datatype().size();
+        long[] dims = dataspace().dimensions();
+        if (layout() instanceof DataLayout.Chunked chunked) {
+            return MemorySegment.ofArray(ChunkedReader.assembleSelection(
+                    ctx, chunked, dims, elementSize, filterPipeline(), fillValue(), offset, count));
+        }
+        return MemorySegment.ofArray(Hyperslab.extract(rawData(), dims, offset, count, elementSize));
     }
 
     /** Builds a byte segment of the fill value tiled to cover the whole (unallocated) dataset. */

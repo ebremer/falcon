@@ -1,7 +1,6 @@
 package com.ebremer.falcon.hdf5;
 
 import com.ebremer.falcon.hdf5.data.Elements;
-import com.ebremer.falcon.hdf5.data.Hyperslab;
 import java.lang.foreign.MemorySegment;
 
 /**
@@ -61,9 +60,7 @@ public final class Selection {
     }
 
     private MemorySegment data() {
-        long[] dims = dataset.dataspace().dimensions();
-        int elementSize = dataset.datatype().size();
-        return MemorySegment.ofArray(Hyperslab.extract(dataset.rawData(), dims, offset, count, elementSize));
+        return dataset.selectionData(offset, count);
     }
 
     private int elementCount() {
