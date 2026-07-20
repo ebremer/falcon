@@ -213,6 +213,25 @@ class WriteTest {
     }
 
     @Test
+    void roundTripCustomFillValue() throws IOException {
+        Path file = Files.createTempFile("falcon-fill", ".h5");
+        try {
+            try (Hdf5Writer w = Hdf5Writer.create(file)) {
+                w.intDataset("i", new int[] {1, 2, 3}, new long[] {3}).fillValue(7);
+                w.doubleDataset("d", new double[] {1.5}, new long[] {1}).fillValue(2.25);
+            }
+            try (Hdf5File h5 = Hdf5File.open(file)) {
+                byte[] iFill = h5.root().dataset("i").fillValueBytes().orElseThrow();
+                assertEquals(7, ByteBuffer.wrap(iFill).order(ByteOrder.LITTLE_ENDIAN).getInt());
+                byte[] dFill = h5.root().dataset("d").fillValueBytes().orElseThrow();
+                assertEquals(2.25, ByteBuffer.wrap(dFill).order(ByteOrder.LITTLE_ENDIAN).getDouble());
+            }
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    @Test
     void roundTripCompoundDataset() throws IOException {
         Path file = Files.createTempFile("falcon-compound", ".h5");
         try {

@@ -167,6 +167,15 @@ public final class Dataset extends Hdf5Object {
     }
 
     /**
+     * This dataset's fill value as raw datatype-order bytes, if one is explicitly defined. Unallocated
+     * or unwritten elements read back as this value; an empty result means the default (all-zero).
+     */
+    public java.util.Optional<byte[]> fillValueBytes() {
+        byte[] fill = fillValue();
+        return fill == null ? java.util.Optional.empty() : java.util.Optional.of(fill.clone());
+    }
+
+    /**
      * Reads the whole dataset into the most natural Java array: {@code int[]}/{@code long[]} for
      * integers, {@code double[]} for floats, {@code String[]} for fixed-length strings.
      */

@@ -513,6 +513,26 @@ public final class Hdf5Writer implements AutoCloseable {
             }
         }
 
+        /** Sets the fill value (for unallocated/unwritten elements) from an integer, sized to the datatype. */
+        public DatasetWriter fillValue(long value) {
+            byte[] fill = new byte[spec.elementSize];
+            for (int b = 0; b < fill.length; b++) {
+                fill[b] = (byte) (value >>> (8 * b));
+            }
+            spec.fillValue = fill;
+            return this;
+        }
+
+        /** Sets the fill value from a floating-point value (float32 or float64 per the datatype size). */
+        public DatasetWriter fillValue(double value) {
+            if (spec.elementSize == 8) {
+                spec.fillValue = doubleBytes(new double[] {value});
+            } else {
+                spec.fillValue = float32Bytes(new float[] {(float) value});
+            }
+            return this;
+        }
+
         public DatasetWriter intAttribute(String name, int[] data, long[] shape) {
             requireElementCount(shape, data.length);
             spec.attributes.add(new AttributeSpec(name, DATATYPE_INT32, shape, intBytes(data)));
@@ -672,7 +692,7 @@ public final class Hdf5Writer implements AutoCloseable {
         List<Message> messages = new ArrayList<>();
         messages.add(new Message(1, 0x00, dataspaceBody(dataset.shape)));
         messages.add(new Message(3, 0x01, datatype));
-        messages.add(new Message(5, 0x01, new byte[] {0x03, 0x0a})); // fill value: default 0
+        messages.add(new Message(5, 0x01, fillValueBody(dataset.fillValue)));
         messages.add(new Message(8, 0x00, layout));
         if (dataset.shuffle || dataset.deflateLevel >= 0 || dataset.fletcher32 || dataset.scaleOffset
                 || dataset.nbitPrecision >= 0 || dataset.szip) {
@@ -1458,6 +1478,19 @@ public final class Hdf5Writer implements AutoCloseable {
         return b.toByteArray();
     }
 
+    /** The Fill Value message body: the default (version 3, undefined) or a defined custom value. */
+    private static byte[] fillValueBody(byte[] fill) {
+        if (fill == null) {
+            return new byte[] {0x03, 0x0a}; // version 3; fill value not defined -> reads back as zero
+        }
+        GrowBuffer b = new GrowBuffer();
+        b.u8(3);        // version
+        b.u8(0x2a);     // flags: alloc/fill time + fill-value-defined (bit 5)
+        b.u32(fill.length);
+        b.bytes(fill);
+        return b.toByteArray();
+    }
+
     private static byte[] contiguousLayoutBody(long address, long size) {
         GrowBuffer b = new GrowBuffer();
         b.u8(3);
@@ -1838,6 +1871,7 @@ public final class Hdf5Writer implements AutoCloseable {
         final List<byte[]> vlenStrings; // vlen payloads (string bytes or sequence element bytes), or null
         int[] vlenElementCounts;        // per-element sequence lengths (element counts); null for strings
         List<String> referenceTargets;  // object-reference target paths, or null
+        byte[] fillValue;                // custom fill value (datatype-order bytes), or null for the default 0
         final List<AttributeSpec> attributes = new ArrayList<>();
         int deflateLevel = -1;          // -1 = no compression
         boolean shuffle;
