@@ -47,7 +47,8 @@ public final class Selection {
 
     /** The raw decoded element bytes of the selection, in C order, each primitive in the array's byte order. */
     public byte[] readRawBytes() {
-        return ChunkAssembler.assemble(array.store, array.path, array.metadata(), offset, shape);
+        return ChunkAssembler.assemble(array.store, array.path, array.metadata(), array.chunkCache(),
+                offset, shape);
     }
 
     /** The selected elements as {@code double}s (any numeric type, widened). */
@@ -72,7 +73,8 @@ public final class Selection {
 
     /** Writes raw element bytes (C order, the array's byte order) into this region. */
     public void writeRawBytes(byte[] elements) {
-        ChunkWriter.write(array.store, array.path, array.metadata(), offset, shape, elements);
+        ChunkWriter.write(array.store, array.path, array.metadata(), array.chunkCache(),
+                offset, shape, elements);
     }
 
     /** Writes {@code values} into this region, narrowing to the array's data type. */

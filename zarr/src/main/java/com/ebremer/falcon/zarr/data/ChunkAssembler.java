@@ -47,7 +47,7 @@ public final class ChunkAssembler {
     }
 
     /** Reads the selection {@code [offset, offset+selShape)} as a flat element buffer. */
-    public static byte[] assemble(Store store, String arrayPath, ArrayMetadata meta,
+    public static byte[] assemble(Store store, String arrayPath, ArrayMetadata meta, ChunkCache cache,
                                   long[] offset, long[] selShape) {
         checkSelection(meta, offset, selShape);
 
@@ -101,7 +101,7 @@ public final class ChunkAssembler {
                 regionOrigin[i] = (int) (lo - chunkOrigin);
                 regionShape[i] = (int) (hi - lo);
             }
-            byte[] chunk = readChunk(store, arrayPath, pipeline, encoding, coord,
+            byte[] chunk = readChunk(store, arrayPath, pipeline, encoding, cache, coord,
                     fillElement, chunkShape, elementSize, regionOrigin, regionShape);
             copyIntersection(out, selShape, offset, selEnd, coord, chunkShapeL, chunk, elementSize);
 
@@ -124,14 +124,31 @@ public final class ChunkAssembler {
      * the sub-chunks that overlap it. An absent chunk yields a fill-valued block.
      */
     private static byte[] readChunk(Store store, String arrayPath, ChunkPipeline pipeline,
-                                    ChunkKeyEncoding encoding, long[] coord, byte[] fillElement,
-                                    int[] chunkShape, int elementSize,
+                                    ChunkKeyEncoding encoding, ChunkCache cache, long[] coord,
+                                    byte[] fillElement, int[] chunkShape, int elementSize,
                                     int[] regionOrigin, int[] regionShape) {
         String relative = encoding.encode(coord);
         String key = arrayPath.isEmpty() ? relative : arrayPath + "/" + relative;
-        byte[] decoded = pipeline.decodeChunk(new StoreChunkBytes(store, key), fillElement,
-                regionOrigin, regionShape);
+
+        // A whole-chunk decode is cacheable; a partial shard region is not (only its region is valid).
+        // Non-sharded pipelines always decode the whole chunk, so force the full region to cache it.
+        boolean wholeChunk = !pipeline.isSharded() || isFullChunk(regionOrigin, regionShape, chunkShape);
+        int[] origin = regionOrigin;
+        int[] shape = regionShape;
+        if (wholeChunk && cache != null) {
+            byte[] hit = cache.get(key);
+            if (hit != null) {
+                return hit;
+            }
+            origin = new int[chunkShape.length];
+            shape = chunkShape;
+        }
+
+        byte[] decoded = pipeline.decodeChunk(new StoreChunkBytes(store, key), fillElement, origin, shape);
         if (decoded != null) {
+            if (wholeChunk && cache != null) {
+                cache.put(key, decoded);
+            }
             return decoded;
         }
         int count = 1;
@@ -218,5 +235,14 @@ public final class ChunkAssembler {
             out[i] = Math.toIntExact(shape[i]);
         }
         return out;
+    }
+
+    private static boolean isFullChunk(int[] regionOrigin, int[] regionShape, int[] chunkShape) {
+        for (int i = 0; i < chunkShape.length; i++) {
+            if (regionOrigin[i] != 0 || regionShape[i] != chunkShape[i]) {
+                return false;
+            }
+        }
+        return true;
     }
 }

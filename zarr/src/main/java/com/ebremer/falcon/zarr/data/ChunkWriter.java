@@ -24,7 +24,7 @@ public final class ChunkWriter {
     }
 
     /** Writes {@code elements} (the selection's elements, C order) into {@code [offset, offset+selShape)}. */
-    public static void write(Store store, String arrayPath, ArrayMetadata meta,
+    public static void write(Store store, String arrayPath, ArrayMetadata meta, ChunkCache cache,
                              long[] offset, long[] selShape, byte[] elements) {
         ChunkAssembler.checkSelection(meta, offset, selShape);
         if (!store.isWritable()) {
@@ -74,7 +74,7 @@ public final class ChunkWriter {
 
         long[] coord = firstChunk.clone();
         while (true) {
-            writeChunk(store, arrayPath, meta, pipeline, encoding, coord, offset, selShape, selEnd,
+            writeChunk(store, arrayPath, pipeline, encoding, cache, coord, offset, selShape, selEnd,
                     chunkShape, elements, elementSize, fillElement, emptyChunk, chunkBytes);
             int d = rank - 1;
             for (; d >= 0; d--) {
@@ -89,10 +89,11 @@ public final class ChunkWriter {
         }
     }
 
-    private static void writeChunk(Store store, String arrayPath, ArrayMetadata meta, ChunkPipeline pipeline,
-                                   ChunkKeyEncoding encoding, long[] coord, long[] selOffset, long[] selShape,
-                                   long[] selEnd, long[] chunkShape, byte[] elements, int elementSize,
-                                   byte[] fillElement, byte[] emptyChunk, int chunkBytes) {
+    private static void writeChunk(Store store, String arrayPath, ChunkPipeline pipeline,
+                                   ChunkKeyEncoding encoding, ChunkCache cache, long[] coord,
+                                   long[] selOffset, long[] selShape, long[] selEnd, long[] chunkShape,
+                                   byte[] elements, int elementSize, byte[] fillElement, byte[] emptyChunk,
+                                   int chunkBytes) {
         int rank = chunkShape.length;
         long[] chunkOrigin = new long[rank];
         long[] srcOrigin = new long[rank];
@@ -124,6 +125,9 @@ public final class ChunkWriter {
         }
         Blocks.copy(elements, selShape, srcOrigin, chunk, chunkShape, dstOrigin, block, elementSize);
 
+        if (cache != null) {
+            cache.remove(key); // a cached decode of this chunk is now stale
+        }
         if (Arrays.equals(chunk, emptyChunk)) {
             store.delete(key); // an all-fill chunk is represented by its absence
             return;

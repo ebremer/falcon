@@ -23,9 +23,9 @@ is left, and why.
 | **Robustness / fuzzing** | ✅ **Done.** `RobustnessTest` fuzzes the zstd decoder (truncation, bit flips, random input), malformed metadata, oversized declared shapes, and corrupt/truncated chunks, asserting every failure is a typed, contained exception. |
 | **Conformance harness** | ✅ **Done.** 21 zarr-python fixtures with expected-value sidecars; hermetic (no Python at build time). |
 | **CI** | ✅ Already covered — the workflow runs `mvn -B verify` over the whole reactor, so the zarr module is built and tested. |
-| **Decoded-chunk cache** | Not started. A selection that revisits a chunk currently re-fetches and re-decodes it. The hdf5 module's `ChunkCache` is the model. |
-| **Streaming / block API** | Not started. Whole-array reads must fit one Java array (~2 GB); a chunk-at-a-time iterator would lift that. `Selection` already allows manual tiling. |
-| **User guide** | Not started. `hdf5/USER_GUIDE.md` is the model. The public API is Javadoc'd throughout. |
+| **Decoded-chunk cache** | ✅ **Done.** A per-array LRU (~16 MB) caches whole decoded chunks, keyed by chunk key; overlapping/repeated selections decompress each chunk once. Writes evict the affected key; sharded partial-region decodes are not cached. `ZarrArray.clearChunkCache()` releases it. |
+| **Streaming / block API** | ✅ **Done.** `ZarrArray.blocks()` returns a lazy `Stream<Selection>`, one per chunk (edge chunks clamped), so an array too big for one Java array can be read tile by tile. |
+| **User guide** | ✅ **Done.** `zarr/USER_GUIDE.md` covers opening, reading, selections/streaming, writing, hierarchy, data types, codecs, and stores. |
 | **Benchmarks** | Not started. |
 | **Byte-range coalescing for sharding** | Not started. Sub-chunks are fetched individually; adjacent ranges could be merged into one request (matters most for a future HTTP store). |
 

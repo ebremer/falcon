@@ -152,7 +152,7 @@ public final class ChunkPipeline {
     }
 
     /** Whether the array&rarr;bytes codec is {@code sharding_indexed}. */
-    boolean isSharded() {
+    public boolean isSharded() {
         return bytesCodec instanceof ShardingCodec;
     }
 

@@ -1,6 +1,7 @@
 package com.ebremer.falcon.zarr;
 
 import com.ebremer.falcon.zarr.data.ChunkAssembler;
+import com.ebremer.falcon.zarr.data.ChunkCache;
 import com.ebremer.falcon.zarr.datatype.DataType;
 import com.ebremer.falcon.zarr.json.JsonObject;
 import com.ebremer.falcon.zarr.json.JsonValue;
@@ -21,6 +22,7 @@ import java.util.Optional;
 public final class ZarrArray extends ZarrNode {
 
     private final ArrayMetadata metadata;
+    private ChunkCache chunkCache; // decoded-chunk LRU, shared by this array's reads and writes
 
     ZarrArray(Store store, String path, ArrayMetadata metadata) {
         super(store, path);
@@ -188,9 +190,40 @@ public final class ZarrArray extends ZarrNode {
         selectAll().writeRawBytes(elements);
     }
 
+    /**
+     * A selection per chunk, each covering that chunk's in-bounds region (edge chunks are clamped to the
+     * array bound). Reading one block at a time streams an array whose whole contents would not fit in a
+     * single Java array (a whole-array {@code readDoubles()} is capped near 2&nbsp;GB); the stream is lazy,
+     * so blocks are produced without materializing them all.
+     */
+    public java.util.stream.Stream<Selection> blocks() {
+        var grid = metadata.grid();
+        return java.util.stream.LongStream.range(0, grid.chunkCount()).mapToObj(i -> {
+            long[] coords = grid.chunkCoordsAt(i);
+            return new Selection(this, grid.chunkOrigin(coords), grid.validExtent(coords));
+        });
+    }
+
+    /** Discards this array's decoded-chunk cache. */
+    public void clearChunkCache() {
+        if (chunkCache != null) {
+            chunkCache.clear();
+        }
+    }
+
     /** Internal access to the parsed metadata for the read path. */
     ArrayMetadata metadata() {
         return metadata;
+    }
+
+    /** This array's decoded-chunk cache, created on first use. */
+    ChunkCache chunkCache() {
+        ChunkCache cache = chunkCache;
+        if (cache == null) {
+            cache = new ChunkCache();
+            chunkCache = cache;
+        }
+        return cache;
     }
 
     @Override
