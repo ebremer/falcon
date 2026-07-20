@@ -393,6 +393,32 @@ class WriteTest {
     }
 
     @Test
+    void roundTripEarliestFormat() throws IOException {
+        Path file = Files.createTempFile("falcon-legacy", ".h5");
+        try {
+            try (Hdf5Writer w = Hdf5Writer.create(file, Hdf5Writer.Format.EARLIEST)) {
+                Hdf5Writer.GroupWriter alpha = w.group("alpha");
+                alpha.intDataset("gamma", new int[] {0, 1, 2, 3, 4, 5}, new long[] {6});
+                alpha.group("beta").stringDataset("labels", new String[] {"a", "bb", "ccc"}, new long[] {3});
+                w.intDataset("root_ds", new int[] {10, 20, 30, 40}, new long[] {4})
+                        .intAttribute("scale", new int[] {100}, new long[] {});
+            }
+            try (Hdf5File h5 = Hdf5File.open(file)) {
+                assertEquals(0, h5.superblockVersion()); // the original (v0 superblock) format
+                Group alpha = h5.root().group("alpha");
+                assertArrayEquals(new int[] {0, 1, 2, 3, 4, 5}, alpha.dataset("gamma").readInts());
+                assertArrayEquals(new String[] {"a", "bb", "ccc"},
+                        alpha.group("beta").dataset("labels").readStrings());
+                Dataset rootDs = h5.root().dataset("root_ds");
+                assertArrayEquals(new int[] {10, 20, 30, 40}, rootDs.readInts());
+                assertArrayEquals(new int[] {100}, rootDs.attribute("scale").orElseThrow().readInts());
+            }
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    @Test
     void roundTripDoubleDatasetAndAttribute() throws IOException {
         Path file = Files.createTempFile("falcon-write-f8", ".h5");
         try {

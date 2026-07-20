@@ -41,8 +41,15 @@ public final class Hdf5Writer implements AutoCloseable {
     private static final byte[] FHDB_SIGNATURE = {'F', 'H', 'D', 'B'};
     private static final byte[] BTHD_SIGNATURE = {'B', 'T', 'H', 'D'};
     private static final byte[] BTLF_SIGNATURE = {'B', 'T', 'L', 'F'};
+    private static final byte[] TREE_SIGNATURE = {'T', 'R', 'E', 'E'};
+    private static final byte[] SNOD_SIGNATURE = {'S', 'N', 'O', 'D'};
+    private static final byte[] HEAP_SIGNATURE = {'H', 'E', 'A', 'P'};
     private static final long UNDEFINED = -1L;
     private static final int SUPERBLOCK_SIZE = 48;
+    private static final int LEGACY_SUPERBLOCK_SIZE = 96; // v0 superblock with 8-byte offsets/lengths
+    private static final int GROUP_INTERNAL_K = 16;       // v1 B-tree entries per node = 2 * K
+    private static final int GROUP_LEAF_K = 4;            // symbol-table node symbols = 2 * K
+    private static final int SYMBOL_ENTRY_SIZE = 2 * 8 + 4 + 4 + 16; // name off, header, cache type, rsv, scratch
 
     // Above this many links/attributes, the writer switches from compact header messages to dense
     // storage (a fractal heap indexed by a version-2 B-tree), matching the library's default threshold.
@@ -76,19 +83,35 @@ public final class Hdf5Writer implements AutoCloseable {
     private static final byte[] DATATYPE_OBJECT_REFERENCE = {0x17, 0, 0, 0, 8, 0, 0, 0};
 
     private final Path path;
+    private final boolean legacy;
     private final GroupSpec root = new GroupSpec();
     private final GroupWriter rootWriter = new GroupWriter(root);
     private final Map<String, Long> objectAddresses = new HashMap<>();     // absolute path -> object header address
     private final List<PendingReference> pendingReferences = new ArrayList<>();
+    private long legacyRootBtree = UNDEFINED;  // root group's symbol-table B-tree / local heap (legacy superblock)
+    private long legacyRootHeap = UNDEFINED;
     private boolean written;
 
-    private Hdf5Writer(Path path) {
-        this.path = path;
+    /** On-disk format version: {@link #EARLIEST} writes the original (v0 superblock, symbol-table
+     * groups, v1 object headers); {@link #LATEST} the modern checksummed format. */
+    public enum Format {
+        EARLIEST,
+        LATEST
     }
 
-    /** Begins writing a new HDF5 file at {@code path} (written on {@link #close()}). */
+    private Hdf5Writer(Path path, Format format) {
+        this.path = path;
+        this.legacy = format == Format.EARLIEST;
+    }
+
+    /** Begins writing a new HDF5 file at {@code path} in the modern format (written on {@link #close()}). */
     public static Hdf5Writer create(Path path) {
-        return new Hdf5Writer(path);
+        return new Hdf5Writer(path, Format.LATEST);
+    }
+
+    /** Begins writing a new HDF5 file at {@code path} in the given on-disk {@link Format}. */
+    public static Hdf5Writer create(Path path, Format format) {
+        return new Hdf5Writer(path, format);
     }
 
     /** The root group writer, on which the same operations are available as any subgroup. */
@@ -160,12 +183,17 @@ public final class Hdf5Writer implements AutoCloseable {
         }
         written = true;
         GrowBuffer buf = new GrowBuffer();
-        buf.reserve(SUPERBLOCK_SIZE);
-        long rootAddress = writeGroup(buf, root, "");
+        buf.reserve(legacy ? LEGACY_SUPERBLOCK_SIZE : SUPERBLOCK_SIZE);
+        GroupResult rootResult = writeGroup(buf, root, "");
+        long rootAddress = rootResult.headerAddress();
+        legacyRootBtree = rootResult.btreeAddress();
+        legacyRootHeap = rootResult.heapAddress();
         objectAddresses.put("/", rootAddress);
         resolveReferences(buf);
         long endOfFile = buf.position();
-        buf.patchBytes(0, superblock(rootAddress, endOfFile));
+        buf.patchBytes(0, legacy
+                ? superblockV0(rootAddress, endOfFile)
+                : superblock(rootAddress, endOfFile));
         Files.write(path, buf.toByteArray());
     }
 
@@ -475,17 +503,36 @@ public final class Hdf5Writer implements AutoCloseable {
 
     // --------------------------------------------------------------- serialization
 
-    private long writeGroup(GrowBuffer buf, GroupSpec group, String groupPath) {
+    /** A written group: its object-header address, and (legacy only) its symbol-table B-tree and heap. */
+    private record GroupResult(long headerAddress, long btreeAddress, long heapAddress) {
+    }
+
+    /** One child of a legacy (symbol-table) group. */
+    private record SymbolChild(String name, long headerAddress, int cacheType, long btree, long heap) {
+    }
+
+    private GroupResult writeGroup(GrowBuffer buf, GroupSpec group, String groupPath) {
         Map<String, Long> children = new LinkedHashMap<>();
+        List<SymbolChild> symbolChildren = legacy ? new ArrayList<>() : null;
         for (GroupSpec subgroup : group.groups) {
-            long address = writeGroup(buf, subgroup, groupPath + "/" + subgroup.name);
-            children.put(subgroup.name, address);
-            objectAddresses.put(groupPath + "/" + subgroup.name, address);
+            GroupResult child = writeGroup(buf, subgroup, groupPath + "/" + subgroup.name);
+            children.put(subgroup.name, child.headerAddress());
+            objectAddresses.put(groupPath + "/" + subgroup.name, child.headerAddress());
+            if (legacy) {
+                symbolChildren.add(new SymbolChild(subgroup.name, child.headerAddress(), 1,
+                        child.btreeAddress(), child.heapAddress()));
+            }
         }
         for (DatasetSpec dataset : group.datasets) {
             long address = writeDataset(buf, dataset);
             children.put(dataset.name, address);
             objectAddresses.put(groupPath + "/" + dataset.name, address);
+            if (legacy) {
+                symbolChildren.add(new SymbolChild(dataset.name, address, 0, UNDEFINED, UNDEFINED));
+            }
+        }
+        if (legacy) {
+            return writeSymbolTableGroup(buf, symbolChildren, group.attributes);
         }
         byte[] linkInfo = children.size() > MAX_COMPACT ? writeDenseLinks(buf, children) : null;
         byte[] attributeInfo = group.attributes.size() > MAX_COMPACT
@@ -493,7 +540,7 @@ public final class Hdf5Writer implements AutoCloseable {
         buf.align(8);
         long headerAddress = buf.position();
         writeGroupHeader(buf, children, group.attributes, linkInfo, attributeInfo);
-        return headerAddress;
+        return new GroupResult(headerAddress, UNDEFINED, UNDEFINED);
     }
 
     /** Patches each pending object reference with the resolved header address of its target object. */
@@ -521,6 +568,10 @@ public final class Hdf5Writer implements AutoCloseable {
     }
 
     private long writeDataset(GrowBuffer buf, DatasetSpec dataset) {
+        if (legacy && (dataset.chunkShape != null || dataset.attributes.size() > MAX_COMPACT)) {
+            throw new HdfUnsupportedException(
+                    "chunked/filtered and dense-attribute datasets are not written in the earliest format");
+        }
         byte[] layout;
         if (dataset.chunkShape != null) {
             layout = writeChunkedStorage(buf, dataset);
@@ -548,23 +599,23 @@ public final class Hdf5Writer implements AutoCloseable {
 
         byte[] datatype = dataset.nbitPrecision >= 0
                 ? nbitDatatype(dataset.elementSize, dataset.nbitPrecision) : dataset.datatype;
-        GrowBuffer messages = new GrowBuffer();
-        writeMessage(messages, 1, 0x00, dataspaceBody(dataset.shape));
-        writeMessage(messages, 3, 0x01, datatype);
-        writeMessage(messages, 5, 0x01, new byte[] {0x03, 0x0a}); // fill value: default 0
-        writeMessage(messages, 8, 0x00, layout);
+        List<Message> messages = new ArrayList<>();
+        messages.add(new Message(1, 0x00, dataspaceBody(dataset.shape)));
+        messages.add(new Message(3, 0x01, datatype));
+        messages.add(new Message(5, 0x01, new byte[] {0x03, 0x0a})); // fill value: default 0
+        messages.add(new Message(8, 0x00, layout));
         if (dataset.shuffle || dataset.deflateLevel >= 0 || dataset.fletcher32 || dataset.scaleOffset
                 || dataset.nbitPrecision >= 0 || dataset.szip) {
-            writeMessage(messages, 11, 0x00, filterPipelineBody(dataset));
+            messages.add(new Message(11, 0x00, filterPipelineBody(dataset)));
         }
         if (attributeInfo != null) {
-            writeMessage(messages, 21, 0x00, attributeInfo);
+            messages.add(new Message(21, 0x00, attributeInfo));
         } else {
             for (AttributeSpec attribute : dataset.attributes) {
-                writeMessage(messages, 12, 0x00, attributeBody(attribute));
+                messages.add(new Message(12, 0x00, attributeBody(attribute)));
             }
         }
-        writeObjectHeader(buf, messages.toByteArray());
+        writeObjectHeader(buf, messages, 1);
         return headerAddress;
     }
 
@@ -980,36 +1031,84 @@ public final class Hdf5Writer implements AutoCloseable {
         return (int) ((n + 7) & ~7L);
     }
 
-    private static void writeGroupHeader(GrowBuffer buf, Map<String, Long> children,
-                                         List<AttributeSpec> attributes, byte[] linkInfo, byte[] attributeInfo) {
-        GrowBuffer messages = new GrowBuffer();
+    private void writeGroupHeader(GrowBuffer buf, Map<String, Long> children,
+                                  List<AttributeSpec> attributes, byte[] linkInfo, byte[] attributeInfo) {
+        List<Message> messages = new ArrayList<>();
         // Links: a Link Info message pointing at dense storage, or an empty one plus compact Link messages.
-        writeMessage(messages, 2, 0x00, linkInfo != null ? linkInfo : linkInfoBody());
-        writeMessage(messages, 10, 0x01, new byte[] {0, 0});
+        messages.add(new Message(2, 0x00, linkInfo != null ? linkInfo : linkInfoBody()));
+        messages.add(new Message(10, 0x01, new byte[] {0, 0}));
         if (linkInfo == null) {
             for (Map.Entry<String, Long> child : children.entrySet()) {
-                writeMessage(messages, 6, 0x00, linkBody(child.getKey(), child.getValue()));
+                messages.add(new Message(6, 0x00, linkBody(child.getKey(), child.getValue())));
             }
         }
         if (attributeInfo != null) {
-            writeMessage(messages, 21, 0x00, attributeInfo);
+            messages.add(new Message(21, 0x00, attributeInfo));
         } else {
             for (AttributeSpec attribute : attributes) {
-                writeMessage(messages, 12, 0x00, attributeBody(attribute));
+                messages.add(new Message(12, 0x00, attributeBody(attribute)));
             }
         }
-        writeObjectHeader(buf, messages.toByteArray());
+        writeObjectHeader(buf, messages, 1);
     }
 
-    private static void writeObjectHeader(GrowBuffer buf, byte[] messages) {
-        int sizeBits = messages.length <= 0xFF ? 0 : messages.length <= 0xFFFF ? 1 : 2;
+    /** One object-header message (type, flags, and body), framed by the version-specific header writer. */
+    private record Message(int type, int flags, byte[] body) {
+    }
+
+    /** Writes an object header around {@code messages}: version-2 (checksummed) or version-1 by format. */
+    private void writeObjectHeader(GrowBuffer buf, List<Message> messages, int referenceCount) {
+        if (legacy) {
+            writeObjectHeaderV1(buf, messages, referenceCount);
+        } else {
+            writeObjectHeaderV2(buf, messages);
+        }
+    }
+
+    private static void writeObjectHeaderV2(GrowBuffer buf, List<Message> messages) {
+        GrowBuffer framed = new GrowBuffer();
+        for (Message message : messages) {
+            framed.u8(message.type());
+            framed.u16(message.body().length);
+            framed.u8(message.flags());
+            framed.bytes(message.body());
+        }
+        byte[] body = framed.toByteArray();
+        int sizeBits = body.length <= 0xFF ? 0 : body.length <= 0xFFFF ? 1 : 2;
         int start = buf.position();
         buf.bytes(OHDR_SIGNATURE);
         buf.u8(2);
         buf.u8(sizeBits);
-        buf.uvar(messages.length, 1 << sizeBits);
-        buf.bytes(messages);
+        buf.uvar(body.length, 1 << sizeBits);
+        buf.bytes(body);
         buf.u32(buf.checksum(start, buf.position()));
+    }
+
+    /** Version-1 object header: a 12-byte prefix padded to 16, then 8-byte-aligned messages. */
+    private static void writeObjectHeaderV1(GrowBuffer buf, List<Message> messages, int referenceCount) {
+        int chunk0 = 0;
+        for (Message message : messages) {
+            chunk0 += 8 + align8(message.body().length); // 8-byte message header + padded body
+        }
+        buf.u8(1);                 // version
+        buf.u8(0);                 // reserved
+        buf.u16(messages.size());  // total number of messages
+        buf.u32(referenceCount);
+        buf.u32(chunk0);           // size of chunk 0's message data
+        buf.u32(0);                // pad the 12-byte prefix to 16 bytes
+        for (Message message : messages) {
+            int padded = align8(message.body().length);
+            buf.u16(message.type());
+            buf.u16(padded);
+            buf.u8(message.flags());
+            buf.u8(0);
+            buf.u8(0);
+            buf.u8(0);             // reserved (3)
+            buf.bytes(message.body());
+            for (int i = message.body().length; i < padded; i++) {
+                buf.u8(0);         // pad the body to an 8-byte boundary
+            }
+        }
     }
 
     private static final int GLOBAL_HEAP_MIN_SIZE = 4096; // HDF5 requires collections to be at least this large
@@ -1260,13 +1359,6 @@ public final class Hdf5Writer implements AutoCloseable {
         return b.toByteArray();
     }
 
-    private static void writeMessage(GrowBuffer buf, int type, int flags, byte[] body) {
-        buf.u8(type);
-        buf.u16(body.length);
-        buf.u8(flags);
-        buf.bytes(body);
-    }
-
     private static byte[] attributeBody(AttributeSpec attribute) {
         byte[] name = (attribute.name + "\0").getBytes(StandardCharsets.UTF_8);
         byte[] dataspace = dataspaceBody(attribute.shape);
@@ -1326,6 +1418,131 @@ public final class Hdf5Writer implements AutoCloseable {
         b.bytes(nameBytes);
         b.u64(targetHeaderAddress);
         return b.toByteArray();
+    }
+
+    /**
+     * Writes a legacy (symbol-table) group: a local heap of link names, a version-1 group B-tree with a
+     * single symbol-table node (entries sorted by name), and a version-1 object header carrying the
+     * Symbol Table message. Returns the group's header plus its B-tree and heap (for the parent's
+     * scratch-pad cache and the superblock's root entry).
+     */
+    private GroupResult writeSymbolTableGroup(GrowBuffer buf, List<SymbolChild> children,
+                                              List<AttributeSpec> attributes) {
+        if (children.size() > 2 * GROUP_LEAF_K) {
+            throw new HdfUnsupportedException("a group with more than " + (2 * GROUP_LEAF_K)
+                    + " children is not written in the earliest format");
+        }
+        // Local heap: 8 reserved bytes (offset 0 = the empty name), then each name, null-terminated and
+        // padded to an 8-byte boundary.
+        Map<String, Integer> nameOffsets = new LinkedHashMap<>();
+        int dataSize = 8;
+        for (SymbolChild child : children) {
+            nameOffsets.put(child.name(), dataSize);
+            dataSize += align8(child.name().getBytes(StandardCharsets.UTF_8).length + 1);
+        }
+        buf.align(8);
+        int heapDataAddress = buf.position();
+        for (int i = 0; i < 8; i++) {
+            buf.u8(0);
+        }
+        for (SymbolChild child : children) {
+            byte[] name = child.name().getBytes(StandardCharsets.UTF_8);
+            buf.bytes(name);
+            for (int i = name.length; i < align8(name.length + 1); i++) {
+                buf.u8(0);
+            }
+        }
+        buf.align(8);
+        int heapHeaderAddress = buf.position();
+        buf.bytes(HEAP_SIGNATURE);
+        buf.u8(0);            // version
+        buf.u8(0);
+        buf.u8(0);
+        buf.u8(0);            // reserved (3)
+        buf.u64(dataSize);            // data segment size
+        buf.u64(1);                  // free-list head offset (1 = no free blocks)
+        buf.u64(heapDataAddress);    // data segment address
+
+        // Symbol-table node: entries sorted by name, padded to its fixed allocated size.
+        List<SymbolChild> sorted = new ArrayList<>(children);
+        sorted.sort((a, b) -> a.name().compareTo(b.name()));
+        buf.align(8);
+        int snodAddress = buf.position();
+        buf.bytes(SNOD_SIGNATURE);
+        buf.u8(1);            // version
+        buf.u8(0);            // reserved
+        buf.u16(sorted.size());
+        for (SymbolChild child : sorted) {
+            buf.u64(nameOffsets.get(child.name()));  // link name offset
+            buf.u64(child.headerAddress());          // object header address
+            buf.u32(child.cacheType());
+            buf.u32(0);                              // reserved
+            buf.u64(child.cacheType() == 1 ? child.btree() : 0); // scratch pad: B-tree + heap for a group
+            buf.u64(child.cacheType() == 1 ? child.heap() : 0);
+        }
+        int snodSize = 8 + 2 * GROUP_LEAF_K * SYMBOL_ENTRY_SIZE;
+        while (buf.position() - snodAddress < snodSize) {
+            buf.u8(0);
+        }
+
+        // Group version-1 B-tree: a single leaf node with one entry pointing at the symbol-table node.
+        buf.align(8);
+        int btreeAddress = buf.position();
+        buf.bytes(TREE_SIGNATURE);
+        buf.u8(0);            // node type: group
+        buf.u8(0);            // node level: leaf
+        buf.u16(1);           // entries used
+        buf.u64(UNDEFINED);   // left sibling
+        buf.u64(UNDEFINED);   // right sibling
+        buf.u64(0);           // key 0: heap offset before the first name
+        buf.u64(snodAddress); // child 0: the symbol-table node
+        buf.u64(sorted.isEmpty() ? 0 : nameOffsets.get(sorted.get(sorted.size() - 1).name())); // key 1
+        int btreeSize = 8 + 2 * 8 + (2 * GROUP_INTERNAL_K + 1) * 8 + 2 * GROUP_INTERNAL_K * 8;
+        while (buf.position() - btreeAddress < btreeSize) {
+            buf.u8(0);
+        }
+
+        // Version-1 object header: a Symbol Table message plus any attributes.
+        buf.align(8);
+        int headerAddress = buf.position();
+        GrowBuffer symbolTable = new GrowBuffer();
+        symbolTable.u64(btreeAddress);
+        symbolTable.u64(heapHeaderAddress);
+        List<Message> messages = new ArrayList<>();
+        messages.add(new Message(17, 0x00, symbolTable.toByteArray()));
+        for (AttributeSpec attribute : attributes) {
+            messages.add(new Message(12, 0x00, attributeBody(attribute)));
+        }
+        writeObjectHeader(buf, messages, 1);
+        return new GroupResult(headerAddress, btreeAddress, heapHeaderAddress);
+    }
+
+    /** The original version-0 superblock: the root group is reached through a symbol-table entry. */
+    private byte[] superblockV0(long rootAddress, long endOfFile) {
+        GrowBuffer sb = new GrowBuffer();
+        sb.bytes(HDF5_SIGNATURE);
+        sb.u8(0);   // superblock version
+        sb.u8(0);   // free-space storage version
+        sb.u8(0);   // root group symbol-table entry version
+        sb.u8(0);   // reserved
+        sb.u8(0);   // shared header message format version
+        sb.u8(8);   // size of offsets
+        sb.u8(8);   // size of lengths
+        sb.u8(0);   // reserved
+        sb.u16(GROUP_LEAF_K);
+        sb.u16(GROUP_INTERNAL_K);
+        sb.u32(0);  // file consistency flags
+        sb.u64(0);          // base address
+        sb.u64(UNDEFINED);  // free-space info address
+        sb.u64(endOfFile);  // end-of-file address
+        sb.u64(UNDEFINED);  // driver info block address
+        sb.u64(0);              // root symbol-table entry: link name offset
+        sb.u64(rootAddress);    // root symbol-table entry: object header address
+        sb.u32(1);              // cache type: group
+        sb.u32(0);              // reserved
+        sb.u64(legacyRootBtree);// scratch pad: root B-tree
+        sb.u64(legacyRootHeap); // scratch pad: root local heap
+        return sb.toByteArray();
     }
 
     private static byte[] superblock(long rootAddress, long endOfFile) {
