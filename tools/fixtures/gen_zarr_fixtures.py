@@ -76,6 +76,12 @@ case("blosc_noshuffle_int16", (150,), (64,), "int16",
      compressors=[BloscCodec(cname="lz4", clevel=1, shuffle=BloscShuffle.noshuffle)])
 case("blosc_zlib_uint8", (300,), (128,), "uint8",
      compressors=[BloscCodec(cname="zlib", clevel=6, shuffle=BloscShuffle.noshuffle)])
+case("blosc_blosclz_int32", (256,), (64,), "int32",
+     compressors=[BloscCodec(cname="blosclz", clevel=5, shuffle=BloscShuffle.shuffle)])
+case("blosc_bitshuffle_int32", (256,), (128,), "int32",
+     compressors=[BloscCodec(cname="lz4", clevel=5, shuffle=BloscShuffle.bitshuffle)])
+case("blosc_bitshuffle_float64", (100,), (64,), "float64",
+     compressors=[BloscCodec(cname="zstd", clevel=5, shuffle=BloscShuffle.bitshuffle)])
 
 
 def values_for(dtype, n):

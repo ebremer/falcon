@@ -98,10 +98,7 @@ public final class BloscDecoder {
         }
         int compressor = (flags & 0xe0) >>> 5;
         boolean shuffle = (flags & FLAG_SHUFFLE) != 0;
-        if ((flags & FLAG_BITSHUFFLE) != 0) {
-            throw new ZarrUnsupportedException(
-                    "the Blosc bit-shuffle filter is not supported (see zarr/TODO.md)");
-        }
+        boolean bitShuffle = (flags & FLAG_BITSHUFFLE) != 0;
 
         int wholeBlocks = nbytes / blocksize;
         int leftover = nbytes % blocksize;
@@ -131,7 +128,9 @@ public final class BloscDecoder {
             decodeBlock(src, start, end - start, block, blockBytes, typeSize, compressor);
 
             int destination = b * blocksize;
-            if (shuffle) {
+            if (bitShuffle) {
+                BitShuffle.unshuffle(block, 0, out, destination, blockBytes, typeSize);
+            } else if (shuffle) {
                 Shuffle.unshuffle(block, 0, out, destination, blockBytes, typeSize);
             } else {
                 System.arraycopy(block, 0, out, destination, blockBytes);
@@ -190,9 +189,7 @@ public final class BloscDecoder {
                 System.arraycopy(decoded, 0, dst, dstOff, dstLen);
             }
             case COMPRESSOR_ZLIB -> zlib(src, srcOff, srcLen, dst, dstOff, dstLen);
-            case COMPRESSOR_BLOSCLZ -> throw new ZarrUnsupportedException(
-                    "the Blosc internal codec 'blosclz' is not supported (see zarr/TODO.md); "
-                            + "re-compress with lz4, zstd, or zlib");
+            case COMPRESSOR_BLOSCLZ -> BloscLz.decompress(src, srcOff, srcLen, dst, dstOff, dstLen);
             case COMPRESSOR_SNAPPY -> throw new ZarrUnsupportedException(
                     "the Blosc internal codec 'snappy' is not supported (see zarr/TODO.md)");
             default -> throw new BloscFormatException("unknown Blosc internal codec " + compressor);

@@ -65,6 +65,17 @@ for shuffle in (Blosc.NOSHUFFLE, Blosc.SHUFFLE, Blosc.BITSHUFFLE):
     case(f"zstd_{SHUFFLE_NAMES[shuffle]}", float64_ramp(1000), cname="zstd",
          shuffle=shuffle, typesize=8)
 
+# Bit-shuffle across type sizes and element counts (multiples of 8 and not), and multi-block sizes.
+for ts in (1, 2, 4, 8, 16):
+    payload = bytes(rng.randrange(256) for _ in range(ts * 800))  # 800 elements: a multiple of 8
+    case(f"bitshuffle_ts{ts}", payload, cname="lz4", shuffle=Blosc.BITSHUFFLE, typesize=ts)
+case("bitshuffle_ramp_i32", int32_ramp(2048), cname="lz4", shuffle=Blosc.BITSHUFFLE, typesize=4)
+case("bitshuffle_ramp_f64", float64_ramp(2048), cname="zstd", shuffle=Blosc.BITSHUFFLE, typesize=8)
+case("bitshuffle_odd_count", int32_ramp(1003), cname="lz4", shuffle=Blosc.BITSHUFFLE, typesize=4)
+case("bitshuffle_small", int32_ramp(24), cname="lz4", shuffle=Blosc.BITSHUFFLE, typesize=4)
+case("bitshuffle_zstd_zeros", bytes(8000), cname="zstd", shuffle=Blosc.BITSHUFFLE, typesize=8)
+case("bitshuffle_multiblock", int32_ramp(200000), cname="lz4", shuffle=Blosc.BITSHUFFLE, typesize=4)
+
 # Type sizes (the shuffle filters and block splitting both depend on this).
 for typesize in (1, 2, 4, 8, 16):
     payload = bytes(rng.randrange(64) for _ in range(typesize * 500))

@@ -29,12 +29,10 @@ class BloscDecoderTest {
     private record Vector(String name, String cname, int clevel, String shuffle, int typeSize,
                           byte[] original, byte[] buffer) {
 
-        /** Whether Falcon implements this vector's internal codec and filter. */
+        /** Whether Falcon implements this vector's internal codec (only snappy is not). */
         boolean supported() {
-            boolean codecOk = !cname.equals("blosclz") && !cname.equals("snappy");
-            // A buffer stored raw (memcpy) needs neither the codec nor the filter.
             boolean memcpyed = buffer.length >= 3 && (buffer[2] & 0x02) != 0;
-            return memcpyed || (codecOk && !shuffle.equals("bitshuffle"));
+            return memcpyed || !cname.equals("snappy");
         }
     }
 
@@ -101,25 +99,28 @@ class BloscDecoderTest {
     }
 
     @Test
-    void unsupportedCodecsAndFiltersAreReportedNotMisdecoded() {
-        List<String> wrong = new ArrayList<>();
-        int checked = 0;
-        for (Vector v : vectors()) {
-            if (v.supported()) {
-                continue;
-            }
-            checked++;
-            try {
-                BloscDecoder.decompress(v.buffer());
-                wrong.add(v.name() + " (" + v.cname() + "/" + v.shuffle() + ") decoded unexpectedly");
-            } catch (ZarrUnsupportedException expected) {
-                // correct: refused rather than guessed
-            } catch (RuntimeException e) {
-                wrong.add(v.name() + " threw " + e.getClass().getSimpleName() + " instead of unsupported");
-            }
-        }
-        assertTrue(checked > 0, "expected some unsupported vectors to exist");
-        assertTrue(wrong.isEmpty(), String.join("\n  ", wrong));
+    void anUnsupportedInternalCodecIsRefusedNotMisdecoded() {
+        // numcodecs does not emit snappy, so craft a minimal Blosc buffer that uses it: a single block
+        // whose one stream is "compressed" (so the decoder must invoke the internal codec).
+        byte[] buffer = new byte[27];
+        buffer[0] = 2;          // version
+        buffer[1] = 1;          // version of the internal codec format
+        buffer[2] = (byte) (2 << 5); // flags: internal codec 2 (snappy), no shuffle, no memcpy
+        buffer[3] = 1;          // typesize
+        putLe32(buffer, 4, 8);  // nbytes (decompressed)
+        putLe32(buffer, 8, 8);  // blocksize
+        putLe32(buffer, 12, 27); // cbytes (total)
+        putLe32(buffer, 16, 20); // block 0 offset
+        putLe32(buffer, 20, 3);  // stream compressed length (!= 8, so not stored raw)
+        // bytes 24..26 are the (unused) snappy payload
+        assertThrows(ZarrUnsupportedException.class, () -> BloscDecoder.decompress(buffer));
+    }
+
+    private static void putLe32(byte[] b, int off, int value) {
+        b[off] = (byte) value;
+        b[off + 1] = (byte) (value >>> 8);
+        b[off + 2] = (byte) (value >>> 16);
+        b[off + 3] = (byte) (value >>> 24);
     }
 
     @Test
@@ -142,7 +143,7 @@ class BloscDecoderTest {
     @Test
     void roundTripsThroughEachSupportedInternalCodec() {
         // every supported cname must appear among the vectors that actually decode
-        for (String cname : List.of("lz4", "lz4hc", "zlib", "zstd")) {
+        for (String cname : List.of("blosclz", "lz4", "lz4hc", "zlib", "zstd")) {
             boolean seen = vectors().stream()
                     .anyMatch(v -> v.cname().equals(cname) && v.supported()
                             && (v.buffer()[2] & 0x02) == 0); // genuinely compressed, not memcpy'ed
