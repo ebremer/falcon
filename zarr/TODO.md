@@ -9,9 +9,8 @@ What follows is what is **left**. None of it blocks reading or writing real Zarr
 
 ## Genuinely remaining
 
-| Item | Notes |
-|---|---|
-| **Benchmarks** | Not started. No throughput/latency measurements exist yet. |
+Nothing functional. Every codec, store, and API item from the plan is implemented and
+reference-validated. What is left is the deliberately-refused, out-of-scope, and deferred work below.
 
 ## Refused with a clear error (read side)
 
@@ -39,6 +38,9 @@ Recognized but not implemented; each fails with `ZarrUnsupportedException`, neve
 
 ## Notes
 
+- **Benchmarks** are in `Benchmarks.java` (skipped unless `-Dfalcon.bench=true`); results and how to
+  run them are in [`BENCHMARKS.md`](BENCHMARKS.md). Headline: Falcon's `zstd` encoder writes ~4-5x faster
+  than gzip at the same ratio, and the decoded-chunk cache gives ~8x on overlapping reads.
 - **Sharding byte-range coalescing** is done: a sharded read sorts the needed sub-chunk ranges and
   merges adjacent ones (gaps up to 8&nbsp;KiB) into a single `readRange`, so a contiguous run of sub-chunks
   is one fetch instead of N &mdash; the win is over HTTP, where each fetch is a round trip.

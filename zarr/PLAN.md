@@ -221,7 +221,7 @@ store written by zarr-python (§8). Stages are dependency-ordered.
 - **Acceptance:** for each fixture, `Falcon-write → zarr-python-read` and `zarr-python-write →
   Falcon-read` agree on structure + data; property-based random round-trips pass.
 
-### Z8 — Compression breadth & compatibility — *partial (zstd decode done)*
+### Z8 — Compression breadth & compatibility ✅ *done (bar the v2-write/Fortran non-goals)*
 - **Pure-Java `zstd`** (RFC 8878 decode first, then encode) and/or **`blosc`** (blosclz/lz4 + shuffle) —
   from scratch, validated against numcodecs/zstd reference vectors (a dev-time tool, like libaec for szip).
 - **Zarr v2 read compatibility**: `.zgroup`/`.zarray`/`.zattrs`, v2 dtype strings (`<i4`, `|u1`, …),
@@ -230,7 +230,7 @@ store written by zarr-python (§8). Stages are dependency-ordered.
 - **Milestone:** open blosc/zstd-compressed and v2 stores.
 - **Acceptance:** blosc/zstd chunks decode to the reference values; a zarr-python v2 store reads correctly.
 
-### Z9 — API polish, performance, robustness, docs — *partial (robustness + conformance + CI done)*
+### Z9 — API polish, performance, robustness, docs ✅ *done*
 - Finalize the public API (typed convenience + scalar reads, block **streaming**, selection ergonomics),
   full Javadoc, worked examples, a user guide.
 - **Performance**: touch-only-needed-chunks (done in Z5), a decoded-chunk **cache**, minimized copying,
