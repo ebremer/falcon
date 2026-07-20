@@ -10,12 +10,14 @@ package com.ebremer.falcon.hdf5.filter;
  * {@code k} split bits), uncompressed, zero-block (with remainder-of-segment), and second extension,
  * with optional nearest-neighbour (unit-delay) preprocessing. Bits are read most-significant-first.
  *
- * <p>Samples are treated as <b>unsigned</b>. Signed data (libaec's {@code DATA_SIGNED}, used by HDF5
- * for signed integer types under nearest-neighbour preprocessing) needs the signed mapper bounds and
- * is a planned extension.
+ * <p>Both <b>unsigned</b> and <b>signed</b> samples are decoded; signed data (libaec's
+ * {@code DATA_SIGNED}, used by HDF5 for signed integer types under nearest-neighbour preprocessing)
+ * sign-extends the reference/raw samples and unmaps against the signed value bounds.
  */
 public final class Aec {
 
+    /** libaec flag: samples are signed integers (affects the reference sample and unmap bounds). */
+    public static final int FLAG_SIGNED = 1;
     /** libaec flag: samples are stored most-significant-byte first (affects byte packing, not decoding). */
     public static final int FLAG_MSB = 4;
     /** libaec flag: nearest-neighbour (unit-delay) preprocessing was applied. */
@@ -81,14 +83,17 @@ public final class Aec {
      *
      * @param blockSize samples per block (libaec {@code block_size})
      * @param rsi       blocks per reference-sample interval
-     * @param flags     libaec flags ({@link #FLAG_PREPROCESS} is the only one that affects decoding)
+     * @param flags     libaec flags ({@link #FLAG_PREPROCESS} and {@link #FLAG_SIGNED} affect decoding)
      */
     public static long[] decode(byte[] data, int sampleCount, int bitsPerSample, int blockSize, int rsi, int flags) {
         boolean preprocess = (flags & FLAG_PREPROCESS) != 0;
+        boolean signed = (flags & FLAG_SIGNED) != 0;
         BitReader in = new BitReader(data);
         int idLen = idLen(bitsPerSample);
         int idMax = (1 << idLen) - 1;
-        long xmax = bitsPerSample >= 64 ? -1L : (1L << bitsPerSample) - 1;
+        long xmin = signed ? -(1L << (bitsPerSample - 1)) : 0;
+        long xmax = signed ? (1L << (bitsPerSample - 1)) - 1
+                : (bitsPerSample >= 64 ? -1L : (1L << bitsPerSample) - 1);
         long[] out = new long[sampleCount];
         int pos = 0;
         int rsiSamples = rsi * blockSize;
@@ -101,7 +106,7 @@ public final class Aec {
 
                 int ref = 0;
                 if (preprocess && produced == 0) { // reference sample follows the mode selection
-                    out[pos++] = in.readLong(bitsPerSample);
+                    out[pos++] = signExtend(in.readLong(bitsPerSample), signed, bitsPerSample);
                     produced++;
                     ref = 1;
                 }
@@ -111,7 +116,8 @@ public final class Aec {
                     for (int i = 0; i < samples; i++) {
                         long v = in.readLong(bitsPerSample);
                         if (pos < sampleCount) {
-                            out[pos] = preprocess ? unmap(v, out[pos - 1], xmax) : v;
+                            out[pos] = preprocess ? unmap(v, out[pos - 1], xmin, xmax)
+                                    : signExtend(v, signed, bitsPerSample);
                             pos++;
                         }
                         produced++;
@@ -129,7 +135,7 @@ public final class Aec {
                         }
                         for (int i = ref; i < blockSize; i++) {
                             if (pos < sampleCount) {
-                                out[pos] = preprocess ? unmap(vals[i], out[pos - 1], xmax) : vals[i];
+                                out[pos] = preprocess ? unmap(vals[i], out[pos - 1], xmin, xmax) : vals[i];
                                 pos++;
                             }
                             produced++;
@@ -161,7 +167,8 @@ public final class Aec {
                         long low = k > 0 ? in.readLong(k) : 0;
                         long v = (highs[i] << k) | low;
                         if (pos < sampleCount) {
-                            out[pos] = preprocess ? unmap(v, out[pos - 1], xmax) : v;
+                            out[pos] = preprocess ? unmap(v, out[pos - 1], xmin, xmax)
+                                    : signExtend(v, signed, bitsPerSample);
                             pos++;
                         }
                         produced++;
@@ -180,13 +187,22 @@ public final class Aec {
     }
 
     /** Inverse of the nearest-neighbour mapper: recovers a sample from its mapped delta and predictor. */
-    private static long unmap(long mapped, long prev, long xmax) {
-        long theta = Math.min(prev, xmax - prev);
+    private static long unmap(long mapped, long prev, long xmin, long xmax) {
+        long theta = Math.min(prev - xmin, xmax - prev);
         if (mapped > 2 * theta) {
             long d = mapped - theta;
-            return prev < xmax - prev ? prev + d : prev - d;
+            return (prev - xmin) < (xmax - prev) ? prev + d : prev - d;
         }
         return (mapped & 1) == 0 ? prev + mapped / 2 : prev - (mapped + 1) / 2;
+    }
+
+    /** Sign-extends a {@code bits}-wide sample to a full {@code long} when signed data is decoded. */
+    private static long signExtend(long value, boolean signed, int bits) {
+        if (!signed || bits >= 64) {
+            return value;
+        }
+        long signBit = 1L << (bits - 1);
+        return (value & signBit) != 0 ? value | -(1L << bits) : value;
     }
 
     /** Largest {@code m} with {@code m(m+1)/2 <= g} (inverse triangular for second extension). */

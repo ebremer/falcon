@@ -22,7 +22,7 @@ import imagecodecs
 
 FIX = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..",
                                    "hdf5", "src", "test", "resources", "fixtures"))
-MSB, PRE = 4, 8
+SIGNED, MSB, PRE = 1, 4, 8
 SZ_LSB, SZ_NN = 8, 32
 rng = np.random.default_rng(7)
 
@@ -53,6 +53,28 @@ def gen_core():
     return lines
 
 
+def gen_signed():
+    """Signed (libaec DATA_SIGNED) vectors: signed integer types, with and without preprocessing."""
+    configs = [("<i1", 8, 8, 2), ("<i2", 16, 8, 2), ("<i2", 16, 16, 2), ("<i4", 32, 16, 2)]
+    lines = ["# signed AEC vectors (DATA_SIGNED). Fields: bpp blocksize rsi flags enc-hex values"]
+    for dt, bpp, bs, rsi in configs:
+        m = 1 << (bpp - 1)
+        patterns = [
+            np.arange(-min(18, m), min(18, m)).astype(dt),
+            rng.integers(-4, 5, 48).astype(dt),
+            rng.integers(-min(60, m), min(60, m), 48).astype(dt),
+            rng.integers(-m, m, 56, dtype="int64").astype(dt),
+        ]
+        be = {8: ">i1", 16: ">i2", 32: ">i4"}[bpp]
+        for arr in patterns:
+            arr = np.ascontiguousarray(arr)
+            for flags in (SIGNED | MSB, SIGNED | MSB | PRE):
+                enc = bytes(imagecodecs.aec_encode(arr, bitspersample=bpp, blocksize=bs, rsi=rsi, flags=flags))
+                vals = np.frombuffer(arr.tobytes(), dtype=be).astype("int64").tolist()
+                lines.append(f"{bpp} {bs} {rsi} {flags} {enc.hex()} {','.join(map(str, vals))}")
+    return lines
+
+
 def gen_szip():
     def chunk(arr, bpp, ppb, rsi):
         a = np.ascontiguousarray(arr)
@@ -70,7 +92,7 @@ def gen_szip():
 
 def main():
     os.makedirs(FIX, exist_ok=True)
-    for name, lines in (("aec_vectors.txt", gen_core()), ("szip_chunks.txt", gen_szip())):
+    for name, lines in (("aec_vectors.txt", gen_core() + gen_signed()), ("szip_chunks.txt", gen_szip())):
         with open(os.path.join(FIX, name), "w", newline="\n") as f:
             f.write("\n".join(lines) + "\n")
         print(f"wrote {name}")
