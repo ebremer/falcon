@@ -1,0 +1,20 @@
+{
+ "name": "partial_fill",
+ "shape": [
+  10
+ ],
+ "dtype": "int32",
+ "values": [
+  0,
+  1,
+  2,
+  3,
+  7,
+  7,
+  7,
+  7,
+  7,
+  7
+ ],
+ "attributes": {}
+}

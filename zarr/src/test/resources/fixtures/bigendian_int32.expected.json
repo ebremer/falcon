@@ -1,0 +1,16 @@
+{
+ "name": "bigendian_int32",
+ "shape": [
+  6
+ ],
+ "dtype": "int32",
+ "values": [
+  0,
+  1,
+  2,
+  3,
+  4,
+  5
+ ],
+ "attributes": {}
+}

@@ -1,0 +1,15 @@
+{
+ "name": "float16_array",
+ "shape": [
+  5
+ ],
+ "dtype": "float16",
+ "values": [
+  0.5,
+  1.5,
+  2.5,
+  3.5,
+  4.5
+ ],
+ "attributes": {}
+}

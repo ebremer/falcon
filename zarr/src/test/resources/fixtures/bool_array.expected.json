@@ -1,0 +1,16 @@
+{
+ "name": "bool_array",
+ "shape": [
+  6
+ ],
+ "dtype": "bool",
+ "values": [
+  true,
+  false,
+  true,
+  false,
+  true,
+  false
+ ],
+ "attributes": {}
+}

@@ -1,0 +1,17 @@
+{
+ "name": "attrs_int32",
+ "shape": [
+  4
+ ],
+ "dtype": "int32",
+ "values": [
+  0,
+  1,
+  2,
+  3
+ ],
+ "attributes": {
+  "units": "K",
+  "n": 3
+ }
+}
