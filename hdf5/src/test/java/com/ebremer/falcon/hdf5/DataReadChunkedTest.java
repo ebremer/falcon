@@ -80,6 +80,18 @@ class DataReadChunkedTest {
     }
 
     @Test
+    void scaleOffsetFloat64() {
+        // decimal-scaling (D=3) float scale-offset: values restored to 3 decimal digits.
+        assertArrayEquals(new double[] {1.0, 1.5, 2.25, 3.125, 3.142, 2.718, 0.5, 10.0},
+                ds("scaleoffset_f8").readDoubles(), 1e-9);
+    }
+
+    @Test
+    void scaleOffsetFloat32() {
+        assertArrayEquals(new float[] {0.5f, 1.25f, 2.5f, 3.75f}, ds("scaleoffset_f4").readFloats(), 1e-6f);
+    }
+
+    @Test
     void singleChunkIndex() throws IOException {
         try (Hdf5File h5 = Hdf5File.open(Fixtures.path("chunk_indexes.h5"))) {
             assertArrayEquals(range(5), h5.root().dataset("single").readInts());

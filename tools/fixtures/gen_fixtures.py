@@ -90,6 +90,11 @@ def build_chunked(f):
                      shuffle=True, compression="gzip")
     f.create_dataset("fletcher_i4", data=np.arange(20, dtype="i4"), chunks=(5,), fletcher32=True)
     f.create_dataset("scaleoffset_i4", data=np.arange(20, dtype="i4"), chunks=(5,), scaleoffset=0)
+    f.create_dataset("scaleoffset_f8",  # float decimal-scaling scale-offset (3 digits kept)
+                     data=np.array([1.0, 1.5, 2.25, 3.125, 3.14159, 2.71828, 0.5, 10.0], dtype="f8"),
+                     chunks=(8,), scaleoffset=3)
+    f.create_dataset("scaleoffset_f4", data=np.array([0.5, 1.25, 2.5, 3.75], dtype="f4"),
+                     chunks=(4,), scaleoffset=2)
 
 
 def build_nbit(path):

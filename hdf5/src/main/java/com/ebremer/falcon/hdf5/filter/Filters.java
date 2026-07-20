@@ -48,15 +48,18 @@ public final class Filters {
     private static final int SO_INT = 2;
 
     /**
-     * Decodes an integer scale-offset chunk (filter id 6). The chunk header holds {@code minbits}
-     * (4-byte LE) and the chunk's minimum value; each element is stored as {@code minbits} bits
-     * (min-subtracted, MSB-first, packed at the chunk's end). An all-ones code marks an element that
-     * held the fill value. Floating-point scale-offset is not yet supported.
+     * Decodes a scale-offset chunk (filter id 6). The chunk header holds {@code minbits} (4-byte LE) and
+     * the chunk's minimum value; each element is stored as {@code minbits} bits (min-subtracted,
+     * MSB-first). An all-ones code marks an element that held the fill value. Integer and
+     * floating-point (decimal-scaling) variants are handled per {@code clientData[0]}.
      */
     private static byte[] scaleOffset(byte[] data, int[] clientData, int elementSize, int uncompressedSize) {
         int scaleType = clientData.length > 0 ? clientData[0] : SO_INT;
-        if (scaleType == SO_FLOAT_DSCALE || scaleType == SO_FLOAT_ESCALE) {
-            throw new HdfUnsupportedException("floating-point scale-offset filter is not yet supported");
+        if (scaleType == SO_FLOAT_DSCALE) {
+            return scaleOffsetFloat(data, clientData, elementSize, uncompressedSize);
+        }
+        if (scaleType == SO_FLOAT_ESCALE) {
+            throw new HdfUnsupportedException("exponent-scaling float scale-offset is not produced by HDF5");
         }
         int elements = uncompressedSize / elementSize;
         int minBits = (int) readLittleEndian(data, 0, 4);
@@ -84,6 +87,54 @@ public final class Filters {
             writeLittleEndian(out, i * elementSize, elementSize, value);
         }
         return out;
+    }
+
+    /**
+     * Decodes a floating-point (decimal-scaling) scale-offset chunk. Header: {@code minbits(4) ·
+     * minval-size(1) · minimum · fill value} (the last two each {@code minval-size} bytes, as native
+     * floats). Each element's {@code minbits}-bit code {@code c} restores to {@code c · 10^-D + min}
+     * where {@code D} is the decimal scale factor ({@code clientData[1]}); an all-ones code restores the
+     * fill value. The decoded values are little-endian (the layout HDF5's scale-offset produces).
+     */
+    private static byte[] scaleOffsetFloat(byte[] data, int[] clientData, int elementSize, int uncompressedSize) {
+        int minBits = (int) readLittleEndian(data, 0, 4);
+        int minvalSize = data[4] & 0xff; // width of the min/fill fields (the float itself takes elementSize)
+        int scaleFactor = clientData.length > 1 ? clientData[1] : 0;
+        double scale = Math.pow(10.0, -scaleFactor);
+        int elements = uncompressedSize / elementSize;
+        double min = decodeFloat(readLittleEndian(data, 5, elementSize), elementSize);
+        double fill = decodeFloat(readLittleEndian(data, 5 + minvalSize, elementSize), elementSize);
+        byte[] out = new byte[uncompressedSize];
+
+        if (minBits == 0) { // every value equals the minimum
+            for (int i = 0; i < elements; i++) {
+                putFloat(out, i * elementSize, elementSize, min);
+            }
+            return out;
+        }
+        long fillMarker = (1L << minBits) - 1;
+        long bit = (long) (5 + 2 * minvalSize) * 8; // packed codes follow the header
+        for (int i = 0; i < elements; i++) {
+            long code = 0;
+            for (int b = 0; b < minBits; b++) {
+                code = (code << 1) | ((data[(int) (bit >> 3)] >> (7 - (int) (bit & 7))) & 1);
+                bit++;
+            }
+            putFloat(out, i * elementSize, elementSize, code == fillMarker ? fill : code * scale + min);
+        }
+        return out;
+    }
+
+    private static double decodeFloat(long raw, int size) {
+        return size == 8 ? Double.longBitsToDouble(raw) : Float.intBitsToFloat((int) raw);
+    }
+
+    private static void putFloat(byte[] out, int offset, int size, double value) {
+        if (size == 8) {
+            writeLittleEndian(out, offset, 8, Double.doubleToLongBits(value));
+        } else {
+            writeLittleEndian(out, offset, 4, Float.floatToIntBits((float) value));
+        }
     }
 
     private static final int NBIT_ATOMIC = 1;
