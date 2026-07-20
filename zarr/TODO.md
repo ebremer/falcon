@@ -7,6 +7,24 @@ verified against the reference implementations — zarr-python 3.2.1, libzstd, a
 
 What follows is what is **left**. None of it blocks reading or writing real Zarr stores.
 
+## Unimplemented features (summary)
+
+Everything not yet implemented, in one place. Nothing here blocks reading or writing real Zarr stores;
+each recognized-but-unsupported input fails with a clear `ZarrUnsupportedException`, never a wrong result.
+The sections below give the detail.
+
+- [ ] **`vlen-bytes` data type** — `vlen-utf8` strings are done (read + write); raw variable-length bytes are not.
+- [ ] **Zarr v2 Fortran (`"F"`) order** for rank&gt;1.
+- [ ] **Zarr v2 filters** — delta, fixed-scale-offset, and the rest.
+- [ ] **Zarr v2 top-level `zlib` compressor** (blosc's *internal* zlib *is* supported).
+- [ ] **Unknown `must_understand: true` metadata fields**, **non-`regular` chunk grids**, **object/extension data types**, and **storage transformers**.
+- [ ] **Zarr v2 writing** — Falcon writes v3 only (v2 is read-compat).
+- [ ] **zstd / blosc encoder tuning** — correct and interoperable, but single-level (no clevel/window tuning, greedy LZ); not optimized for ratio.
+- [ ] **`ZipStore` writing** — read-only; build one with `ZipStore.pack`.
+- [ ] **`HttpStore` key listing** — plain HTTP has no directory listing (a named child still opens).
+- [ ] **Cloud object stores** (S3/GCS/Azure) — not shipped; implement the `Store` SPI (the byte-range contract fits).
+- [ ] **`com.ebremer.falcon.core` extraction** — investigated and deferred (no shared model worth a module).
+
 ## Genuinely remaining
 
 Nothing functional. Every codec, store, and API item from the plan is implemented and
