@@ -6,13 +6,12 @@ It is **Falcon Phase 2**; the HDF5 module (Phase 1) is the sibling and the templ
 (reader-before-writer, thin vertical slice first, every stage gated by conformance tests). See the root
 [`PLAN.md`](../PLAN.md) for the umbrella roadmap.
 
-> **Status: Z4 complete.** On top of Z0–Z3, the module now has the codec pipeline (internal `codec`
-> package): `ChunkPipeline` validates the `(array→array)* (array→bytes) (bytes→bytes)*` structure and
-> decodes a chunk's stored bytes into its elements. Implemented codecs — `transpose` (axis permutation),
-> `bytes` (element byte order), `gzip` (`java.util.zip`), `crc32c` (verify/strip via
-> `java.util.zip.CRC32C`); `sharding_indexed`/`blosc`/`zstd` are reported unsupported until their stages.
-> `ArrayMetadata.pipeline()` builds it lazily (so a node still opens even if a codec is unimplemented).
-> 114 unit tests green. Next: **Z5** (array read + selections).
+> **Status: Z5 complete — the module reads arrays.** On top of Z0–Z4, the read path (internal `data`
+> package) assembles a hyperslab by touching only the chunks that overlap it, decoding each through the
+> codec pipeline (or filling an absent chunk) and copying the intersection into a flat C-order buffer;
+> `Elements` interprets that as `int[]`/`long[]`/`float[]`/`double[]`. `ZarrArray` exposes
+> `readDoubles()/readInts()/…` (whole array) and `select(offset, shape)` → `Selection` with the same
+> readers. 124 unit tests green. Next: **Z6** (sharding codec — read).
 
 ---
 
@@ -191,7 +190,7 @@ store written by zarr-python (§8). Stages are dependency-ordered.
 - **Acceptance:** a chunk's decoded values match zarr-python across `bytes`(+endian) / `transpose` /
   `gzip` / `crc32c` fixtures; a corrupt `crc32c` throws `ZarrFormatException`.
 
-### Z5 — Array read
+### Z5 — Array read ✅ *done*
 - Read a whole array into the natural Java array (row-major), assembling from chunks and filling absent
   chunks; **selection (hyperslab) reads** that touch **only the chunks overlapping the selection**
   (mirrors HDF5's `ChunkedReader.assembleSelection`).
@@ -284,7 +283,7 @@ Z8  zstd/blosc + v2 + zip/http      ── "read compressed & v2 stores"
 Z9  API polish + perf + robustness  ── "Zarr module 1.0"
 ```
 
-Read-usable after **Z5**; read-complete (incl. sharding) after **Z6**; write-complete after **Z7**.
+Read-usable after **Z5** ✅; read-complete (incl. sharding) after **Z6**; write-complete after **Z7**.
 
 ## 10. Relationship to the HDF5 module and a future `core`
 

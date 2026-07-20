@@ -1,5 +1,6 @@
 package com.ebremer.falcon.zarr;
 
+import com.ebremer.falcon.zarr.data.ChunkAssembler;
 import com.ebremer.falcon.zarr.datatype.DataType;
 import com.ebremer.falcon.zarr.json.JsonObject;
 import com.ebremer.falcon.zarr.json.JsonValue;
@@ -120,7 +121,49 @@ public final class ZarrArray extends ZarrNode {
         return count;
     }
 
-    /** Internal access to the parsed metadata for later stages (Z3+). */
+    /**
+     * The hyperslab {@code [offset, offset+shape)} of this array.
+     *
+     * @throws IllegalArgumentException  if the rank is wrong
+     * @throws IndexOutOfBoundsException if the region extends past the array
+     */
+    public Selection select(long[] offset, long[] shape) {
+        ChunkAssembler.checkSelection(metadata, offset, shape);
+        return new Selection(this, offset.clone(), shape.clone());
+    }
+
+    /** The whole array as a selection. */
+    public Selection selectAll() {
+        long[] shape = metadata.shape();
+        return new Selection(this, new long[shape.length], shape);
+    }
+
+    /** Reads the whole array as {@code double}s (any numeric type, widened). */
+    public double[] readDoubles() {
+        return selectAll().readDoubles();
+    }
+
+    /** Reads the whole array as {@code float}s (float data types only). */
+    public float[] readFloats() {
+        return selectAll().readFloats();
+    }
+
+    /** Reads the whole array as {@code long}s (integer data types that fit). */
+    public long[] readLongs() {
+        return selectAll().readLongs();
+    }
+
+    /** Reads the whole array as {@code int}s (integer data types that fit). */
+    public int[] readInts() {
+        return selectAll().readInts();
+    }
+
+    /** Reads the whole array's raw decoded element bytes, in C order, in the array's byte order. */
+    public byte[] readRawBytes() {
+        return selectAll().readRawBytes();
+    }
+
+    /** Internal access to the parsed metadata for the read path. */
     ArrayMetadata metadata() {
         return metadata;
     }
