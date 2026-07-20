@@ -20,8 +20,8 @@ writers of scientific-data formats.
 > and optionally the **earliest on-disk format** (v0 superblock, symbol-table groups, v1 headers) —
 > read back identically by Falcon *and h5py* (szip verified via libaec, since h5py's szip is disabled
 > here). Remaining: a few write datatypes (bitfield / opaque / time / fixed-length string); and a few
-> read edge cases (SOHM shared messages, float scale-offset, compound n-bit, signed szip, the revised
-> reference encoding).
+> read edge cases that this environment can't produce (SOHM shared messages, unlimited-pattern VDS, the
+> revised reference encoding).
 
 ## Program roadmap (Falcon)
 
@@ -269,9 +269,13 @@ Each stage ends with a **milestone** and concrete **acceptance criteria**. "Refe
   (`message.{ObjectModificationTimeMessage,BTreeKValuesMessage,DriverInfoMessage}`), pinned by hand-built
   unit tests since no local HDF5 build emits them.
 - **Milestone met:** every object-header message type parses; every structure on a read path is covered.
-- **Deferred read edge cases** (each isolated, none block real files): SOHM shared-message dedup (msg 15
-  — this h5py can't emit it, so untestable here); the revised `H5R_ref_t` reference encoding; float
-  scale-offset and compound n-bit decode; signed-integer szip; multi-file drivers (family/multi/split).
+- **Filter edge cases done ✓**: **float (decimal-scaling) scale-offset** and **compound n-bit** decode,
+  and **signed AEC/szip** decode (sign-extended reference/raw samples + signed unmap bounds, validated
+  against libaec signed vectors). Threading the datatype's signedness into the szip *filter* to reach
+  the signed AEC path on a real file remains (untestable here — szip is disabled in this h5py).
+- **Deferred read edge cases** (each isolated, none block real files, and none producible by this
+  environment): SOHM shared-message dedup (msg 15); unlimited-pattern (printf-style) VDS mappings; the
+  revised `H5R_ref_t` reference encoding; multi-file drivers (family/multi/split, a non-goal).
 
 ### H7 — Write path foundations
 - **File-space allocation**: end-of-file bump allocator ✓ (`write.GrowBuffer`, append + patch +
