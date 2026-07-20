@@ -1,0 +1,38 @@
+# Falcon Zarr — remaining work
+
+Status as of the Z8/Z9 pass. Stages **Z0–Z7 are complete** and the module reads and writes Zarr v3,
+verified against zarr-python 3.2.1 (see `ConformanceTest` and `tools/fixtures/`). What follows is what
+is left, and why.
+
+## Z8 — compression breadth & compatibility
+
+| Item | Status |
+|---|---|
+| **zstd (decode)** | ✅ **Done.** Pure-Java, from RFC 8878; validated against 18 libzstd frames. This was the important one — zarr-python compresses with zstd by default, so Falcon can now read real-world stores. |
+| **zstd (encode)** | Not started. Needs a full compressor (match finder + FSE/Huffman encoders); much larger than the decoder. Falcon writes `gzip` or raw, which every implementation reads, so this is a nice-to-have. |
+| **blosc** | Not started. Needs the blosc container plus blosclz and LZ4 block decoding and the shuffle/bitshuffle filters. Reference vectors are now easy to produce (`numcodecs.Blosc`), so this is unblocked. |
+| **Zarr v2 read-compat** | Not started. `.zgroup`/`.zarray`/`.zattrs`, v2 dtype strings (`<i4`, `\|u1`, …), v2 chunk keys (already implemented as a v3 key encoding), and the v2 compressor/filter mapping. zarr-python can write v2 fixtures (`zarr_format=2`), so it is verifiable. |
+| **ZipStore** | Not started. Small: `java.util.zip` over the existing `Store` SPI. |
+| **HttpStore (read-only)** | Not started. `java.net.http` with HTTP `Range` requests; the `Store.getRange`/`size` contract already fits. Needs a test server (`jdk.httpserver`). |
+
+## Z9 — API polish, performance, robustness, docs
+
+| Item | Status |
+|---|---|
+| **Robustness / fuzzing** | ✅ **Done.** `RobustnessTest` fuzzes the zstd decoder (truncation, bit flips, random input), malformed metadata, oversized declared shapes, and corrupt/truncated chunks, asserting every failure is a typed, contained exception. |
+| **Conformance harness** | ✅ **Done.** 21 zarr-python fixtures with expected-value sidecars; hermetic (no Python at build time). |
+| **CI** | ✅ Already covered — the workflow runs `mvn -B verify` over the whole reactor, so the zarr module is built and tested. |
+| **Decoded-chunk cache** | Not started. A selection that revisits a chunk currently re-fetches and re-decodes it. The hdf5 module's `ChunkCache` is the model. |
+| **Streaming / block API** | Not started. Whole-array reads must fit one Java array (~2 GB); a chunk-at-a-time iterator would lift that. `Selection` already allows manual tiling. |
+| **User guide** | Not started. `hdf5/USER_GUIDE.md` is the model. The public API is Javadoc'd throughout. |
+| **Benchmarks** | Not started. |
+| **Byte-range coalescing for sharding** | Not started. Sub-chunks are fetched individually; adjacent ranges could be merged into one request (matters most for a future HTTP store). |
+
+## Notes
+
+- `zstd` is **decode-only** by design; `ChunkPipeline` reports `ZarrUnsupportedException` on encode with a
+  message pointing at gzip.
+- Dev-time tools (not Falcon dependencies): `pip install zarr numcodecs` regenerates every fixture via
+  `tools/fixtures/gen_zarr_fixtures.py` and `tools/fixtures/gen_zstd_vectors.py`.
+- The `com.ebremer.falcon.core` extraction (shared array/dtype/chunk model with the hdf5 module) remains a
+  deliberate later step; see `zarr/PLAN.md` §10.

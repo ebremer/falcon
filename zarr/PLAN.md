@@ -6,13 +6,14 @@ It is **Falcon Phase 2**; the HDF5 module (Phase 1) is the sibling and the templ
 (reader-before-writer, thin vertical slice first, every stage gated by conformance tests). See the root
 [`PLAN.md`](../PLAN.md) for the umbrella roadmap.
 
-> **Status: Z7 complete — the module reads *and writes* Zarr v3.** On top of Z0–Z6, every codec gained an
-> encode path (`transpose`, `bytes`, `gzip`, `crc32c`, and `sharding_indexed`, which packs sub-chunks and
-> builds the index, omitting all-fill sub-chunks). `Zarr.createGroup/createArray` and
-> `ZarrGroup.createGroup/createArray` write spec-ordered `zarr.json`; `ArraySpec` builds the array
-> description. `ZarrArray`/`Selection` gained `writeInts/writeDoubles/…`, doing a read-modify-write for
-> partially covered chunks and **deleting** chunks that hold only the fill value. 158 unit tests green.
-> Next: **Z8** (zstd/blosc, Zarr v2 read-compat, zip/HTTP stores).
+> **Status: Z0–Z7 complete; Z8/Z9 partially complete.** The module reads and writes Zarr v3 and is
+> **verified against zarr-python 3.2.1** — 21 conformance fixtures with expected-value sidecars, plus a
+> pure-Java **Zstandard decoder** (RFC 8878) validated against 18 libzstd frames, which is what makes
+> real-world interop work since zarr-python compresses with zstd by default. Corrupt-input fuzzing is in
+> place. 192 tests green.
+>
+> **Remaining** (tracked in [`TODO.md`](TODO.md)): zstd *encode*, blosc, Zarr v2 read-compat, Zip/HTTP
+> stores; and from Z9 the decoded-chunk cache, a streaming block API, a user guide, and benchmarks.
 
 ---
 
@@ -124,7 +125,7 @@ abstraction — Zarr keeps its own model and HDF5 is untouched.
 | `crc32c` | bytes → bytes | `java.util.zip.CRC32C` (4-byte LE trailer) | Z4 | Z7 |
 | `sharding_indexed` | array → bytes | hand-written (sub-chunks + offset/length index) | Z6 | Z7 |
 | `blosc` | bytes → bytes | **from scratch, pure Java** (blosclz/lz4 + shuffle) | Z8 | Z8 |
-| `zstd` | bytes → bytes | **from scratch, pure Java** (RFC 8878) | Z8 | Z8 |
+| `zstd` | bytes → bytes | **from scratch, pure Java** (RFC 8878) | Z8 ✅ | not planned |
 
 ### 5.4 Stores
 | Store | Read | Write | Byte-range | Stage |
@@ -217,7 +218,7 @@ store written by zarr-python (§8). Stages are dependency-ordered.
 - **Acceptance:** for each fixture, `Falcon-write → zarr-python-read` and `zarr-python-write →
   Falcon-read` agree on structure + data; property-based random round-trips pass.
 
-### Z8 — Compression breadth & compatibility
+### Z8 — Compression breadth & compatibility — *partial (zstd decode done)*
 - **Pure-Java `zstd`** (RFC 8878 decode first, then encode) and/or **`blosc`** (blosclz/lz4 + shuffle) —
   from scratch, validated against numcodecs/zstd reference vectors (a dev-time tool, like libaec for szip).
 - **Zarr v2 read compatibility**: `.zgroup`/`.zarray`/`.zattrs`, v2 dtype strings (`<i4`, `|u1`, …),
@@ -226,7 +227,7 @@ store written by zarr-python (§8). Stages are dependency-ordered.
 - **Milestone:** open blosc/zstd-compressed and v2 stores.
 - **Acceptance:** blosc/zstd chunks decode to the reference values; a zarr-python v2 store reads correctly.
 
-### Z9 — API polish, performance, robustness, docs
+### Z9 — API polish, performance, robustness, docs — *partial (robustness + conformance + CI done)*
 - Finalize the public API (typed convenience + scalar reads, block **streaming**, selection ergonomics),
   full Javadoc, worked examples, a user guide.
 - **Performance**: touch-only-needed-chunks (done in Z5), a decoded-chunk **cache**, minimized copying,
