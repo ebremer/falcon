@@ -126,11 +126,29 @@ Navigation reads the store on demand, so a group reflects the store's current co
 ## Data types and fill values
 
 Core data types are modeled by `DataType`: `bool`, `int8/16/32/64`, `uint8/16/32/64`, `float16/32/64`,
-`complex64/128`, and the raw `r<N>` family. Byte order is **not** part of the data type — it lives in the
-`bytes` codec (`ArraySpec.endian`, or the v2 dtype string when reading v2).
+`complex64/128`, the raw `r<N>` family, and the variable-length `string` type. Byte order is **not** part
+of the data type — it lives in the `bytes` codec (`ArraySpec.endian`, or the v2 dtype string when reading
+v2).
 
 A fill value is stored as JSON; `array.fillValue()` returns it, and `array.fillValueBytes(order)` decodes
 it to element bytes. Non-finite floats use the strings `"NaN"`, `"Infinity"`, `"-Infinity"`.
+
+### Variable-length strings
+
+`DataType.STRING` is a variable-length UTF-8 string type, serialized by the `vlen-utf8` array→bytes codec
+(in place of `bytes`); its fill value is a JSON string (default `""`). Read and write it as `String[]`
+rather than a numeric array:
+
+```java
+ZarrArray a = Zarr.createArray(store,
+        ArraySpec.builder(new long[] {3}, DataType.STRING).chunkShape(3).zstd().build());
+a.writeStrings(new String[] {"alpha", "", "gamma-δ"});
+String[] back = Zarr.openArray(store).readStrings();   // and Selection.readStrings()/writeStrings()
+```
+
+The numeric accessors (`readDoubles`/`writeInts`/…) reject a string array, and `readStrings`/`writeStrings`
+reject a numeric one. Strings compress with the `bytes→bytes` codecs (`gzip`, `zstd`, `blosc`) but cannot
+be sharded.
 
 ## Codecs and compression
 
@@ -139,6 +157,7 @@ Falcon implements the Zarr v3 codec pipeline `(array→array)* (array→bytes) (
 | Codec | Read | Write |
 |---|---|---|
 | `bytes` (endianness) | ✅ | ✅ |
+| `vlen-utf8` (variable-length strings) | ✅ | ✅ |
 | `transpose` (axis order) | ✅ | ✅ |
 | `gzip` | ✅ | ✅ |
 | `crc32c` (checksum) | ✅ | ✅ |

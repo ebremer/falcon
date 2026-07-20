@@ -91,6 +91,30 @@ class ConformanceTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"string_1d", "string_2d", "string_zstd", "string_partial"})
+    void readsZarrPythonStringFixture(String name) {
+        JsonObject meta = expected(name);
+        ZarrArray array = Zarr.open(fixture(name)).asArray();
+
+        assertEquals("string", array.dataType().name(), name + ": data type");
+        assertTrue(array.dataType().isVariableLength(), name + ": variable length");
+
+        JsonArray shape = meta.get("shape").asArray();
+        long[] actualShape = array.shape();
+        assertEquals(shape.size(), actualShape.length, name + ": rank");
+        for (int i = 0; i < shape.size(); i++) {
+            assertEquals(shape.get(i).asNumber().longValue(), actualShape[i], name + ": shape[" + i + "]");
+        }
+
+        List<JsonValue> values = meta.get("values").asArray().values();
+        String[] actual = array.readStrings();
+        assertEquals(values.size(), actual.length, name + ": element count");
+        for (int i = 0; i < values.size(); i++) {
+            assertEquals(values.get(i).asString(), actual[i], name + "[" + i + "]");
+        }
+    }
+
     private static void assertElement(String name, int index, JsonValue want, double got) {
         String at = name + "[" + index + "]";
         switch (want) {

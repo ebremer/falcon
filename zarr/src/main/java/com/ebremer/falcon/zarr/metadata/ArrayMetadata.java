@@ -90,10 +90,19 @@ public final class ArrayMetadata implements NodeMetadata {
                 ChunkKeyEncoding.of(encodingConfig.name(), parseSeparator(encodingConfig, ctx));
 
         JsonValue fillValue = Fields.require(o, "fill_value", ctx);
-        try {
-            dataType.decodeFillValue(fillValue, ByteOrder.LITTLE_ENDIAN);
-        } catch (ZarrFormatException e) {
-            throw new ZarrFormatException(ctx + ".fill_value: " + e.getMessage(), e);
+        if (dataType.isVariableLength()) {
+            // A variable-length string's fill value is a JSON string (typically ""); there is no fixed-size
+            // byte encoding to validate against.
+            if (!(fillValue instanceof JsonString)) {
+                throw new ZarrFormatException(ctx + ".fill_value: the '" + dataType.name()
+                        + "' data type requires a string fill value");
+            }
+        } else {
+            try {
+                dataType.decodeFillValue(fillValue, ByteOrder.LITTLE_ENDIAN);
+            } catch (ZarrFormatException e) {
+                throw new ZarrFormatException(ctx + ".fill_value: " + e.getMessage(), e);
+            }
         }
 
         JsonArray codecArray = Fields.array(Fields.require(o, "codecs", ctx), ctx + ".codecs");

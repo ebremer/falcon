@@ -1,0 +1,23 @@
+{
+ "name": "string_2d",
+ "shape": [
+  3,
+  4
+ ],
+ "dtype": "string",
+ "values": [
+  "alpha",
+  "",
+  "gamma-δ",
+  "中文",
+  "emoji-😀",
+  "x",
+  "alpha",
+  "",
+  "gamma-δ",
+  "中文",
+  "emoji-😀",
+  "x"
+ ],
+ "attributes": {}
+}

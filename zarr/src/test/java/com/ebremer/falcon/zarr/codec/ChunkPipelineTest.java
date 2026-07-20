@@ -234,4 +234,41 @@ class ChunkPipelineTest {
         assertThrows(ZarrFormatException.class,
                 () -> pipe(DataType.INT32, new long[] {4}, spec("{\"name\":\"sharding_indexed\"}")));
     }
+
+    private static final JsonObject VLEN_UTF8 = spec("{\"name\":\"vlen-utf8\",\"configuration\":{}}");
+
+    @Test
+    void vlenUtf8RoundTripsStrings() {
+        ChunkPipeline p = pipe(DataType.STRING, new long[] {3}, VLEN_UTF8);
+        String[] elements = {"alpha", "", "gamma-δ"};
+        assertEquals(true, p.isVlen());
+        assertArrayEquals(elements, p.decodeStrings(p.encodeStrings(elements), 3));
+    }
+
+    @Test
+    void vlenUtf8RoundTripsThroughByteCodecs() {
+        ChunkPipeline p = pipe(DataType.STRING, new long[] {4}, VLEN_UTF8,
+                spec("{\"name\":\"zstd\"}"), CRC32C_CODEC);
+        String[] elements = {"one", "two", "three", "中文"};
+        assertArrayEquals(elements, p.decodeStrings(p.encodeStrings(elements), 4));
+    }
+
+    @Test
+    void vlenUtf8RequiresAStringDataType() {
+        assertThrows(ZarrFormatException.class,
+                () -> pipe(DataType.INT32, new long[] {3}, VLEN_UTF8));
+    }
+
+    @Test
+    void stringDataTypeRejectsTheBytesCodec() {
+        assertThrows(ZarrFormatException.class,
+                () -> pipe(DataType.STRING, new long[] {3}, BYTES_LE));
+    }
+
+    @Test
+    void decodeStringsRejectsAWrongElementCount() {
+        ChunkPipeline p = pipe(DataType.STRING, new long[] {3}, VLEN_UTF8);
+        byte[] encoded = p.encodeStrings(new String[] {"a", "b", "c"});
+        assertThrows(ZarrFormatException.class, () -> p.decodeStrings(encoded, 4));
+    }
 }

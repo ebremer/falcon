@@ -30,7 +30,7 @@ public final class Elements {
                 case INT -> (double) signed(bb, off, es);
                 case UINT -> es == 8 ? unsignedToDouble(bb.getLong(off)) : (double) unsigned(bb, off, es);
                 case FLOAT -> floatValue(bb, off, es);
-                case COMPLEX, RAW -> throw cannotRead(dt, "double");
+                case COMPLEX, RAW, STRING -> throw cannotRead(dt, "double");
             };
         }
         return out;
@@ -65,7 +65,7 @@ public final class Elements {
                     }
                     yield unsigned(bb, off, es);
                 }
-                case FLOAT, COMPLEX, RAW -> throw cannotRead(dt, "long");
+                case FLOAT, COMPLEX, RAW, STRING -> throw cannotRead(dt, "long");
             };
         }
         return out;
@@ -91,7 +91,7 @@ public final class Elements {
                     }
                     yield (int) unsigned(bb, off, es);
                 }
-                case FLOAT, COMPLEX, RAW -> throw cannotRead(dt, "int");
+                case FLOAT, COMPLEX, RAW, STRING -> throw cannotRead(dt, "int");
             };
         }
         return out;

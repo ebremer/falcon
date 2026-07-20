@@ -1,0 +1,16 @@
+{
+ "name": "string_1d",
+ "shape": [
+  6
+ ],
+ "dtype": "string",
+ "values": [
+  "alpha",
+  "",
+  "gamma-δ",
+  "中文",
+  "emoji-😀",
+  "x"
+ ],
+ "attributes": {}
+}

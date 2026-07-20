@@ -1,0 +1,30 @@
+{
+ "name": "string_zstd",
+ "shape": [
+  20
+ ],
+ "dtype": "string",
+ "values": [
+  "alpha",
+  "",
+  "gamma-δ",
+  "中文",
+  "emoji-😀",
+  "x",
+  "alpha",
+  "",
+  "gamma-δ",
+  "中文",
+  "emoji-😀",
+  "x",
+  "alpha",
+  "",
+  "gamma-δ",
+  "中文",
+  "emoji-😀",
+  "x",
+  "alpha",
+  ""
+ ],
+ "attributes": {}
+}

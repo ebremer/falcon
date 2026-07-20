@@ -3,6 +3,7 @@ package com.ebremer.falcon.zarr;
 import com.ebremer.falcon.zarr.data.ChunkAssembler;
 import com.ebremer.falcon.zarr.data.ChunkWriter;
 import com.ebremer.falcon.zarr.data.Elements;
+import com.ebremer.falcon.zarr.data.StringChunks;
 import com.ebremer.falcon.zarr.datatype.DataType;
 import com.ebremer.falcon.zarr.metadata.ArrayMetadata;
 import java.nio.ByteOrder;
@@ -47,6 +48,7 @@ public final class Selection {
 
     /** The raw decoded element bytes of the selection, in C order, each primitive in the array's byte order. */
     public byte[] readRawBytes() {
+        requireFixedSize();
         return ChunkAssembler.assemble(array.store, array.path, array.metadata(), array.chunkCache(),
                 offset, shape);
     }
@@ -73,6 +75,7 @@ public final class Selection {
 
     /** Writes raw element bytes (C order, the array's byte order) into this region. */
     public void writeRawBytes(byte[] elements) {
+        requireFixedSize();
         ChunkWriter.write(array.store, array.path, array.metadata(), array.chunkCache(),
                 offset, shape, elements);
     }
@@ -99,6 +102,42 @@ public final class Selection {
     public void writeInts(int[] values) {
         checkLength(values.length);
         writeRawBytes(Elements.fromInts(values, dataType(), order()));
+    }
+
+    /**
+     * The selected elements as {@code String}s, in C order (the {@code string} data type only).
+     *
+     * @throws ZarrException if this array is not a variable-length string array
+     */
+    public String[] readStrings() {
+        requireStringArray();
+        return StringChunks.read(array.store, array.path, array.metadata(), offset, shape);
+    }
+
+    /**
+     * Writes {@code values} into this region (the {@code string} data type only). A {@code null} element is
+     * written as the empty string.
+     *
+     * @throws ZarrException if this array is not a variable-length string array
+     */
+    public void writeStrings(String[] values) {
+        requireStringArray();
+        checkLength(values.length);
+        StringChunks.write(array.store, array.path, array.metadata(), offset, shape, values);
+    }
+
+    private void requireStringArray() {
+        if (!dataType().isVariableLength()) {
+            throw new ZarrException("readStrings/writeStrings requires the 'string' data type, not '"
+                    + dataType().name() + "'");
+        }
+    }
+
+    private void requireFixedSize() {
+        if (dataType().isVariableLength()) {
+            throw new ZarrException("the '" + dataType().name()
+                    + "' data type is variable-length; use readStrings()/writeStrings()");
+        }
     }
 
     private void checkLength(int given) {

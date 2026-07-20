@@ -1,0 +1,20 @@
+{
+ "name": "string_partial",
+ "shape": [
+  10
+ ],
+ "dtype": "string",
+ "values": [
+  "alpha",
+  "",
+  "gamma-δ",
+  "中文",
+  "",
+  "",
+  "",
+  "",
+  "",
+  ""
+ ],
+ "attributes": {}
+}

@@ -53,6 +53,52 @@ final class Blocks {
         }
     }
 
+    /**
+     * The object-array analogue of {@link #copy}: copies a block of {@code blockShape} elements between
+     * two C-order {@code Object[]} buffers. Used for variable-length string chunks, whose elements are
+     * {@link String}s rather than fixed-size byte runs.
+     */
+    static void copyObjects(Object[] src, long[] srcShape, long[] srcOrigin,
+                            Object[] dst, long[] dstShape, long[] dstOrigin,
+                            long[] blockShape) {
+        int rank = blockShape.length;
+        if (rank == 0) {
+            dst[0] = src[0];
+            return;
+        }
+        long run = blockShape[rank - 1];
+        if (run <= 0) {
+            return;
+        }
+        for (long extent : blockShape) {
+            if (extent <= 0) {
+                return;
+            }
+        }
+        long[] srcStride = strides(srcShape);
+        long[] dstStride = strides(dstShape);
+        long[] index = new long[rank];
+        while (true) {
+            long srcOffset = 0;
+            long dstOffset = 0;
+            for (int i = 0; i < rank; i++) {
+                srcOffset += (srcOrigin[i] + index[i]) * srcStride[i];
+                dstOffset += (dstOrigin[i] + index[i]) * dstStride[i];
+            }
+            System.arraycopy(src, (int) srcOffset, dst, (int) dstOffset, (int) run);
+            int d = rank - 2;
+            for (; d >= 0; d--) {
+                if (++index[d] < blockShape[d]) {
+                    break;
+                }
+                index[d] = 0;
+            }
+            if (d < 0) {
+                return;
+            }
+        }
+    }
+
     /** Row-major (C-order) strides, in elements. */
     static long[] strides(long[] shape) {
         long[] stride = new long[shape.length];

@@ -165,6 +165,16 @@ public final class ZarrArray extends ZarrNode {
         return selectAll().readRawBytes();
     }
 
+    /** Reads the whole array as {@code String}s, in C order (the {@code string} data type only). */
+    public String[] readStrings() {
+        return selectAll().readStrings();
+    }
+
+    /** Writes the whole array from {@code values} (the {@code string} data type only). */
+    public void writeStrings(String[] values) {
+        selectAll().writeStrings(values);
+    }
+
     /** Writes the whole array from {@code values}, narrowing to this array's data type. */
     public void writeDoubles(double[] values) {
         selectAll().writeDoubles(values);

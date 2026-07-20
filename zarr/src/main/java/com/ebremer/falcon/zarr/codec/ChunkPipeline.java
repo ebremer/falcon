@@ -29,15 +29,18 @@ public final class ChunkPipeline {
     private final ArrayBytesCodec bytesCodec;
     private final List<BytesBytesCodec> byteCodecs;
     private final int[] boundaryShape; // chunk shape at the array->bytes boundary (after array->array encode)
+    private final boolean vlen;        // array->bytes codec is vlen-utf8 (a String[] chunk, not a byte buffer)
 
     private ChunkPipeline(DataType dataType, int[] chunkShape, List<ArrayArrayCodec> arrayCodecs,
-                          ArrayBytesCodec bytesCodec, List<BytesBytesCodec> byteCodecs, int[] boundaryShape) {
+                          ArrayBytesCodec bytesCodec, List<BytesBytesCodec> byteCodecs, int[] boundaryShape,
+                          boolean vlen) {
         this.dataType = dataType;
         this.chunkShape = chunkShape;
         this.arrayCodecs = arrayCodecs;
         this.bytesCodec = bytesCodec;
         this.byteCodecs = byteCodecs;
         this.boundaryShape = boundaryShape;
+        this.vlen = vlen;
     }
 
     /**
@@ -51,6 +54,7 @@ public final class ChunkPipeline {
         int[] shape = Pipelines.toIntShape(chunkShape);
         List<ArrayArrayCodec> arrayCodecs = new ArrayList<>();
         ArrayBytesCodec bytesCodec = null;
+        boolean vlen = false;
         List<BytesBytesCodec> byteCodecs = new ArrayList<>();
         int[] boundaryShape = shape;
 
@@ -59,6 +63,7 @@ public final class ChunkPipeline {
                 String name = spec.get("name").asString();
                 JsonObject config = spec.find("configuration")
                         .map(JsonValue::asObject).orElse(EMPTY_CONFIG);
+                boolean arrayBytesSet = bytesCodec != null || vlen;
                 switch (name) {
                     case "transpose" -> {
                         if (bytesCodec != null) {
@@ -70,31 +75,50 @@ public final class ChunkPipeline {
                         boundaryShape = codec.encodedShape(boundaryShape);
                     }
                     case "bytes" -> {
-                        if (bytesCodec != null) {
+                        if (arrayBytesSet) {
                             throw new ZarrFormatException("more than one array->bytes codec");
+                        }
+                        if (dataType.isVariableLength()) {
+                            throw new ZarrFormatException(
+                                    "the '" + dataType.name() + "' data type requires the 'vlen-utf8' codec, not 'bytes'");
                         }
                         bytesCodec = BytesCodec.parse(config, dataType);
                     }
+                    case "vlen-utf8" -> {
+                        if (arrayBytesSet) {
+                            throw new ZarrFormatException("more than one array->bytes codec");
+                        }
+                        if (!dataType.isVariableLength()) {
+                            throw new ZarrFormatException(
+                                    "the 'vlen-utf8' codec requires a variable-length data type, not '"
+                                            + dataType.name() + "'");
+                        }
+                        if (!arrayCodecs.isEmpty()) {
+                            throw new ZarrFormatException(
+                                    "array->array codecs are not supported before 'vlen-utf8'");
+                        }
+                        vlen = true;
+                    }
                     case "gzip" -> {
-                        requireBytesCodec(bytesCodec, name);
+                        requireBytesCodec(arrayBytesSet, name);
                         byteCodecs.add(GzipCodec.parse(config));
                     }
                     case "crc32c" -> {
-                        requireBytesCodec(bytesCodec, name);
+                        requireBytesCodec(arrayBytesSet, name);
                         byteCodecs.add(new Crc32cCodec());
                     }
                     case "sharding_indexed" -> {
-                        if (bytesCodec != null) {
+                        if (arrayBytesSet) {
                             throw new ZarrFormatException("more than one array->bytes codec");
                         }
                         bytesCodec = ShardingCodec.parse(config, dataType, boundaryShape);
                     }
                     case "zstd" -> {
-                        requireBytesCodec(bytesCodec, name);
+                        requireBytesCodec(arrayBytesSet, name);
                         byteCodecs.add(ZstdCodec.parse(config));
                     }
                     case "blosc" -> {
-                        requireBytesCodec(bytesCodec, name);
+                        requireBytesCodec(arrayBytesSet, name);
                         byteCodecs.add(BloscCodec.parse(config, dataType.byteCount()));
                     }
                     default -> throw new ZarrUnsupportedException("unknown codec: '" + name + "'");
@@ -104,23 +128,70 @@ public final class ChunkPipeline {
             throw new ZarrFormatException("invalid codec configuration: " + e.getMessage(), e);
         }
 
-        if (bytesCodec == null) {
+        if (bytesCodec == null && !vlen) {
             throw new ZarrFormatException("codec pipeline has no array->bytes codec");
         }
         return new ChunkPipeline(dataType, shape, List.copyOf(arrayCodecs), bytesCodec,
-                List.copyOf(byteCodecs), boundaryShape);
+                List.copyOf(byteCodecs), boundaryShape, vlen);
     }
 
-    private static void requireBytesCodec(ArrayBytesCodec bytesCodec, String name) {
-        if (bytesCodec == null) {
+    private static void requireBytesCodec(boolean arrayBytesSet, String name) {
+        if (!arrayBytesSet) {
             throw new ZarrFormatException(
                     "bytes->bytes codec '" + name + "' appears before the array->bytes codec");
         }
     }
 
-    /** The byte order of each decoded primitive (the {@code bytes} codec's endian). */
+    /** The byte order of each decoded primitive (the {@code bytes} codec's endian, or LE for vlen strings). */
     public ByteOrder elementOrder() {
-        return bytesCodec.elementByteOrder();
+        return vlen ? ByteOrder.LITTLE_ENDIAN : bytesCodec.elementByteOrder();
+    }
+
+    /** Whether the array&rarr;bytes codec is {@code vlen-utf8} (a {@code String[]} chunk). */
+    public boolean isVlen() {
+        return vlen;
+    }
+
+    /**
+     * Decodes a variable-length string chunk's stored bytes into its {@code elementCount} elements in C
+     * order. Reverses the bytes&rarr;bytes codecs, then the {@code vlen-utf8} codec.
+     *
+     * @throws ZarrFormatException if the pipeline is not a string pipeline, or the bytes are malformed
+     */
+    public String[] decodeStrings(byte[] stored, int elementCount) {
+        if (!vlen) {
+            throw new IllegalStateException("decodeStrings requires a vlen-utf8 pipeline");
+        }
+        byte[] bytes = stored;
+        for (int i = byteCodecs.size() - 1; i >= 0; i--) {
+            bytes = byteCodecs.get(i).decode(bytes);
+        }
+        String[] elements = VlenUtf8.decode(bytes);
+        if (elements.length != elementCount) {
+            throw new ZarrFormatException("decoded string chunk has " + elements.length
+                    + " elements, expected " + elementCount);
+        }
+        return elements;
+    }
+
+    /**
+     * Encodes a variable-length string chunk (a flat C-order {@code String[]}) into the bytes to store:
+     * the {@code vlen-utf8} codec, then the bytes&rarr;bytes codecs in order.
+     */
+    public byte[] encodeStrings(String[] elements) {
+        if (!vlen) {
+            throw new IllegalStateException("encodeStrings requires a vlen-utf8 pipeline");
+        }
+        int expected = Pipelines.elementCount(chunkShape);
+        if (elements.length != expected) {
+            throw new ZarrFormatException(
+                    "string chunk has " + elements.length + " elements, expected " + expected);
+        }
+        byte[] bytes = VlenUtf8.encode(elements);
+        for (BytesBytesCodec codec : byteCodecs) {
+            bytes = codec.encode(bytes);
+        }
+        return bytes;
     }
 
     /** The element data type. */

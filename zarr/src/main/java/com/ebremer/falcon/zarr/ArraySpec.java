@@ -36,6 +36,7 @@ public final class ArraySpec {
         this.dataType = b.dataType;
         this.chunkShape = b.chunkShape != null ? b.chunkShape.clone() : defaultChunkShape(b.shape);
         this.fillValue = b.fillValue != null ? b.fillValue
+                : b.dataType.isVariableLength() ? new JsonString("")
                 : b.dataType.encodeFillValue(new byte[b.dataType.byteCount()], ByteOrder.LITTLE_ENDIAN);
         this.codecs = buildCodecs(b);
         this.attributes = b.attributes;
@@ -59,7 +60,10 @@ public final class ArraySpec {
 
     private static List<JsonValue> buildCodecs(Builder b) {
         List<JsonValue> inner = new ArrayList<>();
-        inner.add(bytesCodec(b.dataType, b.endian));
+        // The array->bytes codec: vlen-utf8 for variable-length strings, otherwise the fixed-size bytes codec.
+        inner.add(b.dataType.isVariableLength()
+                ? named("vlen-utf8", JsonObject.builder().build())
+                : bytesCodec(b.dataType, b.endian));
         if (b.gzipLevel != null) {
             inner.add(named("gzip", JsonObject.builder().put("level", b.gzipLevel).build()));
         }
@@ -67,11 +71,12 @@ public final class ArraySpec {
             inner.add(named("zstd", JsonObject.builder().put("level", 0).put("checksum", false).build()));
         }
         if (b.blosc) {
-            boolean shuffle = b.dataType.byteCount() > 1;
+            int typeSize = Math.max(b.dataType.byteCount(), 1); // variable-length elements have no fixed size
+            boolean shuffle = typeSize > 1;
             inner.add(named("blosc", JsonObject.builder()
                     .put("cname", "zstd").put("clevel", 5)
                     .put("shuffle", shuffle ? "shuffle" : "noshuffle")
-                    .put("typesize", b.dataType.byteCount()).put("blocksize", 0).build()));
+                    .put("typesize", typeSize).put("blocksize", 0).build()));
         }
         if (b.crc32c) {
             inner.add(named("crc32c", null));
@@ -274,6 +279,9 @@ public final class ArraySpec {
 
         /** The finished spec. */
         public ArraySpec build() {
+            if (dataType.isVariableLength() && subChunkShape != null) {
+                throw new IllegalArgumentException("sharding is not supported for the 'string' data type");
+            }
             return new ArraySpec(this);
         }
     }

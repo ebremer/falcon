@@ -13,5 +13,7 @@ public enum DataTypeKind {
     /** {@code complex64}/{@code complex128}: two consecutive floats (real, then imaginary). */
     COMPLEX,
     /** {@code r<N>}: raw {@code N}-bit values, {@code N} a positive multiple of 8. */
-    RAW
+    RAW,
+    /** {@code string}: variable-length UTF-8, decoded to {@link String}s (no fixed element size). */
+    STRING
 }

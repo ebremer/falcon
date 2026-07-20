@@ -64,6 +64,8 @@ public final class DataType {
     public static final DataType COMPLEX64 = new DataType("complex64", DataTypeKind.COMPLEX, 8);
     /** {@code complex128} (two {@code float64}). */
     public static final DataType COMPLEX128 = new DataType("complex128", DataTypeKind.COMPLEX, 16);
+    /** {@code string}: variable-length UTF-8 (elements have no fixed byte size). */
+    public static final DataType STRING = new DataType("string", DataTypeKind.STRING, -1);
 
     private static final Map<String, DataType> BUILTINS = Map.ofEntries(
             Map.entry(BOOL.name, BOOL),
@@ -73,7 +75,8 @@ public final class DataType {
             Map.entry(UINT32.name, UINT32), Map.entry(UINT64.name, UINT64),
             Map.entry(FLOAT16.name, FLOAT16), Map.entry(FLOAT32.name, FLOAT32),
             Map.entry(FLOAT64.name, FLOAT64),
-            Map.entry(COMPLEX64.name, COMPLEX64), Map.entry(COMPLEX128.name, COMPLEX128));
+            Map.entry(COMPLEX64.name, COMPLEX64), Map.entry(COMPLEX128.name, COMPLEX128),
+            Map.entry(STRING.name, STRING));
 
     private final String name;
     private final DataTypeKind kind;
@@ -123,9 +126,14 @@ public final class DataType {
         return kind;
     }
 
-    /** The size of one element in bytes. */
+    /** The size of one element in bytes (undefined, {@code -1}, for a variable-length type). */
     public int byteCount() {
         return byteCount;
+    }
+
+    /** Whether elements have no fixed byte size (the {@code string} type). */
+    public boolean isVariableLength() {
+        return kind == DataTypeKind.STRING;
     }
 
     /**
@@ -156,6 +164,8 @@ public final class DataType {
                 yield out;
             }
             case RAW -> decodeRaw(fill);
+            case STRING -> throw new UnsupportedOperationException(
+                    "the '" + name + "' data type has no fixed-size fill encoding; its fill value is a string");
         };
     }
 
@@ -188,6 +198,8 @@ public final class DataType {
                 }
                 yield new JsonArray(bytes);
             }
+            case STRING -> throw new UnsupportedOperationException(
+                    "the '" + name + "' data type has no fixed-size fill encoding; its fill value is a string");
         };
     }
 

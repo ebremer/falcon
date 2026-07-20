@@ -12,6 +12,11 @@ What follows is what is **left**. None of it blocks reading or writing real Zarr
 Nothing functional. Every codec, store, and API item from the plan is implemented and
 reference-validated. What is left is the deliberately-refused, out-of-scope, and deferred work below.
 
+The variable-length `string` data type (`vlen-utf8` codec) is supported for read **and** write:
+`DataType.STRING`, `ZarrArray.readStrings()`/`writeStrings(String[])`, verified both directions against
+zarr-python (see the `string_*` fixtures and `StringArrayTest`). Other vlen types (`vlen-bytes`) are not
+implemented.
+
 ## Refused with a clear error (read side)
 
 Recognized but not implemented; each fails with `ZarrUnsupportedException`, never a wrong result:
@@ -51,6 +56,6 @@ Recognized but not implemented; each fails with `ZarrUnsupportedException`, neve
   select them, and libzstd / c-blosc read Falcon's output. Falcon-written arrays are readable by
   zarr-python.
 - Dev-time tools (not Falcon dependencies; `pip install zarr numcodecs`): `gen_zarr_fixtures.py` and
-  `gen_zarr_v2_fixtures.py` (v3/v2 conformance fixtures, 28 + 12), `gen_zstd_vectors.py` /
+  `gen_zarr_v2_fixtures.py` (v3/v2 conformance fixtures, 32 + 12), `gen_zstd_vectors.py` /
   `gen_blosc_vectors.py` (decoder reference vectors), and `check_zstd_encoder.py` /
   `check_blosc_encoder.py` (encoder interop against libzstd / c-blosc).

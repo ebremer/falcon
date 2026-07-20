@@ -25,10 +25,12 @@ CASES = []
 
 
 def case(name, shape, chunks, dtype, *, filters=None, serializer=BytesCodec(),
-         compressors=None, shards=None, fill_value=0, attrs=None, partial=False):
+         compressors=None, shards=None, fill_value=0, attrs=None, partial=False,
+         string=False):
     CASES.append(dict(name=name, shape=shape, chunks=chunks, dtype=dtype,
                       filters=filters, serializer=serializer, compressors=compressors,
-                      shards=shards, fill_value=fill_value, attrs=attrs, partial=partial))
+                      shards=shards, fill_value=fill_value, attrs=attrs, partial=partial,
+                      string=string))
 
 
 # --- codecs Falcon implements today ------------------------------------------------
@@ -83,6 +85,23 @@ case("blosc_bitshuffle_int32", (256,), (128,), "int32",
 case("blosc_bitshuffle_float64", (100,), (64,), "float64",
      compressors=[BloscCodec(cname="zstd", clevel=5, shuffle=BloscShuffle.bitshuffle)])
 
+# --- variable-length UTF-8 strings (the `string` data type, vlen-utf8 codec) --------
+# serializer="auto" makes zarr-python pick the vlen-utf8 array->bytes codec for strings.
+case("string_1d", (6,), (4,), "string", serializer="auto", fill_value="", string=True)
+case("string_2d", (3, 4), (2, 2), "string", serializer="auto", fill_value="", string=True)
+case("string_zstd", (20,), (8,), "string", serializer="auto", fill_value="",
+     compressors=[ZstdCodec(level=3)], string=True)
+case("string_partial", (10,), (4,), "string", serializer="auto", fill_value="",
+     partial=True, string=True)
+
+
+# A deterministic pool of strings exercising ASCII, empty, non-BMP, and multibyte UTF-8.
+STRING_POOL = ["alpha", "", "gamma-δ", "中文", "emoji-\U0001f600", "x"]
+
+
+def string_values(n):
+    return np.array([STRING_POOL[i % len(STRING_POOL)] for i in range(n)], dtype=object)
+
 
 def values_for(dtype, n):
     if dtype.kind == "b":
@@ -93,6 +112,8 @@ def values_for(dtype, n):
 
 
 def jsonable(flat, dtype):
+    if dtype.kind in ("U", "T", "O"):  # string / object dtypes
+        return [str(v) for v in flat.tolist()]
     if dtype.kind == "f":
         out = []
         for v in flat.tolist():
@@ -114,13 +135,37 @@ def build(c):
     path = os.path.join(OUT, c["name"])
     if os.path.exists(path):
         shutil.rmtree(path)
+    n = int(np.prod(c["shape"]))
+
+    if c["string"]:
+        # zarr-python takes dtype="string" (variable-length UTF-8) directly, not a numpy dtype.
+        z = zarr.create_array(
+            store=path, shape=c["shape"], chunks=c["chunks"], dtype="string",
+            fill_value=c["fill_value"], filters=c["filters"], serializer=c["serializer"],
+            compressors=c["compressors"], shards=c["shards"], attributes=c["attrs"] or {})
+        values = string_values(n).reshape(c["shape"])
+        if c["partial"]:
+            expected = np.full(c["shape"], c["fill_value"], dtype=object)
+            flat = values.reshape(-1)
+            z[0:4] = flat[0:4]
+            expected.reshape(-1)[0:4] = flat[0:4]
+        else:
+            z[...] = values
+            expected = values
+        json_values = [str(v) for v in expected.reshape(-1).tolist()]
+        meta = dict(name=c["name"], shape=list(c["shape"]), dtype="string",
+                    values=json_values, attributes=c["attrs"] or {})
+        with open(os.path.join(OUT, c["name"] + ".expected.json"), "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=1, ensure_ascii=False)
+        print(f"  {c['name']:22s} {'string':8s} {tuple(c['shape'])}")
+        return
+
     dtype = np.dtype(c["dtype"])
     z = zarr.create_array(
         store=path, shape=c["shape"], chunks=c["chunks"], dtype=dtype,
         fill_value=c["fill_value"], filters=c["filters"], serializer=c["serializer"],
         compressors=c["compressors"], shards=c["shards"], attributes=c["attrs"] or {})
 
-    n = int(np.prod(c["shape"]))
     values = values_for(dtype, n).reshape(c["shape"]).astype(dtype)
 
     if c["partial"]:
