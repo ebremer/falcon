@@ -101,6 +101,21 @@ public final class Attribute {
         return readStrings()[0];
     }
 
+    /** Convenience for a scalar integer attribute. */
+    public int readInt() {
+        return readInts()[0];
+    }
+
+    /** Convenience for a scalar integer attribute (up to 8 bytes). */
+    public long readLong() {
+        return readLongs()[0];
+    }
+
+    /** Convenience for a scalar floating-point attribute. */
+    public double readDouble() {
+        return readDoubles()[0];
+    }
+
     /** Reads a variable-length sequence attribute, one {@code int[]} row per element. */
     public int[][] readVlenInts() {
         return VlenSequences.toInts(ctx, data(), count(), requireVlenSequence());

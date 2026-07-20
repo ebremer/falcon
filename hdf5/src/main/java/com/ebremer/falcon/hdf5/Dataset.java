@@ -195,6 +195,37 @@ public final class Dataset extends Hdf5Object {
         };
     }
 
+    /** Reads a single-element (scalar or 1-element) integer dataset as an {@code int}. */
+    public int readInt() {
+        requireSingleElement("readInt");
+        return readInts()[0];
+    }
+
+    /** Reads a single-element integer dataset as a {@code long}. */
+    public long readLong() {
+        requireSingleElement("readLong");
+        return readLongs()[0];
+    }
+
+    /** Reads a single-element floating-point dataset as a {@code double}. */
+    public double readDouble() {
+        requireSingleElement("readDouble");
+        return readDoubles()[0];
+    }
+
+    /** Reads a single-element string dataset. */
+    public String readString() {
+        requireSingleElement("readString");
+        return readStrings()[0];
+    }
+
+    private void requireSingleElement(String op) {
+        long n = dataspace().elementCount();
+        if (n != 1) {
+            throw new HdfUnsupportedException(op + " requires a single-element dataset, but " + path() + " has " + n);
+        }
+    }
+
     /**
      * Selects a rectangular hyperslab: {@code offset} and {@code count} give the start and size in
      * each dimension. Reading the returned {@link Selection} yields only those elements.
@@ -212,6 +243,32 @@ public final class Dataset extends Hdf5Object {
             }
         }
         return new Selection(this, offset, count);
+    }
+
+    /**
+     * Streams the dataset as blocks of at most {@code blockRows} along the first dimension, each a
+     * {@link Selection} spanning the full extent of the remaining dimensions. Reading each block touches
+     * only the chunks it overlaps, so a large dataset can be processed block-by-block without
+     * materializing it whole. A scalar dataset yields a single (whole) block.
+     */
+    public java.util.stream.Stream<Selection> blocks(long blockRows) {
+        if (blockRows <= 0) {
+            throw new IllegalArgumentException("blockRows must be positive: " + blockRows);
+        }
+        long[] dims = dataspace().dimensions();
+        if (dims.length == 0) {
+            return java.util.stream.Stream.of(select(new long[0], new long[0]));
+        }
+        long dim0 = dims[0];
+        long blockCount = (dim0 + blockRows - 1) / blockRows;
+        return java.util.stream.LongStream.range(0, blockCount).mapToObj(b -> {
+            long start = b * blockRows;
+            long[] offset = new long[dims.length];
+            offset[0] = start;
+            long[] shape = dims.clone();
+            shape[0] = Math.min(blockRows, dim0 - start);
+            return select(offset, shape);
+        });
     }
 
     // --------------------------------------------------------------- internals
