@@ -450,6 +450,28 @@ class WriteTest {
     }
 
     @Test
+    void roundTripEarliestManyChildren() throws IOException {
+        Path file = Files.createTempFile("falcon-msnod", ".h5");
+        try {
+            try (Hdf5Writer w = Hdf5Writer.create(file, Hdf5Writer.Format.EARLIEST)) {
+                Hdf5Writer.GroupWriter g = w.group("g");
+                for (int i = 0; i < 20; i++) { // > 8 children -> multiple symbol-table nodes
+                    g.intDataset(String.format("item%02d", i), new int[] {i}, new long[] {1});
+                }
+            }
+            try (Hdf5File h5 = Hdf5File.open(file)) {
+                Group g = h5.root().group("g");
+                assertEquals(20, g.childNames().size());
+                for (int i = 0; i < 20; i++) {
+                    assertArrayEquals(new int[] {i}, g.dataset(String.format("item%02d", i)).readInts());
+                }
+            }
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    @Test
     void roundTripEarliestFormat() throws IOException {
         Path file = Files.createTempFile("falcon-legacy", ".h5");
         try {

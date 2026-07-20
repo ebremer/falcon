@@ -1559,9 +1559,11 @@ public final class Hdf5Writer implements AutoCloseable {
      */
     private GroupResult writeSymbolTableGroup(GrowBuffer buf, List<SymbolChild> children,
                                               List<AttributeSpec> attributes) {
-        if (children.size() > 2 * GROUP_LEAF_K) {
-            throw new HdfUnsupportedException("a group with more than " + (2 * GROUP_LEAF_K)
-                    + " children is not written in the earliest format");
+        int perNode = 2 * GROUP_LEAF_K;      // max symbols per symbol-table node
+        int maxChildren = perNode * 2 * GROUP_INTERNAL_K; // a single-level B-tree of full nodes
+        if (children.size() > maxChildren) {
+            throw new HdfUnsupportedException("a group with more than " + maxChildren
+                    + " children is not written in the earliest format (would need a multi-level B-tree)");
         }
         // Local heap: 8 reserved bytes (offset 0 = the empty name), then each name, null-terminated and
         // padded to an 8-byte boundary.
@@ -1594,40 +1596,53 @@ public final class Hdf5Writer implements AutoCloseable {
         buf.u64(1);                  // free-list head offset (1 = no free blocks)
         buf.u64(heapDataAddress);    // data segment address
 
-        // Symbol-table node: entries sorted by name, padded to its fixed allocated size.
+        // Symbol-table nodes: name-sorted entries distributed across nodes of <= perNode symbols each,
+        // each padded to its fixed allocated size.
         List<SymbolChild> sorted = new ArrayList<>(children);
         sorted.sort((a, b) -> a.name().compareTo(b.name()));
-        buf.align(8);
-        int snodAddress = buf.position();
-        buf.bytes(SNOD_SIGNATURE);
-        buf.u8(1);            // version
-        buf.u8(0);            // reserved
-        buf.u16(sorted.size());
-        for (SymbolChild child : sorted) {
-            buf.u64(nameOffsets.get(child.name()));  // link name offset
-            buf.u64(child.headerAddress());          // object header address
-            buf.u32(child.cacheType());
-            buf.u32(0);                              // reserved
-            buf.u64(child.cacheType() == 1 ? child.btree() : 0); // scratch pad: B-tree + heap for a group
-            buf.u64(child.cacheType() == 1 ? child.heap() : 0);
-        }
-        int snodSize = 8 + 2 * GROUP_LEAF_K * SYMBOL_ENTRY_SIZE;
-        while (buf.position() - snodAddress < snodSize) {
-            buf.u8(0);
+        int nodeCount = Math.max(1, (sorted.size() + perNode - 1) / perNode);
+        int snodSize = 8 + perNode * SYMBOL_ENTRY_SIZE;
+        int[] snodAddresses = new int[nodeCount];
+        int[] snodMaxNameOffset = new int[nodeCount]; // heap offset of each node's greatest-by-name entry
+        for (int n = 0; n < nodeCount; n++) {
+            int from = n * perNode;
+            int to = Math.min(from + perNode, sorted.size());
+            buf.align(8);
+            snodAddresses[n] = buf.position();
+            buf.bytes(SNOD_SIGNATURE);
+            buf.u8(1);            // version
+            buf.u8(0);            // reserved
+            buf.u16(to - from);
+            for (int e = from; e < to; e++) {
+                SymbolChild child = sorted.get(e);
+                buf.u64(nameOffsets.get(child.name()));  // link name offset
+                buf.u64(child.headerAddress());          // object header address
+                buf.u32(child.cacheType());
+                buf.u32(0);                              // reserved
+                buf.u64(child.cacheType() == 1 ? child.btree() : 0); // scratch pad: B-tree + heap for a group
+                buf.u64(child.cacheType() == 1 ? child.heap() : 0);
+            }
+            while (buf.position() - snodAddresses[n] < snodSize) {
+                buf.u8(0);
+            }
+            snodMaxNameOffset[n] = to == 0 ? 0 : nameOffsets.get(sorted.get(to - 1).name());
         }
 
-        // Group version-1 B-tree: a single leaf node with one entry pointing at the symbol-table node.
+        // Group version-1 B-tree: a single leaf node with one entry per symbol-table node. Keys are the
+        // heap offset of the greatest name to the left of each pointer (key 0 = the empty-name offset).
         buf.align(8);
         int btreeAddress = buf.position();
         buf.bytes(TREE_SIGNATURE);
         buf.u8(0);            // node type: group
         buf.u8(0);            // node level: leaf
-        buf.u16(1);           // entries used
+        buf.u16(nodeCount);   // entries used
         buf.u64(UNDEFINED);   // left sibling
         buf.u64(UNDEFINED);   // right sibling
-        buf.u64(0);           // key 0: heap offset before the first name
-        buf.u64(snodAddress); // child 0: the symbol-table node
-        buf.u64(sorted.isEmpty() ? 0 : nameOffsets.get(sorted.get(sorted.size() - 1).name())); // key 1
+        buf.u64(0);           // key 0
+        for (int n = 0; n < nodeCount; n++) {
+            buf.u64(snodAddresses[n]);      // child n
+            buf.u64(snodMaxNameOffset[n]);  // key n+1
+        }
         int btreeSize = 8 + 2 * 8 + (2 * GROUP_INTERNAL_K + 1) * 8 + 2 * GROUP_INTERNAL_K * 8;
         while (buf.position() - btreeAddress < btreeSize) {
             buf.u8(0);
