@@ -213,6 +213,21 @@ class WriteTest {
     }
 
     @Test
+    void roundTripCompactLayout() throws IOException {
+        Path file = Files.createTempFile("falcon-compact", ".h5");
+        try {
+            try (Hdf5Writer w = Hdf5Writer.create(file)) {
+                w.intDataset("c", new int[] {10, 20, 30, 40}, new long[] {4}).compact();
+            }
+            try (Hdf5File h5 = Hdf5File.open(file)) {
+                assertArrayEquals(new int[] {10, 20, 30, 40}, h5.root().dataset("c").readInts());
+            }
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    @Test
     void roundTripCustomFillValue() throws IOException {
         Path file = Files.createTempFile("falcon-fill", ".h5");
         try {

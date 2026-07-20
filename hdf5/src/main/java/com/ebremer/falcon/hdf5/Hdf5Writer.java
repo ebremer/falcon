@@ -513,6 +513,22 @@ public final class Hdf5Writer implements AutoCloseable {
             }
         }
 
+        /**
+         * Stores the element data inline in the object header (compact layout) rather than in a separate
+         * block. For small contiguous datasets only; the data must be at most 65535 bytes.
+         */
+        public DatasetWriter compact() {
+            if (spec.chunkShape != null || spec.data == null || spec.vlenStrings != null
+                    || spec.referenceTargets != null) {
+                throw new IllegalStateException("compact layout requires a plain contiguous dataset");
+            }
+            if (spec.data.length > 0xFFFF) {
+                throw new IllegalStateException("compact layout data must be at most 65535 bytes");
+            }
+            spec.compact = true;
+            return this;
+        }
+
         /** Sets the fill value (for unallocated/unwritten elements) from an integer, sized to the datatype. */
         public DatasetWriter fillValue(long value) {
             byte[] fill = new byte[spec.elementSize];
@@ -663,7 +679,9 @@ public final class Hdf5Writer implements AutoCloseable {
                     "chunked/filtered and dense-attribute datasets are not written in the earliest format");
         }
         byte[] layout;
-        if (dataset.chunkShape != null) {
+        if (dataset.compact) {
+            layout = compactLayoutBody(dataset.data); // data stored inline in the header, no data block
+        } else if (dataset.chunkShape != null) {
             layout = writeChunkedStorage(buf, dataset);
         } else {
             byte[] data = dataset.data;
@@ -1491,6 +1509,16 @@ public final class Hdf5Writer implements AutoCloseable {
         return b.toByteArray();
     }
 
+    /** Compact data-layout message: the element data stored inline (version 3, class 0). */
+    private static byte[] compactLayoutBody(byte[] data) {
+        GrowBuffer b = new GrowBuffer();
+        b.u8(3);       // version
+        b.u8(0);       // layout class: compact
+        b.u16(data.length);
+        b.bytes(data);
+        return b.toByteArray();
+    }
+
     private static byte[] contiguousLayoutBody(long address, long size) {
         GrowBuffer b = new GrowBuffer();
         b.u8(3);
@@ -1872,6 +1900,7 @@ public final class Hdf5Writer implements AutoCloseable {
         int[] vlenElementCounts;        // per-element sequence lengths (element counts); null for strings
         List<String> referenceTargets;  // object-reference target paths, or null
         byte[] fillValue;                // custom fill value (datatype-order bytes), or null for the default 0
+        boolean compact;                 // store the element data inline in the object header
         final List<AttributeSpec> attributes = new ArrayList<>();
         int deflateLevel = -1;          // -1 = no compression
         boolean shuffle;
