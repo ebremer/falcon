@@ -23,4 +23,10 @@ interface ArrayBytesCodec {
      */
     ArrayValue decode(ChunkBytes source, int[] shape, int elementSize, byte[] fillElement,
                       int[] regionOrigin, int[] regionShape);
+
+    /**
+     * Encodes a whole chunk to its stored bytes. {@code fillElement} lets a codec recognize empty regions
+     * (a shard omits sub-chunks that hold only the fill value).
+     */
+    byte[] encode(ArrayValue array, int elementSize, byte[] fillElement);
 }

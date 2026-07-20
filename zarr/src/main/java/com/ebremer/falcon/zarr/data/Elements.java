@@ -97,6 +97,70 @@ public final class Elements {
         return out;
     }
 
+    // ---- encoding (typed array -> element bytes) --------------------------------------------------
+
+    public static byte[] fromDoubles(double[] values, DataType dt, ByteOrder order) {
+        int es = dt.byteCount();
+        ByteBuffer bb = ByteBuffer.allocate(values.length * es).order(order);
+        for (int i = 0; i < values.length; i++) {
+            putNumber(bb, i * es, dt, es, values[i], (long) values[i]);
+        }
+        return bb.array();
+    }
+
+    public static byte[] fromFloats(float[] values, DataType dt, ByteOrder order) {
+        int es = dt.byteCount();
+        ByteBuffer bb = ByteBuffer.allocate(values.length * es).order(order);
+        for (int i = 0; i < values.length; i++) {
+            putNumber(bb, i * es, dt, es, values[i], (long) values[i]);
+        }
+        return bb.array();
+    }
+
+    public static byte[] fromLongs(long[] values, DataType dt, ByteOrder order) {
+        int es = dt.byteCount();
+        ByteBuffer bb = ByteBuffer.allocate(values.length * es).order(order);
+        for (int i = 0; i < values.length; i++) {
+            putNumber(bb, i * es, dt, es, values[i], values[i]);
+        }
+        return bb.array();
+    }
+
+    public static byte[] fromInts(int[] values, DataType dt, ByteOrder order) {
+        int es = dt.byteCount();
+        ByteBuffer bb = ByteBuffer.allocate(values.length * es).order(order);
+        for (int i = 0; i < values.length; i++) {
+            putNumber(bb, i * es, dt, es, values[i], values[i]);
+        }
+        return bb.array();
+    }
+
+    /** Writes one element, narrowing as the data type requires. */
+    private static void putNumber(ByteBuffer bb, int off, DataType dt, int es, double asDouble, long asLong) {
+        switch (dt.kind()) {
+            case BOOL -> bb.put(off, (byte) (asLong != 0 ? 1 : 0));
+            case INT, UINT -> {
+                switch (es) {
+                    case 1 -> bb.put(off, (byte) asLong);
+                    case 2 -> bb.putShort(off, (short) asLong);
+                    case 4 -> bb.putInt(off, (int) asLong);
+                    case 8 -> bb.putLong(off, asLong);
+                    default -> throw new IllegalStateException("integer size " + es);
+                }
+            }
+            case FLOAT -> {
+                switch (es) {
+                    case 2 -> bb.putShort(off, Float.floatToFloat16((float) asDouble));
+                    case 4 -> bb.putFloat(off, (float) asDouble);
+                    case 8 -> bb.putDouble(off, asDouble);
+                    default -> throw new IllegalStateException("float size " + es);
+                }
+            }
+            case COMPLEX, RAW -> throw new ZarrException(
+                    dt.name() + " cannot be written from a primitive array; use the raw element bytes");
+        }
+    }
+
     private static long signed(ByteBuffer bb, int off, int es) {
         return switch (es) {
             case 1 -> bb.get(off);

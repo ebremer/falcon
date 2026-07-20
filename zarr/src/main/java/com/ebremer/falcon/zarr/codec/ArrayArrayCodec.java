@@ -11,4 +11,7 @@ interface ArrayArrayCodec {
 
     /** Decodes {@code input} (the encoded-side array) back toward the logical array. */
     ArrayValue decode(ArrayValue input, int elementSize);
+
+    /** Encodes {@code input} (the logical-side array) toward the stored form. */
+    ArrayValue encode(ArrayValue input, int elementSize);
 }

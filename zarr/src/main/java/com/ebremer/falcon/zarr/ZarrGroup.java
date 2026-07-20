@@ -1,5 +1,6 @@
 package com.ebremer.falcon.zarr;
 
+import com.ebremer.falcon.zarr.json.Json;
 import com.ebremer.falcon.zarr.json.JsonObject;
 import com.ebremer.falcon.zarr.metadata.GroupMetadata;
 import com.ebremer.falcon.zarr.store.Store;
@@ -105,6 +106,34 @@ public final class ZarrGroup extends ZarrNode {
                     "'" + childName + "' in " + display() + " is not a " + label);
         }
         return kind.cast(node);
+    }
+
+    /** Creates (or replaces) a child group. */
+    public ZarrGroup createGroup(String name) {
+        return createGroup(name, new JsonObject(java.util.Map.of()));
+    }
+
+    /** Creates (or replaces) a child group with the given attributes. */
+    public ZarrGroup createGroup(String name, JsonObject attributes) {
+        String childPath = childPath(name);
+        store.set(ZarrNode.metadataKey(childPath), Json.writeBytes(groupJson(attributes)));
+        return ZarrNode.open(store, childPath).asGroup();
+    }
+
+    /** Creates (or replaces) a child array described by {@code spec}. */
+    public ZarrArray createArray(String name, ArraySpec spec) {
+        String childPath = childPath(name);
+        store.set(ZarrNode.metadataKey(childPath), Json.writeBytes(spec.toJson()));
+        return ZarrNode.open(store, childPath).asArray();
+    }
+
+    /** The {@code zarr.json} document for a group with the given attributes. */
+    static JsonObject groupJson(JsonObject attributes) {
+        return JsonObject.builder()
+                .put("zarr_format", Zarr.ZARR_FORMAT)
+                .put("node_type", "group")
+                .put("attributes", attributes)
+                .build();
     }
 
     private String childPath(String childName) {

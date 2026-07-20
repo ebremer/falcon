@@ -6,11 +6,13 @@ It is **Falcon Phase 2**; the HDF5 module (Phase 1) is the sibling and the templ
 (reader-before-writer, thin vertical slice first, every stage gated by conformance tests). See the root
 [`PLAN.md`](../PLAN.md) for the umbrella roadmap.
 
-> **Status: Z6 complete — the module is read-complete.** On top of Z0–Z5, the `sharding_indexed` codec
-> reads shards: it locates the `uint64` (offset, length) index at `index_location` `start`/`end`, decodes
-> it through `index_codecs`, and fetches **only the sub-chunks overlapping the requested region** via
-> store byte ranges (`Store.size()` + `getRange`); all-ones entries read as fill. 135 unit tests green.
-> Next: **Z7** (write path).
+> **Status: Z7 complete — the module reads *and writes* Zarr v3.** On top of Z0–Z6, every codec gained an
+> encode path (`transpose`, `bytes`, `gzip`, `crc32c`, and `sharding_indexed`, which packs sub-chunks and
+> builds the index, omitting all-fill sub-chunks). `Zarr.createGroup/createArray` and
+> `ZarrGroup.createGroup/createArray` write spec-ordered `zarr.json`; `ArraySpec` builds the array
+> description. `ZarrArray`/`Selection` gained `writeInts/writeDoubles/…`, doing a read-modify-write for
+> partially covered chunks and **deleting** chunks that hold only the fill value. 158 unit tests green.
+> Next: **Z8** (zstd/blosc, Zarr v2 read-compat, zip/HTTP stores).
 
 ---
 
@@ -206,7 +208,7 @@ store written by zarr-python (§8). Stages are dependency-ordered.
 - **Acceptance:** values match zarr-python for a sharded fixture (nested `bytes`+`gzip`, both index
   locations); only the needed shard byte ranges are fetched.
 
-### Z7 — Write path
+### Z7 — Write path ✅ *done*
 - **File-space / store writes**: write `zarr.json` for groups and arrays (byte-stable, spec-ordered);
   create/populate the hierarchy; encode chunks by running the pipeline forward (`bytes`/`transpose`/
   `gzip`/`crc32c`); write only non-fill chunks (empty chunks omitted); **sharding write** (pack sub-chunks
@@ -282,7 +284,7 @@ Z8  zstd/blosc + v2 + zip/http      ── "read compressed & v2 stores"
 Z9  API polish + perf + robustness  ── "Zarr module 1.0"
 ```
 
-Read-usable after **Z5** ✅; read-complete (incl. sharding) after **Z6** ✅; write-complete after **Z7**.
+Read-usable after **Z5** ✅; read-complete (incl. sharding) after **Z6** ✅; write-complete after **Z7** ✅.
 
 ## 10. Relationship to the HDF5 module and a future `core`
 

@@ -9,6 +9,9 @@ interface BytesBytesCodec {
     /** Decodes {@code input}, undoing this codec's transform. */
     byte[] decode(byte[] input);
 
+    /** Encodes {@code input}, applying this codec's transform. */
+    byte[] encode(byte[] input);
+
     /**
      * The encoded size of {@code decodedSize} bytes, for codecs whose overhead is fixed. Needed to locate
      * a shard index without reading the whole shard.

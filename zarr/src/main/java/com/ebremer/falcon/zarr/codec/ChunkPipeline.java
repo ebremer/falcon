@@ -122,6 +122,29 @@ public final class ChunkPipeline {
         return dataType;
     }
 
+    /**
+     * Encodes a chunk's elements (a flat C-order buffer, each primitive in {@link #elementOrder()}) into
+     * the bytes to store: array&rarr;array codecs in order, then the array&rarr;bytes codec, then the
+     * bytes&rarr;bytes codecs in order. {@code fillElement} lets a shard omit all-fill sub-chunks.
+     */
+    public byte[] encode(byte[] elements, byte[] fillElement) {
+        int elementSize = dataType.byteCount();
+        long expected = (long) Pipelines.elementCount(chunkShape) * elementSize;
+        if (elements.length != expected) {
+            throw new ZarrFormatException(
+                    "chunk is " + elements.length + " bytes, expected " + expected);
+        }
+        ArrayValue array = new ArrayValue(elements, chunkShape);
+        for (ArrayArrayCodec codec : arrayCodecs) {
+            array = codec.encode(array, elementSize);
+        }
+        byte[] bytes = bytesCodec.encode(array, elementSize, fillElement);
+        for (BytesBytesCodec codec : byteCodecs) {
+            bytes = codec.encode(bytes);
+        }
+        return bytes;
+    }
+
     /** Whether the array&rarr;bytes codec is {@code sharding_indexed}. */
     boolean isSharded() {
         return bytesCodec instanceof ShardingCodec;

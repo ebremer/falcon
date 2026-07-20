@@ -1,6 +1,7 @@
 package com.ebremer.falcon.zarr;
 
 import com.ebremer.falcon.zarr.data.ChunkAssembler;
+import com.ebremer.falcon.zarr.data.ChunkWriter;
 import com.ebremer.falcon.zarr.data.Elements;
 import com.ebremer.falcon.zarr.datatype.DataType;
 import com.ebremer.falcon.zarr.metadata.ArrayMetadata;
@@ -67,6 +68,43 @@ public final class Selection {
     /** The selected elements as {@code int}s (integer data types that fit). */
     public int[] readInts() {
         return Elements.toInts(readRawBytes(), dataType(), order(), intCount());
+    }
+
+    /** Writes raw element bytes (C order, the array's byte order) into this region. */
+    public void writeRawBytes(byte[] elements) {
+        ChunkWriter.write(array.store, array.path, array.metadata(), offset, shape, elements);
+    }
+
+    /** Writes {@code values} into this region, narrowing to the array's data type. */
+    public void writeDoubles(double[] values) {
+        checkLength(values.length);
+        writeRawBytes(Elements.fromDoubles(values, dataType(), order()));
+    }
+
+    /** Writes {@code values} into this region, narrowing to the array's data type. */
+    public void writeFloats(float[] values) {
+        checkLength(values.length);
+        writeRawBytes(Elements.fromFloats(values, dataType(), order()));
+    }
+
+    /** Writes {@code values} into this region, narrowing to the array's data type. */
+    public void writeLongs(long[] values) {
+        checkLength(values.length);
+        writeRawBytes(Elements.fromLongs(values, dataType(), order()));
+    }
+
+    /** Writes {@code values} into this region, narrowing to the array's data type. */
+    public void writeInts(int[] values) {
+        checkLength(values.length);
+        writeRawBytes(Elements.fromInts(values, dataType(), order()));
+    }
+
+    private void checkLength(int given) {
+        long expected = elementCount();
+        if (given != expected) {
+            throw new IllegalArgumentException(
+                    "selection holds " + expected + " elements but got " + given);
+        }
     }
 
     private DataType dataType() {

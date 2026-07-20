@@ -163,6 +163,31 @@ public final class ZarrArray extends ZarrNode {
         return selectAll().readRawBytes();
     }
 
+    /** Writes the whole array from {@code values}, narrowing to this array's data type. */
+    public void writeDoubles(double[] values) {
+        selectAll().writeDoubles(values);
+    }
+
+    /** Writes the whole array from {@code values}, narrowing to this array's data type. */
+    public void writeFloats(float[] values) {
+        selectAll().writeFloats(values);
+    }
+
+    /** Writes the whole array from {@code values}, narrowing to this array's data type. */
+    public void writeLongs(long[] values) {
+        selectAll().writeLongs(values);
+    }
+
+    /** Writes the whole array from {@code values}, narrowing to this array's data type. */
+    public void writeInts(int[] values) {
+        selectAll().writeInts(values);
+    }
+
+    /** Writes the whole array from raw element bytes (C order, this array's byte order). */
+    public void writeRawBytes(byte[] elements) {
+        selectAll().writeRawBytes(elements);
+    }
+
     /** Internal access to the parsed metadata for the read path. */
     ArrayMetadata metadata() {
         return metadata;

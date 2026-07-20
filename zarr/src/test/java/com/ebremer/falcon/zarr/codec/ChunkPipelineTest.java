@@ -180,6 +180,32 @@ class ChunkPipelineTest {
                 spec("{\"name\":\"transpose\",\"configuration\":{\"order\":[1,0]}}")));
     }
 
+    // ---- encode ------------------------------------------------------------------------------------
+
+    @Test
+    void encodeThenDecodeRoundTripsThroughEveryCodec() {
+        JsonObject transpose = spec("{\"name\":\"transpose\",\"configuration\":{\"order\":[1,0]}}");
+        byte[] elements = {10, 11, 12, 13, 14, 15};
+        ChunkPipeline p = pipe(DataType.INT8, new long[] {2, 3}, transpose, BYTES_LE, GZIP, CRC32C_CODEC);
+        byte[] stored = p.encode(elements, new byte[1]);
+        assertArrayEquals(elements, p.decode(stored));
+    }
+
+    @Test
+    void transposeEncodeProducesTheExpectedStoredLayout() {
+        // Logical [2,3] = [10,11,12,13,14,15] stored transposed as [3,2] = [10,13,11,14,12,15].
+        JsonObject transpose = spec("{\"name\":\"transpose\",\"configuration\":{\"order\":[1,0]}}");
+        ChunkPipeline p = pipe(DataType.INT8, new long[] {2, 3}, transpose, BYTES_LE);
+        assertArrayEquals(new byte[] {10, 13, 11, 14, 12, 15},
+                p.encode(new byte[] {10, 11, 12, 13, 14, 15}, new byte[1]));
+    }
+
+    @Test
+    void encodeRejectsWrongChunkLength() {
+        ChunkPipeline p = pipe(DataType.INT32, new long[] {3}, BYTES_LE);
+        assertThrows(ZarrFormatException.class, () -> p.encode(new byte[8], new byte[4]));
+    }
+
     @Test
     void unsupportedCodecsAreReported() {
         assertThrows(ZarrUnsupportedException.class,

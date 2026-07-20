@@ -40,4 +40,17 @@ final class Crc32cCodec implements BytesBytesCodec {
         }
         return Arrays.copyOf(input, dataLength);
     }
+
+    @Override
+    public byte[] encode(byte[] input) {
+        CRC32C crc = new CRC32C();
+        crc.update(input);
+        long value = crc.getValue();
+        byte[] out = Arrays.copyOf(input, input.length + 4);
+        out[input.length] = (byte) value;
+        out[input.length + 1] = (byte) (value >>> 8);
+        out[input.length + 2] = (byte) (value >>> 16);
+        out[input.length + 3] = (byte) (value >>> 24);
+        return out;
+    }
 }

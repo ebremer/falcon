@@ -51,6 +51,12 @@ final class TransposeCodec implements ArrayArrayCodec {
     }
 
     @Override
+    public ArrayValue encode(ArrayValue input, int elementSize) {
+        return new ArrayValue(permute(input.data, input.shape, order, elementSize),
+                permutedShape(input.shape, order));
+    }
+
+    @Override
     public ArrayValue decode(ArrayValue input, int elementSize) {
         int[] inverse = new int[order.length];
         for (int i = 0; i < order.length; i++) {

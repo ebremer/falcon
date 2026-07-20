@@ -188,6 +188,107 @@ final class ShardingCodec implements ArrayBytesCodec {
         return new ArrayValue(out, shape);
     }
 
+    @Override
+    public byte[] encode(ArrayValue array, int elementSize, byte[] fillElement) {
+        int rank = array.shape.length;
+        int subElements = Pipelines.elementCount(subChunkShape);
+        int subBytes = subElements * elementSize;
+        byte[] emptySub = new byte[subBytes];
+        tile(emptySub, fillElement);
+
+        int count = 1;
+        for (int g : subGridShape) {
+            count *= g;
+        }
+        long[] offsets = new long[count];
+        long[] lengths = new long[count];
+        List<byte[]> payloads = new ArrayList<>(count);
+
+        long encodedIndex = encodedIndexSize;
+        long cursor = indexAtStart ? encodedIndex : 0;
+        int[] coord = new int[rank];
+        for (int linear = 0; linear < count; linear++) {
+            byte[] sub = new byte[subBytes];
+            int[] origin = new int[rank];
+            for (int i = 0; i < rank; i++) {
+                origin[i] = coord[i] * subChunkShape[i];
+            }
+            extractBlock(array.data, array.shape, origin, sub, subChunkShape, elementSize);
+            if (java.util.Arrays.equals(sub, emptySub)) {
+                offsets[linear] = EMPTY; // all fill: omit the sub-chunk entirely
+                lengths[linear] = EMPTY;
+            } else {
+                byte[] payload = inner.encode(sub, fillElement);
+                offsets[linear] = cursor;
+                lengths[linear] = payload.length;
+                cursor += payload.length;
+                payloads.add(payload);
+            }
+            for (int i = rank - 1; i >= 0; i--) {
+                if (++coord[i] < subGridShape[i]) {
+                    break;
+                }
+                coord[i] = 0;
+            }
+        }
+
+        ByteBuffer entries = ByteBuffer.allocate(count * 16).order(index.elementOrder());
+        for (int i = 0; i < count; i++) {
+            entries.putLong(offsets[i]);
+            entries.putLong(lengths[i]);
+        }
+        byte[] indexBytes = index.encode(entries.array(), new byte[8]);
+        if (indexBytes.length != encodedIndex) {
+            throw new ZarrFormatException("shard index encoded to " + indexBytes.length
+                    + " bytes, expected " + encodedIndex);
+        }
+
+        long dataBytes = cursor - (indexAtStart ? encodedIndex : 0);
+        byte[] shard = new byte[(int) (dataBytes + encodedIndex)];
+        int dataStart = indexAtStart ? (int) encodedIndex : 0;
+        int position = dataStart;
+        for (byte[] payload : payloads) {
+            System.arraycopy(payload, 0, shard, position, payload.length);
+            position += payload.length;
+        }
+        System.arraycopy(indexBytes, 0, shard, indexAtStart ? 0 : (int) dataBytes, indexBytes.length);
+        return shard;
+    }
+
+    /** Copies a sub-chunk out of the shard's element buffer. */
+    private static void extractBlock(byte[] src, int[] srcShape, int[] srcOrigin,
+                                     byte[] dst, int[] dstShape, int elementSize) {
+        int rank = srcShape.length;
+        if (rank == 0) {
+            System.arraycopy(src, 0, dst, 0, elementSize);
+            return;
+        }
+        int[] srcStride = strides(srcShape);
+        int[] dstStride = strides(dstShape);
+        int last = rank - 1;
+        int run = dstShape[last];
+        int outer = 1;
+        for (int i = 0; i < last; i++) {
+            outer *= dstShape[i];
+        }
+        int[] index = new int[rank];
+        for (int n = 0; n < outer; n++) {
+            int srcOffset = srcOrigin[last] * srcStride[last];
+            int dstOffset = 0;
+            for (int i = 0; i < last; i++) {
+                srcOffset += (srcOrigin[i] + index[i]) * srcStride[i];
+                dstOffset += index[i] * dstStride[i];
+            }
+            System.arraycopy(src, srcOffset * elementSize, dst, dstOffset * elementSize, run * elementSize);
+            for (int i = last - 1; i >= 0; i--) {
+                if (++index[i] < dstShape[i]) {
+                    break;
+                }
+                index[i] = 0;
+            }
+        }
+    }
+
     /** Copies a full sub-chunk into the shard's element buffer at {@code dstOrigin}. */
     private static void copyBlock(byte[] src, int[] srcShape, byte[] dst, int[] dstShape,
                                   int[] dstOrigin, int elementSize) {

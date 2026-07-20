@@ -58,4 +58,14 @@ final class BytesCodec implements ArrayBytesCodec {
         }
         return new ArrayValue(input, shape);
     }
+
+    @Override
+    public byte[] encode(ArrayValue array, int elementSize, byte[] fillElement) {
+        long expected = Pipelines.elementCount(array.shape) * (long) elementSize;
+        if (array.data.length != expected) {
+            throw new ZarrFormatException(
+                    "bytes codec: chunk is " + array.data.length + " bytes, expected " + expected);
+        }
+        return array.data;
+    }
 }

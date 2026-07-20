@@ -1,8 +1,11 @@
 package com.ebremer.falcon.zarr;
 
+import com.ebremer.falcon.zarr.json.Json;
+import com.ebremer.falcon.zarr.json.JsonObject;
 import com.ebremer.falcon.zarr.store.FileSystemStore;
 import com.ebremer.falcon.zarr.store.Store;
 import java.nio.file.Path;
+import java.util.Map;
 
 /**
  * Entry point for reading a Zarr v3 hierarchy.
@@ -57,5 +60,22 @@ public final class Zarr {
      */
     public static ZarrArray openArray(Store store) {
         return open(store).asArray();
+    }
+
+    /** Creates (or replaces) the root group of {@code store} and returns it. */
+    public static ZarrGroup createGroup(Store store) {
+        return createGroup(store, new JsonObject(Map.of()));
+    }
+
+    /** Creates (or replaces) the root group of {@code store} with the given attributes. */
+    public static ZarrGroup createGroup(Store store, JsonObject attributes) {
+        store.set("zarr.json", Json.writeBytes(ZarrGroup.groupJson(attributes)));
+        return ZarrNode.open(store, "").asGroup();
+    }
+
+    /** Creates (or replaces) an array at the root of {@code store} and returns it. */
+    public static ZarrArray createArray(Store store, ArraySpec spec) {
+        store.set("zarr.json", Json.writeBytes(spec.toJson()));
+        return ZarrNode.open(store, "").asArray();
     }
 }

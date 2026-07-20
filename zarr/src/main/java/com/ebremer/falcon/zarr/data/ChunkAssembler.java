@@ -143,6 +143,21 @@ public final class ChunkAssembler {
         return fill;
     }
 
+    /**
+     * Decodes the whole chunk stored under {@code key}, or {@code null} if it is absent. Used by the write
+     * path to read a chunk back before updating part of it.
+     */
+    static byte[] readChunkOrNull(Store store, String key, ChunkPipeline pipeline,
+                                  byte[] fillElement, long[] chunkShape) {
+        int rank = chunkShape.length;
+        int[] origin = new int[rank];
+        int[] extent = new int[rank];
+        for (int i = 0; i < rank; i++) {
+            extent[i] = (int) chunkShape[i];
+        }
+        return pipeline.decodeChunk(new StoreChunkBytes(store, key), fillElement, origin, extent);
+    }
+
     /** Byte-range access to one chunk in a store. */
     private record StoreChunkBytes(Store store, String key) implements ChunkBytes {
 
@@ -166,59 +181,22 @@ public final class ChunkAssembler {
     private static void copyIntersection(byte[] out, long[] selShape, long[] selOffset, long[] selEnd,
                                          long[] coord, long[] chunkShape, byte[] chunk, int elementSize) {
         int rank = selShape.length;
-        if (rank == 0) {
-            System.arraycopy(chunk, 0, out, 0, elementSize);
-            return;
-        }
         long[] chunkOrigin = new long[rank];
-        long[] lo = new long[rank];
-        long[] hi = new long[rank];
+        long[] srcOrigin = new long[rank];
+        long[] dstOrigin = new long[rank];
+        long[] block = new long[rank];
         for (int i = 0; i < rank; i++) {
             chunkOrigin[i] = coord[i] * chunkShape[i];
-            lo[i] = Math.max(selOffset[i], chunkOrigin[i]);
-            hi[i] = Math.min(selEnd[i], chunkOrigin[i] + chunkShape[i]);
+            long lo = Math.max(selOffset[i], chunkOrigin[i]);
+            long hi = Math.min(selEnd[i], chunkOrigin[i] + chunkShape[i]);
+            srcOrigin[i] = lo - chunkOrigin[i];
+            dstOrigin[i] = lo - selOffset[i];
+            block[i] = hi - lo;
         }
-        int last = rank - 1;
-        long run = hi[last] - lo[last];
-        if (run <= 0) {
-            return;
-        }
-        long[] outStride = rowMajorStrides(selShape);
-        long[] chunkStride = rowMajorStrides(chunkShape);
-        long[] g = lo.clone(); // current global coordinate; the last axis stays at lo[last]
-        while (true) {
-            long chunkFlat = 0;
-            long outFlat = 0;
-            for (int i = 0; i < rank; i++) {
-                chunkFlat += (g[i] - chunkOrigin[i]) * chunkStride[i];
-                outFlat += (g[i] - selOffset[i]) * outStride[i];
-            }
-            System.arraycopy(chunk, (int) (chunkFlat * elementSize),
-                    out, (int) (outFlat * elementSize), (int) (run * elementSize));
-            int d = last - 1;
-            for (; d >= 0; d--) {
-                if (++g[d] < hi[d]) {
-                    break;
-                }
-                g[d] = lo[d];
-            }
-            if (d < 0) {
-                break;
-            }
-        }
+        Blocks.copy(chunk, chunkShape, srcOrigin, out, selShape, dstOrigin, block, elementSize);
     }
 
-    private static long[] rowMajorStrides(long[] shape) {
-        long[] stride = new long[shape.length];
-        long acc = 1;
-        for (int i = shape.length - 1; i >= 0; i--) {
-            stride[i] = acc;
-            acc *= shape[i];
-        }
-        return stride;
-    }
-
-    private static void tile(byte[] buffer, byte[] element) {
+    static void tile(byte[] buffer, byte[] element) {
         boolean allZero = true;
         for (byte b : element) {
             if (b != 0) {
