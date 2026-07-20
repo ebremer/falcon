@@ -4,6 +4,7 @@ import com.ebremer.falcon.zarr.ZarrFormatException;
 import com.ebremer.falcon.zarr.ZarrUnsupportedException;
 import com.ebremer.falcon.zarr.chunk.ChunkKeyEncoding;
 import com.ebremer.falcon.zarr.chunk.RegularChunkGrid;
+import com.ebremer.falcon.zarr.codec.ChunkPipeline;
 import com.ebremer.falcon.zarr.datatype.DataType;
 import com.ebremer.falcon.zarr.json.JsonArray;
 import com.ebremer.falcon.zarr.json.JsonObject;
@@ -23,9 +24,9 @@ import java.util.Set;
  *
  * <p>The {@code data_type} is resolved to a {@link DataType} and the {@code fill_value} is validated
  * against it at parse time (though kept as raw JSON; {@link #fillValueBytes} decodes it on demand). The
- * {@code codecs} are kept as {@link NamedConfig}s until the pipeline is built in Z4. Only the
- * {@code regular} chunk grid and the {@code default}/{@code v2} chunk key encodings are recognized;
- * anything else is reported as {@link ZarrUnsupportedException}.
+ * {@code codecs} are kept as raw specs and assembled into a {@link ChunkPipeline} on first use (see
+ * {@link #pipeline()}). Only the {@code regular} chunk grid and the {@code default}/{@code v2} chunk key
+ * encodings are recognized; anything else is reported as {@link ZarrUnsupportedException}.
  */
 public final class ArrayMetadata implements NodeMetadata {
 
@@ -37,12 +38,14 @@ public final class ArrayMetadata implements NodeMetadata {
     private final DataType dataType;
     private final ChunkKeyEncoding chunkKeyEncoding;
     private final JsonValue fillValue;
-    private final List<NamedConfig> codecs;
+    private final List<JsonObject> codecs; // raw codec specs, in pipeline order
     private final JsonObject attributes;
     private final String[] dimensionNames; // null if absent; individual entries may be null (unnamed)
 
+    private ChunkPipeline pipeline; // built lazily from the codec specs
+
     ArrayMetadata(RegularChunkGrid grid, DataType dataType, ChunkKeyEncoding chunkKeyEncoding,
-                  JsonValue fillValue, List<NamedConfig> codecs, JsonObject attributes,
+                  JsonValue fillValue, List<JsonObject> codecs, JsonObject attributes,
                   String[] dimensionNames) {
         this.grid = grid;
         this.dataType = dataType;
@@ -94,9 +97,12 @@ public final class ArrayMetadata implements NodeMetadata {
         }
 
         JsonArray codecArray = Fields.array(Fields.require(o, "codecs", ctx), ctx + ".codecs");
-        List<NamedConfig> codecs = new ArrayList<>(codecArray.size());
+        List<JsonObject> codecs = new ArrayList<>(codecArray.size());
         for (int i = 0; i < codecArray.size(); i++) {
-            codecs.add(NamedConfig.parse(codecArray.get(i), ctx + ".codecs[" + i + "]"));
+            String codecCtx = ctx + ".codecs[" + i + "]";
+            JsonObject codec = Fields.object(codecArray.get(i), codecCtx);
+            Fields.string(Fields.require(codec, "name", codecCtx), codecCtx + ".name"); // validate name
+            codecs.add(codec);
         }
 
         JsonObject attributes = o.find("attributes")
@@ -198,19 +204,29 @@ public final class ArrayMetadata implements NodeMetadata {
         return chunkKeyEncoding.separator();
     }
 
-    /** The raw fill value, decoded to the element type in Z2. */
+    /** The raw fill value; {@link #fillValueBytes} decodes it to element bytes. */
     public JsonValue fillValue() {
         return fillValue;
     }
 
-    /** The codec chain as named extensions, assembled into a pipeline in Z4. */
-    public List<NamedConfig> codecs() {
-        return codecs;
-    }
-
     /** The codec names, in pipeline order. */
     public List<String> codecNames() {
-        return codecs.stream().map(NamedConfig::name).toList();
+        return codecs.stream().map(c -> c.get("name").asString()).toList();
+    }
+
+    /**
+     * The chunk codec pipeline, built on first use from the codec specs and cached.
+     *
+     * @throws ZarrFormatException      if the codec order or a configuration is invalid
+     * @throws ZarrUnsupportedException if a codec is not yet implemented
+     */
+    public ChunkPipeline pipeline() {
+        ChunkPipeline p = pipeline;
+        if (p == null) {
+            p = ChunkPipeline.of(dataType, grid.chunkShape(), codecs);
+            pipeline = p;
+        }
+        return p;
     }
 
     @Override

@@ -9,6 +9,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.ebremer.falcon.zarr.ZarrFormatException;
 import com.ebremer.falcon.zarr.ZarrUnsupportedException;
+import com.ebremer.falcon.zarr.codec.ChunkPipeline;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import org.junit.jupiter.api.Test;
@@ -223,6 +226,37 @@ class MetadataTest {
         assertThrows(ZarrFormatException.class, () -> array(VALID_ARRAY
                 .replace("\"data_type\":\"float64\"", "\"data_type\":\"int16\"")
                 .replace("\"fill_value\":0", "\"fill_value\":100000")));
+    }
+
+    @Test
+    void pipelineDecodesAChunk() {
+        ArrayMetadata a = array(VALID_ARRAY); // float64, chunk [2,3] = 6 elements, bytes little
+        ChunkPipeline pipeline = a.pipeline();
+        assertEquals(ByteOrder.LITTLE_ENDIAN, pipeline.elementOrder());
+
+        ByteBuffer buf = ByteBuffer.allocate(6 * 8).order(ByteOrder.LITTLE_ENDIAN);
+        for (double v : new double[] {1, 2, 3, 4, 5, 6}) {
+            buf.putDouble(v);
+        }
+        byte[] decoded = pipeline.decode(buf.array());
+        ByteBuffer out = ByteBuffer.wrap(decoded).order(ByteOrder.LITTLE_ENDIAN);
+        for (double v : new double[] {1, 2, 3, 4, 5, 6}) {
+            assertEquals(v, out.getDouble());
+        }
+    }
+
+    @Test
+    void unsupportedCodecIsDeferredToPipelineBuild() {
+        // Parsing succeeds (the node can be described); the failure surfaces on data access.
+        ArrayMetadata blosc = array(VALID_ARRAY.replace(
+                "\"codecs\":[{\"name\":\"bytes\",\"configuration\":{\"endian\":\"little\"}}]",
+                "\"codecs\":[{\"name\":\"bytes\",\"configuration\":{\"endian\":\"little\"}},{\"name\":\"blosc\"}]"));
+        assertEquals(List.of("bytes", "blosc"), blosc.codecNames());
+        assertThrows(ZarrUnsupportedException.class, blosc::pipeline);
+
+        ArrayMetadata empty = array(VALID_ARRAY.replace(
+                "\"codecs\":[{\"name\":\"bytes\",\"configuration\":{\"endian\":\"little\"}}]", "\"codecs\":[]"));
+        assertThrows(ZarrFormatException.class, empty::pipeline);
     }
 
     @Test

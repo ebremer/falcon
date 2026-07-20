@@ -6,12 +6,13 @@ It is **Falcon Phase 2**; the HDF5 module (Phase 1) is the sibling and the templ
 (reader-before-writer, thin vertical slice first, every stage gated by conformance tests). See the root
 [`PLAN.md`](../PLAN.md) for the umbrella roadmap.
 
-> **Status: Z3 complete.** On top of Z0–Z2, the module now has the chunk machinery (internal `chunk`
-> package): `RegularChunkGrid` (grid shape = `ceil(shape/chunk_shape)`, chunk origin, edge-chunk extent,
-> coordinate↔index) and `ChunkKeyEncoding` (`default`/`v2`, both separators, the rank-0 cases).
-> `zarr.json` parsing resolves these into typed objects, and `ZarrArray` surfaces `gridShape()`,
-> `chunkCount()`, and `chunkKey(coords…)` (the full store key, path-prefixed). 99 unit tests green.
-> Next: **Z4** (codec pipeline — decode).
+> **Status: Z4 complete.** On top of Z0–Z3, the module now has the codec pipeline (internal `codec`
+> package): `ChunkPipeline` validates the `(array→array)* (array→bytes) (bytes→bytes)*` structure and
+> decodes a chunk's stored bytes into its elements. Implemented codecs — `transpose` (axis permutation),
+> `bytes` (element byte order), `gzip` (`java.util.zip`), `crc32c` (verify/strip via
+> `java.util.zip.CRC32C`); `sharding_indexed`/`blosc`/`zstd` are reported unsupported until their stages.
+> `ArrayMetadata.pipeline()` builds it lazily (so a node still opens even if a codec is unimplemented).
+> 114 unit tests green. Next: **Z5** (array read + selections).
 
 ---
 
@@ -180,7 +181,7 @@ store written by zarr-python (§8). Stages are dependency-ordered.
 - **Milestone:** map any chunk coordinate to its store key, both encodings.
 - **Acceptance:** generated keys match zarr-python for 1-D…4-D arrays and both encodings/separators.
 
-### Z4 — Codec pipeline (decode)
+### Z4 — Codec pipeline (decode) ✅ *done*
 - **Pipeline model**: an ordered list validated as `array→array`* · one `array→bytes` · `bytes→bytes`*;
   decoding applies the inverse in reverse.
 - **Codecs**: `bytes` (endian pack/unpack between the n-D array and a flat buffer), `transpose` (axis
