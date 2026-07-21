@@ -77,14 +77,45 @@ share one in-memory model. Until then, no premature abstraction.
 - A small, ergonomic, documented public API; efficient large-file access via memory mapping; zero
   runtime dependencies; JPMS modules; reproducible builds on JDK 25.
 
-**Non-goals / deferred**
-- **SWMR** concurrent-writer semantics, MPI/parallel I/O, and the HDF5 high-level APIs (images, tables,
-  dimension scales) — Falcon is a *format* library, not a port of the HL API.
-- **Non-default file drivers** beyond the common single-file case (multi/family/split) are read-only
-  and low priority.
-- Byte-for-byte layout parity with the C library — Falcon's writer chooses its own valid, conformant
-  encodings.
-- **Zarr** — Falcon Phase 2 (§12).
+**Non-goals**
+
+Each of these sits *outside* the boundary of the project: Falcon is a **format** library (it reads and
+writes the on-disk container) under a **pure-JDK, zero-dependency** mandate, validated by **semantic
+round-trip conformance** against h5py. Every non-goal falls out of that boundary.
+
+- **SWMR** (Single-Writer/Multiple-Reader) concurrent access. SWMR is a *runtime concurrency protocol*,
+  not part of the format: staying coherent depends on libhdf5's metadata-cache flush ordering and
+  flush-dependency tracking between objects — coordination discipline, not bytes on disk. Falcon uses a
+  batch model (open → read/write → close), which covers the overwhelming majority of Java workloads;
+  live concurrent access is a large, orthogonal effort with its own correctness surface.
+- **MPI / parallel I/O** (Parallel HDF5). Collective I/O across MPI ranks requires an MPI runtime — a
+  native library and an entire distributed-computing model — which directly contradicts the
+  zero-runtime-dependency, pure-JDK guarantee. This one is *precluded* by the core mandate, not merely
+  deprioritized.
+- **HDF5 high-level APIs** (images `H5IM`, tables `H5TB`, dimension scales `H5DS`). These are
+  *conventions layered on the base objects* (an "image" is a dataset with particular attributes; a
+  "dimension scale" is a dataset plus a specific attribute/reference pattern), not format primitives.
+  Falcon exposes the underlying groups/datasets/attributes/references, so a caller can read or implement
+  these conventions directly; porting the HL API would add convenience surface without adding *format*
+  capability, and can always be layered on later. Falcon is a *format* library, not a port of the HL API.
+- **Non-default file drivers** (family / multi / split) — read-only and low priority. These Virtual File
+  Drivers spread one logical file across several physical files, and are rare in practice: almost every
+  real `.h5` uses the default single-file driver. Not forbidden — just no demand pulling it in. (Distinct
+  from *external raw data files* (External File List), a per-dataset spec feature that **is** supported.)
+- **Byte-for-byte on-disk parity** with the C library — Falcon's writer chooses its own valid,
+  conformant encodings. The spec deliberately allows many valid encodings of the same logical content
+  (message ordering, chunk-index choice, free-space arrangement, allocation order, padding). Matching
+  libhdf5 exactly would be *brittle* (its layout shifts across versions/settings), *constraining* (it
+  would tie Falcon to libhdf5's internal choices rather than the spec), and *valueless to readers*
+  (conformance means any spec-valid file is readable, not that two files are byte-identical). The right
+  test is semantic round-trip — h5py reads what Falcon writes and vice versa — which Falcon does across
+  the whole fixture matrix.
+
+**Not a non-goal — deferred.** Distinct from the above (which are out of scope *by design*), a handful of
+in-scope features are simply not done yet or can't be produced/validated by the local h5py build (which
+ships szip disabled and won't emit SOHM): SOHM shared-message deduplication, the revised `H5R_ref_t`
+reference encoding, unlimited-pattern (printf) VDS mappings, and the bitfield/opaque/time datatype
+classes on write. See the stage roadmap (§8) and [`TODO.md`](TODO.md). **Zarr** is Falcon Phase 2 (§12).
 
 > **szip is IN scope** (changed from the draft): implemented from scratch in pure Java (§9).
 
