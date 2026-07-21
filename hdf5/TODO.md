@@ -7,6 +7,26 @@ Nothing below is required for a solid 1.0. Items are grouped by whether they are
 by this environment, or explicit non-goals. See [`PLAN.md`](PLAN.md) for the full roadmap, or the umbrella
 [`../PLAN.md`](../PLAN.md) for the program-level view.
 
+## Priorities — top 5 high-value
+
+Ranked read-completeness-for-modern-files first (the reader is otherwise complete), then write breadth.
+(Full backlog in the summary below.)
+
+1. **Revised `H5R_ref_t` reference encoding (read).** HDF5 1.12+/2.0 files created with the new reference
+   API use this encoding; Falcon reads only the legacy form today. As modern h5py/libhdf5 output
+   proliferates this becomes a *read* gap on mainstream files — the highest-impact miss, since reading is
+   the completed strength.
+2. **SOHM shared-message deduplication (read).** A file that enables shared messages (many objects reusing
+   one compound datatype/dataspace) throws `HdfUnsupportedException`. A genuine unsupported *input*, not
+   just an untested path, and produced by real data pipelines.
+3. **Unlimited-pattern (printf) VDS mappings (read).** Virtual datasets mapping to an open-ended set of
+   source files (acquisition/streaming layouts) are the one VDS shape still refused. Completes VDS read.
+4. **Indirect-block fractal heaps (write).** Unblocks writing groups/attribute sets past ~one direct block
+   (thousands of entries); very large dense groups throw on write without it.
+5. **Opaque / bitfield / time datatypes (write).** Closes the last write datatype-coverage gap. Opaque
+   (arbitrary binary blobs) is the most useful; bitfield/time are rare. Each is a small, well-scoped
+   addition like the atomics already implemented.
+
 ## Unimplemented features (summary)
 
 Everything not yet implemented, in one place. None of it blocks reading or writing real HDF5 files; the

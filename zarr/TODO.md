@@ -7,6 +7,25 @@ verified against the reference implementations — zarr-python 3.2.1, libzstd, a
 
 What follows is what is **left**. None of it blocks reading or writing real Zarr stores.
 
+## Priorities — top 5 high-value
+
+Ranked by real-world Zarr deployment reality: Zarr exists largely to serve arrays from remote object
+storage, so the highest value sits there. (Full backlog in the summary below.)
+
+1. **Cloud object stores (S3 / GCS / Azure).** The *primary* Zarr use case, and nothing ships — users must
+   implement the `Store` SPI themselves. The byte-range contract already fits, so high value at moderate
+   cost. Biggest single unlock.
+2. **Consolidated metadata (read + write).** Currently unimplemented. Over HTTP/object stores, opening a
+   large hierarchy means one request per node; consolidated metadata collapses that into a single fetch —
+   what makes remote stores usable at scale. Pairs directly with #1.
+3. **Full blosc encode configurations (write).** Falcon *reads* the whole blosc matrix but *writes* only
+   byte-shuffle + zstd (`BloscEncoder`). blosc is the PyData ecosystem's most common compressor; writing
+   lz4/lz4hc/zlib + bit-shuffle at a chosen `clevel` matters for round-trip fidelity and interop.
+4. **Zarr v2 read filters (delta, fixed-scale-offset, …).** Falcon reads v2 metadata but refuses v2 filter
+   pipelines, so a filtered v2 array throws. Fully reads the in-the-wild v2 corpus it already partially opens.
+5. **`vlen-bytes` data type.** Complements the implemented `vlen-utf8`; covers raw variable-length
+   byte/object arrays. Lower reach than strings but a small, real addition.
+
 ## Unimplemented features (summary)
 
 Everything not yet implemented, in one place. Nothing here blocks reading or writing real Zarr stores;
@@ -18,8 +37,10 @@ The sections below give the detail.
 - [ ] **Zarr v2 filters** — delta, fixed-scale-offset, and the rest.
 - [ ] **Zarr v2 top-level `zlib` compressor** (blosc's *internal* zlib *is* supported).
 - [ ] **Unknown `must_understand: true` metadata fields**, **non-`regular` chunk grids**, **object/extension data types**, and **storage transformers**.
+- [ ] **Consolidated metadata** (read + write) — a single-request listing of a whole hierarchy; not implemented. High value over remote stores (see priorities).
+- [ ] **Full blosc encode configurations** — the encoder writes only byte-shuffle + zstd; lz4/lz4hc/zlib + bit-shuffle on write are not offered (read supports them all).
 - [ ] **Zarr v2 writing** — Falcon writes v3 only (v2 is read-compat).
-- [ ] **zstd / blosc encoder tuning** — correct and interoperable, but single-level (no clevel/window tuning, greedy LZ); not optimized for ratio.
+- [ ] **zstd / blosc encoder ratio tuning** — correct and interoperable, but single-level (no clevel/window tuning, greedy LZ); not optimized for ratio.
 - [ ] **`ZipStore` writing** — read-only; build one with `ZipStore.pack`.
 - [ ] **`HttpStore` key listing** — plain HTTP has no directory listing (a named child still opens).
 - [ ] **Cloud object stores** (S3/GCS/Azure) — not shipped; implement the `Store` SPI (the byte-range contract fits).
