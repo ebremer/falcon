@@ -8,7 +8,7 @@ encode it nor round-trip it here; instead these vectors come from `cramjam`
 Install with:  pip install cramjam
 Run from the repo root:  python tools/fixtures/gen_snappy_vectors.py
 
-Writes zarr/src/test/resources/fixtures/snappy_vectors.txt, one case per line:
+Writes core/src/test/resources/fixtures/snappy_vectors.txt, one case per line:
 
     <name> <original-hex> <raw-snappy-hex>
 """
@@ -16,7 +16,7 @@ import os
 import random
 import cramjam
 
-OUT = os.path.join("zarr", "src", "test", "resources", "fixtures", "snappy_vectors.txt")
+OUT = os.path.join("core", "src", "test", "resources", "fixtures", "snappy_vectors.txt")
 
 CASES = []
 rng = random.Random(20260720)

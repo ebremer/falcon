@@ -30,9 +30,26 @@ try (Hdf5File h5 = Hdf5File.open(Path.of("data.h5"))) {   // AutoCloseable; unma
 }
 ```
 
-`Hdf5File` also exposes `superblockVersion()` and, for files that record it, `fileSpaceInfo()` (allocation
-strategy, page size, and total free space). `close()` may be called more than once; after it, reading
-anything obtained from the file throws `HdfClosedException`, and `isOpen()` returns false.
+`Hdf5File` also describes the file itself:
+- `superblockVersion()`;
+- `fileSpaceInfo()`, for files that record it: allocation strategy, page size, and total free space.
+  The version 0 written by HDF5 1.10.0 is read too, as libhdf5 maps it.
+- `btreeKValues()`: the B-tree split values the file was created with, or libhdf5's defaults.
+- `driverInfo()`: the file driver, if not the default. For example, `NCSAfami` means the file is one
+  member of a family, and Falcon reads only the member it opened.
+
+`close()` may be called more than once; after it, reading anything obtained from the file throws
+`HdfClosedException`, and `isOpen()` returns false.
+
+`Hdf5File.open(path, options)` takes `OpenOptions`, which hold the external-file policy below and how
+virtual datasets with unlimited mappings are read (see *References and virtual datasets*):
+
+```java
+Hdf5File.open(path, OpenOptions.defaults()
+        .externalFileAccess(ExternalFileAccess.unrestricted())
+        .virtualView(OpenOptions.VirtualView.FIRST_MISSING)
+        .virtualPrintfGap(2));
+```
 
 ### Links
 
@@ -110,8 +127,24 @@ does not fit a `long`. `read()` picks an array every value of the type fits in:
 
 **Non-native layouts.** Integers are read from their bit offset and precision (a 12-bit value packed in 16
 bits, a 24-bit integer in 3 bytes). Floats are decoded from their sign, exponent, and mantissa fields as
-libhdf5 decodes them, so bfloat16 and x87 80-bit extended precision read correctly. VAX-order floats are
-not supported.
+libhdf5 decodes them, so bfloat16, x87 80-bit extended precision, and VAX floats (in their own byte
+order, as libhdf5's `H5T_VAX_F32` and `H5T_VAX_F64` store them) read correctly.
+
+### Compression filters
+
+Chunked data is decoded through any of HDF5's built-in filters:
+- `deflate`, `shuffle`, `fletcher32` (verified), `szip`, `nbit`, and `scaleoffset`.
+
+It is also decoded through the third-party filters most common in the wild:
+- LZF (32000, h5py's built-in filter);
+- Blosc (32001), with every internal codec (BloscLZ, LZ4, LZ4HC, Snappy, zlib, zstd) and both shuffles;
+- LZ4 (32004);
+- bitshuffle (32008), alone or with LZ4 or zstd;
+- Zstandard (32015).
+
+These are pure-Java codecs that Falcon's Zarr module shares (see `../core`). A chunk that an optional
+filter skipped is read as stored. Any other filter throws `HdfUnsupportedException` naming its id.
+Older storage reads too: the chunked layouts of HDF5 1.6.2 and earlier (layout message versions 1 and 2).
 
 ### Hyperslabs and streaming
 
@@ -179,10 +212,18 @@ takes the extent from the sources, as libhdf5 does when it opens the dataset, so
 files. Two kinds of unlimited mapping are read:
 - **Both selections unlimited:** the mapping covers as much as its source currently holds.
 - **printf-style:** `%b` in the source file or dataset name stands for 0, 1, 2, and so on. Source *b*
-  fills block *b* of the virtual selection. The sources found before the first missing one set the
-  extent. `%%` in a name stands for `%`.
+  fills block *b* of the virtual selection, and the sources found set the extent. `%%` in a name stands
+  for `%`.
 
-This matches libhdf5's defaults: the "last available" view, and a printf gap of 0.
+Two `OpenOptions` settings work as libhdf5's dataset access properties do (`H5Pset_virtual_view` and
+`H5Pset_virtual_printf_gap`):
+- **`virtualView`:**
+  - `LAST_AVAILABLE`, the default, extends to the furthest any mapping reaches. Shorter mappings leave
+    the fill value at the end.
+  - `FIRST_MISSING` stops where the shortest mapping ends, or at a printf mapping's first missing
+    source, cutting longer mappings there.
+- **`virtualPrintfGap`:** how many missing printf sources in a row the search skips before it stops.
+  The default is 0. Skipped sources read as the fill value.
 
 ### Datatypes
 
@@ -356,9 +397,9 @@ Catch `HdfException` to handle any Falcon read/write failure.
 
 The following are not supported:
 - **Filtered fractal heaps.**
-- **Virtual-dataset views other than libhdf5's defaults:** the "first missing" view, and a printf gap
-  other than 0.
-- **Multi-file drivers** (family, multi, split).
+- **Filters other than the built-in six and the five third-party ones above.**
+- **Multi-file drivers** (family, multi, split). `driverInfo()` reports them, and Falcon reads only the
+  file it opened.
 - **Following external links, and references into other files.**
 
 On the write side, the bitfield/opaque/time datatype classes and indirect-block dense storage are not

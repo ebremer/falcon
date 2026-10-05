@@ -262,9 +262,10 @@ public final class Elements {
         return value;
     }
 
-    /** True if {@code fp} is exactly IEEE 754 binary16, binary32, or binary64. */
+    /** True if {@code fp} is exactly IEEE 754 binary16, binary32, or binary64 in plain byte order. */
     private static boolean isIeee(Datatype.FloatingPoint fp) {
-        if (fp.normalization() != Datatype.MantissaNormalization.IMPLIED || fp.mantissaLocation() != 0) {
+        if (fp.normalization() != Datatype.MantissaNormalization.IMPLIED || fp.mantissaLocation() != 0
+                || fp.vaxOrder()) {
             return false;
         }
         return switch (fp.size()) {
@@ -290,10 +291,23 @@ public final class Elements {
      * Decodes a floating-point element from its sign, exponent, and mantissa fields, as libhdf5's
      * float conversion ({@code H5T__conv_f_f}) does: field locations count from the element's least
      * significant bit (the bit offset and precision are not used), an all-ones exponent is infinity or
-     * NaN, and a mantissa without an implied leading bit (x87 extended precision) is read as written.
+     * NaN, and a mantissa without an implied leading bit (x87 extended precision) is read as written. A
+     * VAX-order element is first put in little-endian order by reversing its 16-bit words, as libhdf5
+     * does before converting it.
      */
     private static double decodeFloat(MemorySegment data, long off, Datatype.FloatingPoint fp) {
         int size = fp.size();
+        boolean le = fp.byteOrder() == ByteOrder.LITTLE_ENDIAN;
+        if (fp.vaxOrder()) {
+            byte[] element = new byte[size];
+            for (int i = 0; i + 1 < size; i += 2) {
+                element[i] = data.get(ValueLayout.JAVA_BYTE, off + size - 2 - i);
+                element[i + 1] = data.get(ValueLayout.JAVA_BYTE, off + size - 1 - i);
+            }
+            data = MemorySegment.ofArray(element);
+            off = 0;
+            le = true;
+        }
         int esize = fp.exponentSize();
         int msize = fp.mantissaSize();
         long totalBits = 8L * size;
@@ -305,7 +319,6 @@ public final class Elements {
             throw new HdfUnsupportedException("floating-point layout not supported: " + esize
                     + "-bit exponent, " + msize + "-bit mantissa, " + fp.normalization() + " normalization");
         }
-        boolean le = fp.byteOrder() == ByteOrder.LITTLE_ENDIAN;
         boolean negative = bits(data, off, size, le, fp.signLocation(), 1) != 0;
         long exponent = bits(data, off, size, le, fp.exponentLocation(), esize);
         long mantissa = bits(data, off, size, le, fp.mantissaLocation(), msize);

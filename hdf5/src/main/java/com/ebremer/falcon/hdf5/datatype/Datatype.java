@@ -40,12 +40,26 @@ public sealed interface Datatype {
     /**
      * Floating-point type (class 1): sign, exponent, and mantissa fields at the given bit locations of
      * the element (counted from its least significant bit), so IEEE 754 binary16/32/64 and other layouts
-     * (bfloat16, x87 80-bit extended) are all described.
+     * (bfloat16, x87 80-bit extended, VAX) are all described.
+     *
+     * <p>{@code vaxOrder} marks VAX byte order (datatype version 3+): the element's 16-bit words are
+     * stored most significant first, each little-endian; {@code byteOrder} is then big-endian, as the
+     * message's byte-order bit says.
      */
     record FloatingPoint(int size, ByteOrder byteOrder, int bitOffset, int bitPrecision,
                          int exponentLocation, int exponentSize, int mantissaLocation, int mantissaSize,
-                         long exponentBias, int signLocation, MantissaNormalization normalization)
+                         long exponentBias, int signLocation, MantissaNormalization normalization,
+                         boolean vaxOrder)
             implements Datatype {
+
+        /** A floating-point type in plain big- or little-endian order. */
+        public FloatingPoint(int size, ByteOrder byteOrder, int bitOffset, int bitPrecision,
+                             int exponentLocation, int exponentSize, int mantissaLocation, int mantissaSize,
+                             long exponentBias, int signLocation, MantissaNormalization normalization) {
+            this(size, byteOrder, bitOffset, bitPrecision, exponentLocation, exponentSize, mantissaLocation,
+                    mantissaSize, exponentBias, signLocation, normalization, false);
+        }
+
         @Override public DatatypeClass typeClass() {
             return DatatypeClass.FLOATING_POINT;
         }

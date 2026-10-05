@@ -6,6 +6,8 @@ import com.ebremer.falcon.hdf5.header.ObjectHeader;
 import com.ebremer.falcon.hdf5.io.FileContext;
 import com.ebremer.falcon.hdf5.io.HdfBuffer;
 import com.ebremer.falcon.hdf5.io.MappedHdfFile;
+import com.ebremer.falcon.hdf5.message.BTreeKValuesMessage;
+import com.ebremer.falcon.hdf5.message.DriverInfoMessage;
 import com.ebremer.falcon.hdf5.message.FileSpaceInfoMessage;
 import com.ebremer.falcon.hdf5.superblock.Superblock;
 import java.io.IOException;
@@ -28,6 +30,7 @@ import java.util.Optional;
  *
  * <p><b>Other files.</b> External raw data and virtual-dataset sources are opened only as the
  * {@link ExternalFileAccess} policy allows: by default, files in this file's own directory tree.
+ * {@link OpenOptions} set it, and how virtual datasets with unlimited mappings are read.
  *
  * <p><b>Lifecycle.</b> {@link #close()} is idempotent. Once closed, reading anything obtained from the
  * file throws {@link HdfClosedException}; {@link #isOpen()} tells whether it is still open.
@@ -52,9 +55,9 @@ public final class Hdf5File implements AutoCloseable {
         this.root = root;
     }
 
-    /** Opens and memory-maps an HDF5 file for reading, with the default {@link ExternalFileAccess#sameDirectory()} policy. */
+    /** Opens and memory-maps an HDF5 file for reading, with the {@linkplain OpenOptions#defaults() default options}. */
     public static Hdf5File open(Path path) throws IOException {
-        return open(path, ExternalFileAccess.sameDirectory());
+        return open(path, OpenOptions.defaults());
     }
 
     /**
@@ -62,7 +65,12 @@ public final class Hdf5File implements AutoCloseable {
      * files (external raw data, virtual-dataset sources) it may make Falcon open.
      */
     public static Hdf5File open(Path path, ExternalFileAccess externalFileAccess) throws IOException {
-        java.util.Objects.requireNonNull(externalFileAccess, "externalFileAccess");
+        return open(path, OpenOptions.defaults().externalFileAccess(externalFileAccess));
+    }
+
+    /** Opens and memory-maps an HDF5 file for reading, as {@code options} say. */
+    public static Hdf5File open(Path path, OpenOptions options) throws IOException {
+        java.util.Objects.requireNonNull(options, "options");
         MappedHdfFile mapped = MappedHdfFile.openReadOnly(path);
         try {
             Superblock superblock = Superblock.parse(mapped.buffer());
@@ -76,8 +84,7 @@ public final class Hdf5File implements AutoCloseable {
                 data = data.slice(base, data.size() - base);
             }
             FileContext ctx = new FileContext(data, superblock.sizeOfOffsets(), superblock.sizeOfLengths(),
-                    path, superblock.rootObjectHeaderAddress(), externalFileAccess,
-                    superblock.superblockExtensionAddress());
+                    path, superblock.rootObjectHeaderAddress(), options, superblock.superblockExtensionAddress());
             Group root = Group.root(ctx, superblock.rootObjectHeaderAddress());
             return new Hdf5File(mapped, superblock, ctx, root);
         } catch (RuntimeException e) {
@@ -117,6 +124,43 @@ public final class Hdf5File implements AutoCloseable {
             return Optional.empty();
         }
         return Optional.of(FileSpaceInfoMessage.parse(ctx, message.bodyOffset(), message.bodySize()));
+    }
+
+    /**
+     * The 'K' values of this file's version-1 B-trees: those a version 0&ndash;1 superblock stores, or a
+     * B-tree K Values message in the superblock extension; otherwise libhdf5's
+     * {@linkplain BTreeKValues#DEFAULTS defaults}.
+     */
+    public BTreeKValues btreeKValues() {
+        ctx.checkOpen();
+        int[] k = superblock.btreeKValues();
+        if (k != null) {
+            return new BTreeKValues(k[0], k[1], k[2]);
+        }
+        HeaderMessage message = extensionMessage(MessageType.BTREE_K_VALUES);
+        return message == null ? BTreeKValues.DEFAULTS : BTreeKValuesMessage.parse(message.body());
+    }
+
+    /**
+     * The file driver this file records, if it was written with one other than the default (such as the
+     * family driver, whose files are each one member of a set): from a version 0&ndash;1 superblock's
+     * driver information block, or a Driver Info message in the superblock extension. Falcon reads the
+     * file it opened only, not the other members.
+     */
+    public Optional<DriverInfo> driverInfo() {
+        ctx.checkOpen();
+        long block = superblock.driverInfoAddress();
+        if (block != HdfBuffer.UNDEFINED_ADDRESS) {
+            return Optional.of(DriverInfoMessage.parseBlock(ctx.buffer(), block));
+        }
+        HeaderMessage message = extensionMessage(MessageType.DRIVER_INFO);
+        return message == null ? Optional.empty() : Optional.of(DriverInfoMessage.parse(message.body()));
+    }
+
+    /** The superblock extension's message of {@code type}, or null. */
+    private HeaderMessage extensionMessage(int type) {
+        long extension = ctx.superblockExtensionAddress();
+        return extension == HdfBuffer.UNDEFINED_ADDRESS ? null : ObjectHeader.parse(ctx, extension).find(type);
     }
 
     /** True until {@link #close()} is called. */

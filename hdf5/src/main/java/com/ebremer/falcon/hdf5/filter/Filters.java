@@ -11,7 +11,8 @@ import java.util.zip.Inflater;
 /**
  * Decoders for HDF5's six built-in filters: {@code deflate} (via {@code java.util.zip}),
  * {@code shuffle}, {@code fletcher32} (verified), {@code szip} ({@link Szip}), {@code nbit}, and
- * {@code scaleoffset} ({@link ScaleOffset}).
+ * {@code scaleoffset} ({@link ScaleOffset}); and for the common third-party filters LZF, Blosc, LZ4,
+ * bitshuffle, and Zstandard ({@link ThirdPartyFilters}).
  */
 public final class Filters {
 
@@ -39,6 +40,9 @@ public final class Filters {
             case SZIP -> Szip.decode(data, filter.clientData(), maxBytes);
             case SCALEOFFSET -> ScaleOffset.decode(data, filter.clientData(), maxBytes);
             case NBIT -> nbit(data, filter.clientData(), uncompressedSize);
+            case ThirdPartyFilters.LZF, ThirdPartyFilters.BLOSC, ThirdPartyFilters.LZ4, ThirdPartyFilters.BITSHUFFLE,
+                 ThirdPartyFilters.ZSTD -> ThirdPartyFilters.decode(filter.id(), filter.clientData(), data, elementSize,
+                    uncompressedSize, maxBytes);
             default -> throw new HdfUnsupportedException("HDF5 filter id " + filter.id() + " is not supported");
         };
     }

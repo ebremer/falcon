@@ -313,5 +313,17 @@ that should stay separate:
 
 The only genuinely identical, mechanically-shareable code is a ~40-line N-dimensional row-major
 strided block copy (HDF5's `ChunkedReader.copyIntersection`, Zarr's `data.Blocks.copy`) — too small to
-justify a module and its cross-module dependency. A `core` module is therefore **deferred until a real
-shared model emerges** (for example a third format, or a deliberate unification effort); it is not a gap.
+justify a module and its cross-module dependency. A shared *model* is therefore **deferred until a real
+one emerges** (for example a third format, or a deliberate unification effort); it is not a gap.
+
+**Update (2026-10-05): the codecs moved to `core`.** HDF5's third-party filters (Blosc 32001, zstd
+32015, LZ4 32004, bitshuffle 32008, LZF 32000) need exactly the compression code this module had written,
+so — by Erich's decision — it moved to a `core` module (`com.ebremer.falcon.core`) instead of being
+copied:
+- **Packages:** `compress.zstd`, `compress.blosc` (with BloscLZ, Snappy, byte shuffle), `compress.lz4`,
+  `compress.bitshuffle`, and the new `compress.lzf`, exported only to the two format modules.
+- **Exceptions:** malformed data is `CompressionFormatException` and unsupported variants
+  `UnsupportedCompressionException`; each module maps them to its own exceptions.
+- **Tests and vectors:** the codec unit tests, their vectors, and the codec fuzzing moved with the code.
+
+Data types, byte I/O, checksums, and chunk indexing stay format-specific, as above.

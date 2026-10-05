@@ -34,15 +34,20 @@ import java.util.function.Supplier;
  *
  * <p>A mapping may be <b>unlimited</b> in one dimension, letting the virtual dataset grow with its
  * sources; libhdf5 then sets that dimension's extent from the sources when the dataset is opened
- * ({@code H5D__virtual_set_extent_unlim}), and {@link #extent} does the same, with libhdf5's defaults
- * (the "last available" view, and a printf gap of 0):
+ * ({@code H5D__virtual_set_extent_unlim}), and {@link #extent} does the same:
  * <ul>
  *   <li>if both selections are unlimited, the source selection is clipped to the source's current extent
  *       and the virtual one to the extent that selects as many indices;</li>
  *   <li>a <b>printf-style</b> mapping names its sources with {@code %b}, replaced by 0, 1, 2, &hellip;:
- *       source <i>b</i> fills block <i>b</i> of the unlimited virtual selection, and the sources found
- *       before the first missing one set the extent.</li>
+ *       source <i>b</i> fills block <i>b</i> of the unlimited virtual selection. The search stops once
+ *       more sources in a row are missing than the printf gap allows ({@link OpenOptions#virtualPrintfGap});
+ *       the sources found set the extent, and those skipped read as the fill value.</li>
  * </ul>
+ * In the {@linkplain OpenOptions.VirtualView#LAST_AVAILABLE last available} view (the default) the extent
+ * is the furthest any unlimited mapping reaches, to the end of its last block; in the
+ * {@linkplain OpenOptions.VirtualView#FIRST_MISSING first missing} view it is the shortest, up to where
+ * the next block would start (for a printf-style mapping, the block of its first missing source, whatever
+ * the gap), and mappings that reach further are cut there.
  *
  * <p>Source files are found where libhdf5 looks for them, as the file's {@link ExternalFileAccess} policy
  * allows (see there); a refused one fails the read. A missing source file or dataset leaves the fill
@@ -111,6 +116,7 @@ final class VirtualDataset {
         if (mappings.stream().noneMatch(m -> !m.isEmpty() && m.virtual().isUnlimited())) {
             return storedDims;
         }
+        boolean firstMissing = ctx.options().virtualView() == OpenOptions.VirtualView.FIRST_MISSING;
         int rank = storedDims.length;
         long[] unlimited = new long[rank];
         Arrays.fill(unlimited, -1); // -1: no unlimited mapping in this dimension
@@ -131,8 +137,11 @@ final class VirtualDataset {
                     }
                 }
                 if (u >= 0) {
-                    long reach = mapping.isPrintf() ? printfExtent(sources, mapping) : unlimitedExtent(sources, mapping);
-                    unlimited[u] = Math.max(unlimited[u], reach);
+                    long reach = mapping.isPrintf() ? printfExtent(sources, mapping, firstMissing)
+                            : unlimitedExtent(sources, mapping, firstMissing);
+                    // "Last available" takes the furthest-reaching mapping, "first missing" the shortest.
+                    unlimited[u] = unlimited[u] < 0 ? reach
+                            : firstMissing ? Math.min(unlimited[u], reach) : Math.max(unlimited[u], reach);
                 }
             }
         }
@@ -145,30 +154,60 @@ final class VirtualDataset {
         return dims;
     }
 
-    /** How far an unlimited, non-printf mapping reaches: as many indices as its source holds. */
-    private static long unlimitedExtent(Sources sources, Mapping mapping) {
+    /**
+     * How far an unlimited, non-printf mapping reaches: as many indices as its source holds (in the
+     * "first missing" view, on to where its next block would start). A missing source reaches nowhere.
+     */
+    private static long unlimitedExtent(Sources sources, Mapping mapping, boolean firstMissing) {
         Dataset source = sources.find(expand(mapping.fileName(), -1), expand(mapping.datasetName(), -1), false);
         if (source == null) {
             return 0;
         }
         long[] sourceDims = source.dataspace().dimensions();
         int su = requireUnlimitedSource(mapping, sourceDims.length);
-        return mapping.virtual().extentSelecting(mapping.source().selectedBelow(sourceDims[su]));
+        return mapping.virtual().extentSelecting(mapping.source().selectedBelow(sourceDims[su]), firstMissing);
     }
 
-    /** How far a printf-style mapping reaches: to the end of the block of its last source found. */
-    private static long printfExtent(Sources sources, Mapping mapping) {
-        long found = 0;
-        while (found < MAX_PRINTF_SOURCES && printfSource(sources, mapping, found) != null) {
-            found++;
+    /**
+     * How far a printf-style mapping reaches: to the end of the block of its last source found; in the
+     * "first missing" view, to the start of the block of its first missing source, whatever the printf
+     * gap (as libhdf5 2.0 and 1.14 read it).
+     */
+    private static long printfExtent(Sources sources, Mapping mapping, boolean firstMissing) {
+        List<Dataset> found = printfSources(sources, mapping);
+        if (found.isEmpty()) {
+            return 0;
         }
-        return found == 0 ? 0 : mapping.virtual().blockEnd(found - 1);
+        if (firstMissing) {
+            int missing = found.indexOf(null);
+            return mapping.virtual().blockStart(missing < 0 ? found.size() : missing);
+        }
+        return mapping.virtual().blockEnd(found.size() - 1);
     }
 
-    private static Dataset printfSource(Sources sources, Mapping mapping, long block) {
-        // Past the first source, a refused name ends the search like a missing one: an absolute name
-        // whose files were moved resolves by file name, and the name after the last one never does.
-        return sources.find(expand(mapping.fileName(), block), expand(mapping.datasetName(), block), block > 0);
+    /**
+     * A printf-style mapping's sources, from block 0 up to the last one found, with null for those
+     * missing: the search goes on past a missing source only while no more are missing in a row than the
+     * printf gap allows (libhdf5's {@code first_missing} loop).
+     */
+    private static List<Dataset> printfSources(Sources sources, Mapping mapping) {
+        long gap = sources.ctx.options().virtualPrintfGap();
+        List<Dataset> found = new ArrayList<>();
+        long next = 0; // one past the last source found
+        for (long block = 0; block < MAX_PRINTF_SOURCES && block - next <= gap; block++) {
+            // Past the first source, a refused name ends the search like a missing one: an absolute name
+            // whose files were moved resolves by file name, and the names after the last one never do.
+            Dataset source = sources.find(expand(mapping.fileName(), block), expand(mapping.datasetName(), block),
+                    block > 0);
+            if (source != null) {
+                while (found.size() < block) {
+                    found.add(null);
+                }
+                found.add(source);
+                next = block + 1;
+            }
+        }
+        return found;
     }
 
     private static byte[] assembleSources(FileContext ctx, DataLayout.Virtual layout, long[] virtualDims,
@@ -194,16 +233,13 @@ final class VirtualDataset {
                 int u = virtual.unlimitedDimension();
                 if (u >= 0 && mapping.isPrintf()) {
                     requireRank(virtual.highCorner().length, virtualDims.length);
-                    for (long block = 0; block < MAX_PRINTF_SOURCES; block++) {
-                        if (virtual.blockEnd(block) > virtualDims[u]) {
-                            break; // the block lies beyond the extent
+                    List<Dataset> found = printfSources(sources, mapping);
+                    for (int block = 0; block < found.size() && virtual.blockStart(block) < virtualDims[u]; block++) {
+                        Dataset source = found.get(block);
+                        if (source != null) { // a source the printf gap skipped leaves the fill value
+                            copy(output, source, mapping.source().offsets(source.dataspace().dimensions()),
+                                    blockOffsetsWithin(virtual, virtualDims, u, block), type, mapping.datasetName());
                         }
-                        Dataset source = printfSource(sources, mapping, block);
-                        if (source == null) {
-                            break; // libhdf5 maps the sources before the first missing one
-                        }
-                        copy(output, source, mapping.source().offsets(source.dataspace().dimensions()),
-                                virtual.blockOffsets(virtualDims, block), type, mapping.datasetName());
                     }
                     continue;
                 }
@@ -216,10 +252,15 @@ final class VirtualDataset {
                 long[] sourceOffsets;
                 long[] virtualOffsets;
                 if (u >= 0) {
+                    // Clip the virtual selection to the extent (which the "first missing" view may set
+                    // short of this mapping's reach), and the source selection to match it.
                     int su = requireUnlimitedSource(mapping, sourceDims.length);
                     long reach = virtual.extentSelecting(mapping.source().selectedBelow(sourceDims[su]));
-                    sourceOffsets = mapping.source().clippedOffsets(sourceDims, sourceDims[su]);
-                    virtualOffsets = virtual.clippedOffsets(virtualDims, Math.min(reach, virtualDims[u]));
+                    long virtualClip = Math.min(reach, virtualDims[u]);
+                    long sourceClip = Math.min(sourceDims[su],
+                            mapping.source().extentSelecting(virtual.selectedBelow(virtualClip)));
+                    sourceOffsets = mapping.source().clippedOffsets(sourceDims, sourceClip);
+                    virtualOffsets = virtual.clippedOffsets(virtualDims, virtualClip);
                 } else if (mapping.source().isUnlimited()) {
                     throw new HdfFormatException("virtual dataset mapping has an unlimited source selection"
                             + " but a limited virtual one");
@@ -233,7 +274,37 @@ final class VirtualDataset {
         return output;
     }
 
-    /** Copies the source elements at {@code sourceOffsets} to the virtual ones at {@code virtualOffsets}. */
+    /**
+     * The flat offsets of block {@code block} of a printf-style selection, in iteration order, with -1 for
+     * elements beyond the extent: in the "first missing" view another mapping can cut a block short.
+     */
+    private static long[] blockOffsetsWithin(DataspaceSelection virtual, long[] dims, int u, int block) {
+        long end = virtual.blockEnd(block);
+        if (end <= dims[u]) {
+            return virtual.blockOffsets(dims, block);
+        }
+        long[] whole = dims.clone();
+        whole[u] = end;
+        long[][] coordinates = virtual.blockCoordinates(whole, block);
+        long[] offsets = new long[coordinates.length];
+        for (int i = 0; i < offsets.length; i++) {
+            long[] c = coordinates[i];
+            long flat = -1;
+            if (c[u] < dims[u]) {
+                flat = 0;
+                for (int d = 0; d < dims.length; d++) {
+                    flat = flat * dims[d] + c[d];
+                }
+            }
+            offsets[i] = flat;
+        }
+        return offsets;
+    }
+
+    /**
+     * Copies the source elements at {@code sourceOffsets} to the virtual ones at {@code virtualOffsets},
+     * pairing them in order; a negative virtual offset is skipped.
+     */
     private static void copy(byte[] output, Dataset source, long[] sourceOffsets, long[] virtualOffsets,
                              Datatype type, String sourceName) {
         int elementSize = type.size();
@@ -241,6 +312,9 @@ final class VirtualDataset {
         byte[] sourceBytes = source.rawData().toArray(ValueLayout.JAVA_BYTE);
         int n = Math.min(sourceOffsets.length, virtualOffsets.length);
         for (int i = 0; i < n; i++) {
+            if (virtualOffsets[i] < 0) {
+                continue;
+            }
             int from = (int) (sourceOffsets[i] * elementSize);
             int to = (int) (virtualOffsets[i] * elementSize);
             if (swap) {
@@ -372,7 +446,7 @@ final class VirtualDataset {
 
     /** Opens source datasets for one read, each source file once, and closes them at the end. */
     private static final class Sources implements AutoCloseable {
-        private final FileContext ctx;
+        final FileContext ctx;
         private final Path directory;
         private final Map<Path, Optional<Hdf5File>> files = new HashMap<>();
 
@@ -403,7 +477,7 @@ final class VirtualDataset {
                     return null;
                 }
                 Optional<Hdf5File> file = files.computeIfAbsent(path,
-                        p -> Optional.ofNullable(openOrNull(p, ctx.externalFileAccess())));
+                        p -> Optional.ofNullable(openOrNull(p, ctx.options())));
                 if (file.isEmpty()) {
                     return null;
                 }
@@ -439,9 +513,9 @@ final class VirtualDataset {
         return current instanceof Dataset dataset ? dataset : null;
     }
 
-    private static Hdf5File openOrNull(Path path, ExternalFileAccess access) {
+    private static Hdf5File openOrNull(Path path, OpenOptions options) {
         try {
-            return Hdf5File.open(path, access);
+            return Hdf5File.open(path, options);
         } catch (IOException e) {
             return null; // an unavailable source contributes only the fill value
         }
@@ -497,6 +571,7 @@ final class VirtualDataset {
     private static Datatype withOrder(Datatype type, ByteOrder order) {
         return switch (type) {
             case Datatype.FixedPoint t -> new Datatype.FixedPoint(t.size(), order, t.signed(), t.bitOffset(), t.bitPrecision());
+            case Datatype.FloatingPoint t when t.vaxOrder() -> null; // not a plain byte reversal
             case Datatype.FloatingPoint t -> new Datatype.FloatingPoint(t.size(), order, t.bitOffset(), t.bitPrecision(),
                     t.exponentLocation(), t.exponentSize(), t.mantissaLocation(), t.mantissaSize(), t.exponentBias(),
                     t.signLocation(), t.normalization());

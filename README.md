@@ -7,6 +7,7 @@ formats — no native libraries, no third-party dependencies.
 |---|---|---|---|
 | [`hdf5`](hdf5) | `com.ebremer.falcon.hdf5` | HDF5 reader/writer implementing the [HDF5 File Format Specification v4.0](https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html) (HDF5 2.0) | Read-complete, write-broad — 1.0-ready |
 | [`zarr`](zarr) | `com.ebremer.falcon.zarr` | [Zarr](https://zarr.dev/) reader/writer (v3 core; v2 read) | Built |
+| [`core`](core) | `com.ebremer.falcon.core` | Pure-Java compression codecs both formats share (zstd, Blosc, LZ4, LZF, bitshuffle); exported only to Falcon's modules | Built |
 
 See **[PLAN.md](PLAN.md)** for the umbrella roadmap and **[CLAUDE.md](CLAUDE.md)** for conventions. Each
 module has its own plan, remaining-work list, and user guide:
@@ -21,9 +22,10 @@ module has its own plan, remaining-work list, and user guide:
 ## Build
 
 ```bash
-mvn verify              # whole reactor (parent + both modules)
-mvn -pl hdf5 test       # just the HDF5 module
-mvn -pl zarr test       # just the Zarr module
+mvn verify              # whole reactor (parent + all modules)
+mvn -pl hdf5 -am test   # the HDF5 module (and core, which it depends on)
+mvn -pl zarr -am test   # the Zarr module (and core)
+mvn -pl core test       # just the shared codecs
 ```
 
 The build is hermetic: conformance fixtures are committed, so no HDF5, h5py, or zarr-python is needed at
@@ -94,10 +96,12 @@ Stores: in-memory, filesystem, ZIP, and read-only HTTP (byte-range). Full walkth
 
 ## Design highlights
 
-- **Zero runtime dependencies** — only `java.base`. `deflate`/`gzip` use `java.util.zip`; everything else
-  is hand-written in pure Java: HDF5 `szip` (CCSDS 121.0 extended-Rice), the Zarr `zstd` (RFC 8878) and
-  `blosc` codecs, the Jenkins lookup3 / crc32c / fletcher32 checksums, and the shuffle/nbit/scale-offset
-  filters. Every codec is validated against its reference implementation (h5py/libaec, libzstd, c-blosc).
+- **Zero runtime dependencies** — only `java.base` (the format modules depend on Falcon's own `core`,
+  which itself needs only `java.base`). `deflate`/`gzip` use `java.util.zip`; everything else is
+  hand-written in pure Java: HDF5 `szip` (CCSDS 121.0 extended-Rice), the `zstd` (RFC 8878), `blosc`,
+  LZ4, LZF, and bitshuffle codecs in `core` (Zarr codecs and HDF5 filters alike), the Jenkins lookup3 /
+  crc32c / fletcher32 checksums, and the shuffle/nbit/scale-offset filters. Every codec is validated
+  against its reference implementation (h5py/libaec/hdf5plugin, libzstd, c-blosc).
 - **JPMS modules** exporting only their public API.
 - **Foreign Function & Memory API** (`MemorySegment`) for memory-mapped access to files beyond 2 GB.
 - **Typed exceptions** carrying byte offsets; corrupt input never crashes the JVM or returns wrong data.

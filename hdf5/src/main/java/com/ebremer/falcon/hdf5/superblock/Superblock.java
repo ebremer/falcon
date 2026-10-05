@@ -25,6 +25,9 @@ public final class Superblock {
         (byte) 0x0d, (byte) 0x0a, (byte) 0x1a, (byte) 0x0a
     };
 
+    /** libhdf5's indexed-storage internal-node K when a version-0 superblock cannot record one. */
+    private static final int DEFAULT_INDEXED_STORAGE_K = 32; // HDF5_BTREE_CHUNK_IK_DEF
+
     private final long location;
     private final int version;
     private final int sizeOfOffsets;
@@ -33,9 +36,12 @@ public final class Superblock {
     private final long superblockExtensionAddress;
     private final long endOfFileAddress;
     private final long rootObjectHeaderAddress;
+    private final int[] btreeK;           // group leaf, group internal, indexed storage; null if not stored
+    private final long driverInfoAddress; // versions 0-1: the driver information block
 
     private Superblock(long location, int version, int sizeOfOffsets, int sizeOfLengths, long baseAddress,
-                       long superblockExtensionAddress, long endOfFileAddress, long rootObjectHeaderAddress) {
+                       long superblockExtensionAddress, long endOfFileAddress, long rootObjectHeaderAddress,
+                       int[] btreeK, long driverInfoAddress) {
         this.location = location;
         this.version = version;
         this.sizeOfOffsets = sizeOfOffsets;
@@ -44,6 +50,8 @@ public final class Superblock {
         this.superblockExtensionAddress = superblockExtensionAddress;
         this.endOfFileAddress = endOfFileAddress;
         this.rootObjectHeaderAddress = rootObjectHeaderAddress;
+        this.btreeK = btreeK;
+        this.driverInfoAddress = driverInfoAddress;
     }
 
     /**
@@ -72,9 +80,10 @@ public final class Superblock {
     }
 
     /**
-     * Address of the superblock extension object header (versions 2–3), or
-     * {@link HdfBuffer#UNDEFINED_ADDRESS} if the file has none. The extension carries file-level
-     * metadata messages (File Space Info, B-tree K Values, Driver Info, Shared Message Table).
+     * Address of the superblock extension object header, or {@link HdfBuffer#UNDEFINED_ADDRESS} if the
+     * file has none. The extension carries file-level metadata messages (File Space Info, B-tree K Values,
+     * Driver Info, Shared Message Table). Versions 0&ndash;1 keep the address in the slot the format once
+     * named "free-space info", where libhdf5 reads it ({@code H5F__cache_superblock_deserialize}).
      */
     public long superblockExtensionAddress() {
         return superblockExtensionAddress;
@@ -86,6 +95,20 @@ public final class Superblock {
 
     public long rootObjectHeaderAddress() {
         return rootObjectHeaderAddress;
+    }
+
+    /**
+     * The version-1 B-tree 'K' values a version 0&ndash;1 superblock stores: group leaf-node K, group
+     * internal-node K, and indexed-storage internal-node K (version 1 only; libhdf5's default 32 for
+     * version 0). Null for versions 2&ndash;3, which keep non-default values in the extension.
+     */
+    public int[] btreeKValues() {
+        return btreeK == null ? null : btreeK.clone();
+    }
+
+    /** Versions 0&ndash;1: the address of the driver information block, else undefined. */
+    public long driverInfoAddress() {
+        return driverInfoAddress;
     }
 
     /** Locates and parses the superblock of a mapped HDF5 file. */
@@ -117,13 +140,19 @@ public final class Superblock {
         // Version 1 inserts "Indexed Storage Internal Node K" (2) + reserved (2) before the addresses.
         long addressesStart = addr + (version == 1 ? 28 : 24);
         long baseAddress = buf.getAddress(addressesStart, sizeOfOffsets);
+        long extension = buf.getAddress(addressesStart + sizeOfOffsets, sizeOfOffsets);
         long endOfFile = buf.getAddress(addressesStart + 2L * sizeOfOffsets, sizeOfOffsets);
+        long driverInfo = buf.getAddress(addressesStart + 3L * sizeOfOffsets, sizeOfOffsets);
         // Root group symbol-table entry: link-name offset (O), then object-header address (O).
         long rootEntry = addressesStart + 4L * sizeOfOffsets;
         long rootObjectHeader = buf.getAddress(rootEntry + sizeOfOffsets, sizeOfOffsets);
-        // Versions 0–1 have no superblock extension.
+        int[] btreeK = {
+            buf.getUnsignedShort(addr + 16), // group leaf-node K
+            buf.getUnsignedShort(addr + 18), // group internal-node K
+            version == 1 ? buf.getUnsignedShort(addr + 24) : DEFAULT_INDEXED_STORAGE_K,
+        };
         return new Superblock(addr, version, sizeOfOffsets, sizeOfLengths, baseAddress,
-                HdfBuffer.UNDEFINED_ADDRESS, endOfFile, rootObjectHeader);
+                extension, endOfFile, rootObjectHeader, btreeK, driverInfo);
     }
 
     private static Superblock parseChecksummed(HdfBuffer buf, long addr, int version) {
@@ -142,6 +171,6 @@ public final class Superblock {
                     "superblock checksum mismatch: stored=0x%08x computed=0x%08x", stored, computed));
         }
         return new Superblock(addr, version, sizeOfOffsets, sizeOfLengths, baseAddress,
-                extension, endOfFile, rootObjectHeader);
+                extension, endOfFile, rootObjectHeader, null, HdfBuffer.UNDEFINED_ADDRESS);
     }
 }

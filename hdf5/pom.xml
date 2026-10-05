@@ -19,7 +19,14 @@
         implementing the HDF5 File Format Specification, Version 4.0 (HDF5 2.0).</description>
 
     <dependencies>
-        <!-- Test only. The main artifact depends on nothing beyond java.base. -->
+        <!-- Falcon's shared codecs (LZF, Blosc, LZ4, bitshuffle, zstd); like this module, they need nothing
+             beyond java.base. -->
+        <dependency>
+            <groupId>com.ebremer</groupId>
+            <artifactId>core</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <!-- Test only. -->
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>

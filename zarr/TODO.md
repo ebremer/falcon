@@ -25,6 +25,19 @@ Each item gives the location, the failure, and the fix. "✔" means the failure 
 review; anything else comes from code reading or the spec. Line numbers are as of commit `a887633`.
 Paths are under `src/main/java/com/ebremer/falcon/zarr/`.
 
+**Update (2026-10-05): the zstd and Blosc code moved to Falcon Core.** It is now in
+`core/src/main/java/com/ebremer/falcon/core/compress/{zstd,blosc,lz4,bitshuffle}` (see PLAN §10). Two
+consequences:
+- **Shared items.** Z5–Z7 now affect HDF5's zstd and Blosc filters too, so fix them once, in core.
+- **Partly done in core:**
+  - The codec parts of **H2** are done: header bounds, the Huffman guard, `int` overflow in size checks,
+    typesize 0, and internal-zstd errors escaping Blosc. Core now throws only
+    `CompressionFormatException`.
+  - So are the codec parts of **T2**: core's `CompressionRobustnessTest` fuzzes zstd, Blosc (every
+    internal codec), LZF, and bitshuffle, accepting only typed exceptions.
+  - For **H1**, core's zstd and LZF decoders take a maximum size, but Zarr's pipeline does not pass one
+    yet.
+
 ## Do these first — top 10
 
 1. **Z1/Z2 — node replacement destroys or corrupts data.** Re-creating an array keeps its old chunks,

@@ -816,6 +816,270 @@ def build_region_refs(out):
             _region_refs(f)
 
 
+def build_plugin_filters(f):
+    """The third-party filters most common in the wild, each dataset beside an unfiltered copy under
+    /expected: LZF (h5py's own), and through hdf5plugin Blosc (every internal codec and shuffle), LZ4 (one
+    and many blocks, incompressible blocks stored raw), bitshuffle (alone, with LZ4 and zstd, element
+    counts that are not a multiple of 8) and Zstandard. Chunks LZF cannot shrink are stored unfiltered
+    (it is optional), with the filter-mask bit set."""
+    import hdf5plugin
+    rng = np.random.default_rng(11)
+    ramp = np.arange(1000, dtype="<i4")
+    smooth = np.cumsum(rng.normal(size=(40, 30)), axis=1).astype("<f8")
+    noise = rng.integers(-2**62, 2**62, size=500).astype("<i8")
+    text = np.frombuffer((b"falcon reads plugin filters " * 80)[:2006], dtype="u1")
+    cases = {
+        "lzf_i4": (np.repeat(np.arange(100, dtype="<i4"), 10), (250,), dict(compression="lzf")),
+        "lzf_shuffle_f8": (smooth, (16, 16), dict(compression="lzf", shuffle=True)),
+        "lzf_noise_i8": (noise, (100,), dict(compression="lzf")),
+        "lz4_i4": (ramp, (250,), hdf5plugin.LZ4()),
+        "lz4_blocks_f8": (smooth, (16, 16), hdf5plugin.LZ4(nbytes=512)),
+        "lz4_noise_i8": (noise, (100,), hdf5plugin.LZ4(nbytes=256)),
+        "zstd_i4": (ramp, (250,), hdf5plugin.Zstd(clevel=3)),
+        "zstd_f8": (smooth, (16, 16), hdf5plugin.Zstd(clevel=19)),
+        "bitshuffle_i4": (ramp, (250,), hdf5plugin.Bitshuffle(cname="none")),
+        "bitshuffle_lz4_f8": (smooth, (16, 16), hdf5plugin.Bitshuffle(cname="lz4")),
+        "bitshuffle_zstd_i8": (noise, (100,), hdf5plugin.Bitshuffle(cname="zstd")),
+        "bitshuffle_lz4_u1": (text, (1003,), hdf5plugin.Bitshuffle(nelems=64, cname="lz4")),
+    }
+    for cname in ("blosclz", "lz4", "lz4hc", "zlib", "zstd", "snappy"):
+        cases[f"blosc_{cname}_i4"] = (ramp, (250,), hdf5plugin.Blosc(cname=cname, clevel=5,
+                                                                  shuffle=hdf5plugin.Blosc.SHUFFLE))
+    cases["blosc_noshuffle_f8"] = (smooth, (16, 16), hdf5plugin.Blosc(cname="lz4", shuffle=hdf5plugin.Blosc.NOSHUFFLE))
+    cases["blosc_bitshuffle_f8"] = (smooth, (16, 16), hdf5plugin.Blosc(cname="zstd",
+                                                                     shuffle=hdf5plugin.Blosc.BITSHUFFLE))
+    for name, (data, chunks, filters) in cases.items():
+        f.create_dataset(name, data=data, chunks=chunks, **filters)
+        f.create_dataset("expected/" + name, data=data)
+
+
+def _lookup3(data, initval=0):
+    """Bob Jenkins' lookup3 hashlittle, as libhdf5's H5_checksum_lookup3 computes metadata checksums."""
+    m = 0xFFFFFFFF
+    rot = lambda x, k: ((x << k) | (x >> (32 - k))) & m
+    length = len(data)
+    a = b = c = (0xDEADBEEF + length + initval) & m
+    i = 0
+    while length > 12:
+        a = (a + int.from_bytes(data[i:i + 4], "little")) & m
+        b = (b + int.from_bytes(data[i + 4:i + 8], "little")) & m
+        c = (c + int.from_bytes(data[i + 8:i + 12], "little")) & m
+        a = (a - c) & m; a ^= rot(c, 4); c = (c + b) & m
+        b = (b - a) & m; b ^= rot(a, 6); a = (a + c) & m
+        c = (c - b) & m; c ^= rot(b, 8); b = (b + a) & m
+        a = (a - c) & m; a ^= rot(c, 16); c = (c + b) & m
+        b = (b - a) & m; b ^= rot(a, 19); a = (a + c) & m
+        c = (c - b) & m; c ^= rot(b, 4); b = (b + a) & m
+        length -= 12
+        i += 12
+    if length == 0:
+        return c
+    tail = bytes(data[i:]) + bytes(12 - length)
+    a = (a + int.from_bytes(tail[0:4], "little")) & m
+    b = (b + int.from_bytes(tail[4:8], "little")) & m
+    c = (c + int.from_bytes(tail[8:12], "little")) & m
+    c ^= b; c = (c - rot(b, 14)) & m
+    a ^= c; a = (a - rot(c, 11)) & m
+    b ^= a; b = (b - rot(a, 25)) & m
+    c ^= b; c = (c - rot(b, 16)) & m
+    a ^= c; a = (a - rot(c, 4)) & m
+    b ^= a; b = (b - rot(a, 14)) & m
+    c ^= b; c = (c - rot(b, 24)) & m
+    return c
+
+
+def _rewrite_v1_message(data, header, msg_type, rewrite):
+    """Replaces the body of message ``msg_type`` in the first chunk of the version-1 object header at
+    ``header`` with ``rewrite(body)``, repacking that chunk's messages and its trailing NIL space."""
+    if data[header] != 1:
+        raise RuntimeError("not a version-1 object header")
+    count = int.from_bytes(data[header + 2:header + 4], "little")
+    size = int.from_bytes(data[header + 8:header + 12], "little")
+    start, end = header + 16, header + 16 + size
+    messages, nils, p = [], 0, start
+    while p < end:
+        t = int.from_bytes(data[p:p + 2], "little")
+        n = int.from_bytes(data[p + 2:p + 4], "little")
+        body = bytes(data[p + 8:p + 8 + n])
+        if t == 0:
+            nils += 1
+        else:
+            if t == msg_type:
+                body = rewrite(body)
+                body += bytes(-len(body) % 8)
+            messages.append((t, data[p + 4], body))
+        p += 8 + n
+    out = b"".join(t.to_bytes(2, "little") + len(b).to_bytes(2, "little") + bytes([fl, 0, 0, 0]) + b
+                   for t, fl, b in messages)
+    free = size - len(out)
+    if free < 0:
+        raise RuntimeError("the rewritten message does not fit its object header")
+    if free:
+        out += (0).to_bytes(2, "little") + (free - 8).to_bytes(2, "little") + bytes(4 + free - 8)
+    data[start:end] = out
+    data[header + 2:header + 4] = (count - nils + (1 if free else 0)).to_bytes(2, "little")
+
+
+def _layout_v1v2(version, rank_dims, element_size):
+    """A rewrite turning a version-3 layout body into version 1 or 2 (H5O__layout_decode's old form)."""
+    def rewrite(body):
+        if body[0] != 3:
+            raise RuntimeError("expected a version-3 layout")
+        layout_class = body[1]
+        reserved = bytes(5)
+        if layout_class == 0:  # compact: dims, then size(4) and data
+            size = int.from_bytes(body[2:4], "little")
+            dims = list(rank_dims) + [element_size]
+            return (bytes([version, len(dims), 0]) + reserved + b"".join(d.to_bytes(4, "little") for d in dims)
+                    + size.to_bytes(4, "little") + body[4:4 + size])
+        if layout_class == 1:  # contiguous: address, then the dataset dims and element size (unused)
+            dims = list(rank_dims) + [element_size]
+            return (bytes([version, len(dims), 1]) + reserved + body[2:10]
+                    + b"".join(d.to_bytes(4, "little") for d in dims))
+        ndims = body[2]       # chunked: B-tree address, then chunk dims and element size
+        return bytes([version, ndims, 2]) + reserved + body[3:11] + body[11:11 + 4 * ndims]
+    return rewrite
+
+
+def build_legacy_layouts(out):
+    """Data layout messages of versions 1 and 2 (HDF5 1.6.2 and earlier), which no current libhdf5
+    writes: libhdf5 writes the earliest format (layout version 3), then the chunked, contiguous and
+    compact layouts of the 'v1_*'/'v2_*' datasets are rewritten into the old form. HDF5 2.0 and 1.14 read
+    the result; /expected keeps the values."""
+    path = os.path.join(out, "legacy_layouts.h5")
+    data2d = np.arange(48, dtype="<i4").reshape(8, 6)
+    cases = {
+        "v1_chunked": (data2d, dict(chunks=(3, 4), compression="gzip")),
+        "v2_chunked": (np.linspace(0, 1, 10).astype("<f8"), dict(chunks=(4,))),
+        "v1_contiguous": (np.arange(5, dtype="<i2"), {}),
+        "v2_compact": (np.arange(4, dtype="<i8") * 3, dict(compact=True)),
+    }
+    with h5py.File(path, "w", libver="earliest") as f:
+        for name, (values, kw) in cases.items():
+            if kw.pop("compact", False):
+                space = h5py.h5s.create_simple(values.shape)
+                dcpl = h5py.h5p.create(h5py.h5p.DATASET_CREATE)
+                dcpl.set_layout(h5py.h5d.COMPACT)
+                h5py.h5d.create(f.id, name.encode(), h5py.h5t.py_create(values.dtype), space, dcpl=dcpl).write(
+                    h5py.h5s.ALL, h5py.h5s.ALL, values)
+            else:
+                f.create_dataset(name, data=values, **kw)
+            f.create_dataset("expected/" + name, data=values)
+        headers = {name: h5py.h5o.get_info(f[name].id).addr for name in cases}
+    data = bytearray(open(path, "rb").read())
+    for name, (values, _) in cases.items():
+        version = int(name[1])
+        _rewrite_v1_message(data, headers[name], 8, _layout_v1v2(version, values.shape, values.itemsize))
+    open(path, "wb").write(data)
+    with h5py.File(path, "r") as f:
+        for name in cases:
+            if not np.array_equal(f[name][...], f["expected/" + name][...]):
+                raise RuntimeError("libhdf5 misreads the rewritten " + name)
+
+
+def build_vax(f):
+    """VAX-order floats: libhdf5's own H5T_VAX_F32 and H5T_VAX_F64, which h5py does not name, converted
+    from doubles by libhdf5; its conversion back is the 'expected' attribute."""
+    lib = _hdf5_library()
+    lib.H5open()
+    values = [0.0, 1.0, -1.5, 3.141592653589793, 1e-30, -2.5e30, 0.1, 123456.789, 2.9e-39, 1.0e38]
+    for name in ("H5T_VAX_F32_g", "H5T_VAX_F64_g"):
+        tid = h5py.h5t.typewrap(ctypes.c_int64.in_dll(lib, name).value).copy()
+        _typed_dataset(f, "vax_f32" if "F32" in name else "vax_f64", tid, values, "<f8")
+
+
+def _extension_message(data, header, msg_type):
+    """(body offset, body size, checksum offset or None) of message ``msg_type`` in the first chunk of the
+    object header at ``header``: version 2 ("OHDR", checksummed) or version 1."""
+    if data[header:header + 4] == b"OHDR":
+        flags = data[header + 5]
+        p = header + 6 + (16 if flags & 0x20 else 0) + (4 if flags & 0x10 else 0)
+        width = 1 << (flags & 3)
+        end = p + width + int.from_bytes(data[p:p + width], "little")
+        p += width
+        while p < end:
+            t, n = data[p], int.from_bytes(data[p + 1:p + 3], "little")
+            body = p + 4 + (2 if flags & 0x04 else 0)
+            if t == msg_type:
+                return body, n, end
+            p = body + n
+    elif data[header] == 1:
+        p = header + 16
+        end = p + int.from_bytes(data[header + 8:header + 12], "little")
+        while p < end:
+            t, n = int.from_bytes(data[p:p + 2], "little"), int.from_bytes(data[p + 2:p + 4], "little")
+            if t == msg_type:
+                return p + 8, n, None
+            p += 8 + n
+    raise RuntimeError(f"no message {msg_type} in the object header at {header}")
+
+
+def build_fsinfo_v0(out):
+    """File Space Info messages of version 0 (HDF5 1.10.0), which libhdf5 now maps onto version 1: files
+    written with a non-default strategy, whose version-1 message is rewritten as version 0 in place and
+    the superblock extension's checksum recomputed."""
+    strategies = {"persist": (h5py.h5f.FSPACE_STRATEGY_FSM_AGGR, True, 1, 1),
+                  "aggr": (h5py.h5f.FSPACE_STRATEGY_AGGR, False, 1, 3)}
+    for label, (strategy, persist, threshold, old_strategy) in strategies.items():
+        path = os.path.join(out, f"fsinfo_v0_{label}.h5")
+        fcpl = h5py.h5p.create(h5py.h5p.FILE_CREATE)
+        fcpl.set_file_space_strategy(strategy, persist, threshold)
+        fapl = h5py.h5p.create(h5py.h5p.FILE_ACCESS)
+        fapl.set_libver_bounds(h5py.h5f.LIBVER_LATEST, h5py.h5f.LIBVER_LATEST)  # a checksummed extension
+        fid = h5py.h5f.create(path.encode(), h5py.h5f.ACC_TRUNC, fcpl=fcpl, fapl=fapl)
+        with h5py.File(fid) as f:
+            f.create_dataset("kept", data=np.arange(100, dtype="<i4"))
+            f.create_dataset("dropped", data=np.arange(5000, dtype="<f8"))
+        fapl = h5py.h5p.create(h5py.h5p.FILE_ACCESS)
+        fapl.set_libver_bounds(h5py.h5f.LIBVER_LATEST, h5py.h5f.LIBVER_LATEST)
+        with h5py.File(h5py.h5f.open(path.encode(), h5py.h5f.ACC_RDWR, fapl=fapl)) as f:
+            del f["dropped"]  # leaves free space for the managers to track
+        data = bytearray(open(path, "rb").read())
+        if data[8] not in (2, 3):
+            raise RuntimeError("expected a version 2-3 superblock")
+        extension = int.from_bytes(data[20:28], "little")
+        body, size, checksummed = _extension_message(data, extension, 0x17)
+        v1 = bytes(data[body:body + size])
+        v0 = bytes([0, old_strategy]) + v1[3:11]  # version, old strategy, threshold
+        if old_strategy == 1:  # the six small-section managers, which version 1 lists first
+            v0 += v1[3 + 8 + 8 + 2 + 8:3 + 8 + 8 + 2 + 8 + 6 * 8]
+        data[body:body + size] = v0 + bytes(size - len(v0))
+        if checksummed is not None:
+            data[checksummed:checksummed + 4] = _lookup3(bytes(data[extension:checksummed])).to_bytes(4, "little")
+        open(path, "wb").write(data)
+        with h5py.File(path, "r") as f:
+            got = f.id.get_create_plist().get_file_space_strategy()
+            if (got[0], bool(got[1])) != (strategy, persist):
+                raise RuntimeError(f"libhdf5 reads {got} from the rewritten {label} file")
+            if not np.array_equal(f["kept"][...], np.arange(100)):
+                raise RuntimeError("data lost")
+
+
+def build_driver_and_k(out):
+    """Superblock fields Falcon now reports: non-default B-tree 'K' values (in a version-1 superblock,
+    and in the extension's message 19 of a version-3 one), and family-driver information (a version-0
+    superblock's driver information block, and message 20 of a version-3 superblock). The family members
+    are 1 MiB, so all the data stays in member 0, the fixture."""
+    lib = _hdf5_library()
+    for label, libver in (("earliest", h5py.h5f.LIBVER_EARLIEST), ("latest", h5py.h5f.LIBVER_LATEST)):
+        fcpl = h5py.h5p.create(h5py.h5p.FILE_CREATE)
+        if lib.H5Pset_sym_k(ctypes.c_int64(fcpl.id), ctypes.c_uint(8), ctypes.c_uint(6)) < 0:
+            raise RuntimeError("H5Pset_sym_k failed")
+        if lib.H5Pset_istore_k(ctypes.c_int64(fcpl.id), ctypes.c_uint(64)) < 0:
+            raise RuntimeError("H5Pset_istore_k failed")
+        fapl = h5py.h5p.create(h5py.h5p.FILE_ACCESS)
+        fapl.set_libver_bounds(libver, h5py.h5f.LIBVER_LATEST)
+        fid = h5py.h5f.create(os.path.join(out, f"btree_k_{label}.h5").encode(), h5py.h5f.ACC_TRUNC,
+                              fcpl=fcpl, fapl=fapl)
+        with h5py.File(fid) as f:
+            f.create_dataset("d", data=np.arange(10, dtype="<i4"), chunks=(5,))
+        with h5py.File(os.path.join(out, f"family_{label}_%d.h5"), "w", driver="family",
+                       memb_size=1 << 20, libver=(label, "latest")) as f:
+            f.create_dataset("d", data=np.arange(10, dtype="<i4"))
+        if os.path.exists(os.path.join(out, f"family_{label}_1.h5")):
+            raise RuntimeError("the family spilled into a second member")
+
+
 def _virtual(f, name, shape, maxshape, mappings, fill=-1):
     """A virtual dataset through the low-level API: mappings are (vselect, file, dataset, sshape, smax,
     sselect), where the select functions set a selection on a dataspace (or None for all)."""
@@ -831,6 +1095,59 @@ def _virtual(f, name, shape, maxshape, mappings, fill=-1):
             sselect(src)
         dcpl.set_virtual(v, file.encode(), dataset.encode(), src)
     h5py.h5d.create(f.id, name.encode(), h5py.h5t.NATIVE_INT32, vspace, dcpl=dcpl)
+
+
+def build_vds_views(out):
+    """Virtual datasets whose extent depends on libhdf5's view (last available or first missing) and
+    printf gap: two unlimited mappings of different lengths, printf sources 0, 1 and 3 (2 missing) with a
+    stride beyond the block, and a printf mapping beside a shorter unlimited one, which the first-missing
+    view cuts mid-block. libhdf5's reading under each view and gap is stored as 'expected:<view>:<gap>'
+    and 'expected_shape:<view>:<gap>'."""
+    U = h5py.h5s.UNLIMITED
+    for i in (0, 1, 3):
+        with h5py.File(os.path.join(out, "vds_views_%d.h5" % i), "w") as f:
+            f.create_dataset("data", data=np.full((2,), 10 + i, dtype="i4"))
+    for i in range(3):
+        with h5py.File(os.path.join(out, "vds_views_blk_%d.h5" % i), "w") as f:
+            f.create_dataset("data", data=np.full((2, 2), 20 + i, dtype="i4"))
+    path = os.path.join(out, "vds_views.h5")
+    with h5py.File(path, "w", libver="latest") as f:
+        f.create_dataset("a5", data=np.arange(5, dtype="i4"), maxshape=(None,))
+        f.create_dataset("b3", data=100 + np.arange(3, dtype="i4"), maxshape=(None,))
+        f.create_dataset("c5", data=200 + np.arange(5, dtype="i4").reshape(1, 5), maxshape=(1, None))
+        column = lambda c: lambda s: s.select_hyperslab((0, c), (U, 1), (1, 1), (1, 1))
+        whole = lambda s: s.select_hyperslab((0,), (1,), (1,), (U,))
+        _virtual(f, "two_lengths", (0, 2), (U, 2), [(column(0), ".", "a5", (0,), (U,), whole),
+                                                   (column(1), ".", "b3", (0,), (U,), whole)])
+        strided = lambda s: s.select_hyperslab((0,), (U,), (3,), (2,))
+        _virtual(f, "printf_gap", (0,), (U,), [(strided, "vds_views_%b.h5", "data", (2,), None, None)])
+        blocks = lambda s: s.select_hyperslab((0, 0), (1, U), (1, 2), (2, 2))
+        last_row = lambda s: s.select_hyperslab((2, 0), (1, U), (1, 1), (1, 1))
+        row = lambda s: s.select_hyperslab((0, 0), (1, U), (1, 1), (1, 1))
+        _virtual(f, "partial_block", (3, 0), (3, U),
+                 [(blocks, "vds_views_blk_%b.h5", "data", (2, 2), None, None),
+                  (last_row, ".", "c5", (1, 0), (1, U), row)])
+    names = ("two_lengths", "printf_gap", "partial_block")
+    expected = {}
+    for view, code in (("last", h5py.h5d.VDS_LAST_AVAILABLE), ("first", h5py.h5d.VDS_FIRST_MISSING)):
+        for gap in (0, 1):
+            # A fresh open each time: libhdf5 shares an open dataset, with the view it was opened with.
+            fid = h5py.h5f.open(path.encode(), h5py.h5f.ACC_RDONLY)
+            for name in names:
+                dapl = h5py.h5p.create(h5py.h5p.DATASET_ACCESS)
+                dapl.set_virtual_view(code)
+                dapl.set_virtual_printf_gap(gap)
+                d = h5py.h5d.open(fid, name.encode(), dapl=dapl)
+                values = np.empty(d.shape, dtype="i4")
+                if values.size:
+                    d.read(h5py.h5s.ALL, h5py.h5s.ALL, values)
+                expected[(name, view, gap)] = (np.array(d.shape, dtype="i8"), values.reshape(-1))
+                d.close()
+            fid.close()
+    with h5py.File(path, "a") as f:
+        for (name, view, gap), (shape, values) in expected.items():
+            f[name].attrs[f"expected_shape:{view}:{gap}"] = shape
+            f[name].attrs[f"expected:{view}:{gap}"] = values
 
 
 def build_vds_unlimited(out):
@@ -1049,7 +1366,13 @@ FIXTURES = {
     "vds_encodings": lambda: build_vds_encodings(OUT),
     "region_refs": lambda: build_region_refs(OUT),
     "revised_refs": lambda: build_revised_refs(OUT),
+    "plugin_filters": lambda: _with_file("plugin_filters.h5", build_plugin_filters, libver="latest"),
     "vds_unlimited": lambda: build_vds_unlimited(OUT),
+    "vds_views": lambda: build_vds_views(OUT),
+    "legacy_layouts": lambda: build_legacy_layouts(OUT),
+    "vax": lambda: _with_file("vax.h5", build_vax),
+    "fsinfo_v0": lambda: build_fsinfo_v0(OUT),
+    "driver_and_k": lambda: build_driver_and_k(OUT),
     "sohm": lambda: (build_sohm(os.path.join(OUT, "sohm.h5"), (h5py.h5f.LIBVER_EARLIEST, h5py.h5f.LIBVER_LATEST)),
                      build_sohm(os.path.join(OUT, "sohm_latest.h5"), (h5py.h5f.LIBVER_LATEST, h5py.h5f.LIBVER_LATEST))),
     "external_paths": lambda: build_external_paths(OUT),

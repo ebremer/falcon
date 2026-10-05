@@ -1,7 +1,6 @@
 package com.ebremer.falcon.hdf5.layout;
 
 import com.ebremer.falcon.hdf5.HdfFormatException;
-import com.ebremer.falcon.hdf5.HdfUnsupportedException;
 import com.ebremer.falcon.hdf5.io.FileContext;
 import com.ebremer.falcon.hdf5.io.HdfBuffer;
 
@@ -10,8 +9,13 @@ import com.ebremer.falcon.hdf5.io.HdfBuffer;
  *
  * <p>Versions 3 and 4 share the compact ({@code size(2)+data}) and contiguous ({@code address(O)+
  * size(L)}) encodings. Chunked storage differs: version 3 stores a B-tree address and chunk
- * dimensions directly; version 4's chunk index types are read in stage H5 (they accompany new-style
- * files). Versions 1 and 2 are handled for compact/contiguous.
+ * dimensions directly; version 4 adds the other chunk index types.
+ *
+ * <p>Versions 1 and 2 (HDF5 1.6.2 and earlier) share one layout ({@code H5O__layout_decode}):
+ * {@code version · dimensionality · class · reserved(5)}, then a data address (contiguous) or v1 B-tree
+ * address (chunked), none for compact; then {@code dimensionality} 4-byte sizes, which for a chunked
+ * layout are the chunk dimensions followed by the element size (a contiguous layout's are skipped: its
+ * size comes from the dataspace); then, for compact, {@code size(4) · data}.
  */
 public final class DataLayoutMessage {
 
@@ -37,8 +41,8 @@ public final class DataLayoutMessage {
                         yield new DataLayout.Compact(buf.getBytes(dp + 4, size));
                     }
                     case 1 -> new DataLayout.Contiguous(buf.getAddress(p, offsets), -1);
-                    default -> throw new HdfUnsupportedException(
-                            "chunked data layout message version " + version + " is not yet supported");
+                    case 2 -> chunkedV1BTree(buf, dimensionality, buf.getAddress(p, offsets), p + offsets, off);
+                    default -> throw new HdfFormatException("unknown data layout class " + layoutClass + " at " + off);
                 };
             }
             case 3: {
@@ -81,8 +85,11 @@ public final class DataLayoutMessage {
         HdfBuffer buf = ctx.buffer();
         int offsets = ctx.sizeOfOffsets();
         int dimensionality = buf.getUnsignedByte(off + 2); // rank + 1 (last is element size)
-        long indexAddress = buf.getAddress(off + 3, offsets);
-        long p = off + 3 + offsets;
+        return chunkedV1BTree(buf, dimensionality, buf.getAddress(off + 3, offsets), off + 3 + offsets, off);
+    }
+
+    /** A chunked layout indexed by a v1 B-tree: {@code dimensionality} 4-byte sizes at {@code p}. */
+    private static DataLayout chunkedV1BTree(HdfBuffer buf, int dimensionality, long indexAddress, long p, long off) {
         int rank = checkedRank(dimensionality, off);
         int[] chunkDimensions = new int[rank];
         for (int i = 0; i < rank; i++) {

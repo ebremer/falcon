@@ -296,9 +296,10 @@ Each stage ends with a **milestone** and concrete **acceptance criteria**. "Refe
   `Hdf5File.fileSpaceInfo()` — strategy, page size, threshold, persist flag, end-of-file address, and
   total free space / section count (validated against h5py's `H5Fget_freespace`); the variable-bit-width
   FSSE section list is not decoded (no reader value). **Old modification time (14) ✓** feeds
-  `modificationTime()`; **B-tree K Values (19) ✓** and **Driver Info (20) ✓** have spec-layout parsers
-  (`message.{ObjectModificationTimeMessage,BTreeKValuesMessage,DriverInfoMessage}`), pinned by hand-built
-  unit tests since no local HDF5 build emits them.
+  `modificationTime()`; **B-tree K Values (19) ✓** and **Driver Info (20) ✓** are public since P2 S6 as
+  `Hdf5File.btreeKValues()` / `driverInfo()` (also from a version 0–1 superblock's fields and driver
+  information block), tested on files libhdf5 writes with `H5Pset_sym_k`/`H5Pset_istore_k` and the family
+  driver. File Space Info version 0 is read since P2 S5.
 - **Milestone met:** every object-header message type parses; every structure on a read path is covered.
 - **Filter edge cases done ✓**: **float (decimal-scaling) scale-offset** and **compound n-bit** decode,
   and **signed AEC/szip** decode (sign-extended reference/raw samples + signed unmap bounds, validated

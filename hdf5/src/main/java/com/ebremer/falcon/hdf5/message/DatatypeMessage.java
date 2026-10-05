@@ -84,8 +84,13 @@ public final class DatatypeMessage {
                 return new Result(new Datatype.FixedPoint(size, order, signed, bitOffset, bitPrecision), p + 4);
             }
             case 1: { // floating-point
-                if ((bits0 & 0x41) == 0x41) {
-                    throw new HdfUnsupportedException("VAX-order floating-point data is not supported (at " + off + ")");
+                // Bit 6 with bit 0 is VAX order (datatype version 3+); bit 6 alone is invalid there.
+                boolean vax = version >= 3 && (bits0 & 0x41) == 0x41;
+                if (version >= 3 && (bits0 & 0x41) == 0x40) {
+                    throw new HdfFormatException("invalid floating-point byte order at " + off);
+                }
+                if (vax && size % 2 != 0) {
+                    throw new HdfFormatException("VAX-order floating-point type of odd size " + size + " at " + off);
                 }
                 ByteOrder order = order(bits0);
                 Datatype.MantissaNormalization normalization =
@@ -99,7 +104,7 @@ public final class DatatypeMessage {
                 int mantSize = buf.getUnsignedByte(p + 7);
                 long bias = buf.getUnsignedInt(p + 8);
                 return new Result(new Datatype.FloatingPoint(size, order, bitOffset, bitPrecision,
-                        expLoc, expSize, mantLoc, mantSize, bias, signLocation, normalization), p + 12);
+                        expLoc, expSize, mantLoc, mantSize, bias, signLocation, normalization, vax), p + 12);
             }
             case 2: { // time
                 ByteOrder order = order(bits0);

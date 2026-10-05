@@ -4,7 +4,7 @@ Dev-time tool only -- numcodecs is NOT a Falcon dependency, exactly like libaec
 for the hdf5 module's szip vectors. Install with:  pip install numcodecs
 Run from the repo root:  python tools/fixtures/gen_zstd_vectors.py
 
-Writes zarr/src/test/resources/fixtures/zstd_vectors.txt with one case per line:
+Writes core/src/test/resources/fixtures/zstd_vectors.txt with one case per line:
 
     <name> <level> <original-hex> <frame-hex>
 
@@ -16,7 +16,7 @@ import os
 import random
 from numcodecs import Zstd
 
-OUT = os.path.join("zarr", "src", "test", "resources", "fixtures", "zstd_vectors.txt")
+OUT = os.path.join("core", "src", "test", "resources", "fixtures", "zstd_vectors.txt")
 
 CASES = []
 

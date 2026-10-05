@@ -11,8 +11,8 @@
 
     <name>Falcon</name>
     <description>Umbrella for pure-JDK 25, zero-runtime-dependency readers/writers of scientific-data
-        formats. The hdf5 module implements the HDF5 File Format Specification, Version 4.0 (HDF5 2.0);
-        a zarr module is planned.</description>
+        formats. The hdf5 module implements the HDF5 File Format Specification, Version 4.0 (HDF5 2.0),
+        the zarr module Zarr v3 (and v2); the core module holds the compression codecs both share.</description>
     <url>https://github.com/ebremer/falcon</url>
 
     <licenses>
@@ -31,6 +31,7 @@
     </developers>
 
     <modules>
+        <module>core</module>  <!-- Code both formats share: the pure-Java compression codecs. -->
         <module>hdf5</module>
         <module>zarr</module>  <!-- Falcon Phase 2 — Zarr v3 (see zarr/PLAN.md). -->
     </modules>

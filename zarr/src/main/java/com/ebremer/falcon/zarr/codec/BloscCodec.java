@@ -1,14 +1,16 @@
 package com.ebremer.falcon.zarr.codec;
 
+import com.ebremer.falcon.core.compress.CompressionFormatException;
+import com.ebremer.falcon.core.compress.UnsupportedCompressionException;
+import com.ebremer.falcon.core.compress.blosc.BloscDecoder;
+import com.ebremer.falcon.core.compress.blosc.BloscEncoder;
 import com.ebremer.falcon.zarr.ZarrFormatException;
-import com.ebremer.falcon.zarr.codec.blosc.BloscDecoder;
-import com.ebremer.falcon.zarr.codec.blosc.BloscEncoder;
-import com.ebremer.falcon.zarr.codec.blosc.BloscFormatException;
+import com.ebremer.falcon.zarr.ZarrUnsupportedException;
 import com.ebremer.falcon.zarr.json.JsonObject;
 
 /**
- * The {@code blosc} bytes&rarr;bytes codec, decoded by Falcon's from-scratch Blosc implementation
- * (see {@link BloscDecoder}) so the module stays dependency-free.
+ * The {@code blosc} bytes&rarr;bytes codec, decoded by Falcon's from-scratch Blosc implementation in
+ * Falcon Core (see {@link BloscDecoder}), shared with the HDF5 module's blosc filter.
  *
  * <p>Everything the decoder needs &mdash; the internal compressor, shuffle filter, type size, and block
  * layout &mdash; is recorded in the buffer's own header, so the codec's {@code configuration} (which
@@ -46,8 +48,10 @@ final class BloscCodec implements BytesBytesCodec {
     public byte[] decode(byte[] input) {
         try {
             return BloscDecoder.decompress(input);
-        } catch (BloscFormatException e) {
+        } catch (CompressionFormatException e) {
             throw new ZarrFormatException("blosc decode failed: " + e.getMessage(), e);
+        } catch (UnsupportedCompressionException e) {
+            throw new ZarrUnsupportedException(e.getMessage());
         }
     }
 

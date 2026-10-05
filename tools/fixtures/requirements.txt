@@ -4,17 +4,20 @@
 #   python -m venv .venv-fixtures
 #   .venv-fixtures/bin/pip install -r tools/fixtures/requirements.txt      (Scripts\pip on Windows)
 #
-# HDF5 fixtures and the writer interop check (gen_fixtures.py, check_hdf5_writer.py):
+# HDF5 fixtures, Falcon Core's LZF / bitshuffle vectors, and the writer interop check (gen_fixtures.py,
+# gen_core_vectors.py, check_hdf5_writer.py):
 h5py==3.16.0          # bundles HDF5 2.0.0 -- the reference oracle
 numpy>=2.0
 imagecodecs>=2026.1   # libaec: AEC / szip reference vectors and real-format szip chunks
+hdf5plugin>=7.1       # Blosc, LZ4, bitshuffle and Zstandard HDF5 filters (plugin_filters.h5, gen_core_vectors.py)
 #
 # check_hdf5_writer.py can additionally read Falcon's output with an HDF5 1.14 build. Put that in a
 # second environment (its own venv) and pass it with --python114:
 #   h5py==3.14.0       # bundles HDF5 1.14.6
 #
-# Zarr fixtures and codec vectors (gen_zarr_fixtures.py, gen_zarr_v2_fixtures.py, gen_zstd_vectors.py,
-# gen_blosc_vectors.py, check_zstd_encoder.py, check_blosc_encoder.py):
+# Zarr fixtures, and Falcon Core's zstd / Blosc / Snappy vectors (gen_zarr_fixtures.py,
+# gen_zarr_v2_fixtures.py, gen_zstd_vectors.py, gen_blosc_vectors.py, gen_snappy_vectors.py,
+# check_zstd_encoder.py, check_blosc_encoder.py):
 zarr>=3.2,<4
 numcodecs>=0.15
 zstandard>=0.23

@@ -2,9 +2,9 @@ package com.ebremer.falcon.zarr.codec;
 
 import com.ebremer.falcon.zarr.ZarrFormatException;
 import com.ebremer.falcon.zarr.ZarrUnsupportedException;
-import com.ebremer.falcon.zarr.codec.zstd.ZstdDecoder;
-import com.ebremer.falcon.zarr.codec.zstd.ZstdEncoder;
-import com.ebremer.falcon.zarr.codec.zstd.ZstdFormatException;
+import com.ebremer.falcon.core.compress.CompressionFormatException;
+import com.ebremer.falcon.core.compress.zstd.ZstdDecoder;
+import com.ebremer.falcon.core.compress.zstd.ZstdEncoder;
 import com.ebremer.falcon.zarr.json.JsonObject;
 
 /**
@@ -36,7 +36,7 @@ final class ZstdCodec implements BytesBytesCodec {
     public byte[] decode(byte[] input) {
         try {
             return ZstdDecoder.decompress(input);
-        } catch (ZstdFormatException e) {
+        } catch (CompressionFormatException e) {
             throw new ZarrFormatException("zstd decode failed: " + e.getMessage(), e);
         }
     }

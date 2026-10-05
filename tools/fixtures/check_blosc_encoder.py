@@ -5,16 +5,16 @@ proves the other direction -- that buffers Falcon *writes* are read by c-blosc, 
 a Falcon-written blosc chunk is readable by zarr-python. Dev-time tool; numcodecs
 is not a Falcon dependency.
 
-Usage (from the repo root, after `mvn -pl zarr compile`):
+Usage (from the repo root, after `mvn -pl core compile`):
 
     # 1. emit buffers from Java (write EmitBlosc.java once, then):
-    javac -cp zarr/target/classes -d /tmp/xb EmitBlosc.java
-    java  -cp "/tmp/xb;zarr/target/classes" EmitBlosc
+    javac -cp core/target/classes -d /tmp/xb EmitBlosc.java
+    java  -cp "/tmp/xb;core/target/classes" EmitBlosc
     # 2. verify with c-blosc
     python tools/fixtures/check_blosc_encoder.py /tmp/xb/blosc_xcheck
 
 EmitBlosc emits, per case, orig_<k>.bin / buf_<k>.blosc / ts_<k>.txt using
-com.ebremer.falcon.zarr.codec.blosc.BloscEncoder.compress(data, typeSize) over a
+com.ebremer.falcon.core.compress.blosc.BloscEncoder.compress(data, typeSize) over a
 mix of shuffled int16/int32/float64 arrays and incompressible bytes.
 """
 import glob

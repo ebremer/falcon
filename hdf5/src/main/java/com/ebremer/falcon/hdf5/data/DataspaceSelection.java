@@ -113,9 +113,18 @@ public final class DataspaceSelection {
      * one past the last of them (libhdf5's {@code H5S_hyper_get_clip_extent_match}), or 0 for none.
      */
     public long extentSelecting(long slices) {
+        return extentSelecting(slices, false);
+    }
+
+    /**
+     * As {@link #extentSelecting(long)}; with {@code includeTrailing} (libhdf5's "first missing" view) an
+     * extent that ends with a whole block runs on to where the next block would start, and selecting
+     * nothing needs the extent up to the selection's start.
+     */
+    public long extentSelecting(long slices, boolean includeTrailing) {
         int d = requireUnlimited();
         if (slices <= 0 || block[d] == 0) {
-            return 0;
+            return includeTrailing ? start[d] : 0;
         }
         try {
             if (block[d] == UNLIMITED || block[d] == stride[d]) {
@@ -123,8 +132,11 @@ public final class DataspaceSelection {
             }
             long blocks = slices / block[d];
             long rest = slices % block[d];
-            return rest > 0
-                    ? Math.addExact(Math.addExact(start[d], Math.multiplyExact(blocks, stride[d])), rest)
+            if (rest > 0) {
+                return Math.addExact(Math.addExact(start[d], Math.multiplyExact(blocks, stride[d])), rest);
+            }
+            return includeTrailing
+                    ? Math.addExact(start[d], Math.multiplyExact(blocks, stride[d]))
                     : Math.addExact(Math.addExact(start[d], Math.multiplyExact(blocks - 1, stride[d])), block[d]);
         } catch (ArithmeticException e) {
             throw new HdfFormatException("dataspace selection size overflows (corrupt?)", e);
@@ -151,6 +163,16 @@ public final class DataspaceSelection {
         return offsetsWith(dims, d, indices);
     }
 
+    /** Where block {@code blockIndex} of the unlimited dimension starts in a printf-style mapping. */
+    public long blockStart(long blockIndex) {
+        int d = requirePrintf();
+        try {
+            return Math.addExact(start[d], Math.multiplyExact(blockIndex, stride[d]));
+        } catch (ArithmeticException e) {
+            throw new HdfFormatException("dataspace selection size overflows (corrupt?)", e);
+        }
+    }
+
     /** Where block {@code blockIndex} of the unlimited dimension ends (exclusive) in a printf-style mapping. */
     public long blockEnd(long blockIndex) {
         int d = requirePrintf();
@@ -167,17 +189,26 @@ public final class DataspaceSelection {
      * {@code blockIndex}th source to.
      */
     public long[] blockOffsets(long[] dims, long blockIndex) {
-        int d = requirePrintf();
-        long[] indices = new long[Elements.checkedInt(block[d])];
         try {
-            long first = Math.addExact(start[d], Math.multiplyExact(blockIndex, stride[d]));
-            for (int b = 0; b < indices.length; b++) {
-                indices[b] = first + b;
-            }
+            return flatten(blockCoordinates(dims, blockIndex), dims);
         } catch (ArithmeticException e) {
             throw new HdfFormatException("dataspace selection size overflows (corrupt?)", e);
         }
-        return offsetsWith(dims, d, indices);
+    }
+
+    /** The coordinates, in iteration order, of what {@link #blockOffsets} selects. */
+    public long[][] blockCoordinates(long[] dims, long blockIndex) {
+        int d = requirePrintf();
+        long[] indices = new long[Elements.checkedInt(block[d])];
+        long first = blockStart(blockIndex);
+        for (int b = 0; b < indices.length; b++) {
+            indices[b] = first + b;
+        }
+        try {
+            return regularCoordinates(dims, d, indices);
+        } catch (ArithmeticException e) {
+            throw new HdfFormatException("dataspace selection size overflows (corrupt?)", e);
+        }
     }
 
     /**

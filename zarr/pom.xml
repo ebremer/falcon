@@ -19,7 +19,13 @@
         implementing the Zarr v3 core specification.</description>
 
     <dependencies>
-        <!-- Test only. The main artifact depends on nothing beyond java.base. -->
+        <!-- Falcon's shared codecs (zstd, Blosc); like this module, they need nothing beyond java.base. -->
+        <dependency>
+            <groupId>com.ebremer</groupId>
+            <artifactId>core</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <!-- Test only. -->
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>

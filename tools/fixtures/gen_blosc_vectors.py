@@ -4,7 +4,7 @@ Dev-time tool only -- numcodecs is NOT a Falcon dependency, exactly like libaec
 for the hdf5 module's szip vectors. Install with:  pip install numcodecs
 Run from the repo root:  python tools/fixtures/gen_blosc_vectors.py
 
-Writes zarr/src/test/resources/fixtures/blosc_vectors.txt with one case per line:
+Writes core/src/test/resources/fixtures/blosc_vectors.txt with one case per line:
 
     <name> <cname> <clevel> <shuffle> <typesize> <original-hex> <buffer-hex>
 
@@ -16,7 +16,7 @@ import os
 import random
 from numcodecs import Blosc
 
-OUT = os.path.join("zarr", "src", "test", "resources", "fixtures", "blosc_vectors.txt")
+OUT = os.path.join("core", "src", "test", "resources", "fixtures", "blosc_vectors.txt")
 
 SHUFFLE_NAMES = {Blosc.NOSHUFFLE: "noshuffle", Blosc.SHUFFLE: "shuffle",
                  Blosc.BITSHUFFLE: "bitshuffle"}

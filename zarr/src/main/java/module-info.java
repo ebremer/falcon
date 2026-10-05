@@ -7,13 +7,16 @@
  * {@code gzip} codec uses {@code java.util.zip} and the {@code crc32c} codec uses
  * {@code java.util.zip.CRC32C}, both in {@code java.base}. Codecs not available in the JDK
  * (e.g. {@code blosc}, {@code zstd}) are implemented from scratch in pure Java, mirroring the HDF5
- * module's {@code szip} decision.
+ * module's {@code szip} decision; they live in Falcon Core ({@code com.ebremer.falcon.core}), which the
+ * HDF5 module shares and which itself depends on nothing beyond {@code java.base}.
  *
  * <p>The public API package is exported, along with the {@code json} model (Zarr attributes and fill
  * values are arbitrary JSON) and the {@code store} SPI (callers supply a store to open). The metadata,
  * codec, and chunk machinery stays encapsulated.
  */
 module com.ebremer.falcon.zarr {
+    requires com.ebremer.falcon.core;
+
     exports com.ebremer.falcon.zarr;
     exports com.ebremer.falcon.zarr.datatype;
     exports com.ebremer.falcon.zarr.json;

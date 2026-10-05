@@ -1,8 +1,9 @@
 # Falcon HDF5 — remaining work (prioritized)
 
-**Status (2026-10-05, after P2 S1–S3):** build green, **243 HDF5 tests** (144 at the review, 187 after
-the top 10, 206 after P0, 228 after P1). The review's top 10, **every P0 item, every P1 item, and P2
-S1–S3** are done (see *Done* at the end). Falcon now:
+**Status (2026-10-05, after P2 S1–S7):** build green, **256 HDF5 tests** (144 at the review, 187
+after the top 10, 206 after P0, 228 after P1, 243 after S1–S3), plus 33 in the new `core` module. The
+review's top 10, every P1 item, and **P2 S1–S7** are done (see *Done* at the end). P0 has one new item,
+inherited with the shared zstd decoder. Falcon now:
 
 - reads the files the review showed it misreading:
   - real libhdf5 szip and scale-offset data;
@@ -17,7 +18,10 @@ S1–S3** are done (see *Done* at the end). Falcon now:
   - every VDS mapping and region-reference selection encoding;
   - shared messages, including SOHM (the shared-message heap);
   - revised references (`H5R_ref_t`);
-  - unlimited and printf-style VDS mappings, with libhdf5's source search order.
+  - unlimited and printf-style VDS mappings, with libhdf5's source search order, views, and printf gap;
+  - the third-party filters LZF, Blosc, LZ4, bitshuffle, and Zstandard, through Falcon Core's codecs;
+  - HDF5 1.6.2-era chunked layouts (layout message versions 1 and 2), VAX floats, and File Space Info
+    version 0.
 - writes files that **HDF5 2.0 and 1.14 read**, checked by `tools/fixtures/check_hdf5_writer.py`. The
   final run read 83/83 objects with HDF5 2.0 and 78/78 with 1.14.6. The P0 edge-case files written by
   the previous writer fail 19 objects under each version.
@@ -26,7 +30,19 @@ S1–S3** are done (see *Done* at the end). Falcon now:
   fuzzing under a 128 MB heap and 256 KB stack, confines external files to the HDF5 file's directory by
   default, and supports concurrent reads of one open file.
 
-P0 and P1 are empty. What remains is features and API (P2) and docs and build (P3).
+P1 is empty, and P0 holds only Z6/Z7, the zstd decoder's defects. What remains is features and API (P2)
+and docs and build (P3).
+
+**API changes in P2 S4–S7** (pre-1.0):
+- **Opening:** `Hdf5File.open(path, OpenOptions)`. `OpenOptions` holds the `ExternalFileAccess` policy,
+  `virtualView` (`LAST_AVAILABLE` / `FIRST_MISSING`), and `virtualPrintfGap`.
+- **New `Hdf5File` accessors:**
+  - `btreeKValues()`, returning the new `BTreeKValues` record (libhdf5's defaults when the file records
+    none);
+  - `driverInfo()`, returning `Optional<DriverInfo>`.
+- **`Datatype.FloatingPoint`** gains a `vaxOrder` component. The 11-argument constructor remains.
+- **Dependencies:** the module now depends on Falcon's `core` (`requires com.ebremer.falcon.core`), and
+  `mvn -pl hdf5` needs `-am`.
 
 **API changes in P2 S1–S3** (pre-1.0):
 - References:
@@ -86,16 +102,16 @@ review baseline. Abbreviations: `W` = `Hdf5Writer.java`; other paths are under
 
 ## Next up — top 10
 
-1. **A1 — typed reads for compound, enum, array, and complex.** The writer produces them, but `read()`
+1. **P0 Z6/Z7 — the shared zstd decoder accepts corrupt frames.** HDF5's zstd filter (and Blosc's
+   internal zstd) inherit this. Fix it once in core (see P0 below).
+2. **A1 — typed reads for compound, enum, array, and complex.** The writer produces them, but `read()`
    cannot return them.
-2. **WF1 — streaming writes.** The writer builds the whole file in memory, which caps it at about 2 GB
+3. **WF1 — streaming writes.** The writer builds the whole file in memory, which caps it at about 2 GB
    and rules out append and resizable datasets.
-3. **WF2 — datatype breadth:**
+4. **WF2 — datatype breadth:**
    - string attributes;
    - unsigned integers;
    - chunking for every type.
-4. **S4 — third-party filters:** LZF, blosc, zstd, lz4, and bitshuffle. This needs the `falcon.core`
-   decision first.
 5. **A4/A5 — selections and paths:**
    - strided and point selections in `select`;
    - vlen readers on `Selection`;
@@ -112,8 +128,19 @@ review baseline. Abbreviations: `W` = `Hdf5Writer.java`; other paths are under
 
 ## P0 — silent wrong data / files libhdf5 rejects
 
-Empty: every item is done (see *Done — 2026-10-05*). A new P0 is any silent wrong value, or any written
-file that libhdf5 rejects or misreads.
+A new P0 is any silent wrong value, or any written file that libhdf5 rejects or misreads. The earlier
+items are done (see *Done — 2026-10-05*).
+
+- [ ] **Z6/Z7 — corrupt zstd chunks can decode to wrong data.** Since S4, HDF5's zstd filter (32015) and
+  Blosc's internal zstd use the zstd decoder in `core`. The Zarr review (`../zarr/TODO.md` Z6/Z7) found it
+  accepts corrupt frames:
+  - the XXH64 content checksum is not verified;
+  - bitstreams are not checked for exact consumption;
+  - the declared content size is not compared with the output;
+  - frames after the first are ignored.
+
+  In HDF5 a chunk that decodes to the wrong size still fails. One that keeps its size reads wrong
+  values unless the dataset also has fletcher32. Fix it once, in core, as Z6/Z7 describe.
 
 ## P1 — valid files that fail; hardening; concurrency; test gaps
 
@@ -123,23 +150,11 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
 
 ### Read features
 
-- S1–S3 are done (see *Done — 2026-10-05 (P2: S1–S3)*). Still open around them:
-  - [ ] **S7 — VDS views:** libhdf5's "first missing" view and printf gaps other than 0
-    (`H5Pset_virtual_view`, `H5Pset_virtual_printf_gap`) as open options. Falcon reads with the
-    defaults.
-- [ ] **S4 — third-party filters common in the wild:**
-  - LZF (32000, built into h5py);
-  - bitshuffle (32008);
-  - blosc (32001);
-  - zstd (32015);
-  - lz4 (32004).
-
-  The Zarr module already has pure-Java zstd, blosc, and lz4. Reusing them reopens the
-  `falcon.core` question (see `../zarr/PLAN.md` §10), so decide that deliberately rather than copy the
-  code.
-- [ ] **S5 — layout v1/v2 chunked storage (HDF5 ≤ 1.6.2), VAX float byte order, and File Space Info v0.**
-- [ ] **S6 — public accessors for B-tree K-values (msg 19) and Driver Info (msg 20).** Both already parse.
-  (carried over)
+- S1–S7 are done (see *Done — 2026-10-05 (P2: S1–S3)* and *(P2: S4–S7)*). Still open around them:
+  - [ ] **S8 — writing the third-party filters.** Falcon reads LZF, Blosc, LZ4, bitshuffle, and zstd. The
+    writer cannot apply them yet, though core has zstd and Blosc encoders.
+  - [ ] **S9 — more registered filters:** Blosc2 (32026), bzip2 (307), ZFP (32013), and SZ (32017).
+    Each needs a pure-Java codec.
 
 ### Read API
 
@@ -238,6 +253,73 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
   - The root `pom.xml` description says "a zarr module is planned".
 
   Editing CLAUDE.md is Erich's call.
+
+## Done — 2026-10-05 (P2: S4–S7)
+
+Fixtures come from libhdf5 2.0 through h5py and hdf5plugin, with libhdf5 as the oracle for each. Where
+no current libhdf5 writes a form, libhdf5 writes the file and `gen_fixtures.py` rewrites the one message
+in place:
+- layout versions 1 and 2, in the v1 object header;
+- File Space Info version 0, re-checksummed with a Python lookup3.
+
+libhdf5 2.0 and 1.14.6 then read each rewritten file back correctly.
+
+- [x] **S4 — third-party filters, through a new `core` module.**
+  - **The module.** By Erich's decision, Zarr's pure-Java zstd and Blosc code (with BloscLZ, Snappy, LZ4,
+    and the shuffles) moved to `core` (`com.ebremer.falcon.core`, exported only to `hdf5` and `zarr`).
+    Its unit tests, vectors, and fuzzing moved with it. It adds:
+    - an LZF decoder;
+    - the bitshuffle library's blocked and LZ4/zstd forms;
+    - output limits for zstd and LZF;
+    - one exception pair, `CompressionFormatException` and `UnsupportedCompressionException`.
+  - **The filters.** `filter/ThirdPartyFilters` frames each one as its reference plugin does:
+    - LZF 32000 (h5py);
+    - Blosc 32001 (hdf5-blosc);
+    - LZ4 32004 (H5Zlz4: big-endian sizes, raw blocks);
+    - bitshuffle 32008 (bshuf_h5filter: element size, block size, LZ4 or zstd);
+    - Zstandard 32015.
+
+    Every declared size is checked against the chunk before anything is allocated.
+  - **Hardening found on the way.** The stricter core fuzz test accepts only typed exceptions, and it
+    found leaks the Zarr test had accepted:
+    - zstd read block-header bytes past the block end;
+    - zstd's Huffman weight count was off by one;
+    - Blosc, BloscLZ, Snappy, and LZ4 had `int` overflow in bounds checks;
+    - Blosc's block table could overflow, and a block could be larger than its buffer.
+
+    All are fixed; zstd and Blosc ran 2.1M and 160K mutated streams clean.
+  - **Tests:**
+    - `PluginFiltersTest`: 20 datasets, against unfiltered copies, including chunks a filter skipped.
+    - core's `LzfTest` and `BitshuffleTest`, against liblzf and bitshuffle output
+      (`tools/fixtures/gen_core_vectors.py`), and `CompressionRobustnessTest`.
+- [x] **S5 — older forms.**
+  - **Layout messages of versions 1 and 2** (`H5O__layout_decode`): chunked storage is a v1 B-tree
+    address and the chunk dimensions plus element size after 5 reserved bytes.
+  - **VAX floats** (`H5T_VAX_F32`, `H5T_VAX_F64`, datatype version 3+): the 16-bit words are reversed into
+    little-endian order, then decoded from the type's fields as libhdf5's `H5T__conv_f_f` does.
+  - **File Space Info version 0** (HDF5 1.10.0), mapped as `H5O__fsinfo_decode` does:
+    - the old strategies 1–4 become FSM_AGGR (persisting or not), AGGR, and NONE;
+    - the six free-space managers of "all, persisting" are followed;
+    - the page size and page-end threshold take their defaults.
+  - **Tested by** `P2FormatsTest` on `legacy_layouts.h5`, `vax.h5` (against libhdf5's own conversion), and
+    `fsinfo_v0_{persist,aggr}.h5` (1312 free bytes, as `H5Fget_freespace` reports).
+- [x] **S6 — superblock accessors.** `Hdf5File.btreeKValues()` and `driverInfo()`, from:
+  - a version 0–1 superblock: the 'K' fields, and the driver information block;
+  - or the extension's messages 19 and 20.
+
+  Like libhdf5, a version 0–1 superblock's "free-space info" slot is now read as the extension address.
+  Tested on files written with `H5Pset_sym_k(8, 6)` and `H5Pset_istore_k(64)`, and with the family
+  driver (1 MiB members), in both superblock generations.
+- [x] **S7 — VDS views and printf gap,** as `OpenOptions.virtualView` and `virtualPrintfGap`:
+  - first missing takes the shortest unlimited mapping, up to where its next block would start;
+  - a printf mapping there ends at its first missing source, whatever the gap;
+  - mappings that reach further are cut, mid-block if need be;
+  - the gap lets the printf search skip missing sources, which read as fill.
+
+  Tested by `P2FormatsTest.virtualDatasetViewsAndPrintfGaps`: three datasets under both views and gaps 0
+  and 1, against libhdf5's reading of each (2.0 and 1.14.6 agree on all 24 results).
+- **T3:** the fuzz set adds the plugin-filter, legacy-layout, VAX, File Space Info v0, K-value, family,
+  and VDS-view fixtures, and reads the new file-level accessors (about 76 s against a 300 s limit).
 
 ## Done — 2026-10-05 (P2: S1–S3)
 

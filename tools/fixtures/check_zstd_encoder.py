@@ -5,18 +5,18 @@ proves the other direction -- that frames Falcon *writes* are read by libzstd, s
 a Falcon-written zstd chunk is readable by zarr-python. Dev-time tool; numcodecs
 is not a Falcon dependency.
 
-Usage (from the repo root, after `mvn -pl zarr compile`):
+Usage (from the repo root, after `mvn -pl core compile`):
 
     # 1. emit frames from Java
-    javac -cp zarr/target/classes -d /tmp/xz EmitZstd.java   # see the class below
-    java  -cp "/tmp/xz;zarr/target/classes" EmitZstd /tmp/xz
+    javac -cp core/target/classes -d /tmp/xz EmitZstd.java   # see the class below
+    java  -cp "/tmp/xz;core/target/classes" EmitZstd /tmp/xz
 
     # 2. verify with libzstd
     python tools/fixtures/check_zstd_encoder.py /tmp/xz
 
 The EmitZstd helper (write once to /tmp/xz/EmitZstd.java):
 
-    import com.ebremer.falcon.zarr.codec.zstd.ZstdEncoder;
+    import com.ebremer.falcon.core.compress.zstd.ZstdEncoder;
     import java.nio.file.*; import java.util.*;
     public class EmitZstd {
       public static void main(String[] a) throws Exception {

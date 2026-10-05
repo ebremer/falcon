@@ -29,6 +29,8 @@ class RobustnessTest {
         "links.h5", "links_old.h5", "heap_limits.h5", "vds_default.h5", "vds_latest.h5",
         "regionrefs_default.h5", "regionrefs_latest.h5", "sohm.h5", "external_paths.h5", "ea_paged.h5",
         "sohm_latest.h5", "refs_revised.h5", "vds_unlimited.h5",
+        "plugin_filters.h5", "legacy_layouts.h5", "vax.h5", "fsinfo_v0_persist.h5", "btree_k_earliest.h5",
+        "family_latest_0.h5", "vds_views.h5",
     };
 
     @Test
@@ -80,6 +82,9 @@ class RobustnessTest {
             file = Files.createTempFile("falcon-fuzz", ".h5");
             Files.write(file, bytes);
             try (Hdf5File h5 = Hdf5File.open(file)) {
+                h5.fileSpaceInfo();
+                h5.btreeKValues();
+                h5.driverInfo();
                 readEverything(h5.root());
             }
         } catch (HdfException | IOException typed) {

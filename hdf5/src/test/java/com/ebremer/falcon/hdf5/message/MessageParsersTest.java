@@ -34,7 +34,7 @@ class MessageParsersTest {
     void btreeKValues() {
         // type 19: version(1), indexed-storage internal K(2), group internal K(2), group leaf K(2).
         byte[] body = {0, 0x40, 0, 0x10, 0, 0x04, 0}; // 64, 16, 4
-        BTreeKValuesMessage k = BTreeKValuesMessage.parse(HdfBuffer.of(body));
+        com.ebremer.falcon.hdf5.BTreeKValues k = BTreeKValuesMessage.parse(HdfBuffer.of(body));
         assertEquals(64, k.indexedStorageInternalNodeK());
         assertEquals(16, k.groupInternalNodeK());
         assertEquals(4, k.groupLeafNodeK());
@@ -44,8 +44,8 @@ class MessageParsersTest {
     void driverInfo() {
         // type 20: version(1), driver id(8 ASCII), info size(2), info(size).
         byte[] body = {0, 'N', 'C', 'S', 'A', 'f', 'a', 'm', 'i', 0x04, 0, 1, 2, 3, 4};
-        DriverInfoMessage d = DriverInfoMessage.parse(HdfBuffer.of(body));
-        assertEquals("NCSAfami", d.driverName());
-        assertArrayEquals(new byte[] {1, 2, 3, 4}, d.info());
+        com.ebremer.falcon.hdf5.DriverInfo d = DriverInfoMessage.parse(HdfBuffer.of(body));
+        assertEquals("NCSAfami", d.driverId());
+        assertArrayEquals(new byte[] {1, 2, 3, 4}, d.information());
     }
 }
