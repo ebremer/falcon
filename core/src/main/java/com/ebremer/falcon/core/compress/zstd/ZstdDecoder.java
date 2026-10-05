@@ -7,14 +7,30 @@ import java.util.Arrays;
  * A pure-Java Zstandard decompressor (RFC&nbsp;8878), written from the specification so the module keeps
  * its zero-dependency guarantee &mdash; the same decision the HDF5 module made for szip.
  *
- * <p>Supports the whole single-frame decode path: raw, RLE, and compressed blocks; raw, RLE, Huffman, and
- * treeless literals in the one- and four-stream layouts; predefined, RLE, FSE-compressed, and repeated
- * sequence tables; and the three repeat offsets. Dictionaries are not supported (Zarr does not use them),
- * and the optional frame checksum is skipped rather than verified.
+ * <p>Supports the whole decode path: raw, RLE, and compressed blocks; raw, RLE, Huffman, and treeless
+ * literals in the one- and four-stream layouts; predefined, RLE, FSE-compressed, and repeated sequence
+ * tables; and the three repeat offsets. Input may hold several frames, whose contents are concatenated,
+ * and skippable frames, which are skipped, as libzstd's {@code ZSTD_decompress} reads it. Dictionaries
+ * are not supported (neither Zarr nor HDF5 uses them).
+ *
+ * <p><b>Corrupt input fails</b> with {@link CompressionFormatException} wherever libzstd rejects it,
+ * rather than decoding to something else:
+ * <ul>
+ *   <li>a frame's content checksum (XXH64), when present, is verified;</li>
+ *   <li>a frame's declared content size must be what it decodes to;</li>
+ *   <li>every Huffman literal stream and every sequence bitstream must be consumed exactly, to its last
+ *       bit;</li>
+ *   <li>a block may not decode to more than the frame's block size limit (its window size, at most
+ *       128&nbsp;KiB), nor carry bytes past its sections;</li>
+ *   <li>a match may only reach back within its own frame;</li>
+ *   <li>bytes after the last frame that are not a frame are an error.</li>
+ * </ul>
  */
 public final class ZstdDecoder {
 
     private static final int MAGIC = 0xFD2FB528;
+    /** Skippable frames have magic numbers 0x184D2A50 to 0x184D2A5F. */
+    private static final int SKIPPABLE_MAGIC = 0x184D2A50;
     private static final int MAX_BLOCK_SIZE = 128 * 1024;
 
     // Predefined distributions (RFC 8878 section 3.1.1.3.2.2).
@@ -57,8 +73,11 @@ public final class ZstdDecoder {
 
     private byte[] out = new byte[0];
     private int op;
+    private int frameStart;   // where the current frame's output starts: its matches reach no further back
+    private int blockSizeMax; // the most one block of the current frame may decode to
 
-    // Entropy tables persist across blocks of a frame so "repeat"/"treeless" modes can reuse them.
+    // Entropy tables persist across blocks of a frame so "repeat"/"treeless" modes can reuse them; each
+    // frame starts afresh.
     private ZstdHuffman.Table huffman;
     private ZstdFse.Table literalLengthTable;
     private ZstdFse.Table offsetTable;
@@ -72,33 +91,71 @@ public final class ZstdDecoder {
         this.limit = limit;
     }
 
-    /** Decompresses a single Zstandard frame. */
+    /** Decompresses Zstandard data: one or more frames, whose contents are concatenated. */
     public static byte[] decompress(byte[] input) {
         return decompress(input, 0, input.length);
     }
 
-    /** Decompresses a single Zstandard frame from a region of {@code input}. */
+    /** Decompresses Zstandard data (one or more frames) from a region of {@code input}. */
     public static byte[] decompress(byte[] input, int off, int length) {
         return decompress(input, off, length, Integer.MAX_VALUE - 8);
     }
 
     /**
-     * Decompresses a single Zstandard frame from a region of {@code input}, failing if it would decode to
-     * more than {@code maxSize} bytes (so a corrupt frame cannot claim an enormous output).
+     * Decompresses Zstandard data (one or more frames) from a region of {@code input}, failing if it would
+     * decode to more than {@code maxSize} bytes in all (so a corrupt frame cannot claim an enormous output).
      */
     public static byte[] decompress(byte[] input, int off, int length, int maxSize) {
         if (off < 0 || length < 0 || length > input.length - off) {
             throw new IllegalArgumentException("invalid range " + off + "+" + length + " of " + input.length);
         }
         ZstdDecoder decoder = new ZstdDecoder(input, off, length, Math.min(maxSize, Integer.MAX_VALUE - 8));
-        decoder.decodeFrame();
+        decoder.decodeFrames();
         return Arrays.copyOf(decoder.out, decoder.op);
     }
 
-    private void decodeFrame() {
-        if (remaining() < 4 || readLe32() != MAGIC) {
-            throw new CompressionFormatException("not a Zstandard frame (bad magic number)");
+    /**
+     * Decodes every frame, as {@code ZSTD_decompress} does: Zstandard frames are decoded one after
+     * another, skippable frames skipped, and anything else (or a few bytes too short to be a frame) is an
+     * error. Input holding no frame at all is not Zstandard data.
+     */
+    private void decodeFrames() {
+        boolean any = false;
+        while (remaining() > 0) {
+            if (remaining() < 4) {
+                throw new CompressionFormatException(remaining() + " bytes follow the last frame");
+            }
+            int magic = peekLe32();
+            if ((magic & 0xFFFFFFF0) == SKIPPABLE_MAGIC) {
+                ip += 4;
+                long size = readLe(4);
+                if (size > remaining()) {
+                    throw new CompressionFormatException("skippable frame of " + size + " bytes is truncated");
+                }
+                ip += (int) size;
+            } else if (magic == MAGIC) {
+                decodeFrame();
+            } else {
+                throw new CompressionFormatException(any ? "bytes after the last frame are not a Zstandard frame"
+                        : "not a Zstandard frame (bad magic number)");
+            }
+            any = true;
         }
+        if (!any) {
+            throw new CompressionFormatException("not a Zstandard frame (no input)");
+        }
+    }
+
+    private void decodeFrame() {
+        ip += 4; // the magic number
+        frameStart = op;
+        huffman = null;
+        literalLengthTable = null;
+        offsetTable = null;
+        matchLengthTable = null;
+        repeatOffsets[0] = 1;
+        repeatOffsets[1] = 4;
+        repeatOffsets[2] = 8;
         int descriptor = readByte();
         int contentSizeFlag = descriptor >>> 6;
         boolean singleSegment = (descriptor & 0x20) != 0;
@@ -107,8 +164,12 @@ public final class ZstdDecoder {
         if ((descriptor & 0x08) != 0) {
             throw new CompressionFormatException("reserved bit set in the frame header descriptor");
         }
+        long windowSize = 0;
         if (!singleSegment) {
-            readByte(); // window descriptor: the whole frame is buffered, so it is not needed
+            // The whole frame is buffered, so the window matters only as the bound on a block's size.
+            int window = readByte();
+            long base = 1L << (10 + (window >>> 3));
+            windowSize = base + (base / 8) * (window & 7);
         }
         int dictionaryIdBytes = switch (dictionaryIdFlag) {
             case 0 -> 0;
@@ -135,11 +196,21 @@ public final class ZstdDecoder {
                 contentSize += 256; // the 2-byte form is stored biased
             }
         }
-        if (contentSize > limit) {
+        if (singleSegment) {
+            windowSize = contentSize; // a single-segment frame's window is its content
+        }
+        blockSizeMax = (int) Math.min(windowSize, MAX_BLOCK_SIZE);
+        if (contentSize > limit - op) {
             throw new CompressionFormatException("frame content size " + contentSize + " exceeds " + limit + " bytes");
         }
-        if (contentSize >= 0) {
-            out = new byte[(int) contentSize];
+        // No block decodes to more than 128 KiB, and each takes at least a 3-byte header: a larger content
+        // size is corrupt, and is not allocated.
+        if (contentSize > (remaining() / 3 + 1L) * MAX_BLOCK_SIZE) {
+            throw new CompressionFormatException("frame content size " + contentSize + " is more than its "
+                    + remaining() + " bytes can hold");
+        }
+        if (contentSize > 0) {
+            ensure((int) contentSize);
         }
 
         boolean last = false;
@@ -148,18 +219,37 @@ public final class ZstdDecoder {
             last = (header & 1) != 0;
             int type = (header >>> 1) & 3;
             int size = header >>> 3;
+            int before = op;
+            if (type != 2 && size > blockSizeMax) { // a raw or RLE block's size is what it decodes to
+                throw new CompressionFormatException("block of " + size
+                        + " bytes exceeds the frame's block size limit " + blockSizeMax);
+            }
             switch (type) {
                 case 0 -> copyRawBlock(size);
                 case 1 -> writeRleBlock(size);
                 case 2 -> decodeCompressedBlock(size);
                 default -> throw new CompressionFormatException("reserved block type");
             }
+            if (op - before > blockSizeMax) {
+                throw new CompressionFormatException("block decodes to " + (op - before)
+                        + " bytes, more than the frame's block size limit " + blockSizeMax);
+            }
+        }
+        int decoded = op - frameStart;
+        if (contentSize >= 0 && decoded != contentSize) {
+            throw new CompressionFormatException("frame decodes to " + decoded + " bytes but declares "
+                    + contentSize);
         }
         if (hasChecksum) {
             if (remaining() < 4) {
                 throw new CompressionFormatException("frame checksum is truncated");
             }
-            ip += 4; // the content checksum is not verified
+            int stored = readLe32();
+            int computed = (int) Xxh64.hash(out, frameStart, decoded, 0);
+            if (stored != computed) {
+                throw new CompressionFormatException(String.format(
+                        "frame checksum mismatch: stored 0x%08x, computed 0x%08x", stored, computed));
+            }
         }
     }
 
@@ -181,8 +271,9 @@ public final class ZstdDecoder {
 
     private void decodeCompressedBlock(int blockSize) {
         require(blockSize);
-        if (blockSize > MAX_BLOCK_SIZE) {
-            throw new CompressionFormatException("block of " + blockSize + " bytes exceeds the format maximum");
+        if (blockSize > blockSizeMax) {
+            throw new CompressionFormatException("compressed block of " + blockSize
+                    + " bytes exceeds the frame's block size limit " + blockSizeMax);
         }
         int blockStart = ip;
         int blockEnd = ip + blockSize;
@@ -258,6 +349,9 @@ public final class ZstdDecoder {
             }
         }
 
+        if (regenerated > blockSizeMax) {
+            throw new CompressionFormatException(regenerated + " literals exceed the block size limit " + blockSizeMax);
+        }
         byte[] literals = new byte[regenerated];
         switch (type) {
             case 0 -> {
@@ -307,11 +401,7 @@ public final class ZstdDecoder {
     // ---- sequences --------------------------------------------------------------------------------
 
     private void decodeSequences(int blockEnd, byte[] literals) {
-        if (ip >= blockEnd) {
-            // No sequences section at all: the block is just its literals.
-            appendLiterals(literals, 0, literals.length);
-            return;
-        }
+        need(1, blockEnd, "sequences section header"); // present even when it holds no sequence
         int first = in[ip++] & 0xff;
         int sequenceCount;
         if (first == 0) {
@@ -328,6 +418,9 @@ public final class ZstdDecoder {
             ip += 2;
         }
         if (sequenceCount == 0) {
+            if (ip != blockEnd) {
+                throw new CompressionFormatException("bytes follow an empty sequences section");
+            }
             appendLiterals(literals, 0, literals.length);
             return;
         }
@@ -338,11 +431,11 @@ public final class ZstdDecoder {
             throw new CompressionFormatException("reserved bits set in the sequence compression modes");
         }
         literalLengthTable = readSequenceTable((modes >>> 6) & 3, literalLengthTable,
-                LL_DEFAULT, 6, 35, "literal lengths");
+                LL_DEFAULT, 6, 35, "literal lengths", blockEnd);
         offsetTable = readSequenceTable((modes >>> 4) & 3, offsetTable,
-                OF_DEFAULT, 5, 28, "offsets");
+                OF_DEFAULT, 5, 31, "offsets", blockEnd);
         matchLengthTable = readSequenceTable((modes >>> 2) & 3, matchLengthTable,
-                ML_DEFAULT, 6, 52, "match lengths");
+                ML_DEFAULT, 6, 52, "match lengths", blockEnd);
 
         int streamLength = blockEnd - ip;
         if (streamLength <= 0) {
@@ -383,6 +476,9 @@ public final class ZstdDecoder {
                 mlState.advance(bits);
                 ofState.advance(bits);
             }
+        }
+        if (!bits.finished()) {
+            throw new CompressionFormatException("sequence bitstream is not consumed exactly");
         }
         appendLiterals(literals, literalsUsed, literals.length - literalsUsed);
     }
@@ -428,20 +524,23 @@ public final class ZstdDecoder {
     }
 
     private ZstdFse.Table readSequenceTable(int mode, ZstdFse.Table previous, short[] predefined,
-                                            int predefinedLog, int maxSymbol, String what) {
+                                            int predefinedLog, int maxSymbol, String what, int blockEnd) {
         switch (mode) {
             case 0 -> {
                 return ZstdFse.predefined(predefined, predefinedLog);
             }
             case 1 -> {
-                require(1);
+                need(1, blockEnd, what + " table");
                 int symbol = in[ip++] & 0xff;
+                if (symbol > maxSymbol) {
+                    throw new CompressionFormatException("RLE " + what + " code " + symbol + " is out of range");
+                }
                 return ZstdFse.rleTable(symbol);
             }
             case 2 -> {
                 short[] counts = new short[maxSymbol + 2];
                 int[] header = {maxSymbol, 0};
-                int used = ZstdFse.readNCount(counts, header, in, ip, end - ip);
+                int used = ZstdFse.readNCount(counts, header, in, ip, blockEnd - ip);
                 ip += used;
                 return ZstdFse.buildTable(counts, header[0], header[1]);
             }
@@ -466,8 +565,8 @@ public final class ZstdDecoder {
     }
 
     private void copyMatch(int offset, int length) {
-        if (offset <= 0 || offset > op) {
-            throw new CompressionFormatException("match offset " + offset + " is outside the decoded output");
+        if (offset <= 0 || offset > op - frameStart) {
+            throw new CompressionFormatException("match offset " + offset + " reaches before the frame's output");
         }
         ensure(length);
         int from = op - offset;
@@ -511,6 +610,11 @@ public final class ZstdDecoder {
     private int readByte() {
         require(1);
         return in[ip++] & 0xff;
+    }
+
+    private int peekLe32() {
+        require(4);
+        return (in[ip] & 0xff) | ((in[ip + 1] & 0xff) << 8) | ((in[ip + 2] & 0xff) << 16) | ((in[ip + 3] & 0xff) << 24);
     }
 
     private int readLe32() {

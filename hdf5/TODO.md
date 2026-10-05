@@ -3,8 +3,8 @@
 **Status (2026-10-05, after P2 S1–S7, A2, A3, A5, A6, and PF1–PF4):** build green, **610 HDF5 tests**
 (144 at the review, 187 after the top 10, 206 after P0, 228 after P1, 243 after S1–S3, 256 after S4–S7,
 439 after A2–A6), plus 33 in the `core` module. The review's top 10, every P1 item, **P2 S1–S7**,
-**A2, A3, A5, A6**, and **PF1–PF4** are done (see *Done* at the end). P0 has one item, inherited with the
-shared zstd decoder. Falcon now:
+**A2, A3, A5, A6**, **PF1–PF4**, and the P0 zstd fix (Z6/Z7, in `core`, now 38 tests) are done (see *Done*
+at the end). Falcon now:
 
 - reads the files the review showed it misreading:
   - real libhdf5 szip and scale-offset data;
@@ -39,8 +39,15 @@ shared zstd decoder. Falcon now:
   fuzzing under a 128 MB heap and 256 KB stack, confines external files to the HDF5 file's directory by
   default, and supports concurrent reads of one open file.
 
-P1 is empty, and P0 holds only Z6/Z7, the zstd decoder's defects. What remains is features and API (P2)
-and docs and build (P3).
+P0 and P1 are empty. What remains is features and API (P2) and docs and build (P3).
+
+**Behaviour changes in the Z6/Z7 fix** (shared with Zarr):
+- **Corrupt frames fail:** zstd data that fails its checksum, its declared size, or any of libzstd's
+  structural checks now fails with `HdfFormatException` instead of decoding. In HDF5, a chunk that kept
+  its size used to read wrong values.
+- **Several frames** decode to their concatenation; libzstd's own `ZSTD_decompress` does the same.
+- **Skippable frames** are skipped.
+- **Trailing bytes** after the last frame are an error.
 
 **Behaviour changes in P2 PF1–PF4** (pre-1.0; no API change):
 - `Hdf5Object.attributes()` returns an unmodifiable list, read once per handle. It used to return a new
@@ -139,45 +146,33 @@ review baseline. Abbreviations: `W` = `Hdf5Writer.java`; other paths are under
 
 ## Next up — top 10
 
-1. **P0 Z6/Z7 — the shared zstd decoder accepts corrupt frames.** HDF5's zstd filter (and Blosc's
-   internal zstd) inherit this. Fix it once in core (see P0 below).
-2. **A1 — typed reads for compound, enum, array, and complex.** The writer produces them, but `read()`
+1. **A1 — typed reads for compound, enum, array, and complex.** The writer produces them, but `read()`
    cannot return them.
-3. **WF1 — streaming writes.** The writer builds the whole file in memory, which caps it at about 2 GB
+2. **WF1 — streaming writes.** The writer builds the whole file in memory, which caps it at about 2 GB
    and rules out append and resizable datasets.
-4. **WF2 — datatype breadth:**
+3. **WF2 — datatype breadth:**
    - string attributes;
    - unsigned integers;
    - chunking for every type.
-5. **A4 — selections:**
+4. **A4 — selections:**
    - strided and point selections in `select`;
    - vlen readers on `Selection`.
-6. **A8 — internal types out of the public API.** `Attribute`'s public constructor exposes `FileContext`;
+5. **A8 — internal types out of the public API.** `Attribute`'s public constructor exposes `FileContext`;
    pre-1.0 is the time to fix it.
-7. **D1/D3 — docs that overclaim, and a stale PLAN.md.**
-8. **B1/B2 — CI and release plumbing:** a Windows CI leg, source and Javadoc jars, and the enforcer.
+6. **D1/D3 — docs that overclaim, and a stale PLAN.md.**
+7. **B1/B2 — CI and release plumbing:** a Windows CI leg, source and Javadoc jars, and the enforcer.
    New plugins need Erich's approval.
-9. **A9/A10 — remote files, continued:** other files of a remote file (external raw data, VDS sources)
+8. **A9/A10 — remote files, continued:** other files of a remote file (external raw data, VDS sources)
    through the reader, and paths that cannot be mapped.
-10. **PF5 — chunk lookups without reading the whole index,** for very large or remote datasets.
+9. **PF5 — chunk lookups without reading the whole index,** for very large or remote datasets.
+10. **A7 — configurable cache sizes:** the decoded-chunk cache, and a `RangeReader`'s pages.
 
 ---
 
 ## P0 — silent wrong data / files libhdf5 rejects
 
-A new P0 is any silent wrong value, or any written file that libhdf5 rejects or misreads. The earlier
-items are done (see *Done — 2026-10-05*).
-
-- [ ] **Z6/Z7 — corrupt zstd chunks can decode to wrong data.** Since S4, HDF5's zstd filter (32015) and
-  Blosc's internal zstd use the zstd decoder in `core`. The Zarr review (`../zarr/TODO.md` Z6/Z7) found it
-  accepts corrupt frames:
-  - the XXH64 content checksum is not verified;
-  - bitstreams are not checked for exact consumption;
-  - the declared content size is not compared with the output;
-  - frames after the first are ignored.
-
-  In HDF5 a chunk that decodes to the wrong size still fails. One that keeps its size reads wrong
-  values unless the dataset also has fletcher32. Fix it once, in core, as Z6/Z7 describe.
+Empty: every item is done (see *Done — 2026-10-05*, and *(P0: Z6/Z7)* for the zstd decoder). A new P0
+is any silent wrong value, or any written file that libhdf5 rejects or misreads.
 
 ## P1 — valid files that fail; hardening; concurrency; test gaps
 
@@ -303,6 +298,38 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
   - The root `pom.xml` description says "a zarr module is planned".
 
   Editing CLAUDE.md is Erich's call.
+
+## Done — 2026-10-05 (P0: Z6/Z7)
+
+- [x] **Z6/Z7 — corrupt zstd chunks decoded to wrong data.** HDF5's zstd filter (32015), Blosc's internal
+  zstd, and Zarr's zstd codec share one decoder; the shared zstd decoder (`core`) is fixed:
+  - **Checksum:** a frame's XXH64 content checksum is verified (XXH64 written from its specification).
+  - **Content size:** the declared size must be what the frame decodes to. A size larger than the frame
+    could hold is rejected before anything is allocated.
+  - **Bitstreams:** every Huffman literal stream and every sequence bitstream must be consumed to its
+    last bit.
+  - **Blocks:** a block may not decode to more than the frame's block size limit (window size, at most
+    128 KiB). A compressed block must carry its sequences header and nothing after an empty one.
+  - **Frames:** a match may not reach back before its own frame, and each frame starts with fresh
+    entropy tables and repeat offsets.
+  - **Several frames** decode to their concatenation and skippable frames are skipped, as libzstd's
+    `ZSTD_decompress` does. Any other bytes after the last frame, or a frame cut short, are an error.
+- **Verified against libzstd 1.5.7** over the Zarr review's 50,400 cases (python-zstandard):
+  - **Before:** the review counted 11,561 checksummed and 264 unchecksummed mutated frames that libzstd
+    rejects and Falcon decoded to wrong data.
+  - **After, over all 50,000 mutations** (30,000 one- and two-bit, half with a checksum; 20,000 single-bit,
+    without): Falcon decodes no frame libzstd rejects, no output differs from libzstd's, and no exception
+    is untyped.
+  - **400 valid frames** (streamed, multi-frame, long-distance matching, no content size) all decode
+    exactly.
+  - **Where they still differ:** in 5,210 mutated frames Falcon is the stricter. Each time, libzstd's
+    output is corrupt: its fast Huffman decoder checks a literal stream's output length, not that the
+    stream ends there.
+- **Tests:**
+  - `core`'s `ZstdCorruptionTest` checks XXH64 against reference values, and 436 vectors from libzstd
+    (`tools/fixtures/gen_zstd_corrupt_vectors.py` → `zstd_corrupt_vectors.txt`): mutations, several
+    frames, skippable frames, and trailing data. The old decoder fails 137 of them.
+  - The core fuzzer: 1.5M further mutated frames threw only typed exceptions.
 
 ## Done — 2026-10-05 (P2: PF1–PF4)
 

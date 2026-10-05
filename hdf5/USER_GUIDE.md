@@ -176,7 +176,7 @@ It is also decoded through the third-party filters most common in the wild:
 - Blosc (32001), with every internal codec (BloscLZ, LZ4, LZ4HC, Snappy, zlib, zstd) and both shuffles;
 - LZ4 (32004);
 - bitshuffle (32008), alone or with LZ4 or zstd;
-- Zstandard (32015).
+- Zstandard (32015), verifying each frame's content checksum when it has one.
 
 These are pure-Java codecs that Falcon's Zarr module shares (see `../core`). A chunk that an optional
 filter skipped is read as stored. Any other filter throws `HdfUnsupportedException` naming its id.
@@ -422,7 +422,7 @@ Every failure Falcon raises is an unchecked `HdfException`:
 - `HdfFormatException` — bytes on disk violate the spec (bad signature/checksum, out-of-range address,
   truncated or corrupt input). Corrupt input fails this way rather than as a raw runtime exception, a
   JVM crash, or an infinite loop: every checksummed metadata structure (object headers, B-trees,
-  fractal heaps, chunk indexes) and every `fletcher32` chunk is verified, loops and over-deep nesting in
+  fractal heaps, chunk indexes), every `fletcher32` chunk, and every zstd frame's checksum is verified, loops and over-deep nesting in
   the file's structure are detected, and decompression is bounded by the chunk size.
 - `HdfUnsupportedException` — a valid but not-yet-implemented structure, or another file the
   `ExternalFileAccess` policy refuses.

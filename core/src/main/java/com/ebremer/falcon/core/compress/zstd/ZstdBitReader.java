@@ -9,8 +9,9 @@ import com.ebremer.falcon.core.compress.CompressionFormatException;
  * is an end marker, everything above it is padding, and bits are then consumed downwards. The first bit
  * read becomes the most significant bit of the returned value.
  *
- * <p>Reading past the front of the stream yields zero bits rather than failing, which the format relies
- * on for the final states.
+ * <p>Reading past the front of the stream yields zero bits rather than failing, as libzstd's reader
+ * does; a stream must then be checked with {@link #finished()} (consumed exactly) or
+ * {@link #overflowed()}, so a corrupt one cannot decode to bits it does not hold.
  */
 final class ZstdBitReader {
 
@@ -63,6 +64,11 @@ final class ZstdBitReader {
      */
     boolean overflowed() {
         return bitPos < -1;
+    }
+
+    /** Whether exactly every bit of the stream has been consumed (libzstd's {@code BIT_endOfDStream}). */
+    boolean finished() {
+        return bitPos == -1;
     }
 
     private int bitAt(int absolute) {

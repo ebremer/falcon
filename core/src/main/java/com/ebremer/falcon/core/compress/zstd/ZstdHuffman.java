@@ -187,12 +187,15 @@ final class ZstdHuffman {
         return table.symbol[index] & 0xff;
     }
 
-    /** Decodes {@code count} literals from a single Huffman stream. */
+    /** Decodes {@code count} literals from a single Huffman stream, which they must consume exactly. */
     static void decodeStream(Table table, byte[] in, int off, int length,
                              byte[] out, int outOff, int count) {
         ZstdBitReader reader = new ZstdBitReader(in, off, length);
         for (int i = 0; i < count; i++) {
             out[outOff + i] = (byte) decodeSymbol(table, reader);
+        }
+        if (!reader.finished()) {
+            throw new CompressionFormatException("Huffman literal stream is not consumed exactly");
         }
     }
 
@@ -203,8 +206,11 @@ final class ZstdHuffman {
      */
     static void decodeFourStreams(Table table, byte[] in, int off, int length,
                                   byte[] out, int regeneratedSize) {
-        if (length < 6) {
-            throw new CompressionFormatException("4-stream literals are missing their jump table");
+        if (length < 10) { // the jump table and at least one byte per stream (libzstd's minimum)
+            throw new CompressionFormatException("4-stream literals are too short");
+        }
+        if (regeneratedSize < 6) {
+            throw new CompressionFormatException("4-stream literals of " + regeneratedSize + " bytes cannot be split");
         }
         int size1 = (in[off] & 0xff) | ((in[off + 1] & 0xff) << 8);
         int size2 = (in[off + 2] & 0xff) | ((in[off + 3] & 0xff) << 8);

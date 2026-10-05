@@ -46,8 +46,8 @@ consequences:
    `ConcurrentModificationException`.
 3. **Z4 — silent numeric conversion on write.** `uint64` values saturate and narrowing wraps.
 4. **Z5 — the blosc encoder corrupts data when the element size is ≥ 256 bytes** (`r2048` and up).
-5. **Z6/Z7 — the zstd decoder accepts corrupt frames** (checksum not verified, bitstream underrun, size
-   mismatch) **and drops trailing frames**.
+5. ~~**Z6/Z7 — the zstd decoder accepts corrupt frames and drops trailing frames.**~~ Done 2026-10-05 in
+   core (below).
 6. **Z8 — bounds and overflow.** An offset near `Long.MAX` passes validation, and a size can wrap to 0.
 7. **H1 — bound decompression.** Pass the expected size into every bytes→bytes codec; zip bombs and
    bogus header sizes cause OOM today.
@@ -110,7 +110,22 @@ consequences:
     Falcon's *own* round trip. c-blosc decodes the 300- and 1000-byte cases to wrong bytes and fails on
     256.
   - **Fix:** do what c-blosc does: when typesize > 255, write typesize 1 and don't shuffle.
-- [ ] **Z6 — the zstd decoder accepts corrupt frames.** ✔
+- [x] **Z6 — the zstd decoder accepts corrupt frames.** ✔ **Done 2026-10-05, in core** (with Z7; see
+  `../hdf5/TODO.md`, *Done — 2026-10-05 (P0: Z6/Z7)*): the shared zstd decoder (`core`) is fixed:
+    - **Checksum:** a frame's XXH64 content checksum is verified (XXH64 written from its specification).
+    - **Content size:** the declared size must be what the frame decodes to. A size larger than the frame
+      could hold is rejected before anything is allocated.
+    - **Bitstreams:** every Huffman literal stream and every sequence bitstream must be consumed to its
+      last bit.
+    - **Blocks:** a block may not decode to more than the frame's block size limit (window size, at most
+      128 KiB). A compressed block must carry its sequences header and nothing after an empty one.
+    - **Frames:** a match may not reach back before its own frame, and each frame starts with fresh
+      entropy tables and repeat offsets.
+    - **Several frames** decode to their concatenation and skippable frames are skipped, as libzstd's
+      `ZSTD_decompress` does. Any other bytes after the last frame, or a frame cut short, are an error.
+  Against libzstd 1.5.7 over this review's 50,400 cases, Falcon now returns data libzstd rejects in none,
+  and differs from libzstd's output in none. `ZstdCorruptionTest` holds 436 libzstd vectors. The original
+  finding follows.
   - **Where:** `codec/zstd/ZstdDecoder.java:81,144-149,336-364`, `ZstdBitReader.java:66-71`,
     `ZstdHuffman.java:185-191`.
   - **Defects:**
@@ -125,7 +140,10 @@ consequences:
     - A 15-byte frame with an empty Huffman stream decodes to 10 invented bytes.
   - **Fix:** implement XXH64; require `bitPos == -1` after each stream; require `op == contentSize` when
     the frame content size is present.
-- [ ] **Z7 — zstd decodes only the first frame and silently ignores trailing frames and garbage.** ✔
+- [x] **Z7 — zstd decodes only the first frame and silently ignores trailing frames and garbage.** ✔
+  **Done 2026-10-05, in core** (with Z6): frames decode to their concatenation, skippable frames are
+  skipped, and other trailing bytes are an error. vlen-utf8 no longer loses data. The original finding
+  follows.
   - **Where:** `ZstdDecoder.java:78-86`.
   - **Failure:** `frame("AAAA")+frame("BBBB")` returns `AAAA`; 73 of 84 two-frame cases came back short.
     `BytesCodec`'s length check catches this for fixed-size types, but **vlen-utf8 loses data silently**.
@@ -424,7 +442,7 @@ Items 1–5 of the previous TODO's top-5 are F1–F5 below.
 
 - [ ] **D1 — fix docs that overclaim.**
   - `USER_GUIDE.md:205-207` says "never … out-of-memory from a bogus declared size" (false; see H1).
-  - README says "corrupt input never … returns wrong data" (false; see Z6 and Z7).
+  - README says "corrupt input never … returns wrong data" (false; see Z1–Z5 and Z8; Z6/Z7 are fixed).
   - `ZarrArray`'s Javadoc says it "reflects the store's current contents" (false; see Z3).
 - [ ] **D2 — USER_GUIDE gaps.** Document:
   - the thread-safety contract;
