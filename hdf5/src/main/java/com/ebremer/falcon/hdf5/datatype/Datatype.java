@@ -165,9 +165,23 @@ public sealed interface Datatype {
         ASCII, UTF8, RESERVED
     }
 
-    /** Reference kind. */
+    /**
+     * Reference kind. {@code OBJECT} and {@code DATASET_REGION} are the original encodings Falcon reads;
+     * the {@code REVISED_*} kinds are HDF5 1.12's {@code H5R_ref_t} encoding (datatype version 4).
+     */
     enum ReferenceKind {
-        OBJECT, DATASET_REGION, ATTRIBUTE, OTHER
+        /** An object reference ({@code H5R_OBJECT1}): an object-header address. */
+        OBJECT,
+        /** A dataset-region reference ({@code H5R_DATASET_REGION1}): a global-heap ID. */
+        DATASET_REGION,
+        /** A revised object reference ({@code H5R_OBJECT2}). */
+        REVISED_OBJECT,
+        /** A revised dataset-region reference ({@code H5R_DATASET_REGION2}). */
+        REVISED_DATASET_REGION,
+        /** A revised attribute reference ({@code H5R_ATTR}). */
+        REVISED_ATTRIBUTE,
+        /** A reserved or unknown code. */
+        OTHER
     }
 
     /** Variable-length flavour. */

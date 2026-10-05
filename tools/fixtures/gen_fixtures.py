@@ -20,6 +20,7 @@ Logical tree:
   /empty            (group)
   /root_ds          (dataset, int16[4])
 """
+import ctypes
 import os
 import sys
 import h5py
@@ -697,9 +698,168 @@ def build_vds_byteorder(out):
             f.create_virtual_dataset(name, layout, fillvalue=0)
 
 
+def _links(f, dense):
+    """Hard, soft (absolute, relative, chained, dangling, cyclic, to a group) and external links."""
+    data = f.create_group("data")
+    data.create_dataset("x", data=np.array([1, 2, 3], dtype="i4"))
+    links = f.create_group("links")
+    links.create_group("sub").create_dataset("y", data=np.array([7], dtype="i4"))
+    links["hard"] = data["x"]
+    links["soft_abs"] = h5py.SoftLink("/data/x")
+    links["soft_rel"] = h5py.SoftLink("sub/y")
+    links["soft_group"] = h5py.SoftLink("/data")
+    links["chain"] = h5py.SoftLink("/links/soft_abs")
+    links["dangling"] = h5py.SoftLink("/nowhere")
+    links["loop_a"] = h5py.SoftLink("/links/loop_b")
+    links["loop_b"] = h5py.SoftLink("/links/loop_a")
+    if f.libver[0] != "earliest":
+        links["ext"] = h5py.ExternalLink("links_ext.h5", "/y")
+    if dense:
+        big = f.create_group("dense")
+        for i in range(12):
+            big[f"h{i:02d}"] = data["x"]
+        big["soft"] = h5py.SoftLink("/data/x")
+        big["ext"] = h5py.ExternalLink("links_ext.h5", "/y")
+
+
+def build_links(out):
+    """Every link kind in new-style (compact and dense) and old-style (symbol-table) groups, plus the
+    external file the external links name."""
+    with h5py.File(os.path.join(out, "links_ext.h5"), "w") as f:
+        f.create_dataset("y", data=np.array([42], dtype="i4"))
+    with h5py.File(os.path.join(out, "links.h5"), "w", libver="latest") as f:
+        _links(f, dense=True)
+    with h5py.File(os.path.join(out, "links_old.h5"), "w", libver="earliest") as f:
+        _links(f, dense=False)  # old-style groups store soft links as symbol-table cache type 2
+
+
+def build_heap_limits(f):
+    """Fractal-heap structures beyond a single block: dense attributes stored as 'huge' heap objects
+    (larger than the 4 KiB managed-object limit, or than 64 KiB), and a group whose link heap needs
+    nested indirect blocks (over 520 KB of link messages)."""
+    d = f.create_dataset("huge_attr", data=np.int32(1))
+    for i in range(9):
+        d.attrs[f"small{i}"] = np.int32(i)
+    d.attrs["wide"] = np.arange(1000, dtype="<f8") * 0.5          # 8000 bytes: a huge object
+    e = f.create_dataset("huge_alone", data=np.int32(2))
+    e.attrs["vast"] = np.arange(10000, dtype="<f8")              # 80000 bytes: forces dense storage
+    target = f.create_dataset("target", data=np.int32(3))
+    g = f.create_group("nested")
+    for i in range(2100):
+        g[f"{i:05d}" + "n" * 250] = target
+
+
+def _vds_sources(out, names):
+    for n in names:
+        with h5py.File(os.path.join(out, n), "w") as f:
+            f.create_dataset("dataset_aaaaaaaaaa", data=np.arange(4, dtype="i4"))
+            f.create_dataset("dataset_bbbbbbbbbb", data=np.arange(4, dtype="i4") + 10)
+
+
+def _vds_same_file(f):
+    f.create_dataset("src", data=np.arange(12, dtype="i4").reshape(3, 4))
+    layout = h5py.VirtualLayout(shape=(3, 4), dtype="i4")
+    layout[0:2, 0:2] = h5py.VirtualSource(".", "src", shape=(3, 4))[1:3, 2:4]
+    layout[2, :] = h5py.VirtualSource(".", "src", shape=(3, 4))[0, :]
+    f.create_virtual_dataset("same_file", layout, fillvalue=-1)
+    layout = h5py.VirtualLayout(shape=(8,), dtype="i4")
+    layout[0:8:2] = h5py.VirtualSource(".", "src", shape=(3, 4))[1, :]
+    f.create_virtual_dataset("strided", layout, fillvalue=-1)
+
+
+def build_vds_encodings(out):
+    """Virtual datasets in each mapping encoding: the default libver (heap block v0, hyperslab selection
+    v1 block lists, "." for a same-file source) and libver latest (heap block v1, whose entries flag a
+    same-file source or point back at an earlier entry's file or dataset name)."""
+    names = ["vds_external_source_0.h5", "vds_external_source_1.h5"]
+    _vds_sources(out, names)
+    for libver, name in (("earliest", "vds_default.h5"), ("latest", "vds_latest.h5")):
+        with h5py.File(os.path.join(out, name), "w", libver=libver) as f:
+            _vds_same_file(f)
+            layout = h5py.VirtualLayout(shape=(4, 4), dtype="i4")
+            layout[0] = h5py.VirtualSource(names[0], "dataset_aaaaaaaaaa", shape=(4,))
+            layout[1] = h5py.VirtualSource(names[1], "dataset_aaaaaaaaaa", shape=(4,))
+            layout[2] = h5py.VirtualSource(names[0], "dataset_bbbbbbbbbb", shape=(4,))
+            layout[3] = h5py.VirtualSource(names[1], "dataset_bbbbbbbbbb", shape=(4,))
+            f.create_virtual_dataset("shared_names", layout, fillvalue=-1)
+
+
+def _region_refs(f):
+    src = f.create_dataset("src", data=np.arange(12, dtype="i4").reshape(3, 4))
+    refs = f.create_dataset("refs", shape=(7,), dtype=h5py.regionref_dtype)
+    refs[0] = src.regionref[0:2, 1:3]                         # one block
+    refs[1] = src.regionref[...]                              # all
+    space = src.id.get_space()
+    space.select_elements(np.array([[0, 1], [2, 3], [1, 0]], dtype="u8"))
+    refs[2] = h5py.h5r.create(f.id, b"src", h5py.h5r.DATASET_REGION, space)    # points, in list order
+    space = src.id.get_space()
+    space.select_hyperslab((2, 2), (1, 1), block=(1, 2))
+    space.select_hyperslab((0, 0), (1, 1), block=(1, 2), op=h5py.h5s.SELECT_OR)
+    refs[3] = h5py.h5r.create(f.id, b"src", h5py.h5r.DATASET_REGION, space)    # two blocks
+    space = src.id.get_space()
+    space.select_hyperslab((0, 0), (2, 2), stride=(2, 2), block=(1, 1))
+    refs[4] = h5py.h5r.create(f.id, b"src", h5py.h5r.DATASET_REGION, space)    # strided
+    space = src.id.get_space()
+    space.select_none()
+    refs[5] = h5py.h5r.create(f.id, b"src", h5py.h5r.DATASET_REGION, space)    # none
+    # refs[6] stays a null reference.
+    expected = [src[r].ravel().tolist() if r else [] for r in refs[:6]]
+    for i, values in enumerate(expected):
+        refs.attrs[f"expected{i}"] = np.array(values, dtype="i4")
+
+
+def build_region_refs(out):
+    """Region references in each selection encoding: the default libver (hyperslab v1 block lists,
+    points v1) and libver latest (hyperslab v3 regular and irregular, points v2), with all/none/null."""
+    for libver, name in (("earliest", "regionrefs_default.h5"), ("latest", "regionrefs_latest.h5")):
+        with h5py.File(os.path.join(out, name), "w", libver=libver) as f:
+            _region_refs(f)
+
+
+def build_sohm(path):
+    """Shared object header messages (SOHM): every dataspace, datatype, fill value, filter pipeline and
+    attribute message is stored once in the shared-message heap and referenced from object headers."""
+    lib = _hdf5_library()
+    fcpl = h5py.h5p.create(h5py.h5p.FILE_CREATE)
+    if lib.H5Pset_shared_mesg_nindexes(ctypes.c_int64(fcpl.id), ctypes.c_uint(1)) < 0:
+        raise RuntimeError("H5Pset_shared_mesg_nindexes failed")
+    all_types = 0x01 | 0x02 | 0x04 | 0x08 | 0x10              # H5O_SHMESG_ALL_FLAG
+    if lib.H5Pset_shared_mesg_index(ctypes.c_int64(fcpl.id), ctypes.c_uint(0), ctypes.c_uint(all_types),
+                                    ctypes.c_uint(0)) < 0:
+        raise RuntimeError("H5Pset_shared_mesg_index failed")
+    fid = h5py.h5f.create(path.encode(), h5py.h5f.ACC_TRUNC, fcpl=fcpl)
+    with h5py.File(fid) as f:
+        f.create_group("group")
+        for name in ("a", "b"):
+            d = f.create_dataset(name, data=np.arange(6, dtype="i4"), chunks=(3,), compression="gzip")
+            d.attrs["units"] = np.int32(7)
+
+
+def build_external_paths(out):
+    """External raw data (External File List) with an unlimited final slot, and names that leave the
+    HDF5 file's directory (a '..' path and an absolute path): Falcon refuses those by default."""
+    raw = os.path.join(out, "external_unlimited.raw")
+    np.arange(6, dtype="<i4").tofile(raw)
+    with h5py.File(os.path.join(out, "external_paths.h5"), "w") as f:
+        f.create_dataset("unlimited", shape=(6,), dtype="<i4",
+                         external=[("external_unlimited.raw", 0, h5py.h5f.UNLIMITED)])
+        f.create_dataset("parent", shape=(2,), dtype="<i4", external=[("../outside.raw", 0, 8)])
+        f.create_dataset("absolute", shape=(2,), dtype="<i4", external=[("/nonexistent/abs.raw", 0, 8)])
+    with h5py.File(os.path.join(out, "vds_outside.h5"), "w", libver="latest") as f:
+        layout = h5py.VirtualLayout(shape=(4,), dtype="i4")
+        layout[:] = h5py.VirtualSource("../outside_source.h5", "data", shape=(4,))
+        f.create_virtual_dataset("v", layout, fillvalue=-1)
+
+
 # name -> builder; `python gen_fixtures.py NAME ...` regenerates just those fixtures.
 FIXTURES = {
     "vds_loop": lambda: build_vds_loop(OUT),
+    "links": lambda: build_links(OUT),
+    "heap_limits": lambda: _with_file("heap_limits.h5", build_heap_limits, libver="latest"),
+    "vds_encodings": lambda: build_vds_encodings(OUT),
+    "region_refs": lambda: build_region_refs(OUT),
+    "sohm": lambda: build_sohm(os.path.join(OUT, "sohm.h5")),
+    "external_paths": lambda: build_external_paths(OUT),
     "numeric": lambda: _with_file("numeric.h5", build_numeric, libver="latest"),
     "vds_byteorder": lambda: build_vds_byteorder(OUT),
     "userblock": lambda: build_userblock(OUT),

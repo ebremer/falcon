@@ -26,12 +26,50 @@ try (Hdf5File h5 = Hdf5File.open(Path.of("data.h5"))) {   // AutoCloseable; unma
 
     Group   run  = root.group("run");                 // navigate by name
     Dataset temp = run.dataset("temperature");
-    root.child("maybe/missing").ifPresent(o -> { /* Optional lookup */ });
+    root.child("maybe").ifPresent(o -> { /* Optional lookup */ });
 }
 ```
 
 `Hdf5File` also exposes `superblockVersion()` and, for files that record it, `fileSpaceInfo()` (allocation
-strategy, page size, and total free space).
+strategy, page size, and total free space). `close()` may be called more than once; after it, reading
+anything obtained from the file throws `HdfClosedException`, and `isOpen()` returns false.
+
+### Links
+
+A group holds links. `links()` lists every one, and each `Link` is `Hard`, `Soft`, `External`, or
+`UserDefined`:
+
+```java
+for (Link link : group.links()) {
+    switch (link) {
+        case Link.Soft s     -> System.out.println(s.name() + " -> " + s.targetPath());
+        case Link.External e -> System.out.println(e.name() + " -> " + e.fileName() + ":" + e.objectPath());
+        default -> { }
+    }
+}
+```
+
+`childNames()` names every link. `children()`, `child(name)`, `group(name)` and `dataset(name)` follow
+hard links and soft links:
+- An object reached through a soft link takes the link's path (e.g. `/links/soft`).
+- **External links are not followed.** `dataset(name)` on one throws `HdfUnsupportedException` naming
+  the target file; open that file yourself.
+- A soft link whose target is missing, or which loops (more than 16 soft links on one path, as in
+  libhdf5), reaches nothing.
+
+### Files outside the HDF5 file
+
+External raw data (an External File List) and virtual-dataset sources are other files named inside the
+HDF5 file. An untrusted file could otherwise point Falcon at any local file, or at a network share. So
+by default Falcon opens only files in the HDF5 file's own directory tree; any other name fails the read
+with `HdfUnsupportedException`. Choose a different policy when opening:
+
+```java
+Hdf5File.open(path);                                                         // = ExternalFileAccess.sameDirectory()
+Hdf5File.open(path, ExternalFileAccess.sameDirectory().allowDirectory(raw)); // also files under raw/
+Hdf5File.open(path, ExternalFileAccess.unrestricted());                      // any name, as libhdf5 (trusted files)
+Hdf5File.open(path, ExternalFileAccess.none());                              // never open another file
+```
 
 ### Read a dataset
 
@@ -97,8 +135,16 @@ Selection[]  regions = ds.readRegionReferences();      // region references -> d
 double[] slice = regions[0].readDoubles();
 ```
 
+A region reference may select one block, points, several blocks, everything, or nothing; every
+encoding libhdf5 writes is read. A selection that is not one block (`isRectangular()` is false) reads
+as a flat array of its elements, in the order libhdf5 visits them (points as listed, blocks in row-major
+order). A null reference reads as `null`. An element that cannot be resolved, such as a reference to a
+deleted dataset, throws only when that selection is used.
+
 Virtual datasets are read transparently: `ds.readDoubles()` assembles the data from the source files
 (resolved relative to the virtual dataset's own file), filling unmapped regions with the fill value.
+Same-file sources (`"."`) and every mapping encoding libhdf5 writes are read. A source file the
+`ExternalFileAccess` policy refuses fails the read; a missing one leaves the fill value, as in libhdf5.
 A source in the other byte order is converted. A source of any other type, such as a `uint32` source
 under an `int32` virtual dataset, throws `HdfUnsupportedException`; libhdf5 would convert it.
 
@@ -119,6 +165,28 @@ try (Hdf5Writer w = Hdf5Writer.create(Path.of("out.h5"))) {
     // ... build the file ...
 }   // written on close()
 ```
+
+The file is built in memory and written by `close()`. It goes to a temporary file beside the target,
+which is then moved into place, so the path holds either the complete new file or what it held before.
+
+- **When `close()` fails,** for example on a reference to an object never added, nothing is written
+  and the writer stays open: fix the cause and call `close()` again.
+- **`close()` cannot tell that your own code failed.** To discard what was added so far, call
+  `abort()`:
+
+  ```java
+  Hdf5Writer w = Hdf5Writer.create(path);
+  try {
+      build(w);
+      w.close();
+  } catch (RuntimeException | IOException e) {
+      w.abort();  // leaves any existing file untouched
+      throw e;
+  }
+  ```
+
+- **After `close()` or `abort()`,** adding to the writer, or to any group or dataset handle it gave out,
+  throws `HdfClosedException`.
 
 ### Groups, datasets, and attributes
 
@@ -152,6 +220,7 @@ that call rather than at `close()`.
 ```java
 w.intChunkedDataset("big", data, new long[]{100_000}, new long[]{4096})
  .shuffle().deflate(6);                                     // filters apply in call order
+// the chunk shape needs the dataset's rank, dimensions >= 1, and at most 2 GiB per chunk
 
 // also: .fletcher32(), .scaleOffset(), .nbit(precision), .szip()
 ```
@@ -200,6 +269,10 @@ Hdf5Writer.create(path, Hdf5Writer.Format.LATEST);    // modern: v3 superblock, 
 Hdf5Writer.create(path, Hdf5Writer.Format.EARLIEST);  // original: v0 superblock, symbol-table groups
 ```
 
+In `EARLIEST`:
+- every attribute goes in the version-1 object header (there is no dense storage);
+- chunked datasets, and groups with more than 256 children, are refused when added.
+
 `EARLIEST` uses the message versions libhdf5 writes for its own earliest setting:
 - dataspace v1;
 - compound and enum datatypes v1, array datatype v2;
@@ -221,7 +294,9 @@ Every failure Falcon raises is an unchecked `HdfException`:
   JVM crash, or an infinite loop: every checksummed metadata structure (object headers, B-trees,
   fractal heaps, chunk indexes) and every `fletcher32` chunk is verified, loops and over-deep nesting in
   the file's structure are detected, and decompression is bounded by the chunk size.
-- `HdfUnsupportedException` — a valid but not-yet-implemented structure.
+- `HdfUnsupportedException` — a valid but not-yet-implemented structure, or another file the
+  `ExternalFileAccess` policy refuses.
+- `HdfClosedException` — a closed `Hdf5File` or `Hdf5Writer` was used.
 
 Catch `HdfException` to handle any Falcon read/write failure.
 
@@ -243,7 +318,14 @@ Catch `HdfException` to handle any Falcon read/write failure.
 
 ## Not supported (reads throw `HdfUnsupportedException`)
 
-SOHM shared-message deduplication, the revised `H5R_ref_t` reference encoding, unlimited-pattern virtual
-datasets, and multi-file drivers (family/multi/split). On the write side, the bitfield/opaque/time
+The following are not supported:
+- **SOHM shared-message deduplication.** An object whose messages live in the shared-message heap is
+  reported, not misread.
+- **The revised `H5R_ref_t` reference encoding.** The datatype is recognised; the values are not
+  decoded.
+- **Filtered fractal heaps.**
+- **Unlimited-pattern virtual datasets.**
+- **Multi-file drivers** (family, multi, split).
+- **Following external links.** On the write side, the bitfield/opaque/time
 datatype classes and indirect-block dense storage are not yet emitted. See
 [`PLAN.md`](PLAN.md) for the full roadmap.

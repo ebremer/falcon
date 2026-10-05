@@ -52,4 +52,44 @@ class DatatypeMessageTest {
         assertEquals(23, base.mantissaSize());
         assertEquals(127, base.exponentBias());
     }
+
+    @Test
+    void referenceKindsByVersion() {
+        // Codes 0 and 1 are the original object and region references; 2-4 are the revised (H5R_ref_t)
+        // object, region, and attribute references of datatype version 4, and reserved before it.
+        assertEquals(Datatype.ReferenceKind.OBJECT, referenceKind(0x17, 0));
+        assertEquals(Datatype.ReferenceKind.DATASET_REGION, referenceKind(0x17, 1));
+        assertEquals(Datatype.ReferenceKind.OTHER, referenceKind(0x17, 2));
+        assertEquals(Datatype.ReferenceKind.REVISED_OBJECT, referenceKind(0x47, 0x12));
+        assertEquals(Datatype.ReferenceKind.REVISED_DATASET_REGION, referenceKind(0x47, 0x13));
+        assertEquals(Datatype.ReferenceKind.REVISED_ATTRIBUTE, referenceKind(0x47, 0x14));
+    }
+
+    private static Datatype.ReferenceKind referenceKind(int classAndVersion, int bits) {
+        byte[] body = {(byte) classAndVersion, (byte) bits, 0, 0, 8, 0, 0, 0};
+        return ((Datatype.Reference) DatatypeMessage.parse(HdfBuffer.of(body), 0)).kind();
+    }
+
+    @Test
+    void version1CompoundArrayMembers() {
+        // A pre-1.4 compound: member "v" is a 2x3 array of int16 (dimensionality in the member's legacy
+        // block), member "s" a scalar int16 after it.
+        java.nio.ByteBuffer b = java.nio.ByteBuffer.allocate(256).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        b.put((byte) 0x16).put((byte) 2).put((byte) 0).put((byte) 0).putInt(14);  // v1 compound, 2 members, 14 bytes
+        b.put(new byte[] {'v', 0, 0, 0, 0, 0, 0, 0});                             // name padded to 8
+        b.putInt(0).put((byte) 2).put(new byte[3]).putInt(0).putInt(0);         // offset, rank 2, rsv, perm, rsv
+        b.putInt(2).putInt(3).putInt(0).putInt(0);                               // dimension sizes
+        b.put(new byte[] {0x10, 0x08, 0, 0, 2, 0, 0, 0, 0, 0, 16, 0});           // int16
+        b.put(new byte[] {'s', 0, 0, 0, 0, 0, 0, 0});
+        b.putInt(12).put((byte) 0).put(new byte[3]).putInt(0).putInt(0);
+        b.putInt(0).putInt(0).putInt(0).putInt(0);
+        b.put(new byte[] {0x10, 0x08, 0, 0, 2, 0, 0, 0, 0, 0, 16, 0});
+        var compound = (Datatype.Compound) DatatypeMessage.parse(HdfBuffer.of(java.util.Arrays.copyOf(b.array(), b.position())), 0);
+        var v = (Datatype.Array) compound.members().get(0).type();
+        org.junit.jupiter.api.Assertions.assertArrayEquals(new int[] {2, 3}, v.dimensions());
+        assertEquals(12, v.size());
+        assertEquals(2, v.base().size());
+        assertEquals(12, compound.members().get(1).offset());
+        assertEquals(Datatype.FixedPoint.class, compound.members().get(1).type().getClass());
+    }
 }

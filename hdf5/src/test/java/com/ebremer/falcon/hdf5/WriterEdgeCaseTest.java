@@ -272,4 +272,78 @@ class WriterEdgeCaseTest {
         }
         return a;
     }
+
+    @Test
+    void failedCloseLeavesNothingAndCanBeRetried() throws IOException {
+        Path file = dir.resolve("retry.h5");
+        Hdf5Writer w = Hdf5Writer.create(file);
+        w.referenceDataset("refs", new long[] {1}, new String[] {"/later"});
+        assertThrows(IllegalArgumentException.class, w::close); // the target does not exist yet
+        assertTrue(w.isOpen());
+        try (var listing = Files.list(dir)) {
+            assertEquals(List.of(), listing.toList());         // no partial file, no temporary file
+        }
+        w.intDataset("later", new int[] {5}, new long[] {1});
+        w.close();
+        w.close();                                             // idempotent
+        assertTrue(!w.isOpen());
+        assertThrows(HdfClosedException.class, () -> w.intDataset("more", new int[] {1}, new long[] {1}));
+        try (Hdf5File h5 = Hdf5File.open(file)) {
+            assertEquals(h5.root().dataset("later").objectHeaderAddress(),
+                    h5.root().dataset("refs").readObjectReferences()[0].objectHeaderAddress());
+        }
+    }
+
+    @Test
+    void abortKeepsTheExistingFile() throws IOException {
+        Path file = dir.resolve("keep.h5");
+        try (Hdf5Writer w = Hdf5Writer.create(file)) {
+            w.intDataset("old", new int[] {1}, new long[] {1});
+        }
+        byte[] before = Files.readAllBytes(file);
+        Hdf5Writer w = Hdf5Writer.create(file);
+        Hdf5Writer.DatasetWriter d = w.intDataset("new", new int[] {2}, new long[] {1});
+        w.abort();
+        w.close();
+        assertArrayEquals(before, Files.readAllBytes(file));
+        assertThrows(HdfClosedException.class, () -> d.intAttribute("a", new int[] {1}, new long[] {}));
+        assertThrows(HdfClosedException.class, () -> w.group("g"));
+    }
+
+    @Test
+    void chunkShapesAreValidatedWhenAdded() throws IOException {
+        try (Hdf5Writer w = Hdf5Writer.create(dir.resolve("chunks.h5"))) {
+            int[] data = new int[6];
+            assertThrows(IllegalArgumentException.class, () -> w.intChunkedDataset("rank", data, new long[] {2, 3}, new long[] {2}));
+            assertThrows(IllegalArgumentException.class, () -> w.intChunkedDataset("zero", data, new long[] {6}, new long[] {0}));
+            assertThrows(IllegalArgumentException.class, () -> w.intChunkedDataset("scalar", new int[] {1}, new long[] {}, new long[] {}));
+            assertThrows(IllegalArgumentException.class,
+                    () -> w.intChunkedDataset("huge", data, new long[] {6}, new long[] {1L << 30}));
+            w.intChunkedDataset("bigger_than_data", data, new long[] {6}, new long[] {8}); // libhdf5 reads this
+        }
+        try (Hdf5Writer w = Hdf5Writer.create(dir.resolve("chunks_old.h5"), Hdf5Writer.Format.EARLIEST)) {
+            assertThrows(HdfUnsupportedException.class,
+                    () -> w.intChunkedDataset("c", new int[] {1}, new long[] {1}, new long[] {1}));
+        }
+    }
+
+    @Test
+    void earliestFormatLimitsAreCheckedWhenAdded() throws IOException {
+        Path file = dir.resolve("old_limits.h5");
+        try (Hdf5Writer w = Hdf5Writer.create(file, Hdf5Writer.Format.EARLIEST)) {
+            Hdf5Writer.DatasetWriter d = w.intDataset("d", new int[] {1}, new long[] {1});
+            for (int i = 0; i < 12; i++) {
+                d.intAttribute("a" + i, new int[] {i}, new long[] {}); // v1 headers hold them all
+            }
+            Hdf5Writer.GroupWriter g = w.group("g");
+            for (int i = 0; i < 256; i++) {
+                g.intDataset("x" + i, new int[] {i}, new long[] {1});
+            }
+            assertThrows(HdfUnsupportedException.class, () -> g.intDataset("x256", new int[] {0}, new long[] {1}));
+        }
+        try (Hdf5File h5 = Hdf5File.open(file)) {
+            assertEquals(12, h5.root().dataset("d").attributes().size());
+            assertEquals(256, h5.root().group("g").childNames().size());
+        }
+    }
 }

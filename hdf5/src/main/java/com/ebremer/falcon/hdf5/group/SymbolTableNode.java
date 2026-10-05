@@ -37,7 +37,9 @@ public final class SymbolTableNode {
             long nameOffset = buf.getUnsignedValue(e, offsets);
             long objectHeader = buf.getAddress(e + offsets, offsets);
             int cacheType = buf.getInt(e + 2L * offsets);
-            entries.add(new SymbolTableEntry(nameOffset, objectHeader, cacheType));
+            // A soft link (cache type 2) keeps its target path's local-heap offset in the scratch pad.
+            long linkValue = cacheType == 2 ? buf.getUnsignedInt(e + 2L * offsets + 8) : 0;
+            entries.add(new SymbolTableEntry(nameOffset, objectHeader, cacheType, linkValue));
         }
         return entries;
     }

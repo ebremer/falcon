@@ -6,11 +6,17 @@ package com.ebremer.falcon.hdf5.group;
  * @param linkNameOffset       byte offset of the link name in the group's local heap
  * @param objectHeaderAddress  file address of the linked object's header
  * @param cacheType            0 = no cache (dataset / committed type), 1 = group (scratch pad caches
- *                             its B-tree and heap), 2 = symbolic link
+ *                             its B-tree and heap), 2 = symbolic (soft) link
+ * @param linkValueOffset      for a soft link (cache type 2), the offset of its target path in the
+ *                             group's local heap (the first 4 bytes of the scratch pad); otherwise 0
  */
-public record SymbolTableEntry(long linkNameOffset, long objectHeaderAddress, int cacheType) {
+public record SymbolTableEntry(long linkNameOffset, long objectHeaderAddress, int cacheType, long linkValueOffset) {
 
     public boolean isGroup() {
         return cacheType == 1;
+    }
+
+    public boolean isSoftLink() {
+        return cacheType == 2;
     }
 }

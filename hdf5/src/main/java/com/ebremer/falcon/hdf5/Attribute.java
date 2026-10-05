@@ -169,6 +169,11 @@ public final class Attribute {
     }
 
     private MemorySegment data() {
+        long needed = (long) count() * datatype.size();
+        if (needed > dataSize) {
+            throw new HdfFormatException("attribute '" + name + "' holds " + dataSize + " bytes but its dataspace"
+                    + " and datatype need " + needed + " (corrupt attribute message?)");
+        }
         return ctx.buffer().segmentSlice(dataOffset, dataSize);
     }
 

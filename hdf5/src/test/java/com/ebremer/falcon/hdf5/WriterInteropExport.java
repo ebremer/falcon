@@ -236,6 +236,14 @@ class WriterInteropExport {
         dataset("/rec_utf8", null).put("fields", Map.of("é", new int[] {1, 2}));
         w.enumDataset("enum_utf8", new long[] {2}, Hdf5Writer.enumType().add("ÉTÉ", 1).add("HIVER", 2), new int[] {2, 1});
         dataset("/enum_utf8", new int[] {2, 1}).put("enum", Map.of("ÉTÉ", 1, "HIVER", 2));
+        // Many attributes: dense storage in the latest format, version-1 header messages in the earliest.
+        Hdf5Writer.DatasetWriter manyAttributes = w.intDataset("many_attrs", new int[] {1}, new long[] {1});
+        Map<String, Object> manyAttrs = new LinkedHashMap<>();
+        for (int i = 0; i < 12; i++) {
+            manyAttributes.intAttribute("a" + i, new int[] {i}, new long[] {});
+            manyAttrs.put("a" + i, new int[] {i});
+        }
+        dataset("/many_attrs", new int[] {1}).put("attrs", manyAttrs);
         if (format == Hdf5Writer.Format.LATEST) {
             // Chunked storage (not written in the earliest format): empty, and n-bit at its limit.
             w.intChunkedDataset("empty_chunked", new int[0], new long[] {0}, new long[] {4});

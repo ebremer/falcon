@@ -1,5 +1,6 @@
 package com.ebremer.falcon.hdf5;
 
+import com.ebremer.falcon.hdf5.data.DataspaceSelection;
 import com.ebremer.falcon.hdf5.datatype.Datatype;
 import com.ebremer.falcon.hdf5.heap.GlobalHeap;
 import com.ebremer.falcon.hdf5.io.FileContext;
@@ -11,6 +12,7 @@ import java.lang.foreign.ValueLayout;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
@@ -25,16 +27,13 @@ import java.util.Map;
  * the virtual dataset's datatype, possibly in the other byte order (converted here); other type
  * conversions are reported as unsupported.
  *
- * <p>Selections are resolved generally: whole-space (ALL) and regular hyperslabs, including strided and
- * multi-block patterns (each dimension's selected indices are {@code start + j·stride + b} for
- * {@code j} in [0,count) and {@code b} in [0,block)). Unlimited-extent selection patterns and point
- * selections are a later increment.
+ * <p>The mapping block is read in both versions libhdf5 writes: version 0 (each entry's file name, with
+ * {@code "."} for this same file) and version 1 (HDF5 2.0: per-entry flags mark a same-file source, or a
+ * file or dataset name shared with an earlier entry by index). Selections are read in every encoding
+ * (see {@link DataspaceSelection}); unlimited-extent mappings are a later increment. Source files are
+ * opened only as the file's {@link ExternalFileAccess} policy allows; a refused one fails the read.
  */
 final class VirtualDataset {
-
-    private static final int SEL_NONE = 0;
-    private static final int SEL_HYPERSLAB = 2;
-    private static final int SEL_ALL = 3;
 
     private VirtualDataset() {
     }
@@ -75,38 +74,76 @@ final class VirtualDataset {
         byte[] block = GlobalHeap.readObject(ctx, layout.globalHeapAddress(), layout.index());
         HdfBuffer buf = HdfBuffer.of(block);
         int lengths = ctx.sizeOfLengths();
+        int version = buf.getUnsignedByte(0);
+        if (version > 1) {
+            throw new HdfUnsupportedException("virtual dataset mapping block version " + version);
+        }
         long entries = buf.getUnsignedValue(1, lengths); // version(1), then entry count
+        if (entries < 0 || entries > block.length) {
+            throw new HdfFormatException("virtual dataset mapping count " + entries + " is invalid");
+        }
         int p = 1 + lengths;
 
         Path directory = ctx.path() == null ? null : ctx.path().getParent();
         Map<Path, Hdf5File> sources = new HashMap<>();
+        List<String> fileNames = new ArrayList<>();
+        List<String> datasetNames = new ArrayList<>();
         try {
-            for (long e = 0; e < entries; e++) {
-                int fileEnd = zeroFrom(block, p);
-                String sourceFile = new String(block, p, fileEnd - p, StandardCharsets.UTF_8);
-                p = fileEnd + 1;
-                int datasetEnd = zeroFrom(block, p);
-                String sourceDataset = new String(block, p, datasetEnd - p, StandardCharsets.UTF_8);
-                p = datasetEnd + 1;
-                VdsSelection sourceSelection = readSelection(buf, p);
-                p += sourceSelection.byteLength;
-                VdsSelection virtualSelection = readSelection(buf, p);
-                p += virtualSelection.byteLength;
+            for (int e = 0; e < entries; e++) {
+                // Version 1 prefixes each entry with flags: the source is this file (no name stored), or its
+                // file / dataset name is an earlier entry's (stored as that entry's index).
+                int flags = version >= 1 ? buf.getUnsignedByte(p++) : 0;
+                String sourceFile;
+                if ((flags & SAME_FILE) != 0) {
+                    sourceFile = ".";
+                } else if ((flags & SHARED_FILE_NAME) != 0) {
+                    sourceFile = earlier(fileNames, buf.getUnsignedValue(p, lengths), e);
+                    p += lengths;
+                } else {
+                    int fileEnd = zeroFrom(block, p);
+                    sourceFile = new String(block, p, fileEnd - p, StandardCharsets.UTF_8);
+                    p = fileEnd + 1;
+                }
+                String sourceDataset;
+                if ((flags & SHARED_DATASET_NAME) != 0) {
+                    sourceDataset = earlier(datasetNames, buf.getUnsignedValue(p, lengths), e);
+                    p += lengths;
+                } else {
+                    int datasetEnd = zeroFrom(block, p);
+                    sourceDataset = new String(block, p, datasetEnd - p, StandardCharsets.UTF_8);
+                    p = datasetEnd + 1;
+                }
+                fileNames.add(sourceFile);
+                datasetNames.add(sourceDataset);
+                DataspaceSelection sourceSelection = DataspaceSelection.parse(buf, p);
+                p += sourceSelection.byteLength();
+                DataspaceSelection virtualSelection = DataspaceSelection.parse(buf, p);
+                p += virtualSelection.byteLength();
 
-                if (sourceSelection.type == SEL_NONE || virtualSelection.type == SEL_NONE) {
+                if (sourceSelection.type() == DataspaceSelection.NONE || virtualSelection.type() == DataspaceSelection.NONE) {
                     continue;
                 }
-                Path sourcePath = directory == null ? Path.of(sourceFile) : directory.resolve(sourceFile);
-                Hdf5File source = sources.computeIfAbsent(sourcePath, VirtualDataset::openOrNull);
-                if (source == null) {
-                    continue; // missing source file -> leave the fill value in place
+                if (sourceSelection.isUnlimited() || virtualSelection.isUnlimited()) {
+                    throw new HdfUnsupportedException("unlimited-extent virtual dataset selections are not yet supported");
                 }
-                Dataset sourceDataset2 = navigate(source.root(), sourceDataset);
+                Group root;
+                if (sourceFile.equals(".")) {
+                    root = Group.root(ctx, ctx.rootAddress()); // the source is in this same file
+                } else {
+                    Path sourcePath = ctx.externalFileAccess().resolve(sourceFile, directory, "virtual dataset source file");
+                    Hdf5File source = sources.computeIfAbsent(sourcePath,
+                            path -> openOrNull(path, ctx.externalFileAccess()));
+                    if (source == null) {
+                        continue; // a missing source file leaves the fill value in place, as in libhdf5
+                    }
+                    root = source.root();
+                }
+                Dataset sourceDataset2 = navigate(root, sourceDataset);
                 long[] sourceDims = sourceDataset2.dataspace().dimensions();
                 boolean swap = byteSwapNeeded(sourceDataset2.datatype(), type, sourceDataset);
 
-                long[] sourceOffsets = sourceSelection.selectedOffsets(sourceDims);
-                long[] virtualOffsets = virtualSelection.selectedOffsets(virtualDims);
+                long[] sourceOffsets = sourceSelection.offsets(sourceDims);
+                long[] virtualOffsets = virtualSelection.offsets(virtualDims);
                 byte[] sourceBytes = sourceDataset2.rawData().toArray(ValueLayout.JAVA_BYTE);
                 int n = Math.min(sourceOffsets.length, virtualOffsets.length);
                 for (int i = 0; i < n; i++) {
@@ -131,107 +168,17 @@ final class VirtualDataset {
         return output;
     }
 
-    /** A parsed source/virtual selection: whole-space (ALL) or a regular (possibly strided) hyperslab. */
-    private static final class VdsSelection {
-        final int type;
-        final long[] start;
-        final long[] stride;
-        final long[] count;
-        final long[] block;
-        final int byteLength;
+    // Mapping-entry flags of a version-1 mapping block (HDF5 2.0).
+    private static final int SHARED_FILE_NAME = 0x01;
+    private static final int SHARED_DATASET_NAME = 0x02;
+    private static final int SAME_FILE = 0x04;
 
-        VdsSelection(int type, long[] start, long[] stride, long[] count, long[] block, int byteLength) {
-            this.type = type;
-            this.start = start;
-            this.stride = stride;
-            this.count = count;
-            this.block = block;
-            this.byteLength = byteLength;
+    /** The name an entry shares with the earlier entry {@code index}. */
+    private static String earlier(List<String> names, long index, int entry) {
+        if (index < 0 || index >= entry) {
+            throw new HdfFormatException("virtual dataset mapping " + entry + " refers to mapping " + index);
         }
-
-        /** Flat row-major offsets of the selected elements over a space of shape {@code dims}. */
-        long[] selectedOffsets(long[] dims) {
-            int rank = dims.length;
-            long[][] indices = new long[rank][];
-            for (int d = 0; d < rank; d++) {
-                if (type == SEL_ALL) {
-                    indices[d] = new long[com.ebremer.falcon.hdf5.data.Elements.checkedInt(dims[d])];
-                    for (int i = 0; i < indices[d].length; i++) {
-                        indices[d][i] = i;
-                    }
-                } else {
-                    indices[d] = new long[com.ebremer.falcon.hdf5.data.Elements.checkedInt(count[d] * block[d])];
-                    int k = 0;
-                    for (long j = 0; j < count[d]; j++) {
-                        for (long b = 0; b < block[d]; b++) {
-                            indices[d][k++] = start[d] + j * stride[d] + b;
-                        }
-                    }
-                }
-            }
-            long[] dimStride = new long[rank];
-            long s = 1;
-            for (int d = rank - 1; d >= 0; d--) {
-                dimStride[d] = s;
-                s *= dims[d];
-            }
-            long total = 1;
-            for (long[] index : indices) {
-                total *= index.length;
-            }
-            long[] offsets = new long[com.ebremer.falcon.hdf5.data.Elements.checkedInt(total)];
-            int[] cursor = new int[rank];
-            for (int i = 0; i < offsets.length; i++) {
-                long flat = 0;
-                for (int d = 0; d < rank; d++) {
-                    flat += indices[d][cursor[d]] * dimStride[d];
-                }
-                offsets[i] = flat;
-                for (int d = rank - 1; d >= 0; d--) {
-                    if (++cursor[d] < indices[d].length) {
-                        break;
-                    }
-                    cursor[d] = 0;
-                }
-            }
-            return offsets;
-        }
-    }
-
-    private static VdsSelection readSelection(HdfBuffer buf, int offset) {
-        int type = (int) buf.getUnsignedInt(offset);
-        if (type == SEL_ALL || type == SEL_NONE) {
-            // type(4), version(4), padding(4), length(4)
-            return new VdsSelection(type, null, null, null, null, 16);
-        }
-        if (type != SEL_HYPERSLAB) {
-            throw new HdfUnsupportedException("virtual dataset selection type " + type
-                    + " (only hyperslab and all-points selections are supported)");
-        }
-        int version = (int) buf.getUnsignedInt(offset + 4);
-        if (version != 3) {
-            throw new HdfUnsupportedException("virtual dataset hyperslab selection version " + version
-                    + " is not yet supported");
-        }
-        int encodeSize = buf.getUnsignedByte(offset + 9); // version(4), flags(1), encode size(1)
-        int rank = (int) buf.getUnsignedInt(offset + 10);
-        long unlimited = encodeSize >= 8 ? -1L : (1L << (8 * encodeSize)) - 1;
-        int q = offset + 14;
-        long[] start = new long[rank];
-        long[] stride = new long[rank];
-        long[] count = new long[rank];
-        long[] block = new long[rank];
-        for (int d = 0; d < rank; d++) {
-            start[d] = buf.getUnsignedValue(q, encodeSize);
-            stride[d] = buf.getUnsignedValue(q + encodeSize, encodeSize);
-            count[d] = buf.getUnsignedValue(q + 2L * encodeSize, encodeSize);
-            block[d] = buf.getUnsignedValue(q + 3L * encodeSize, encodeSize);
-            if (count[d] == unlimited || block[d] == unlimited) {
-                throw new HdfUnsupportedException("unlimited-extent virtual dataset selections are not yet supported");
-            }
-            q += 4L * encodeSize; // start, stride, count, block
-        }
-        return new VdsSelection(SEL_HYPERSLAB, start, stride, count, block, 14 + rank * 4 * encodeSize);
+        return names.get((int) index);
     }
 
     /**
@@ -322,9 +269,9 @@ final class VirtualDataset {
         return dataset;
     }
 
-    private static Hdf5File openOrNull(Path path) {
+    private static Hdf5File openOrNull(Path path, ExternalFileAccess access) {
         try {
-            return Hdf5File.open(path);
+            return Hdf5File.open(path, access);
         } catch (IOException e) {
             return null; // an unavailable source contributes only the fill value
         }

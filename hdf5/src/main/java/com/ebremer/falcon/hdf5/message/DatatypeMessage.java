@@ -142,10 +142,27 @@ public final class DatatypeMessage {
                 for (int i = 0; i < members; i++) {
                     Name name;
                     long memberOffset;
+                    int[] memberDims = null;
                     if (version == 1) {
                         name = readNamePadded(buf, p);
                         p = name.next;
                         memberOffset = buf.getUnsignedInt(p);
+                        // Pre-1.4 array members: a dimensionality (0-4) and up to four sizes, after a
+                        // reserved block and a (never implemented) permutation.
+                        int rank = buf.getUnsignedByte(p + 4);
+                        if (rank > 4) {
+                            throw new HdfFormatException("compound member dimensionality " + rank + " exceeds 4 at " + p);
+                        }
+                        if (rank > 0) {
+                            memberDims = new int[rank];
+                            for (int d = 0; d < rank; d++) {
+                                long dim = buf.getUnsignedInt(p + 16 + 4L * d);
+                                if (dim < 1 || dim > Integer.MAX_VALUE) {
+                                    throw new HdfFormatException("invalid compound member dimension " + dim + " at " + p);
+                                }
+                                memberDims[d] = (int) dim;
+                            }
+                        }
                         p += 4 + 1 + 3 + 4 + 4 + 16; // offset + legacy dimensionality block
                     } else if (version == 2) {
                         name = readNamePadded(buf, p);
@@ -161,12 +178,24 @@ public final class DatatypeMessage {
                     }
                     Result member = read(buf, p, depth + 1);
                     p = member.next;
-                    list.add(new Datatype.Compound.Member(name.value, (int) memberOffset, member.type));
+                    Datatype memberType = member.type;
+                    if (memberDims != null) {
+                        long elements = 1;
+                        for (int dim : memberDims) {
+                            elements *= dim;
+                        }
+                        long arraySize = elements * memberType.size();
+                        if (arraySize > Integer.MAX_VALUE) {
+                            throw new HdfFormatException("compound array member too large at " + p);
+                        }
+                        memberType = new Datatype.Array((int) arraySize, memberDims, memberType);
+                    }
+                    list.add(new Datatype.Compound.Member(name.value, (int) memberOffset, memberType));
                 }
                 return new Result(new Datatype.Compound(size, list), p);
             }
             case 7: { // reference
-                return new Result(new Datatype.Reference(size, referenceKind(bits0 & 0x0F)), p);
+                return new Result(new Datatype.Reference(size, referenceKind(bits0 & 0x0F, version)), p);
             }
             case 8: { // enumerated
                 int members = bits0 | (bits1 << 8);
@@ -252,11 +281,14 @@ public final class DatatypeMessage {
         };
     }
 
-    private static Datatype.ReferenceKind referenceKind(int code) {
+    /** Reference type codes: 0-1 in every version; 2-4 are the revised references of datatype version 4+. */
+    private static Datatype.ReferenceKind referenceKind(int code, int version) {
         return switch (code) {
             case 0 -> Datatype.ReferenceKind.OBJECT;
             case 1 -> Datatype.ReferenceKind.DATASET_REGION;
-            case 2 -> Datatype.ReferenceKind.ATTRIBUTE;
+            case 2 -> version >= 4 ? Datatype.ReferenceKind.REVISED_OBJECT : Datatype.ReferenceKind.OTHER;
+            case 3 -> version >= 4 ? Datatype.ReferenceKind.REVISED_DATASET_REGION : Datatype.ReferenceKind.OTHER;
+            case 4 -> version >= 4 ? Datatype.ReferenceKind.REVISED_ATTRIBUTE : Datatype.ReferenceKind.OTHER;
             default -> Datatype.ReferenceKind.OTHER;
         };
     }

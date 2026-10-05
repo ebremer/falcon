@@ -26,11 +26,17 @@ import java.util.Optional;
  * }
  * }</pre>
  *
+ * <p><b>Other files.</b> External raw data and virtual-dataset sources are opened only as the
+ * {@link ExternalFileAccess} policy allows: by default, files in this file's own directory tree.
+ *
+ * <p><b>Lifecycle.</b> {@link #close()} is idempotent. Once closed, reading anything obtained from the
+ * file throws {@link HdfClosedException}; {@link #isOpen()} tells whether it is still open.
+ *
  * <p><b>Thread safety.</b> An open file, and every object, attribute and selection obtained from it, may
  * be read from any number of threads at once (for example through {@code dataset.blocks(n).parallel()}):
  * the mapping is read without shared cursors, the decoded-chunk cache is synchronized, and lazily parsed
- * metadata is safely published. Close the file only once those reads have finished; a read racing with
- * {@link #close()} fails with {@link IllegalStateException}.
+ * metadata is safely published. Close the file only once those reads have finished; a read already in
+ * progress when another thread closes the file may fail with {@link IllegalStateException}.
  */
 public final class Hdf5File implements AutoCloseable {
 
@@ -46,8 +52,17 @@ public final class Hdf5File implements AutoCloseable {
         this.root = root;
     }
 
-    /** Opens and memory-maps an HDF5 file for reading. */
+    /** Opens and memory-maps an HDF5 file for reading, with the default {@link ExternalFileAccess#sameDirectory()} policy. */
     public static Hdf5File open(Path path) throws IOException {
+        return open(path, ExternalFileAccess.sameDirectory());
+    }
+
+    /**
+     * Opens and memory-maps an HDF5 file for reading; {@code externalFileAccess} decides which other
+     * files (external raw data, virtual-dataset sources) it may make Falcon open.
+     */
+    public static Hdf5File open(Path path, ExternalFileAccess externalFileAccess) throws IOException {
+        java.util.Objects.requireNonNull(externalFileAccess, "externalFileAccess");
         MappedHdfFile mapped = MappedHdfFile.openReadOnly(path);
         try {
             Superblock superblock = Superblock.parse(mapped.buffer());
@@ -60,8 +75,8 @@ public final class Hdf5File implements AutoCloseable {
             if (base != 0) {
                 data = data.slice(base, data.size() - base);
             }
-            FileContext ctx = new FileContext(data,
-                    superblock.sizeOfOffsets(), superblock.sizeOfLengths(), path);
+            FileContext ctx = new FileContext(data, superblock.sizeOfOffsets(), superblock.sizeOfLengths(),
+                    path, superblock.rootObjectHeaderAddress(), externalFileAccess);
             Group root = Group.root(ctx, superblock.rootObjectHeaderAddress());
             return new Hdf5File(mapped, superblock, ctx, root);
         } catch (RuntimeException e) {
@@ -91,6 +106,7 @@ public final class Hdf5File implements AutoCloseable {
      * no superblock extension.
      */
     public Optional<FileSpaceInfo> fileSpaceInfo() {
+        ctx.checkOpen();
         long extension = superblock.superblockExtensionAddress();
         if (extension == HdfBuffer.UNDEFINED_ADDRESS) {
             return Optional.empty();
@@ -102,8 +118,15 @@ public final class Hdf5File implements AutoCloseable {
         return Optional.of(FileSpaceInfoMessage.parse(ctx, message.bodyOffset(), message.bodySize()));
     }
 
+    /** True until {@link #close()} is called. */
+    public boolean isOpen() {
+        return !ctx.isClosed();
+    }
+
+    /** Unmaps the file. Calling it again does nothing. */
     @Override
     public void close() {
+        ctx.markClosed();
         mapped.close();
     }
 }

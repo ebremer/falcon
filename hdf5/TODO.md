@@ -1,8 +1,8 @@
 # Falcon HDF5 — remaining work (prioritized)
 
-**Status (2026-10-05, after the P0 pass):** build green, **206 HDF5 tests** (144 at the review, 187
-after the top 10). The review's top 10 and **every P0 item** are done (see *Done* at the end). Falcon
-now:
+**Status (2026-10-05, after the P1 pass):** build green, **228 HDF5 tests** (144 at the review, 187
+after the top 10, 206 after P0). The review's top 10, **every P0 item, and every P1 item** are done (see
+*Done* at the end). Falcon now:
 
 - reads the files the review showed it misreading:
   - real libhdf5 szip and scale-offset data;
@@ -11,15 +11,20 @@ now:
   - user-block (MATLAB v7.3) files;
   - integers with a bit offset or reduced precision, and non-IEEE floats;
   - unsigned values (never wrapped);
-  - virtual-dataset sources in the other byte order.
+  - virtual-dataset sources in the other byte order;
+  - soft and external links (old- and new-style groups);
+  - fractal-heap huge and tiny objects and nested indirect blocks;
+  - every VDS mapping and region-reference selection encoding;
+  - shared messages (SOHM is reported, not misread).
 - writes files that **HDF5 2.0 and 1.14 read**, checked by `tools/fixtures/check_hdf5_writer.py`. The
-  final run read 81/81 objects with HDF5 2.0 and 76/76 with 1.14.6. The P0 edge-case files written by
+  final run read 83/83 objects with HDF5 2.0 and 78/78 with 1.14.6. The P0 edge-case files written by
   the previous writer fail 19 objects under each version.
-- verifies metadata and fletcher32 checksums, rejects loops and runaway sizes in corrupt files, and
-  supports concurrent reads of one open file.
+- writes atomically (temp file, then move), can be aborted, and validates input when it is added;
+- verifies metadata and fletcher32 checksums, rejects loops and runaway sizes in corrupt files, survives
+  fuzzing under a 128 MB heap and 256 KB stack, confines external files to the HDF5 file's directory by
+  default, and supports concurrent reads of one open file.
 
-No known P0 remains. Valid files Falcon cannot read yet are P1 (V3–V12); the lifecycle gaps (C2/C3) are
-P1 too.
+P0 and P1 are empty. What remains is features and API (P2) and docs and build (P3).
 
 **API changes in the P0 pass** (pre-1.0):
 - `read()` returns `long[]` for `uint32` and `BigInteger[]` for `uint64`.
@@ -27,6 +32,24 @@ P1 too.
 - `readInts()` now accepts `int64` data whose values fit in an `int`.
 - `Datatype.FloatingPoint` gains `signLocation` and `normalization`.
 - The writer rejects bad names, out-of-range fill values, and n-bit values when they are added.
+
+**API changes in the P1 pass:**
+- Links:
+  - new `Link` (`Hard`, `Soft`, `External`, `UserDefined`) and `Group.links()` / `link(name)`;
+  - `childNames()` now names every link;
+  - `children()` and `child()` follow soft links.
+- `Hdf5File`:
+  - `Hdf5File.open(path, ExternalFileAccess)`, with `sameDirectory()` as the default;
+  - `isOpen()`, and `close()` is idempotent;
+  - a closed file throws the new `HdfClosedException`.
+- `Selection.isRectangular()` and `elementCount()`; a region reference may now be points or blocks.
+- `Datatype.ReferenceKind`: `ATTRIBUTE` is replaced by `REVISED_OBJECT`, `REVISED_DATASET_REGION`, and
+  `REVISED_ATTRIBUTE`.
+- `Hdf5Writer`:
+  - new `abort()` and `isOpen()`; `close()` writes atomically and can be retried after a failure;
+  - adding after close throws `HdfClosedException`;
+  - chunk shapes are validated when added;
+  - `EARLIEST` datasets accept any number of attributes.
 
 How to read this list:
 - **P0** — silent wrong data, or files other HDF5 tools reject or misread. Fix before any release.
@@ -47,27 +70,26 @@ review baseline. Abbreviations: `W` = `Hdf5Writer.java`; other paths are under
 
 ## Next up — top 10
 
-1. **V3/V4 — links.** An old-style soft link makes its whole group unreadable, and new-style soft and
-   external links are hidden.
-2. **V5 — fractal-heap limits.** A dense attribute over 4 KiB (huge object), or a group of about 40k
-   links, fails to read.
-3. **V6/V7 — default-libver encodings.** VDS and region references written with the default libver are
-   refused.
-4. **H6 — security.** External-file and VDS paths can reach any local file.
-5. **C2/C3 — lifecycle.** Use after `close()` is untyped, and a writer that fails part-way still writes a
-   partial file.
-6. **C4 — chunk shape validation.** A bad chunk shape fails at `close()` with a raw exception.
-7. **V8–V12 — smaller format gaps:**
-   - an unlimited External File List slot;
-   - the v1 shared-message address;
-   - shared (SOHM) messages other than datatypes;
-   - reference type code 2;
-   - v1 compound member dimensions.
-8. **T2/T3 — remaining fixtures and fuzzing.** Add the V3–V7 fixtures, and run the fuzz tests under a
-   small heap and stack.
-9. **D1 — docs that overclaim.** PLAN.md and the README still say "1.0-ready" and "never returns wrong
-   data".
-10. **WF1 — streaming writes.** The writer builds the whole file in memory, which caps it at about 2 GB.
+1. **A1 — typed reads for compound, enum, array, and complex.** The writer produces them, but `read()`
+   cannot return them.
+2. **WF1 — streaming writes.** The writer builds the whole file in memory, which caps it at about 2 GB
+   and rules out append and resizable datasets.
+3. **WF2 — datatype breadth:**
+   - string attributes;
+   - unsigned integers;
+   - chunking for every type.
+4. **S1 — SOHM.** Objects whose messages live in the shared-message heap are reported as unsupported.
+5. **S4 — third-party filters:** LZF, blosc, zstd, lz4, and bitshuffle. This needs the `falcon.core`
+   decision first.
+6. **A4/A5 — selections and paths:**
+   - strided and point selections in `select`;
+   - vlen readers on `Selection`;
+   - `child("a/b")` path lookup.
+7. **PF1/PF3 — lookups:** cache each dataset's chunk index; look attributes up by name.
+8. **S2/S3 — unlimited-pattern VDS mappings and revised `H5R_ref_t` references.**
+9. **D1/D3 — docs that overclaim, and a stale PLAN.md.**
+10. **B1/B2 — CI and release plumbing:** a Windows CI leg, source and Javadoc jars, and the enforcer.
+    New plugins need Erich's approval.
 
 ---
 
@@ -78,105 +100,7 @@ file that libhdf5 rejects or misreads.
 
 ## P1 — valid files that fail; hardening; concurrency; test gaps
 
-### Valid files that fail to read
-
-- [ ] **V3 — old-style soft links (symbol-table cache type 2) are classified at address -1.** ✔
-  - **Where:** `group/SymbolTableNode.java:37-40` → `Group.java:160-167`.
-  - **Failure:** the *whole group* becomes unreadable.
-  - **Fix:** keep the scratch pad, and skip or resolve cache-type-2 entries.
-- [ ] **V4 — soft and external links in new-style groups are silently dropped from `children()`.** ✔
-  - **Fix:** expose links (`links()`, a `Link` record with kind and target, optional resolution), or at
-    least don't hide them.
-- [ ] **V5 — fractal-heap limits:**
-  - **Huge objects:** a dense attribute over 4 KiB is a *huge* object, and *all* attributes on that
-    object then fail. ✔
-  - **Nested indirect blocks:** a group of ~40k links needs nested indirect blocks, and it fails. ✔
-  - **Also missing:** filtered heaps and tiny objects.
-  - **Where:** `heap/FractalHeap.java`. Also match libhdf5's ID length computation (`:95-96`).
-- [ ] **V6 — VDS encodings:**
-  - Heap-block **version 1** (same-file `"."` sources: per-entry flags, no file name) is misparsed as
-    "selection type 65536".
-  - **Hyperslab selection v1** (every default-libver VDS) is unsupported.
-  - **Where:** `VirtualDataset.java:48,174`.
-- [ ] **V7 — region references:**
-  - Null refs (address 0) aren't detected.
-  - Selection v1/v2 (default libver) is unsupported.
-  - Point selections are unsupported.
-  - One bad element fails the whole array.
-  - **Where:** `Hdf5Object.java:175,197-206`.
-- [ ] **V8 — an External File List slot of size `H5F_UNLIMITED` (allowed by the spec) gives a raw IOOBE.** ✔
-  - **Where:** `message/ExternalFileList.java:77,86`.
-  - **Also:** a negative offset gives IAE, and a bad name gives `InvalidPathException`.
-  - **Fix:** treat it as unbounded, validate, and wrap the errors.
-- [ ] **V9 — the shared-message v1 layout reads the address at body+8.** (spec)
-  - **Where:** `header/SharedMessage.java:49`.
-  - **Defect:** the address is at body+8+sizeOfLengths; body+8 is the link-name offset.
-  - **Failure:** committed types in pre-1.6.1 files resolve to a bogus address.
-- [ ] **V10 — the shared flag is honoured only for datatypes.** ✔
-  - **Failure:** under SOHM, a dataspace throws "version 3", attributes misparse, and fill parses as
-    "none".
-  - **Fix:** resolve shared messages centrally. Throw `HdfUnsupportedException` for SOHM until P2 S1 is
-    done.
-- [ ] **V11 — reference type code 2 is reported as `ATTRIBUTE`.**
-  - **Where:** `message/DatatypeMessage.java:232-238`.
-  - **Defect:** in datatype v4, code 2 is the revised generic `H5R_ref_t`; in v<4 it is reserved.
-  - **Fix:** add a REVISED kind, decoded per element (ties to P2 S3).
-- [ ] **V12 — v1 compound member array dimensions are skipped.** Pre-1.4 array members decode as scalars.
-  - **Where:** `DatatypeMessage.java:128-132`.
-
-### Corrupt-input hardening
-
-H1–H5 (checksums, cycles, runaway sizes, raw exceptions) are done; see *Done*.
-
-- [ ] **H6 — security: external-file and VDS source paths are opened as written.** ✔
-  - **Where:** `message/ExternalFileList.java:76`, `VirtualDataset.java:69`.
-  - **Defect:** absolute paths, `..`, and Windows UNC paths are honoured. A crafted `.h5` can read any
-    local file, or trigger an SMB/NTLM connection.
-  - **Fix:** add a resolver policy — confined to the file's directory by default, with an opt-in for
-    absolute paths and an `HDF5_EXTFILE_PREFIX` / `HDF5_VDS_PREFIX` equivalent. Document it.
-
-### Concurrency & lifecycle
-
-- [ ] **C2 — use after `close()` gives a raw `IllegalStateException`, and a second `close()` throws.** ✔
-  - **Fix:** make `close()` idempotent, throw a typed exception on use after close, and add `isOpen()`.
-- [ ] **C3 — writer failure semantics.** ✔
-  - **Where:** `W:202-221`.
-  - **Defects:**
-    - `close()` writes whatever was defined even if the try body threw. An NPE mid-build still leaves a
-      valid-looking, truncated file.
-    - `written=true` is set before work that can fail, so a retried `close()` does nothing.
-    - Adds after `close()` are silently dropped.
-    - Errors surface at `close()` as raw RuntimeExceptions.
-  - **Fix:** validate eagerly; add a closed-guard and `abort()`; write to a temp file and move it into
-    place atomically on success.
-- [ ] **C4 — chunk shape is never validated.** ✔
-  - **Where:** `W:290-300, 1040-1050`.
-  - **Failure:** a rank mismatch gives AIOOBE at close; a zero dim gives "/ by zero" at close; a chunked
-    scalar is rejected by libhdf5.
-
-### Test & oracle gaps (what let P0 through)
-
-- [ ] **T2 — add the reader fixtures the remaining bugs live in.**
-  - **Done:** fixtures for every fixed item now exist: `chunk_maxshape`, `layout_v4`, `paged_sparse`,
-    `filtered_single`, `unwritten_*`, `scaleoffset` (plus `scaleoffset_chunks.txt`), real-format
-    `szip` (plus `szip_chunks.txt`), `userblock_v0/v3`, `filter_edge`, `vds_loop`, and
-    `aec_ros_vectors.txt`.
-  - **Still to add**, each as a generator entry in `gen_fixtures.py`:
-    - default-libver VDS (including same-file `"."` sources) and region references (V6, V7);
-    - old-style soft links (V3), and new-style soft and external links (V4);
-    - a dense attribute over 4 KiB, and a group of ~40k links (V5);
-    - SOHM shared messages (V10, S1).
-- [ ] **T3 — strengthen `RobustnessTest` further.**
-  - **Done:**
-    - The fuzz set now includes 10 more fixtures (`vds`, `dense_links_big`, and the new ones).
-    - `readEverything` does typed reads that resolve vlen data and references; this found a
-      region-reference leak, now fixed.
-    - `HardeningTest` covers crafted cycles, self-continuations, negative sizes, deep nesting, and zip
-      bombs.
-  - **Still to do:**
-    - Add `ea_paged.h5` (slow: 150k chunks per mutation).
-    - Run the fuzz tests under a small `-Xss`/`-Xmx` in a dedicated surefire execution, so a regression
-      to unbounded recursion or allocation fails fast.
+Empty: every item is done (see *Done — 2026-10-05 (P1)*).
 
 ## P2 — features, API, performance
 
@@ -214,8 +138,8 @@ H1–H5 (checksums, cycles, runaway sizes, raw exceptions) are done; see *Done*.
 - [ ] **A4 — selections:**
   - strided and blocked hyperslabs and point selections in `select`;
   - raw, vlen, and reference readers on `Selection` (`readStrings` on vlen throws today).
-- [ ] **A5 — paths:** `Group.child("a/b")` never matches paths, yet USER_GUIDE uses
-  `child("maybe/missing")`. Add path lookup.
+- [ ] **A5 — paths:** `Group.child("a/b")` never matches paths. (The USER_GUIDE example that implied it
+  is fixed.) Add path lookup, following soft links as `Group` now does.
 - [ ] **A6 — open from something other than a `Path`:** `byte[]`, `SeekableByteChannel`, or a range
   reader (remote / object store). PLAN §5 claims a `ByteBuffer` fallback exists; it doesn't.
 - [ ] **A7 — configurable chunk-cache size.** It is fixed at 16 MB (`io/ChunkCache.java:17`).
@@ -254,8 +178,10 @@ H1–H5 (checksums, cycles, runaway sizes, raw exceptions) are done; see *Done*.
   re-walks the whole index, so `blocks()` costs O(blocks × chunks). (`ChunkedReader.java:72`)
 - [ ] **PF2 — read VDS selections lazily.** Today they re-assemble the whole VDS and re-map every source
   file per call (`Dataset.java:348`).
-- [ ] **PF3 — use name indexes for lookup.** `Group.child(name)` classifies every child (79 ms for 20k
-  entries), and `attribute(name)` reparses every attribute on each call.
+- [ ] **PF3 — use name indexes for lookup.**
+  - `attribute(name)` reparses every attribute on each call.
+  - A dense group's `link(name)` scans the link list; the name-hash B-tree could find it directly.
+  - Partly done: `child(name)` now classifies only the object it returns, not every child.
 - [ ] **PF4 — benchmark / perf-regression harness.** Still optional; the Zarr module's opt-in
   `Benchmarks` pattern works. (carried over)
 
@@ -272,9 +198,9 @@ H1–H5 (checksums, cycles, runaway sizes, raw exceptions) are done; see *Done*.
     verification are now documented.
   - **Also done (P0 pass):** unsigned and non-native numeric reads, VDS type rules, writer names and
     limits, typed fill values, and the EARLIEST message versions.
-  - **Still to document:**
-    - the write-on-close lifecycle and memory use (WF1);
-    - the external-path policy (H6).
+  - **Also done (P1 pass):** links, the external-file policy, closed files, region-reference selections,
+    and the writer's lifecycle (atomic close, `abort()`, retry).
+  - **Still to document:** the writer's memory use (WF1).
 - [ ] **D3 — PLAN.md is stale.**
   - §6 lists the non-existent `dataspace` and `util` packages, omits `data`, `index`, and `group`, and
     says only one package is exported (`datatype` is exported too).
@@ -295,6 +221,86 @@ H1–H5 (checksums, cycles, runaway sizes, raw exceptions) are done; see *Done*.
   - The root `pom.xml` description says "a zarr module is planned".
 
   Editing CLAUDE.md is Erich's call.
+
+## Done — 2026-10-05 (P1)
+
+Every reader fix has an h5py fixture made by `gen_fixtures.py`: `links`, `heap_limits`,
+`vds_encodings`, `region_refs`, `sohm`, and `external_paths`.
+
+- [x] **V3/V4 — links.**
+  - New public `Link` (`Hard`, `Soft`, `External`, `UserDefined`) and `Group.links()` / `link(name)`.
+  - Old-style groups read soft links from symbol-table cache type 2 (the target path is in the local
+    heap); before, the whole group was unreadable.
+  - Soft links resolve absolute and relative paths, follow chains, and stop after 16 links (libhdf5's
+    limit), so cycles reach nothing.
+  - External links are listed but not followed; `dataset()` on one names the target file.
+  - Tested by `LinksTest`.
+- [x] **V5 — fractal heap.**
+  - Huge objects, direct or through the huge-object v2 B-tree, as for dense attributes over 4 KiB or
+    64 KiB.
+  - Tiny objects, kept in the heap ID.
+  - Nested indirect blocks (child rows = log2(size) − log2(start × width) + 1), as for a group of 2100
+    long-named links, whose heap has 16 rows against 9 direct.
+  - Filtered heaps still report Unsupported.
+  - Tested by `P1ReadTest.hugeHeapObjectsAndNestedIndirectBlocks`.
+- [x] **V6 — VDS encodings.**
+  - New `data/DataspaceSelection` reads every selection encoding: hyperslab v1 block lists, v2 and v3
+    regular, v3 irregular; points v1 and v2; all; none.
+  - Both mapping-block versions: v0 with `"."` for the same file, which Falcon used to resolve to the
+    directory and fill silently. And v1 (HDF5 2.0): per-entry flags for a same-file source (0x04) or a
+    file or dataset name shared by entry index (0x01/0x02), verified against libhdf5 output.
+  - Tested by `P1ReadTest.virtualDatasetsInEveryMappingEncoding`.
+- [x] **V7 — region references.**
+  - A null reference (address 0) is detected.
+  - Points and multi-block selections become a non-rectangular `Selection`, read in libhdf5's order.
+  - A bad element becomes a selection that throws when used, so it no longer fails the array.
+  - Tested by `P1ReadTest.regionReferencesInEverySelectionEncoding` and
+    `oneUnresolvableRegionReferenceDoesNotFailTheOthers`.
+- [x] **V8 — External File List.**
+  - An `H5F_UNLIMITED` slot reads to the end of its file.
+  - Bad offsets or sizes, and bad names, are `HdfFormatException`.
+- [x] **V9** — the v1 shared message's address is read after the symbol-table entry's heap offset
+  (`H5O__shared_decode`). Tested by `SharedMessageTest`.
+- [x] **V10 — shared messages.** `SharedMessage.resolve` follows a shared dataspace, fill value, filter
+  pipeline, or attribute (in the header, or flagged in a dense attribute record). An attribute's shared
+  dataspace is resolved too. A message in the SOHM heap is reported as Unsupported instead of being
+  misparsed (`sohm.h5`).
+- [x] **V11** — reference type codes 2–4 are the revised references of datatype v4
+  (`REVISED_OBJECT`, `REVISED_DATASET_REGION`, `REVISED_ATTRIBUTE`), and reserved before v4. Tested by
+  `DatatypeMessageTest`.
+- [x] **V12** — v1 compound members with dimensions read as `Datatype.Array` members. Tested by
+  `DatatypeMessageTest`.
+- [x] **H6 — external files.** A new `ExternalFileAccess` policy governs External File List and VDS
+  sources:
+  - **default:** the file's own directory tree;
+  - **options:** `allowDirectory(...)` (Falcon's `HDF5_EXTFILE_PREFIX` / `HDF5_VDS_PREFIX`),
+    `unrestricted()`, and `none()`;
+  - **refusals:** absolute, `..`, and UNC names are refused with Unsupported, and a refused VDS source
+    is never silently filled.
+
+  Tested by `P1ReadTest.externalFilesOutsideTheDirectoryAreRefusedByDefault`.
+- [x] **C2 — closing.** `close()` is idempotent and there is `isOpen()`. Any read of a closed file's
+  objects (links, metadata, data, attributes) throws `HdfClosedException`.
+- [x] **C3 — writer lifecycle.**
+  - `close()` builds the file, writes a temp file beside the target, and moves it into place
+    atomically.
+  - A failed close leaves nothing and the writer open for a retry.
+  - `abort()` discards; additions after close throw `HdfClosedException`.
+  - Unexpected internal errors are wrapped as `HdfException`.
+  - Earliest-format limits are checked when added: chunked datasets are refused, and so are more than
+    256 children per group. Datasets keep any number of attributes in v1 headers.
+- [x] **C4 — chunk shapes.** Checked when added: same rank, each dimension at least 1, no chunked
+  scalar, a chunk under 2 GiB. A chunk larger than the dataset stays allowed; libhdf5 reads it.
+- **Tests (C3/C4):** `WriterEdgeCaseTest`, plus libhdf5 interop of 12 attributes in both formats.
+- [x] **T2** — every fixture listed above.
+- [x] **T3 — fuzzing.**
+  - The fuzz set adds every new fixture and `ea_paged.h5`.
+  - It reads links and region selections, and samples datasets declared over 16 MB.
+  - It runs in its own surefire execution (`fuzz`) with `-Xss256k -Xmx128m`. That found and fixed:
+    - out-of-memory errors from corrupt dimensions: a contiguous or compact layout's stored size must now
+      equal dataspace × datatype, as libhdf5 checks;
+    - two raw exceptions: an attribute whose data is shorter than its dataspace needs, and
+      unbounded or overflowing selection arithmetic.
 
 ## Done — 2026-10-05 (P0)
 

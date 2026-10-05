@@ -20,6 +20,7 @@ public final class MappedHdfFile implements AutoCloseable {
     private final Arena arena;
     private final HdfBuffer buffer;
     private final Path path;
+    private final java.util.concurrent.atomic.AtomicBoolean closed = new java.util.concurrent.atomic.AtomicBoolean();
 
     private MappedHdfFile(Arena arena, HdfBuffer buffer, Path path) {
         this.arena = arena;
@@ -55,9 +56,11 @@ public final class MappedHdfFile implements AutoCloseable {
         return buffer.size();
     }
 
-    /** Unmaps the file. Accessing the {@link #buffer()} afterwards is an error. */
+    /** Unmaps the file (once; later calls do nothing). Accessing the {@link #buffer()} afterwards is an error. */
     @Override
     public void close() {
-        arena.close();
+        if (closed.compareAndSet(false, true)) {
+            arena.close();
+        }
     }
 }

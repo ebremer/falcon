@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -12,6 +13,9 @@ import org.junit.jupiter.api.Timeout;
  * {@link IOException}) &mdash; never a raw runtime exception, a JVM crash (OOM / StackOverflow), an
  * infinite loop, or silently-wrong data. Truncates and byte-flips a spread of fixtures and forces a
  * full read of each mutation.
+ *
+ * <p>Runs in its own surefire execution ({@code fuzz} in the module POM) with a small stack and heap,
+ * so a regression to unbounded recursion or allocation fails here rather than passing on a big JVM.
  */
 class RobustnessTest {
 
@@ -22,6 +26,8 @@ class RobustnessTest {
         "compound_nbit.h5", "external.h5", "free_space.h5", "implicit.h5", "committed_types_old.h5",
         "vds.h5", "numeric.h5", "vds_byteorder.h5", "dense_links_big.h5", "chunk_maxshape.h5", "layout_v4.h5", "filtered_single.h5",
         "unwritten_latest.h5", "scaleoffset.h5", "szip.h5", "userblock_v3.h5", "filter_edge.h5",
+        "links.h5", "links_old.h5", "heap_limits.h5", "vds_default.h5", "vds_latest.h5",
+        "regionrefs_default.h5", "regionrefs_latest.h5", "sohm.h5", "external_paths.h5", "ea_paged.h5",
     };
 
     @Test
@@ -43,17 +49,27 @@ class RobustnessTest {
     }
 
     @Test
-    @Timeout(180)
+    @Timeout(300)
     void byteFlippedFiles() throws IOException {
         for (String fixture : FIXTURES) {
             byte[] full = Files.readAllBytes(Fixtures.path(fixture));
-            int step = Math.max(1, full.length / 250);
+            // Large fixtures (150k chunks, 2100 links) cost far more per read: flip fewer bytes in them.
+            int step = Math.max(1, full.length / (full.length > 500_000 ? 60 : 250));
             for (int pos = 0; pos < full.length; pos += step) {
                 byte[] copy = full.clone();
                 copy[pos] ^= 0xFF; // flip one byte
                 assertTypedFailure(copy);
             }
         }
+    }
+
+    /** Datasets declaring more than this are sampled instead of read whole (see {@link #readEverything}). */
+    private static final long MAX_READ_BYTES = 16 << 20;
+
+    private static long[] ones(int rank) {
+        long[] a = new long[rank];
+        Arrays.fill(a, 1);
+        return a;
     }
 
     /** Opens and fully reads {@code bytes}; any failure must be an {@link HdfException} or IOException. */
@@ -84,7 +100,13 @@ class RobustnessTest {
      * the typed read does not support is skipped for that object only.
      */
     private static void readEverything(Hdf5Object object) {
-        for (Attribute attribute : object.attributes()) {
+        List<Attribute> attributes;
+        try {
+            attributes = object.attributes();
+        } catch (HdfUnsupportedException unsupported) {
+            attributes = List.of(); // e.g. shared (SOHM) attribute messages
+        }
+        for (Attribute attribute : attributes) {
             try {
                 attribute.read();
             } catch (HdfUnsupportedException unsupported) {
@@ -92,13 +114,30 @@ class RobustnessTest {
             }
         }
         if (object instanceof Group group) {
+            group.links();
             for (Hdf5Object child : group.children()) {
                 readEverything(child);
             }
         } else if (object instanceof Dataset dataset) {
-            dataset.readRawBytes();
             try {
-                dataset.read();
+                long[] dims = dataset.dataspace().dimensions();
+                if (dataset.dataspace().elementCount() * dataset.datatype().size() > MAX_READ_BYTES) {
+                    // A dataset this large may be valid (chunked and sparse): reading it whole needs that
+                    // much memory, corrupt or not. Read one element, which still walks its storage.
+                    if (Arrays.stream(dims).allMatch(d -> d > 0)) {
+                        dataset.select(new long[dims.length], ones(dims.length)).readDoubles();
+                    }
+                    return;
+                }
+                dataset.readRawBytes();
+                Object value = dataset.read();
+                if (value instanceof Selection[] regions) {
+                    for (Selection region : regions) {
+                        if (region != null) {
+                            region.readDoubles();
+                        }
+                    }
+                }
             } catch (HdfUnsupportedException unsupported) {
                 // fine: keep reading the rest of the file
             }

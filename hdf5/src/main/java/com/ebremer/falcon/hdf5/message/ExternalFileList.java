@@ -11,6 +11,7 @@ import java.nio.channels.SeekableByteChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.function.Function;
 
 /**
  * External File List message (type 7, spec section IV.A.2.h): a <b>contiguous</b> dataset whose raw
@@ -20,7 +21,8 @@ import java.nio.file.StandardOpenOption;
  * <p>Body layout: {@code version(1) · reserved(3) · allocated slots(2) · used slots(2) · heap
  * address(O)}, then per used slot {@code name offset in heap(L) · offset in file(L) · size(L)}. The
  * file names are null-terminated strings in the {@linkplain LocalHeap local heap} at the heap address,
- * and are resolved relative to the HDF5 file's own directory.
+ * and are resolved by the caller (relative to the HDF5 file's own directory, under its external-file
+ * policy). A slot's size may be {@code H5F_UNLIMITED} (all ones): the rest of that file.
  *
  * <p>External storage is signalled on a dataset by a contiguous Data Layout message with an
  * {@linkplain HdfBuffer#UNDEFINED_ADDRESS undefined} address alongside this message.
@@ -57,24 +59,30 @@ public final class ExternalFileList {
             fileOffsets[i] = buf.getUnsignedValue(p + lengths, lengths);
             sizes[i] = buf.getUnsignedValue(p + 2L * lengths, lengths);
             names[i] = heap.name(ctx, nameOffset);
+            if (fileOffsets[i] < 0 || (sizes[i] < 0 && sizes[i] != UNLIMITED)) {
+                throw new HdfFormatException("external file slot " + i + " has an invalid offset or size at " + bodyOffset);
+            }
             p += 3L * lengths;
         }
         return new ExternalFileList(names, fileOffsets, sizes);
     }
 
+    /** A slot size of all ones: the slot extends to the end of its file. */
+    private static final long UNLIMITED = -1L;
+
     /**
      * Assembles the dataset's raw bytes by reading each slot's region from its external file and
-     * concatenating them, stopping once {@code byteCount} bytes have been gathered. Files are resolved
-     * against {@code baseDirectory} (the HDF5 file's directory; {@code null} for the process directory).
-     * A slot's stored size may exceed what is needed for the final block, so only the required prefix is
-     * taken. If an external file is shorter than its slot promises, the missing bytes stay zero.
+     * concatenating them, stopping once {@code byteCount} bytes have been gathered. {@code resolver} maps
+     * each stored file name to the file to read (and refuses names its policy forbids). A slot's stored
+     * size may exceed what is needed for the final block, so only the required prefix is taken. If an
+     * external file is shorter than its slot promises, the missing bytes stay zero.
      */
-    public byte[] readData(Path baseDirectory, long byteCount) {
+    public byte[] readData(Function<String, Path> resolver, long byteCount) {
         byte[] out = new byte[com.ebremer.falcon.hdf5.data.Elements.checkedInt(byteCount)];
         int pos = 0;
         for (int i = 0; i < names.length && pos < out.length; i++) {
-            Path file = baseDirectory == null ? Path.of(names[i]) : baseDirectory.resolve(names[i]);
-            int want = (int) Math.min(sizes[i], out.length - pos);
+            Path file = resolver.apply(names[i]);
+            int want = sizes[i] == UNLIMITED ? out.length - pos : (int) Math.min(sizes[i], out.length - pos);
             readInto(file, fileOffsets[i], out, pos, want);
             pos += want;
         }

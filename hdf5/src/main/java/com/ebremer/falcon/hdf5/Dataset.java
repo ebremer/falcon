@@ -54,6 +54,7 @@ public final class Dataset extends Hdf5Object {
 
     /** This dataset's element datatype (resolving a committed/shared type if referenced). */
     public Datatype datatype() {
+        ctx.checkOpen();
         Datatype result = datatype;
         if (result == null) {
             HeaderMessage message = require(MessageType.DATATYPE, "datatype");
@@ -65,9 +66,11 @@ public final class Dataset extends Hdf5Object {
 
     /** This dataset's shape. */
     public Dataspace dataspace() {
+        ctx.checkOpen();
         Dataspace result = dataspace;
         if (result == null) {
-            result = DataspaceMessage.parse(ctx, require(MessageType.DATASPACE, "dataspace").bodyOffset());
+            result = DataspaceMessage.parse(ctx,
+                    SharedMessage.resolve(ctx, require(MessageType.DATASPACE, "dataspace")).bodyOffset());
             dataspace = result;
         }
         return result;
@@ -310,6 +313,7 @@ public final class Dataset extends Hdf5Object {
             if (message == null) {
                 message = header().find(MessageType.FILL_VALUE_OLD);
             }
+            message = message == null ? null : SharedMessage.resolve(ctx, message);
             result = java.util.Optional.ofNullable(message == null ? null
                     : FillValueMessage.parse(ctx.buffer(), message.bodyOffset(), message.type()));
             fillValue = result;
@@ -321,6 +325,7 @@ public final class Dataset extends Hdf5Object {
         java.util.Optional<FilterPipeline> result = filterPipeline;
         if (result == null) {
             HeaderMessage message = header().find(MessageType.FILTER_PIPELINE);
+            message = message == null ? null : SharedMessage.resolve(ctx, message);
             result = java.util.Optional.ofNullable(message == null ? null
                     : FilterPipelineMessage.parse(ctx.buffer(), message.bodyOffset()));
             filterPipeline = result;
@@ -330,15 +335,22 @@ public final class Dataset extends Hdf5Object {
 
     MemorySegment rawData() {
         return switch (layout()) {
-            case DataLayout.Compact c -> MemorySegment.ofArray(c.data());
+            case DataLayout.Compact c -> {
+                requireStoredSize(c.data().length, (long) elementCount() * datatype().size());
+                yield MemorySegment.ofArray(c.data());
+            }
             case DataLayout.Contiguous c -> {
                 long byteCount = (long) elementCount() * datatype().size();
+                if (c.size() >= 0 && header().find(MessageType.EXTERNAL_DATA_FILES) == null) {
+                    requireStoredSize(c.size(), byteCount); // layout version 3+ records the size
+                }
                 if (c.address() == HdfBuffer.UNDEFINED_ADDRESS) {
                     HeaderMessage external = header().find(MessageType.EXTERNAL_DATA_FILES);
                     if (external != null) {
                         Path directory = ctx.path() == null ? null : ctx.path().getParent();
                         yield MemorySegment.ofArray(ExternalFileList.parse(ctx, external.bodyOffset())
-                                .readData(directory, byteCount));
+                                .readData(name -> ctx.externalFileAccess().resolve(name, directory,
+                                        "external raw data file"), byteCount));
                     }
                     yield fillSegment(byteCount);
                 }
@@ -371,6 +383,18 @@ public final class Dataset extends Hdf5Object {
                     dataspace().maxDimensions(), elementSize, filterPipeline(), fillValue(), offset, count));
         }
         return MemorySegment.ofArray(Hyperslab.extract(rawData(), dims, offset, count, elementSize));
+    }
+
+    /**
+     * The storage size the layout records must be what the dataspace and datatype imply, as libhdf5
+     * checks: otherwise a corrupt dimension could make a read allocate gigabytes of fill or copy past
+     * the data.
+     */
+    private void requireStoredSize(long stored, long needed) {
+        if (stored != needed) {
+            throw new HdfFormatException("dataset " + path() + " stores " + stored + " bytes but its dataspace and"
+                    + " datatype need " + needed + " (invalid dataset size, likely file corruption)");
+        }
     }
 
     /** Builds a byte segment of the fill value tiled to cover the whole (unallocated) dataset. */

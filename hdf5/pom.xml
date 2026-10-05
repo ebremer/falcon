@@ -26,4 +26,40 @@
             <scope>test</scope>
         </dependency>
     </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <executions>
+                    <!-- The corrupt-input tests run on their own, under a small stack and heap: unbounded
+                         recursion or allocation on hostile input then fails them instead of passing on a
+                         generously sized JVM. -->
+                    <execution>
+                        <id>default-test</id>
+                        <configuration>
+                            <excludes>
+                                <exclude>**/RobustnessTest.java</exclude>
+                                <exclude>**/HardeningTest.java</exclude>
+                            </excludes>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>fuzz</id>
+                        <goals>
+                            <goal>test</goal>
+                        </goals>
+                        <configuration>
+                            <includes>
+                                <include>**/RobustnessTest.java</include>
+                                <include>**/HardeningTest.java</include>
+                            </includes>
+                            <argLine>-Xss256k -Xmx128m</argLine>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
 </project>

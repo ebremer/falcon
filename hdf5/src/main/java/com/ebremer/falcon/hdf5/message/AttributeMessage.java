@@ -4,6 +4,8 @@ import com.ebremer.falcon.hdf5.Attribute;
 import com.ebremer.falcon.hdf5.Dataspace;
 import com.ebremer.falcon.hdf5.datatype.Datatype;
 import com.ebremer.falcon.hdf5.header.HeaderMessage;
+import com.ebremer.falcon.hdf5.header.MessageType;
+import com.ebremer.falcon.hdf5.header.SharedMessage;
 import com.ebremer.falcon.hdf5.io.FileContext;
 import com.ebremer.falcon.hdf5.io.HdfBuffer;
 import java.nio.charset.StandardCharsets;
@@ -35,6 +37,7 @@ public final class AttributeMessage {
         int dataspaceSize = buf.getUnsignedShort(base + 6);
         boolean padded = version == 1;
         boolean datatypeShared = (flags & 0x01) != 0;
+        boolean dataspaceShared = (flags & 0x02) != 0;
 
         long p = base + 8;
         if (version == 3) {
@@ -49,7 +52,8 @@ public final class AttributeMessage {
         long dataOffset = p;
 
         Datatype datatype = DatatypeMessage.resolve(ctx, datatypeOffset, datatypeShared);
-        Dataspace dataspace = DataspaceMessage.parse(ctx, dataspaceOffset);
+        Dataspace dataspace = DataspaceMessage.parse(ctx, dataspaceShared
+                ? SharedMessage.target(ctx, dataspaceOffset, MessageType.DATASPACE).bodyOffset() : dataspaceOffset);
         int dataSize = (int) (base + bodySize - dataOffset);
         return new Attribute(ctx, name, datatype, dataspace, dataOffset, dataSize);
     }
