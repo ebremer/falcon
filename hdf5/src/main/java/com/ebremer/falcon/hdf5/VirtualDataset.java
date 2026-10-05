@@ -415,19 +415,22 @@ final class VirtualDataset {
         if (fileName.equals(".")) {
             root = Group.root(ctx, ctx.rootAddress()); // the source is in this same file
         } else {
-            Path path;
+            ExternalFileAccess access = ctx.externalFileAccess();
+            SourceFiles files = ctx.resource(SourceFiles.class, SourceFiles::new);
+            Hdf5File file;
             try {
-                path = ctx.externalFileAccess().resolveVirtualSource(fileName, directory);
+                if (access.resolver() != null) {
+                    file = files.open(fileName, access.resolver(), ctx.options());
+                } else {
+                    Path path = access.resolveVirtualSource(fileName, directory);
+                    file = path == null ? null : files.open(path, ctx.options());
+                }
             } catch (HdfUnsupportedException e) {
                 if (refusalIsMissing) {
                     return null;
                 }
                 throw e;
             }
-            if (path == null) {
-                return null;
-            }
-            Hdf5File file = ctx.resource(SourceFiles.class, SourceFiles::new).open(path, ctx.options());
             if (file == null) {
                 return null;
             }

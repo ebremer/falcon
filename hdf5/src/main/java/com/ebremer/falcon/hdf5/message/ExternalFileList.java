@@ -6,12 +6,6 @@ import com.ebremer.falcon.hdf5.heap.LocalHeap;
 import com.ebremer.falcon.hdf5.io.FileContext;
 import com.ebremer.falcon.hdf5.io.HdfBuffer;
 import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.nio.channels.SeekableByteChannel;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
-import java.util.function.Function;
 
 /**
  * External File List message (type 7, spec section IV.A.2.h): a <b>contiguous</b> dataset whose raw
@@ -70,34 +64,35 @@ public final class ExternalFileList {
     /** A slot size of all ones: the slot extends to the end of its file. */
     private static final long UNLIMITED = -1L;
 
+    /** Reads part of an external file, under the file's external-file policy. */
+    @FunctionalInterface
+    public interface FileReader {
+        /**
+         * Reads up to {@code length} bytes at {@code position} of the file {@code name} (as stored) into
+         * {@code out[at...]}; bytes past the end of the file stay zero.
+         */
+        void read(String name, long position, byte[] out, int at, int length) throws IOException;
+    }
+
     /**
      * Assembles the dataset's raw bytes by reading each slot's region from its external file and
-     * concatenating them, stopping once {@code byteCount} bytes have been gathered. {@code resolver} maps
-     * each stored file name to the file to read (and refuses names its policy forbids). A slot's stored
-     * size may exceed what is needed for the final block, so only the required prefix is taken. If an
-     * external file is shorter than its slot promises, the missing bytes stay zero.
+     * concatenating them, stopping once {@code byteCount} bytes have been gathered. {@code reader} reads
+     * each stored file name (and refuses names its policy forbids). A slot's stored size may exceed what
+     * is needed for the final block, so only the required prefix is taken. If an external file is shorter
+     * than its slot promises, the missing bytes stay zero.
      */
-    public byte[] readData(Function<String, Path> resolver, long byteCount) {
+    public byte[] readData(FileReader reader, long byteCount) {
         byte[] out = new byte[com.ebremer.falcon.hdf5.data.Elements.checkedInt(byteCount)];
         int pos = 0;
         for (int i = 0; i < names.length && pos < out.length; i++) {
-            Path file = resolver.apply(names[i]);
             int want = sizes[i] == UNLIMITED ? out.length - pos : (int) Math.min(sizes[i], out.length - pos);
-            readInto(file, fileOffsets[i], out, pos, want);
+            try {
+                reader.read(names[i], fileOffsets[i], out, pos, want);
+            } catch (IOException e) {
+                throw new HdfException("failed to read external data file '" + names[i] + "'", e);
+            }
             pos += want;
         }
         return out;
-    }
-
-    private static void readInto(Path file, long fileOffset, byte[] out, int destPos, int length) {
-        try (SeekableByteChannel channel = Files.newByteChannel(file, StandardOpenOption.READ)) {
-            channel.position(fileOffset);
-            ByteBuffer bb = ByteBuffer.wrap(out, destPos, length);
-            while (bb.hasRemaining() && channel.read(bb) >= 0) {
-                // keep reading until the region is filled or the file ends (short files leave zeros)
-            }
-        } catch (IOException e) {
-            throw new HdfException("failed to read external data file " + file, e);
-        }
     }
 }

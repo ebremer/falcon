@@ -7,66 +7,22 @@ import com.ebremer.falcon.hdf5.io.HdfBuffer;
 import java.lang.foreign.MemorySegment;
 
 /**
- * Decodes variable-length <em>sequence</em> data (ragged arrays): a class-9 datatype whose kind is
+ * Variable-length <em>sequence</em> data (ragged arrays): a class-9 datatype whose kind is
  * {@code SEQUENCE}. Each element is a "global heap ID" — {@code length(4) · collection address(O) ·
  * object index(4)} — where {@code length} is the number of base-type elements in that row; the base
  * elements live contiguously in the referenced global-heap object. An empty row has length 0 and no
  * heap reference.
  *
- * <p>Each row is decoded through {@link Elements} against the sequence's base datatype, so byte order
- * and precision are honoured exactly as for a regular dataset of the base type.
+ * <p>Each row's bytes are elements of the sequence's base datatype, decoded as a dataset of that type
+ * would be, so byte order and precision are honoured exactly.
  */
 public final class VlenSequences {
 
     private VlenSequences() {
     }
 
-    /** Each row as an {@code int[]} (fixed-point base type up to 4 bytes). */
-    public static int[][] toInts(FileContext ctx, MemorySegment data, int count, Datatype.VariableLength vlen) {
-        Datatype base = vlen.base();
-        int[][] out = new int[count][];
-        for (int i = 0; i < count; i++) {
-            byte[] row = rawRow(ctx, data, i, vlen);
-            out[i] = Elements.toInts(MemorySegment.ofArray(row), row.length / base.size(), base);
-        }
-        return out;
-    }
-
-    /** Each row as a {@code long[]} (fixed-point base type up to 8 bytes). */
-    public static long[][] toLongs(FileContext ctx, MemorySegment data, int count, Datatype.VariableLength vlen) {
-        Datatype base = vlen.base();
-        long[][] out = new long[count][];
-        for (int i = 0; i < count; i++) {
-            byte[] row = rawRow(ctx, data, i, vlen);
-            out[i] = Elements.toLongs(MemorySegment.ofArray(row), row.length / base.size(), base);
-        }
-        return out;
-    }
-
-    /** Each row as a {@code double[]} (floating-point or integer base type, as {@link Elements#toDoubles}). */
-    public static double[][] toDoubles(FileContext ctx, MemorySegment data, int count, Datatype.VariableLength vlen) {
-        Datatype base = vlen.base();
-        double[][] out = new double[count][];
-        for (int i = 0; i < count; i++) {
-            byte[] row = rawRow(ctx, data, i, vlen);
-            out[i] = Elements.toDoubles(MemorySegment.ofArray(row), row.length / base.size(), base);
-        }
-        return out;
-    }
-
-    /** Each row as a {@code float[]} (floating-point or integer base type, as {@link Elements#toFloats}). */
-    public static float[][] toFloats(FileContext ctx, MemorySegment data, int count, Datatype.VariableLength vlen) {
-        Datatype base = vlen.base();
-        float[][] out = new float[count][];
-        for (int i = 0; i < count; i++) {
-            byte[] row = rawRow(ctx, data, i, vlen);
-            out[i] = Elements.toFloats(MemorySegment.ofArray(row), row.length / base.size(), base);
-        }
-        return out;
-    }
-
-    /** Reads the raw global-heap bytes backing sequence element {@code i} (empty rows yield no bytes). */
-    private static byte[] rawRow(FileContext ctx, MemorySegment data, int i, Datatype.VariableLength vlen) {
+    /** The raw global-heap bytes of sequence element {@code i} (an empty row yields no bytes). */
+    public static byte[] row(FileContext ctx, MemorySegment data, int i, Datatype.VariableLength vlen) {
         HdfBuffer buf = new HdfBuffer(data);
         int offsets = ctx.sizeOfOffsets();
         long p = (long) i * vlen.size();

@@ -10,8 +10,10 @@ import java.nio.file.Path;
 ```
 
 A file opened from a path is memory-mapped (the Foreign Function & Memory API), so it stays on disk and
-files larger than 2 GB are handled without the `MappedByteBuffer` size limit. A file can also be opened
-from bytes in memory, or read on demand through a `RangeReader` (see *Other sources*).
+files larger than 2 GB are handled without the `MappedByteBuffer` size limit. A path on a file system
+that cannot map its files (a zip or in-memory file system) is read on demand through a channel instead.
+A file can also be opened from bytes in memory, or read on demand through a `RangeReader` (see *Other
+sources*).
 
 ---
 
@@ -71,16 +73,25 @@ Hdf5File.open(reader, options);                          // your own RangeReader
 
 A `RangeReader` has two methods, `size()` and `read(position, buffer)`, and must allow calls from
 several threads. Falcon reads through it on demand:
-- **Metadata** is read in 64 KiB pages, which are cached (16 MiB per file).
-- **Data** is read only where a read asks for it: a chunk or contiguous run of 64 KiB or more in one
+- **Metadata** is read in pages, which are cached: 64 KiB pages and 16 MiB per file by default. Larger
+  pages suit a high-latency store, as fewer requests each fetch more.
+- **Data** is read only where a read asks for it: a chunk or contiguous run of a page or more in one
   call, a smaller one through the pages. Reading a small selection of a large remote file fetches the
   metadata and the pages or chunks around that selection, not the file.
+
+```java
+Hdf5File.open(reader, OpenOptions.defaults()
+        .readerPageSize(1 << 20)        // 1 MiB pages
+        .readerCacheSize(256L << 20)    // keep up to 256 MiB of them
+        .chunkCacheSize(512L << 20));   // and up to 512 MiB of decoded chunks
+```
 
 A reader failure surfaces from the read that needed the bytes as `java.io.UncheckedIOException`, or as
 the `IOException` of `open` itself while the file is being opened. Falcon does not close the reader:
 close it after the `Hdf5File`. Such a file has no path (`path()` is `null`) and no directory of its
-own, so by default it opens no other file. `allowDirectory(...)` or `unrestricted()` let it open
-external raw data and virtual-dataset sources (see *Files outside the HDF5 file*).
+own, so by default it opens no other file. A resolver (`ExternalFileAccess.resolvedBy`) opens its
+external raw data and virtual-dataset sources wherever they are, such as next to it in the same store;
+`allowDirectory(...)` or `unrestricted()` let it open local ones (see *Files outside the HDF5 file*).
 
 ### Links
 
@@ -117,7 +128,26 @@ Hdf5File.open(path);                                                         // 
 Hdf5File.open(path, ExternalFileAccess.sameDirectory().allowDirectory(raw)); // also files under raw/
 Hdf5File.open(path, ExternalFileAccess.unrestricted());                      // any name, as libhdf5 (trusted files)
 Hdf5File.open(path, ExternalFileAccess.none());                              // never open another file
+Hdf5File.open(path, ExternalFileAccess.resolvedBy(resolver));                // your resolver decides
 ```
+
+A **resolver** is given every name the file holds (and why: `RAW_DATA` or `VIRTUAL_SOURCE`) and returns a
+`RangeReader` for it, `null` if there is no such file, or throws `HdfUnsupportedException` to refuse it.
+It is the policy for a file read through a `RangeReader`, whose other files are not local paths:
+
+```java
+ExternalFileAccess sources = ExternalFileAccess.resolvedBy((name, purpose) ->
+        name.startsWith("/") || name.contains("..") ? null : store.reader(prefix + name));
+Hdf5File.open(store.reader(prefix + "data.h5"), OpenOptions.defaults().externalFileAccess(sources));
+```
+
+Names in the files a resolver opens (a virtual source's own sources) come to it too. A reader it returns
+that is `AutoCloseable` is closed once Falcon is done with it: after a read of external raw data, and
+for a virtual dataset's source when the file closes. A source it does not find, or cannot open
+(`IOException`), reads as the fill value; external raw data it does not find fails the read.
+
+A name is read as a path of the HDF5 file's own file system, so the files next to a file inside a zip
+file system are found in it.
 
 A virtual-dataset source is looked for where libhdf5 looks, among the places the policy allows:
 - **An absolute name** is tried as written. If that fails, its file name alone is tried, as libhdf5 does
@@ -136,11 +166,13 @@ int[]    a = ds.readInts();        // integers, each of which must fit in an int
 long[]   b = ds.readLongs();       // integers, each of which must fit in a long
 float[]  c = ds.readFloats();      // floating point, or integers converted
 double[] d = ds.readDoubles();
-String[] s = ds.readStrings();     // fixed- or variable-length strings
-Object natural = ds.read();        // most natural Java array for the datatype
+double[] z = ds.readComplexDoubles(); // complex numbers as (real, imaginary) pairs
+String[] s = ds.readStrings();     // fixed- or variable-length strings, or enumeration names
+Object natural = ds.read();        // most natural Java value for the datatype
 byte[]  raw    = ds.readRawBytes(); // element bytes as stored (after the filters are undone)
 
 int    scalar = ds.readInt();      // single-element datasets: readInt/readLong/readDouble/readString
+double[] col = ds.member("temperature").readDoubles(); // one member of a compound dataset
 ```
 
 Multidimensional data is returned flattened row-major; `ds.dataspace().dimensions()` gives the shape and
@@ -199,17 +231,29 @@ filter's name is the one the file stores, or libhdf5's name for its built-in fil
 reads the whole chunk index of a chunked dataset; it is 0 for a virtual dataset and for contiguous data
 never written.
 
-### Hyperslabs and streaming
+### Selections and streaming
 
-Read a rectangular sub-region without materializing the whole dataset — only the chunks it overlaps are
-read and de-filtered:
+Read part of a dataset without materializing the whole of it: only the chunks that hold selected
+elements are read and de-filtered, and only the selected runs of contiguous data.
 
 ```java
 double[] slab = ds.select(new long[]{100, 0}, new long[]{50, 200}).readDoubles(); // rows 100..149
 
+// A regular hyperslab, as H5Sselect_hyperslab: start, stride, count, block (null stride or block = 1).
+float[] everyOther = ds.select(new long[]{0, 0}, new long[]{2, 2}, new long[]{500, 100}, null).readFloats();
+
+// Points, as H5Sselect_elements, read in the order given.
+double[] three = ds.selectPoints(new long[][]{{0, 0}, {512, 7}, {9000, 3}}).readDoubles();
+
 // Process a large dataset block-by-block along the first dimension:
 ds.blocks(10_000).forEach(block -> process(block.readDoubles()));
 ```
+
+A selection has every reader a dataset has: numbers, strings, variable-length sequences
+(`readVlenInts()` and the rest), references, `readRawBytes()`, and `read()`. A block, or a regular
+hyperslab, reads flattened row-major in its own shape (`shape()`: `count[d] * block[d]` in each
+dimension); points read as a flat array. `member(name)` narrows a selection of a compound dataset to one
+member.
 
 Decoded (filtered) chunks are cached per file, so streaming reads that revisit a boundary chunk reuse the
 decode.
@@ -223,6 +267,8 @@ ds.attribute("units").ifPresent(a -> System.out.println(a.readString()));
 int scale = ds.attribute("scale").orElseThrow().readInt();
 ```
 
+An attribute has the readers a dataset has, and `member(name)` for a compound attribute.
+
 ### References and virtual datasets
 
 ```java
@@ -232,7 +278,14 @@ double[] slice = regions[0].readDoubles();
 Attribute[]  attrs   = ds.readAttributeReferences();   // revised attribute references -> attributes
 ```
 
-Attributes holding references have the same three methods.
+Attributes and selections holding references have the same three methods.
+
+An object reached through a reference has the path libhdf5's `H5Iget_name` gives it: found when first
+asked for, by walking the file's hard links depth first, each group's in its native order (name order in
+an old-style group, the order the links were made in a compact one, name-hash order in a dense one), so
+an object with several paths is named as libhdf5 names it. The walk reads every group up to the object,
+so for a large file, ask for `path()` only when it is needed; `objectHeaderAddress()` identifies the
+object without it. An object no path reaches has the path `""`.
 
 A region reference may select one block, points, several blocks, everything, or nothing; every
 encoding libhdf5 writes is read. A selection that is not one block (`isRectangular()` is false) reads
@@ -280,11 +333,33 @@ Two `OpenOptions` settings work as libhdf5's dataset access properties do (`H5Ps
 
 ### Datatypes
 
-The reader decodes every HDF5 datatype class. Atomic types (integer, float, string, bitfield, opaque,
-time, enum, reference, complex) map to Java arrays; compound and array classes are exposed structurally
-via `ds.datatype()` and their bytes via `readRawBytes()`. Variable-length string and numeric sequence
-data is read with `readStrings()` / `readVlenInts()` / `readVlenDoubles()` (and the `long`/`float`
-variants).
+The reader decodes every HDF5 datatype class (`ds.datatype()` describes it), and reads the data of every
+class but time:
+
+| Datatype | Readers | `read()` returns |
+|---|---|---|
+| integer | `readInts`, `readLongs`, `readFloats`, `readDoubles` | `int[]`, `long[]` or `BigInteger[]` (see above) |
+| float | `readFloats`, `readDoubles` | `double[]` |
+| string, variable-length string | `readStrings` | `String[]` |
+| enumeration | `readStrings` (member names; `null` for a value no member has), and the integer readers | `String[]` of names |
+| compound | `member(name)`, which reads like a dataset of the member's type | `Map<String, Object>` of each member's values, in member order |
+| array | the readers of its base type, every element's values in turn | its base type's, flattened |
+| complex (HDF5 2.0) | `readComplexDoubles`, `readComplexFloats`; `readDoubles` and `readFloats` give the real part, as libhdf5 converts | `double[]` of (real, imaginary) pairs |
+| bit field | the integer readers, as unsigned integers (as h5py reads them) | as for an unsigned integer |
+| opaque | `readRawBytes` | `byte[][]`, one array per element |
+| reference | `readObjectReferences`, `readRegionReferences`, `readAttributeReferences` | `Hdf5Object[]` or `Selection[]` |
+| variable-length sequence | `readVlenInts`, `readVlenLongs`, `readVlenFloats`, `readVlenDoubles` | `int[][]`, `long[][]`, `double[][]`, or `Object[]` of rows |
+
+h5py writes complex numbers as a compound of two floats named `r` and `i`; `readComplexDoubles()` reads
+that too, and a real number as a complex one with no imaginary part, as libhdf5 converts it.
+
+```java
+Dataset table = h5.root().dataset("table");   // compound {id int32, pos {x int16, y float32}, color enum}
+int[]    ids    = table.member("id").readInts();
+int[]    x      = table.member("pos").member("x").readInts();
+String[] colors = table.member("color").readStrings();
+Map<String, Object> columns = (Map<String, Object>) table.read();
+```
 
 ---
 
@@ -452,8 +527,13 @@ also fail to be read at all: that is `java.io.UncheckedIOException`, wrapping th
   dataset's file is closed.
 - **Lookups by name read the index.** `attribute(name)`, `link(name)`, and path lookups search a large
   group's or object's name index (as libhdf5 does) instead of reading every link or attribute.
-- **Decoded-chunk cache.** Repeated or streaming reads reuse the filter-decode result for a chunk
-  (~16 MB LRU per file).
+- **Selections read their chunks.** A strided selection reads only the chunks in the grid cells its
+  indices fall in, so one every 100th row of a dataset chunked by rows reads one chunk in 100; points
+  read the chunks they fall in, each once.
+- **Decoded-chunk cache.** Repeated or streaming reads reuse the filter-decode result for a chunk: 16 MiB
+  per file, least recently used first out, set by `OpenOptions.chunkCacheSize(bytes)` (0 turns it off).
+  A file read through a `RangeReader` also caches its pages, set by `readerPageSize` and
+  `readerCacheSize`.
 - **Measuring.** `Benchmarks` (opt-in) times the common read paths; see [`BENCHMARKS.md`](BENCHMARKS.md).
 - **Concurrent reads.** An open `Hdf5File` and everything obtained from it may be read from many
   threads at once (e.g. `dataset.blocks(n).parallel()`); close it only after those reads finish.
@@ -469,6 +549,8 @@ The following are not supported:
 - **Multi-file drivers** (family, multi, split). `driverInfo()` reports them, and Falcon reads only the
   file it opened.
 - **Following external links, and references into other files.**
+- **Reading the time datatype** (class 2), which HDF5 itself has never fully supported. `datatype()`
+  describes it, and `readRawBytes()` gives its bytes.
 
 On the write side, the bitfield/opaque/time datatype classes and indirect-block dense storage are not
 yet emitted. See [`PLAN.md`](PLAN.md) for the full roadmap.

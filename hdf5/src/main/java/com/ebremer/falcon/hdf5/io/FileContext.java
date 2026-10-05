@@ -30,7 +30,7 @@ public final class FileContext {
     private final long rootAddress;
     private final OpenOptions options;
     private final long superblockExtensionAddress;
-    private final ChunkCache chunkCache = new ChunkCache(); // per-file decoded-chunk cache
+    private final ChunkCache chunkCache; // per-file decoded-chunk cache
     private volatile SharedMessageTable sharedMessageTable; // read on first use, then cached
     private final ConcurrentHashMap<Class<?>, AutoCloseable> resources = new ConcurrentHashMap<>();
     private volatile boolean closed;
@@ -49,6 +49,7 @@ public final class FileContext {
         this.rootAddress = rootAddress;
         this.options = options;
         this.superblockExtensionAddress = superblockExtensionAddress;
+        this.chunkCache = new ChunkCache(options.chunkCacheSize());
     }
 
     /** The file's bytes; fails with {@link HdfClosedException} once the file is closed. */

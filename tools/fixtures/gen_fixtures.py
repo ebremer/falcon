@@ -722,6 +722,104 @@ def build_conversions(f):
         f.attrs[attr] = back
 
 
+
+def _lowlevel(f, name, tid, values, mtype=None, shape=None):
+    """A dataset of the file type ``tid`` written from ``values`` through ``mtype`` (default: ``tid``
+    itself, so the bytes are stored as given)."""
+    values = np.asarray(values)
+    space = h5py.h5s.create_simple(shape or values.shape)
+    dsid = h5py.h5d.create(f.id, name.encode(), tid, space)
+    dsid.write(h5py.h5s.ALL, h5py.h5s.ALL, np.ascontiguousarray(values), mtype=mtype or tid)
+    return dsid
+
+
+def build_typed(f):
+    """Typed reads of the composite datatypes: a compound with nested compound, array, enumeration, string
+    and complex members (contiguous, and a chunked, filtered 2-D one); enumerations (big-endian and
+    signed, unsigned, and one holding a value no member has); arrays; complex numbers (h5py's compound
+    and HDF5 2.0's native type, in both byte orders and three precisions); bit fields; opaque data; a
+    sequence of compounds; and compound, enumeration and complex attributes."""
+    color = h5py.enum_dtype({"RED": 0, "GREEN": 1, "BLUE": 2}, basetype="<i4")
+    inner = np.dtype([("x", "<i2"), ("y", ">f4")])
+    record = np.dtype([("id", "<i4"), ("pos", inner), ("vec", "<f8", (3,)), ("color", color),
+                       ("name", "S6"), ("label", h5py.string_dtype("utf-8")), ("z", "<c8")])
+    rows = np.array([
+        (1, (-3, 1.5), (0.5, 1.5, 2.5), 0, b"alpha", "one", 1 + 2j),
+        (2, (40, -0.25), (3.0, 4.0, 5.0), 2, b"beta", "zwei é", -3.5 - 0.25j),
+        (3, (-32768, 1e30), (-1.0, 0.0, 1.0), 1, b"gamma!", "", 0j),
+    ], dtype=record)
+    records = f.create_dataset("records", data=rows)
+    records.attrs["rec"] = rows[:2]
+    records.attrs["color"] = np.array([2, 0], dtype=color)
+    records.attrs["z"] = np.array([1 - 1j], dtype="<c16")
+    space = h5py.h5s.create_simple((2,))
+    zn = h5py.h5a.create(records.id, b"zn", h5py.h5t.NATIVE_DOUBLE_COMPLEX, space)
+    zn.write(np.array([2 + 3j, -1j]), mtype=h5py.h5t.NATIVE_DOUBLE_COMPLEX)
+
+    table = np.zeros((6, 5), dtype=[("a", "<i4"), ("b", "<f8")])
+    for r in range(6):
+        for c in range(5):
+            table[r, c] = (r * 10 + c, r + c / 10)
+    f.create_dataset("table", data=table, chunks=(4, 2), compression="gzip")
+
+    f.create_dataset("enum_be", data=np.array([-5, 300, 0, -5], dtype=h5py.enum_dtype(
+        {"NEG": -5, "ZERO": 0, "BIG": 300}, basetype=">i2")))
+    f.create_dataset("enum_u8", data=np.array([255, 0, 255], dtype=h5py.enum_dtype(
+        {"OFF": 0, "ON": 255}, basetype="u1")))
+    f.create_dataset("enum_unknown", data=np.array([0, 7, 2], dtype=color))  # 7 names no member
+
+    farray = h5py.h5t.array_create(h5py.h5t.IEEE_F32LE, (2, 3))
+    _lowlevel(f, "arr_f4", farray, (np.arange(12, dtype="<f4") * 0.5).reshape(2, 2, 3), shape=(2,))
+    sarray = h5py.h5t.array_create(h5py.h5t.py_create(np.dtype("S3")), (2,))
+    _lowlevel(f, "arr_s", sarray, np.array([[b"ab", b"cd"], [b"ef", b"g"]], dtype="S3"), shape=(2,))
+
+    f.create_dataset("cx_h5py", data=np.array([1 + 2j, -3.5 - 0.25j, 0j], dtype="<c8"))
+    _lowlevel(f, "cx_native", h5py.h5t.NATIVE_DOUBLE_COMPLEX,
+              np.array([1 + 2j, -3.5 - 0.25j, 1e300 - 1e-300j]))
+    _lowlevel(f, "cx_native_be", h5py.h5t.COMPLEX_IEEE_F32BE, np.array([1 + 2j, -0.5 + 4j], dtype="<c8"),
+              mtype=h5py.h5t.NATIVE_FLOAT_COMPLEX)
+    _lowlevel(f, "cx_native_f16", h5py.h5t.COMPLEX_IEEE_F16LE, np.array([1.5 + 0.25j, -2 - 1j], dtype="<c8"),
+              mtype=h5py.h5t.NATIVE_FLOAT_COMPLEX)
+
+    _lowlevel(f, "bits_b8", h5py.h5t.STD_B8LE, np.array([0x00, 0x81, 0xFF], dtype="u1"))
+    _lowlevel(f, "bits_b16be", h5py.h5t.STD_B16BE, np.array([1, 0x8001, 0xFFFF], dtype=">u2"))
+    _lowlevel(f, "bits_b32", h5py.h5t.STD_B32LE, np.array([0xDEADBEEF, 1], dtype="<u4"))
+
+    opaque = h5py.h5t.create(h5py.h5t.OPAQUE, 4)
+    opaque.set_tag(b"falcon-tag")
+    _lowlevel(f, "opaque", opaque, np.array([b"\x00\x01\x02\x03", b"\xff\xfe\xfd\xfc"], dtype="V4"))
+
+    pair = np.dtype([("a", "<i4"), ("b", "<f8")])
+    seq = f.create_dataset("vlen_rec", (3,), dtype=h5py.vlen_dtype(pair))
+    seq[0] = np.array([(1, 0.5)], dtype=pair)
+    seq[1] = np.array([], dtype=pair)
+    seq[2] = np.array([(2, 1.5), (3, 2.5)], dtype=pair)
+
+
+def build_paths(out):
+    """Objects reached through references, whose paths Falcon finds as libhdf5's H5Iget_name does:
+    nested groups, a dataset with two hard links, and one with three in a group of 23 links (dense storage
+    in the latest format, where libhdf5 walks links in name-hash order), in both group formats. h5py's
+    (libhdf5's) name for each reference's target is stored beside the references, as the oracle."""
+    for name, libver in (("paths.h5", None), ("paths_latest.h5", "latest")):
+        with h5py.File(os.path.join(out, name), "w", libver=libver) as f:
+            many = f.create_group("many")  # made first, so the walk comes to it first
+            target = many.create_dataset("t00", data=[0])
+            for i in range(1, 21):
+                many.create_dataset(f"t{i:02d}", data=[i])
+            many["alias_b"] = target
+            many["alias_a"] = target
+            f.create_group("z")
+            a = f.create_group("a")
+            c = a.create_group("b").create_group("c")
+            deep = c.create_dataset("deep", data=np.arange(3))
+            f["z/second"] = deep  # a second hard link, made after the first
+            f.create_dataset("plain", data=[1])
+            refs = [f.ref, a.ref, c.ref, deep.ref, f["plain"].ref, f["z"].ref, target.ref, many["t13"].ref]
+            ds = f.create_dataset("refs", data=refs, dtype=h5py.ref_dtype)
+            ds.attrs["names"] = [f[r].name for r in refs]
+
+
 def build_vds_byteorder(out):
     """Virtual datasets whose sources hold big-endian data under a little-endian virtual type (libhdf5
     converts), and one whose source has a different type of the same size (uint32 under int32)."""
@@ -1459,6 +1557,8 @@ FIXTURES = {
     "scaleoffset": lambda: build_scaleoffset(os.path.join(OUT, "scaleoffset.h5")),
     "szip": lambda: _with_file("szip.h5", build_szip, libver="latest"),
     "filter_edge": lambda: _with_file("filter_edge.h5", build_filter_edge, libver="latest"),
+    "typed": lambda: _with_file("typed.h5", build_typed),
+    "paths": lambda: build_paths(OUT),
 }
 
 

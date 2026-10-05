@@ -32,7 +32,7 @@ class RobustnessTest {
         "regionrefs_default.h5", "regionrefs_latest.h5", "sohm.h5", "external_paths.h5", "ea_paged.h5",
         "sohm_latest.h5", "refs_revised.h5", "vds_unlimited.h5",
         "plugin_filters.h5", "legacy_layouts.h5", "vax.h5", "fsinfo_v0_persist.h5", "btree_k_earliest.h5",
-        "family_latest_0.h5", "vds_views.h5", "conversions.h5", "oldstyle_big.h5",
+        "family_latest_0.h5", "vds_views.h5", "conversions.h5", "oldstyle_big.h5", "typed.h5", "paths_latest.h5",
     };
 
     @Test
@@ -183,6 +183,11 @@ class RobustnessTest {
                     // A one-element box: the chunk index lookup, or a virtual dataset's lazy read.
                     long[] last = Arrays.stream(dims).map(d -> d - 1).toArray();
                     dataset.selectionData(last, ones(dims.length));
+                    // Every other index in each dimension, and two points: the selected-element reads.
+                    long[] stride = Arrays.stream(dims).map(d -> 2).toArray();
+                    long[] count = Arrays.stream(dims).map(d -> (d + 1) / 2).toArray();
+                    dataset.select(new long[dims.length], stride, count, null).readRawBytes();
+                    dataset.selectPoints(new long[][] {last, new long[dims.length]}).readRawBytes();
                 }
                 dataset.readRawBytes();
                 readSelections(dataset.read());
@@ -197,8 +202,15 @@ class RobustnessTest {
         }
     }
 
-    /** Reads every region a read returned, if it returned regions. */
+    /** Reads every region a read returned, if it returned regions, and finds every referenced object's path. */
     private static void readSelections(Object value) {
+        if (value instanceof Hdf5Object[] objects) {
+            for (Hdf5Object object : objects) {
+                if (object != null) {
+                    object.path(); // walks the file's links to find it
+                }
+            }
+        }
         if (value instanceof Selection[] regions) {
             for (Selection region : regions) {
                 try {

@@ -129,7 +129,11 @@ public sealed interface Datatype {
             return DatatypeClass.ENUMERATED;
         }
 
-        /** A named enum constant. */
+        /**
+         * A named enum constant. {@code value} is the integer its elements hold, read as the base type
+         * stores it (its byte order and sign); a {@code uint64} value of 2<sup>63</sup> or more is its bit
+         * pattern.
+         */
         public record Member(String name, long value) {
         }
     }

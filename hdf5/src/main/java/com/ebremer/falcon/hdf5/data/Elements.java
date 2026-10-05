@@ -86,7 +86,7 @@ public final class Elements {
 
     /**
      * Every element as a {@code long} (see {@link #toInts}). A {@code uint64} value of 2<sup>63</sup> or
-     * more does not fit and is an error; read such data with {@link #toUnsignedBigIntegers}.
+     * more does not fit and is an error; read such data with {@link #toBigIntegers}.
      *
      * @throws HdfUnsupportedException if the datatype is not fixed-point or a value does not fit
      */
@@ -226,6 +226,15 @@ public final class Elements {
         byte[] out = new byte[checkedInt(byteCount)];
         MemorySegment.copy(data, ValueLayout.JAVA_BYTE, 0, out, 0, out.length);
         return out;
+    }
+
+    /**
+     * The integer stored in the element at byte {@code off} of {@code data}, read as {@link #toLongs} reads
+     * it (its bit precision at its bit offset, sign-extended if signed) but without range checks: a
+     * {@code uint64} value of 2<sup>63</sup> or more comes back as its bit pattern.
+     */
+    public static long integerValue(MemorySegment data, long off, Datatype.FixedPoint fp) {
+        return integerAt(data, off, fp);
     }
 
     private static final BigInteger TWO_TO_THE_64 = BigInteger.ONE.shiftLeft(64);

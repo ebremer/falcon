@@ -1,10 +1,10 @@
 # Falcon HDF5 — remaining work (prioritized)
 
-**Status (2026-10-05, after P2 S1–S7, A2, A3, A5, A6, and PF1–PF4):** build green, **610 HDF5 tests**
-(144 at the review, 187 after the top 10, 206 after P0, 228 after P1, 243 after S1–S3, 256 after S4–S7,
-439 after A2–A6), plus 33 in the `core` module. The review's top 10, every P1 item, **P2 S1–S7**,
-**A2, A3, A5, A6**, **PF1–PF4**, and the P0 zstd fix (Z6/Z7, in `core`, now 38 tests) are done (see *Done*
-at the end). Falcon now:
+**Status (2026-10-05, after P2 S1–S7, A1–A10, and PF1–PF4):** build green, **677 HDF5 tests** (144 at
+the review, 187 after the top 10, 206 after P0, 228 after P1, 243 after S1–S3, 256 after S4–S7, 439 after
+A2–A6, 610 after PF1–PF4), plus 38 in the `core` module. The review's top 10, every P1 item, **P2 S1–S7**,
+**A1–A10**, **PF1–PF4**, and the P0 zstd fix (Z6/Z7, in `core`) are done (see *Done* at the end). Falcon
+now:
 
 - reads the files the review showed it misreading:
   - real libhdf5 szip and scale-offset data;
@@ -27,6 +27,13 @@ at the end). Falcon now:
   ranges, any channel) that it reads on demand;
 - looks objects up by path, reads integers as floating point as libhdf5 converts them, and reports each
   dataset's layout, chunk shape, filters, and storage size as libhdf5 does;
+- reads every datatype class but time: compound members by name, enumeration names, arrays, complex
+  numbers (as libhdf5 converts them), bit fields, and opaque data;
+- selects regular hyperslabs with gaps and single points, reading only the chunks they touch, and
+  reads anything a dataset can from a selection;
+- opens a path on a file system that cannot map it, takes its cache sizes as options, and opens the
+  other files of a remote file through an application's resolver;
+- names an object reached through a reference by the path libhdf5 gives it;
 - reads only what a read needs:
   - chunks are looked up by coordinate in an index read once per dataset;
   - virtual-dataset selections read only the parts of the sources they map to;
@@ -40,6 +47,33 @@ at the end). Falcon now:
   default, and supports concurrent reads of one open file.
 
 P0 and P1 are empty. What remains is features and API (P2) and docs and build (P3).
+
+**API changes in P2 A1, A4, A7–A10** (pre-1.0):
+- **Typed reads** (on `Dataset`, `Attribute`, and `Selection` alike):
+  - `read()` returns a `Map<String, Object>` of member values for a compound, member names for an
+    enumeration, `byte[][]` for opaque data, (real, imaginary) pairs for a complex number, the base
+    type's values for an array, and `Object[]` rows for a sequence of any other base type. Each used to
+    throw.
+  - The integer readers accept enumerations (their values) and bit fields (unsigned); `readFloats()` and
+    `readDoubles()` also complex numbers (the real part, as libhdf5 converts); `readStrings()` also
+    enumerations (names); every reader also arrays of those (flattened).
+  - New: `readComplexDoubles()` and `readComplexFloats()`; `member(name)`; `Selection.datatype()`;
+    `Attribute.readRawBytes()`.
+  - `Datatype.Enumeration.Member.value()` is the base type's integer. It was read as unsigned
+    little-endian, wrong for a big-endian or negative member.
+- **Selections:**
+  - new `Dataset.select(start, stride, count, block)` and `selectPoints(long[][])`;
+  - `Selection` has every reader a dataset has; `readStrings()` reads variable-length strings.
+- **Options:** `OpenOptions.chunkCacheSize`, `readerPageSize`, and `readerCacheSize`.
+- **Other files:**
+  - new `ExternalFileAccess.resolvedBy(Resolver)`, with `ExternalFileAccess.Resolver` and `Purpose`;
+    `allowDirectory` on a resolver's policy throws `IllegalStateException`;
+  - names are read as paths of the HDF5 file's own file system;
+  - a failed read of external raw data names the stored name, not the resolved path.
+- **Opening:** `Hdf5File.open(Path)` reads through a channel when the file system cannot map the file.
+- **Internal types:** `Attribute`'s constructor is no longer public.
+- **Referenced objects:** `path()` and `name()` are found as libhdf5's `H5Iget_name` finds them. They
+  used to be `"/"` and `""`. `toString()` shows the object's address until its path is known.
 
 **Behaviour changes in the Z6/Z7 fix** (shared with Zarr):
 - **Corrupt frames fail:** zstd data that fails its checksum, its declared size, or any of libzstd's
@@ -146,26 +180,22 @@ review baseline. Abbreviations: `W` = `Hdf5Writer.java`; other paths are under
 
 ## Next up — top 10
 
-1. **A1 — typed reads for compound, enum, array, and complex.** The writer produces them, but `read()`
-   cannot return them.
-2. **WF1 — streaming writes.** The writer builds the whole file in memory, which caps it at about 2 GB
+1. **WF1 — streaming writes.** The writer builds the whole file in memory, which caps it at about 2 GB
    and rules out append and resizable datasets.
-3. **WF2 — datatype breadth:**
+2. **WF2 — datatype breadth:**
    - string attributes;
    - unsigned integers;
    - chunking for every type.
-4. **A4 — selections:**
-   - strided and point selections in `select`;
-   - vlen readers on `Selection`.
-5. **A8 — internal types out of the public API.** `Attribute`'s public constructor exposes `FileContext`;
-   pre-1.0 is the time to fix it.
-6. **D1/D3 — docs that overclaim, and a stale PLAN.md.**
-7. **B1/B2 — CI and release plumbing:** a Windows CI leg, source and Javadoc jars, and the enforcer.
+3. **D1/D3 — docs that overclaim, and a stale PLAN.md.**
+4. **B1/B2 — CI and release plumbing:** a Windows CI leg, source and Javadoc jars, and the enforcer.
    New plugins need Erich's approval.
-8. **A9/A10 — remote files, continued:** other files of a remote file (external raw data, VDS sources)
-   through the reader, and paths that cannot be mapped.
-9. **PF5 — chunk lookups without reading the whole index,** for very large or remote datasets.
-10. **A7 — configurable cache sizes:** the decoded-chunk cache, and a `RangeReader`'s pages.
+5. **PF5 — chunk lookups without reading the whole index,** for very large or remote datasets.
+6. **WF3 — a generic `createDataset(Datatype, Dataspace)`,** in place of about 20 per-type methods.
+7. **S8 — writing the third-party filters,** whose encoders core partly has.
+8. **A11 — external links and references into other files,** now that a policy or resolver can open
+   other files.
+9. **WF4 — writing links and references:** soft and external links; region references.
+10. **PF6/PF7 — per-file object caches, and virtual mappings that scatter.**
 
 ---
 
@@ -190,27 +220,16 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
 
 ### Read API
 
-- [ ] **A1 — typed reads for compound, enum, array, complex, bitfield, and opaque.**
-  - **Gap:** `read()` throws Unsupported for all of these, although the writer produces compound, enum,
-    array, and complex. USER_GUIDE implies all atomic types map to Java arrays.
-  - **Add:** compound field accessors (by member name), enum names, complex pairs, and raw opaque bytes.
-- A2, A3, A5, and A6 are done (see *Done — 2026-10-05 (P2: A2, A3, A5, A6)*).
-- [ ] **A4 — selections:**
-  - strided and blocked hyperslabs and point selections in `select`;
-  - raw, vlen, and reference readers on `Selection` (`readStrings` on vlen throws today).
-- [ ] **A7 — configurable cache sizes.** Each is fixed:
-  - the decoded-chunk cache at 16 MB (`io/ChunkCache.java`);
-  - a `RangeReader`'s page size (64 KiB) and page cache (16 MiB, `io/PagedSource.java`). Larger pages suit
-    high-latency stores.
-- [ ] **A8 — remove internal types from public signatures.** `Attribute`'s public constructor exposes the
-  non-exported `io.FileContext`. A dereferenced object reports `path()` as `""` and prints `Dataset[/]`.
-- [ ] **A9 — a `Path` that cannot be mapped.** `Hdf5File.open(Path)` fails on a file system whose channels
-  do not map (a zip file system, an in-memory one) with `UnsupportedOperationException`. Fall back to
-  on-demand reads through `RangeReader.of(Files.newByteChannel(path))`. Until then, callers can do that
-  themselves.
-- [ ] **A10 — other files of a remote file.** External raw data and virtual-dataset sources are opened
-  as local paths only, so a file read through a `RangeReader` reaches them only on local disk. Add an
-  `OpenOptions` resolver from a name to a `RangeReader`, under the same policy ideas.
+- A1–A10 are done (see *Done — 2026-10-05 (P2: A1, A4, A7–A10)* and *(P2: A2, A3, A5, A6)*). Still open
+  around them:
+  - [ ] **A11 — external links and references into other files.** Both are listed (or named in the
+    error) but not followed. An external link names a file and an object path, as a virtual source
+    does, so following one can go through the same `ExternalFileAccess` policy or resolver (libhdf5's
+    `H5Pset_elink_prefix` is the analogue of `allowDirectory`). Revised references into other files
+    likewise.
+  - [ ] **A12 — the time datatype** (class 2) is described but not read. libhdf5 itself never
+    implemented it, so this matters only for files from old or other writers; `readRawBytes()` gives the
+    bytes.
 
 ### Write features & API
 
@@ -255,7 +274,12 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
   - [ ] **PF7 — virtual mappings that scatter.** A virtual selection reads the bounding box of the source
     elements it needs. For regular mappings that is about what it needs. For a mapping whose virtual and
     source shapes differ, or whose source is strided, the box can be much larger than the elements:
-    read those by runs.
+    read those by runs. A strided or point selection of a virtual dataset (A4) also reads its bounding
+    box, through the same path.
+  - [ ] **PF8 — selected elements copied one at a time.** A strided or point selection of chunked data
+    copies each element out of its chunk on its own (a selection of contiguous data copies runs). Every
+    other element of 2000 × 2000 doubles takes 16 ms against 17 ms for the whole read, so this matters
+    only for very large selections: copy the runs of the last dimension instead.
 
 ## P3 — docs, build, housekeeping
 
@@ -277,6 +301,9 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
   - **Also done (P2 A2–A6):** other sources (bytes, `RangeReader`), paths, integers as floating point,
     and storage metadata.
   - **Also done (P2 PF1–PF4):** what reads keep per handle and per file, and `BENCHMARKS.md`.
+  - **Also done (P2 A1, A4, A7–A10):** a table of every datatype class's readers and `read()` value,
+    compound members, strided and point selections, cache sizes, resolvers, paths that cannot be mapped,
+    and the paths of referenced objects.
   - **Still to document:** the writer's memory use (WF1).
 - [ ] **D3 — PLAN.md is stale.**
   - §6 lists the non-existent `dataspace` and `util` packages, omits `data`, `index`, and `group`, and
@@ -330,6 +357,101 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
     (`tools/fixtures/gen_zstd_corrupt_vectors.py` → `zstd_corrupt_vectors.txt`): mutations, several
     frames, skippable frames, and trailing data. The old decoder fails 137 of them.
   - The core fuzzer: 1.5M further mutated frames threw only typed exceptions.
+
+## Done — 2026-10-05 (P2: A1, A4, A7–A10)
+
+The readers of `Dataset`, `Attribute`, and `Selection` now share one decoder, `ElementReader`, so the
+three read the same types the same ways.
+
+- [x] **A1 — typed reads for every datatype class but time.**
+  - **Compound:** `member(name)` (on all three) reads one member like a dataset of its type; members of
+    members by chaining. `read()` returns each member's values by name, in member order.
+  - **Enumeration:** the integer readers give its values; `readStrings()` and `read()` give member names
+    (`null` for a value no member has).
+  - **Array:** read through its base type's readers, every element's values in turn.
+  - **Complex** (HDF5 2.0):
+    - `readComplexDoubles()` and `readComplexFloats()` give (real, imaginary) pairs;
+    - `readDoubles()` and `readFloats()` give the real part, as libhdf5 2.0 converts to
+      `H5T_NATIVE_DOUBLE` (checked with `H5Dread`);
+    - h5py's `{r, i}` compound reads as complex too, and a real number as complex with an imaginary part
+      of 0, as libhdf5 converts it.
+  - **Bit field:** read as unsigned integers, as h5py reads them; libhdf5 has no bit-field-to-integer
+    conversion.
+  - **Opaque:** `read()` gives one `byte[]` per element.
+  - **Sequences** of any other base type read as `Object[]` rows.
+  - **Bug found on the way:** `Datatype.Enumeration.Member.value()` was read as an unsigned little-endian
+    number whatever the base type. So a big-endian or negative member was wrong: −5 as a big-endian
+    `int16` read as 64,507. It is now the base type's integer.
+  - **Tests:** `TypedReadTest` (12), on files Falcon writes and on `typed.h5`, a new h5py fixture with:
+    - nested compounds with array, enumeration, string, variable-length string, and complex members,
+      contiguous and chunked;
+    - big-endian, unsigned, and unknown-value enumerations;
+    - arrays of floats and of strings;
+    - complex numbers: h5py's compound, and native ones in three precisions and both byte orders;
+    - bit fields, opaque data, and a sequence of compounds;
+    - compound, enumeration, and complex attributes.
+- [x] **A4 — selections.**
+  - **New:**
+    - `Dataset.select(start, stride, count, block)`, as `H5Sselect_hyperslab`, read in the shape of its
+      indices;
+    - `selectPoints(long[][])`, as `H5Sselect_elements`, read in the order given.
+  - **Reading only what is selected:**
+    - a strided selection reads only the chunks in the grid cells its indices fall in, in each dimension;
+    - points read the chunks they fall in, each once;
+    - contiguous data in the file is read run by run, and other layouts read the bounding box.
+  - **Every reader on `Selection`:** strings (also variable-length ones and enumeration names), sequences,
+    the three reference readers, `readRawBytes()`, `read()`, and `member(name)`. A region reference's
+    regular hyperslab is no longer expanded into a list of coordinates.
+  - **Tests:** `SelectionTest` (33):
+    - every dataset of 28 fixtures, covering every layout, chunk index, filter, and datatype class but
+      time, is read with 6 random strided and 6 random point selections, each byte-identical to the same
+      elements of a whole read;
+    - through a `RangeReader`, every 100th row reads under a fifth of the file, three points under a
+      twentieth, and 16 runs of contiguous data at most 32 pages;
+    - every reader on a selection;
+    - argument checks.
+
+    Breaking the point grouping and the per-dimension chunk cells fails 21 of the 33.
+  - **Timing:** for 2000 × 2000 doubles, against a whole read of 12–18 ms:
+
+    | Selection | Chunked | Contiguous |
+    |---|--:|--:|
+    | every other element (1M) | 16 ms | 21–28 ms |
+    | 100,000 random points | 49–57 ms | 14–17 ms |
+- [x] **A7 — cache sizes:** `OpenOptions.chunkCacheSize(bytes)` (0 turns it off), `readerPageSize(bytes)`,
+  and `readerCacheSize(bytes)`. A virtual dataset's source files inherit them.
+  - **Tests:**
+    - any sizes, down to 521-byte pages (the smallest is 512, as libhdf5's) and no caches, read four
+      fixtures identically;
+    - one 1 MiB page reads a file of under 1 MiB in one request;
+    - a one-page cache makes more requests than the default.
+- [x] **A8 — internal types out of the public API.**
+  - `Attribute`'s constructor is package-private: the attribute-message parser returns the parts.
+  - **`ApiSurfaceTest`** checks every public or protected signature in the exported packages by
+    reflection. It fails on the old constructor.
+  - **Referenced objects' paths** are found as libhdf5's `H5Iget_name` finds them: depth-first through
+    hard links, each group's in its native order.
+    - Checked against h5py's names for 16 references in `paths.h5` and `paths_latest.h5`.
+    - These include objects with several hard links in old-style, compact, and dense groups, which
+      libhdf5 names in name order, creation order, and name-hash order.
+    - `toString()` shows the address until the path is known.
+- [x] **A9 — paths that cannot be mapped.** `Hdf5File.open(Path)` reads through the file system's channel
+  when it cannot map the file (`UnsupportedOperationException`), and closes the channel with the file.
+  External raw data and virtual sources are found in the HDF5 file's own file system.
+  - **Test file system:** a test-only one over the default, whose provider cannot open a `FileChannel`,
+    so `jdk.zipfs` is not needed.
+  - **Tested:** data, external raw data, virtual sources, the policy, and the channel's closing.
+- [x] **A10 — other files of a remote file:** `ExternalFileAccess.resolvedBy(Resolver)`.
+  - **The resolver** gets each name and its `Purpose` (`RAW_DATA`, `VIRTUAL_SOURCE`). It returns a
+    `RangeReader`, or `null` for a missing file (fill for a virtual source, an error for raw data), or
+    refuses with `HdfUnsupportedException`. An `IOException` makes a virtual source missing.
+  - **Closing:** an `AutoCloseable` reader is closed after a raw-data read, or when the file closes.
+  - **Tests:**
+    - virtual datasets and external raw data of files opened from bytes, from readers, and from paths;
+    - resolvers that find nothing, fail, or refuse;
+    - closing.
+- **T3:** the fuzz test also reads a strided and a point selection of every dataset and finds the path of
+  every referenced object. It also covers `typed.h5` and `paths_latest.h5` (124 s against a 300 s limit).
 
 ## Done — 2026-10-05 (P2: PF1–PF4)
 

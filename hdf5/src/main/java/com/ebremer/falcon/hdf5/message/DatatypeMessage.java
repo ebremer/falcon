@@ -2,12 +2,14 @@ package com.ebremer.falcon.hdf5.message;
 
 import com.ebremer.falcon.hdf5.HdfFormatException;
 import com.ebremer.falcon.hdf5.HdfUnsupportedException;
+import com.ebremer.falcon.hdf5.data.Elements;
 import com.ebremer.falcon.hdf5.datatype.Datatype;
 import com.ebremer.falcon.hdf5.header.HeaderMessage;
 import com.ebremer.falcon.hdf5.header.MessageType;
 import com.ebremer.falcon.hdf5.header.SharedMessage;
 import com.ebremer.falcon.hdf5.io.FileContext;
 import com.ebremer.falcon.hdf5.io.HdfBuffer;
+import java.lang.foreign.MemorySegment;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -201,7 +203,7 @@ public final class DatatypeMessage {
                 int baseSize = base.type.size();
                 List<Datatype.Enumeration.Member> list = new ArrayList<>(members);
                 for (int i = 0; i < members; i++) {
-                    long value = buf.getUnsignedValue(p, baseSize);
+                    long value = enumValue(buf, p, base.type);
                     p += baseSize;
                     list.add(new Datatype.Enumeration.Member(names.get(i), value));
                 }
@@ -249,6 +251,20 @@ public final class DatatypeMessage {
             default:
                 throw new HdfFormatException("unknown datatype class " + typeClass + " at " + off);
         }
+    }
+
+    /**
+     * An enumeration member's value, stored as an element of the base type ("in the same byte order as
+     * the base type"): an integer base is read as its elements are (byte order, sign, bit offset and
+     * precision), so a member's value is the integer its elements hold. Any other base, which libhdf5
+     * never writes, is read as an unsigned little-endian value, as before.
+     */
+    private static long enumValue(HdfBuffer buf, long p, Datatype base) {
+        if (base instanceof Datatype.FixedPoint fp && fp.bitPrecision() >= 1 && fp.bitPrecision() <= 64
+                && (long) fp.bitOffset() + fp.bitPrecision() <= 8L * fp.size()) {
+            return Elements.integerValue(MemorySegment.ofArray(buf.getBytes(p, fp.size())), 0, fp);
+        }
+        return buf.getUnsignedValue(p, base.size());
     }
 
     private static ByteOrder order(int bitField0) {

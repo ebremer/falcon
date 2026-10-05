@@ -3,6 +3,7 @@ package com.ebremer.falcon.hdf5;
 import com.ebremer.falcon.hdf5.btree.BTreeV2;
 import com.ebremer.falcon.hdf5.checksum.Lookup3;
 import com.ebremer.falcon.hdf5.data.DataspaceSelection;
+import com.ebremer.falcon.hdf5.data.SelectedElements;
 import com.ebremer.falcon.hdf5.datatype.Datatype;
 import com.ebremer.falcon.hdf5.header.HeaderMessage;
 import com.ebremer.falcon.hdf5.header.MessageType;
@@ -29,8 +30,8 @@ import java.util.Optional;
 public abstract sealed class Hdf5Object permits Group, Dataset, CommittedDatatype {
 
     final FileContext ctx;
-    private final String name;
-    private final String path;
+    private volatile String name; // null until found, for an object reached through a reference
+    private volatile String path; // likewise
     private final long objectHeaderAddress;
     private volatile ObjectHeader header; // parsed lazily, then cached (safely published across threads)
     private volatile List<Attribute> attributes; // read on first attributes(), then cached (immutable)
@@ -53,14 +54,40 @@ public abstract sealed class Hdf5Object permits Group, Dataset, CommittedDatatyp
         return result;
     }
 
-    /** The object's local link name ({@code ""} for the root group). */
+    /**
+     * The object's local link name: the last component of its {@link #path()} ({@code ""} for the root
+     * group, and for an object no path reaches).
+     */
     public String name() {
-        return name;
+        String result = name;
+        if (result == null) {
+            String found = path();
+            result = found.substring(found.lastIndexOf('/') + 1);
+            name = result;
+        }
+        return result;
     }
 
-    /** The object's absolute path from the root (e.g. {@code /alpha/beta}). */
+    /**
+     * The object's absolute path from the root (e.g. {@code /alpha/beta}): the path it was reached through.
+     * For an object reached through a reference, it is found when first asked for, as libhdf5's
+     * {@code H5Iget_name} finds one: the first path to the object in a depth-first walk of the file's hard
+     * links, each group's in its native order; {@code ""} if no path reaches it. So an object with several
+     * paths is named by the one libhdf5 names it by.
+     */
     public String path() {
-        return path;
+        String result = path;
+        if (result == null) {
+            result = ctx.resource(ObjectPaths.class, ObjectPaths::new).find(ctx, objectHeaderAddress);
+            path = result;
+        }
+        return result;
+    }
+
+    /** How messages name this object: its path, if known, without looking for one. */
+    String label() {
+        String known = path;
+        return known != null ? known : "the object at address " + objectHeaderAddress;
     }
 
     /** The file address of this object's header. */
@@ -87,7 +114,7 @@ public abstract sealed class Hdf5Object permits Group, Dataset, CommittedDatatyp
         List<Attribute> out = new ArrayList<>();
         for (HeaderMessage message : header.messages()) {
             if (message.type() == MessageType.ATTRIBUTE) {
-                out.add(AttributeMessage.parse(ctx, SharedMessage.resolve(ctx, message)));
+                out.add(attribute(AttributeMessage.parse(ctx, SharedMessage.resolve(ctx, message))));
             }
         }
         HeaderMessage attributeInfo = header.find(MessageType.ATTRIBUTE_INFO);
@@ -114,10 +141,15 @@ public abstract sealed class Hdf5Object permits Group, Dataset, CommittedDatatyp
         }
         byte[] heapId = Arrays.copyOfRange(record, 0, heap.idLength());
         if ((record[heap.idLength()] & SharedMessage.SHARED_FLAG) != 0) {
-            return AttributeMessage.parse(ctx, SharedMessage.heapMessage(ctx, heapId, MessageType.ATTRIBUTE));
+            return attribute(AttributeMessage.parse(ctx, SharedMessage.heapMessage(ctx, heapId, MessageType.ATTRIBUTE)));
         }
         FractalHeap.HeapObject object = heap.locate(heapId);
-        return AttributeMessage.parse(ctx, object.address(), object.length());
+        return attribute(AttributeMessage.parse(ctx, object.address(), object.length()));
+    }
+
+    private Attribute attribute(AttributeMessage.Parsed parsed) {
+        return new Attribute(ctx, parsed.name(), parsed.datatype(), parsed.dataspace(), parsed.dataOffset(),
+                parsed.dataSize());
     }
 
     /**
@@ -134,9 +166,9 @@ public abstract sealed class Hdf5Object permits Group, Dataset, CommittedDatatyp
         ObjectHeader header = header();
         for (HeaderMessage message : header.messages()) {
             if (message.type() == MessageType.ATTRIBUTE) {
-                Attribute attribute = AttributeMessage.parse(ctx, SharedMessage.resolve(ctx, message));
-                if (attribute.name().equals(name)) {
-                    return Optional.of(attribute);
+                AttributeMessage.Parsed parsed = AttributeMessage.parse(ctx, SharedMessage.resolve(ctx, message));
+                if (parsed.name().equals(name)) {
+                    return Optional.of(attribute(parsed));
                 }
             }
         }
@@ -236,8 +268,8 @@ public abstract sealed class Hdf5Object permits Group, Dataset, CommittedDatatyp
     /**
      * Resolves an object-reference buffer: each {@code stride}-byte element is a target object-header
      * address (or, if {@code revised}, a {@link RevisedReference} of any kind), resolved to the object it
-     * points at or into (or {@code null} for a null reference). Resolved objects carry no reconstructed
-     * name/path; identify them via {@link #objectHeaderAddress()}.
+     * points at or into (or {@code null} for a null reference). Each object's name and path are found
+     * when first asked for (see {@link #path()}).
      *
      * @throws HdfUnsupportedException for a revised reference into another file
      */
@@ -251,7 +283,7 @@ public abstract sealed class Hdf5Object permits Group, Dataset, CommittedDatatyp
                 RevisedReference reference = RevisedReference.decode(ctx, buffer, (long) i * stride, stride);
                 if (reference != null) {
                     reference.requireLocal();
-                    out[i] = classify(ctx, "", "", reference.address());
+                    out[i] = dereference(ctx, reference.address());
                 }
                 continue;
             }
@@ -259,7 +291,7 @@ public abstract sealed class Hdf5Object permits Group, Dataset, CommittedDatatyp
             // A null object reference is stored as an all-zero (address 0, where the superblock lives,
             // never an object) or all-ones (undefined) address.
             out[i] = (address == HdfBuffer.UNDEFINED_ADDRESS || address == 0)
-                    ? null : classify(ctx, "", "", address);
+                    ? null : dereference(ctx, address);
         }
         return out;
     }
@@ -285,7 +317,7 @@ public abstract sealed class Hdf5Object permits Group, Dataset, CommittedDatatyp
                         + ", not an attribute reference (read it with readObjectReferences)");
             }
             reference.requireLocal();
-            Hdf5Object object = classify(ctx, "", "", reference.address());
+            Hdf5Object object = dereference(ctx, reference.address());
             out[i] = object.attribute(reference.attributeName()).orElseThrow(() -> new HdfFormatException(
                     "attribute reference names '" + reference.attributeName() + "', which the object at "
                     + reference.address() + " does not have"));
@@ -347,7 +379,7 @@ public abstract sealed class Hdf5Object permits Group, Dataset, CommittedDatatyp
 
     /** The {@code selection} of the dataset at {@code datasetHeader}; {@code rank} is checked unless -1. */
     private static Selection region(FileContext ctx, long datasetHeader, DataspaceSelection selection, int rank) {
-        if (!(classify(ctx, "", "", datasetHeader) instanceof Dataset dataset)) {
+        if (!(dereference(ctx, datasetHeader) instanceof Dataset dataset)) {
             throw new HdfFormatException("region reference does not point at a dataset");
         }
         long[] dims = dataset.dataspace().dimensions();
@@ -356,17 +388,30 @@ public abstract sealed class Hdf5Object permits Group, Dataset, CommittedDatatyp
         }
         // The selection comes from the file, so an out-of-range one is corrupt data, not a caller error.
         long[][] block = selection.singleBlock(dims);
-        return block != null ? dataset.select(block[0], block[1])
-                : Selection.ofCoordinates(dataset, selection.coordinates(dims));
+        if (block != null) {
+            return dataset.select(block[0], block[1]);
+        }
+        SelectedElements elements = selection.elements(dims);
+        return Selection.of(dataset, elements, new long[] {elements.count()});
     }
 
-    /** Joins a parent path and a child name into an absolute path. */
+    /** Joins a parent path and a child name into an absolute path; null (not yet known) if the parent's is. */
     static String childPath(String parentPath, String childName) {
+        if (parentPath == null) {
+            return null;
+        }
         return parentPath.equals("/") ? "/" + childName : parentPath + "/" + childName;
     }
 
+    /** The object a reference points at, whose name and path are found when first asked for. */
+    static Hdf5Object dereference(FileContext ctx, long objectHeaderAddress) {
+        return classify(ctx, null, null, objectHeaderAddress);
+    }
+
+    /** The object's class and path, or, for an object reached through a reference, its address. */
     @Override
     public String toString() {
-        return getClass().getSimpleName() + "[" + (path.isEmpty() ? "/" : path) + "]";
+        String known = path;
+        return getClass().getSimpleName() + "[" + (known != null ? known : "@" + objectHeaderAddress) + "]";
     }
 }

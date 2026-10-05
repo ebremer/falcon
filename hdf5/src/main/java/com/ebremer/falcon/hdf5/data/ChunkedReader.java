@@ -72,6 +72,81 @@ public final class ChunkedReader {
         return output;
     }
 
+    /**
+     * Gathers the selected elements, in the selection's order: only the chunks that hold a selected element
+     * are read. For a regular hyperslab those are the chunks in the grid cells its indices fall in, in
+     * every dimension, so a strided selection skips the chunks between its blocks; for points, the chunks
+     * the points fall in, each read once however many points it holds.
+     */
+    public static byte[] gather(FileContext ctx, DataLayout.Chunked layout, ChunkIndex index, long[] datasetDims,
+                                int elementSize, FilterPipeline pipeline, byte[] fill, SelectedElements selection) {
+        byte[] output = new byte[Elements.checkedByteCount(selection.count(), elementSize)];
+        tileFill(output, fill, elementSize);
+        if (selection.count() == 0) {
+            return output;
+        }
+        int[] chunkDims = layout.chunkDimensions();
+        int chunkBytes = chunkBytes(chunkDims, elementSize);
+        int rank = datasetDims.length;
+        if (selection instanceof SelectedElements.Listed points) {
+            // Order the points by the chunk they fall in, then read each chunk once for all of its points.
+            int n = (int) points.count();
+            long[][] cellOf = new long[n][rank];
+            Integer[] order = new Integer[n];
+            for (int i = 0; i < n; i++) {
+                long[] c = points.at(i);
+                for (int d = 0; d < rank; d++) {
+                    cellOf[i][d] = c[d] / chunkDims[d];
+                }
+                order[i] = i;
+            }
+            java.util.Arrays.sort(order, (a, b) -> java.util.Arrays.compare(cellOf[a], cellOf[b]));
+            for (int k = 0; k < n; ) {
+                long[] cell = cellOf[order[k]];
+                int end = k;
+                while (end < n && java.util.Arrays.equals(cellOf[order[end]], cell)) {
+                    end++;
+                }
+                ChunkRecord chunk = index.at(cell);
+                if (chunk != null) {
+                    byte[] bytes = readChunk(ctx, layout, chunk, datasetDims, pipeline, elementSize, chunkBytes);
+                    for (int j = k; j < end; j++) {
+                        int i = order[j];
+                        copyElement(bytes, chunk.offset(), chunkDims, points.at(i), output, i, elementSize);
+                    }
+                }
+                k = end;
+            }
+            return output;
+        }
+        SelectedElements.Product product = (SelectedElements.Product) selection;
+        long[][] cells = new long[rank][];
+        for (int d = 0; d < rank; d++) {
+            cells[d] = product.cells(d, chunkDims[d]);
+        }
+        long[] box = new long[rank];
+        for (ChunkRecord chunk : index.inGrid(cells)) {
+            long[] offset = chunk.offset();
+            for (int d = 0; d < rank; d++) {
+                box[d] = Math.max(0, Math.min(chunkDims[d], datasetDims[d] - offset[d]));
+            }
+            byte[] bytes = readChunk(ctx, layout, chunk, datasetDims, pipeline, elementSize, chunkBytes);
+            product.forEachInBox(offset, box, (position, coordinates) ->
+                    copyElement(bytes, offset, chunkDims, coordinates, output, position, elementSize));
+        }
+        return output;
+    }
+
+    /** Copies the element at {@code coordinates} of a decoded chunk to position {@code position} of {@code output}. */
+    private static void copyElement(byte[] chunk, long[] chunkOffset, int[] chunkDims, long[] coordinates,
+                                    byte[] output, long position, int elementSize) {
+        long flat = 0;
+        for (int d = 0; d < chunkDims.length; d++) {
+            flat = flat * chunkDims[d] + (coordinates[d] - chunkOffset[d]);
+        }
+        System.arraycopy(chunk, (int) (flat * elementSize), output, (int) (position * elementSize), elementSize);
+    }
+
     private static List<ChunkRecord> enumerateChunks(FileContext ctx, DataLayout.Chunked layout, int chunkBytes,
                                                      long[] datasetDims, long[] maxDims) {
         int rank = datasetDims.length;

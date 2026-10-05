@@ -24,8 +24,36 @@ public abstract sealed class SelectedElements permits SelectedElements.Product, 
     private SelectedElements() {
     }
 
+    /**
+     * A regular hyperslab ({@code H5Sselect_hyperslab}): in each dimension <i>d</i>, {@code count[d]}
+     * blocks of {@code block[d]} indices, each block {@code stride[d]} after the last, from
+     * {@code start[d]}. The caller has checked the arguments (see {@code Dataset.select}).
+     */
+    public static SelectedElements hyperslab(long[] start, long[] stride, long[] count, long[] block) {
+        Axis[] axes = new Axis[start.length];
+        for (int d = 0; d < axes.length; d++) {
+            axes[d] = new Axis(start[d], stride[d], block[d], Math.multiplyExact(count[d], block[d]));
+        }
+        return new Product(axes);
+    }
+
+    /** The points at {@code coordinates} (each of length {@code rank}), in the order given. */
+    public static SelectedElements points(long[][] coordinates, int rank) {
+        long[][] copy = new long[coordinates.length][];
+        for (int i = 0; i < copy.length; i++) {
+            copy[i] = coordinates[i].clone();
+        }
+        return new Listed(copy, rank);
+    }
+
     /** The rank of the dataspace selected from. */
     public abstract int rank();
+
+    /** The low corner of the box that bounds the selected elements (zeros if none is selected). */
+    public abstract long[] lowCorner();
+
+    /** The high corner (inclusive) of the box that bounds the selected elements (-1s if none is selected). */
+    public abstract long[] highCorner();
 
     /** The number of elements selected. */
     public abstract long count();
@@ -40,6 +68,47 @@ public abstract sealed class SelectedElements permits SelectedElements.Product, 
 
     /** False if no selected element can lie inside the box (a quick test; true may still visit none). */
     public abstract boolean mayIntersect(long[] offset, long[] count);
+
+    /** Copies {@code length} bytes from byte {@code from} of a source to {@code out[at...]}. */
+    @FunctionalInterface
+    public interface Source {
+        void copy(long from, byte[] out, int at, int length);
+    }
+
+    /**
+     * The selected elements' bytes, in iteration order, from {@code source}: the row-major elements of the
+     * box of shape {@code dims} whose corner is {@code origin}, which holds every selected element. Elements
+     * next to each other in both the source and the selection are copied as one run.
+     */
+    public byte[] gather(Source source, long[] origin, long[] dims, int elementSize) {
+        long n = count();
+        byte[] out = new byte[Elements.checkedByteCount(n, elementSize)];
+        long[] c = new long[rank()];
+        long runFrom = -1;  // the source element the current run starts at
+        long runAt = 0;     // its position in the selection
+        long runLength = 0;
+        for (long position = 0; position < n; position++) {
+            coordinates(position, c);
+            long flat = 0;
+            for (int d = 0; d < c.length; d++) {
+                flat = flat * dims[d] + (c[d] - origin[d]);
+            }
+            if (runLength > 0 && flat == runFrom + runLength) {
+                runLength++;
+                continue;
+            }
+            if (runLength > 0) {
+                source.copy(runFrom * elementSize, out, (int) (runAt * elementSize), (int) (runLength * elementSize));
+            }
+            runFrom = flat;
+            runAt = position;
+            runLength = 1;
+        }
+        if (runLength > 0) {
+            source.copy(runFrom * elementSize, out, (int) (runAt * elementSize), (int) (runLength * elementSize));
+        }
+        return out;
+    }
 
     /**
      * One dimension of a product: {@code size} indices taken in runs of {@code block}, each run starting
@@ -84,6 +153,35 @@ public abstract sealed class SelectedElements permits SelectedElements.Product, 
                 throw new HdfFormatException("dataspace selection size overflows (corrupt?)", e);
             }
         }
+
+        /**
+         * The cells of width {@code width} (chunks, along this dimension) that hold at least one of this
+         * axis's indices, in increasing order: one pass over its runs of indices.
+         */
+        long[] cells(long width) {
+            if (size == 0) {
+                return new long[0];
+            }
+            long runs = (size - 1) / block + 1;
+            long[] out = new long[(int) Math.min(runs * 2, 1 << 16)];
+            int n = 0;
+            for (long r = 0; r < runs; r++) {
+                long first = start + r * stride;
+                long length = Math.min(block, size - r * block);
+                long from = first / width;
+                long to = (first + length - 1) / width;
+                if (n > 0 && from <= out[n - 1]) {
+                    from = out[n - 1] + 1;
+                }
+                for (long c = from; c <= to; c++) {
+                    if (n == out.length) {
+                        out = java.util.Arrays.copyOf(out, Math.multiplyExact(out.length, 2));
+                    }
+                    out[n++] = c;
+                }
+            }
+            return java.util.Arrays.copyOf(out, n);
+        }
     }
 
     /** A product of per-dimension index sets, visited in row-major order. */
@@ -112,6 +210,29 @@ public abstract sealed class SelectedElements permits SelectedElements.Product, 
         @Override
         public long count() {
             return count;
+        }
+
+        @Override
+        public long[] lowCorner() {
+            long[] low = new long[axes.length];
+            for (int d = 0; d < axes.length && count > 0; d++) {
+                low[d] = axes[d].start();
+            }
+            return low;
+        }
+
+        @Override
+        public long[] highCorner() {
+            long[] high = new long[axes.length];
+            for (int d = 0; d < axes.length; d++) {
+                high[d] = count > 0 ? axes[d].last() : -1;
+            }
+            return high;
+        }
+
+        /** The chunk-grid cells along dimension {@code d}, for chunks {@code width} wide, that hold a selected index. */
+        long[] cells(int d, long width) {
+            return axes[d].cells(width);
         }
 
         @Override
@@ -206,6 +327,26 @@ public abstract sealed class SelectedElements permits SelectedElements.Product, 
         @Override
         public long count() {
             return coordinates.length;
+        }
+
+        @Override
+        public long[] lowCorner() {
+            return coordinates.length == 0 ? new long[rank] : low.clone();
+        }
+
+        @Override
+        public long[] highCorner() {
+            if (coordinates.length == 0) {
+                long[] none = new long[rank];
+                java.util.Arrays.fill(none, -1);
+                return none;
+            }
+            return high.clone();
+        }
+
+        /** The coordinates of the element at {@code position}, not to be changed. */
+        long[] at(int position) {
+            return coordinates[position];
         }
 
         @Override

@@ -153,6 +153,62 @@ public final class ChunkIndex {
         }
     }
 
+    /** The stored chunk at grid coordinates {@code cell}, or null if none is stored there. */
+    public ChunkRecord at(long[] cell) {
+        int i = find(cell);
+        return i < 0 ? null : record(i);
+    }
+
+    /**
+     * The stored chunks whose grid coordinate in every dimension <i>d</i> is one of {@code cells[d]}
+     * (each sorted increasing), in row-major grid order: by looking up each combination, or, when there
+     * are more combinations than stored chunks, by one pass over the chunks.
+     */
+    public List<ChunkRecord> inGrid(long[][] cells) {
+        List<ChunkRecord> out = new ArrayList<>();
+        long combinations = 1;
+        for (long[] axis : cells) {
+            if (axis.length == 0) {
+                return out;
+            }
+            combinations = combinations > Long.MAX_VALUE / axis.length ? Long.MAX_VALUE : combinations * axis.length;
+        }
+        if (combinations > size()) {
+            next:
+            for (int i = 0; i < size(); i++) {
+                for (int d = 0; d < rank; d++) {
+                    if (Arrays.binarySearch(cells[d], scaled[i * rank + d]) < 0) {
+                        continue next;
+                    }
+                }
+                out.add(record(i));
+            }
+            return out;
+        }
+        int[] at = new int[rank];
+        long[] cell = new long[rank];
+        while (true) {
+            for (int d = 0; d < rank; d++) {
+                cell[d] = cells[d][at[d]];
+            }
+            int i = find(cell);
+            if (i >= 0) {
+                out.add(record(i));
+            }
+            int d = rank - 1;
+            while (d >= 0) {
+                if (++at[d] < cells[d].length) {
+                    break;
+                }
+                at[d] = 0;
+                d--;
+            }
+            if (d < 0) {
+                return out;
+            }
+        }
+    }
+
     private boolean within(int i, long[] first, long[] last) {
         for (int d = 0; d < rank; d++) {
             long c = scaled[i * rank + d];

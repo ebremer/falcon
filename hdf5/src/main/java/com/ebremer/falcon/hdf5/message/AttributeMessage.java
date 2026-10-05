@@ -1,6 +1,5 @@
 package com.ebremer.falcon.hdf5.message;
 
-import com.ebremer.falcon.hdf5.Attribute;
 import com.ebremer.falcon.hdf5.Dataspace;
 import com.ebremer.falcon.hdf5.HdfFormatException;
 import com.ebremer.falcon.hdf5.datatype.Datatype;
@@ -22,7 +21,14 @@ public final class AttributeMessage {
     private AttributeMessage() {
     }
 
-    public static Attribute parse(FileContext ctx, HeaderMessage message) {
+    /**
+     * A parsed attribute message: the attribute's name, datatype and dataspace, and where its value's
+     * {@code dataSize} bytes lie in the file.
+     */
+    public record Parsed(String name, Datatype datatype, Dataspace dataspace, long dataOffset, int dataSize) {
+    }
+
+    public static Parsed parse(FileContext ctx, HeaderMessage message) {
         if (message.buffer() != ctx.buffer()) {
             // Only a shared message of at most 7 bytes lives outside the file; no attribute is that small.
             throw new HdfFormatException("attribute message of " + message.bodySize() + " bytes is too small");
@@ -31,7 +37,7 @@ public final class AttributeMessage {
     }
 
     /** Parses an attribute message body of {@code bodySize} bytes at file offset {@code base}. */
-    public static Attribute parse(FileContext ctx, long base, int bodySize) {
+    public static Parsed parse(FileContext ctx, long base, int bodySize) {
         HdfBuffer buf = ctx.buffer();
         int version = buf.getUnsignedByte(base);
         // Version 1 has a reserved byte here; versions 2-3 use it for flags (bit 0: datatype shared,
@@ -61,7 +67,7 @@ public final class AttributeMessage {
                 ? DataspaceMessage.parse(ctx, SharedMessage.target(ctx, dataspaceOffset, MessageType.DATASPACE))
                 : DataspaceMessage.parse(ctx, dataspaceOffset);
         int dataSize = (int) (base + bodySize - dataOffset);
-        return new Attribute(ctx, name, datatype, dataspace, dataOffset, dataSize);
+        return new Parsed(name, datatype, dataspace, dataOffset, dataSize);
     }
 
     private static int align8(int n) {

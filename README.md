@@ -34,7 +34,8 @@ dependencies.)
 
 ## HDF5
 
-**Read** — open a file, walk the tree, read datasets (whole or by hyperslab) and attributes:
+**Read** — open a file, walk the tree, read datasets (whole, a hyperslab, a strided selection, or
+points) and attributes, of every datatype (compound members, enumerations, complex numbers, ...):
 
 ```java
 import com.ebremer.falcon.hdf5.*;
@@ -46,12 +47,16 @@ try (Hdf5File h5 = Hdf5File.open(Path.of("data.h5"))) {
     double[] all  = temps.readDoubles();                              // whole dataset, de-filtered
     double[] slab = temps.select(new long[]{0}, new long[]{100})      // a hyperslab
                          .readDoubles();
+    double[] tenth = temps.select(new long[]{0}, new long[]{10},      // every 10th value
+                                  new long[]{100}, null).readDoubles();
+    int[] ids = h5.root().dataset("table").member("id").readInts();   // a compound member
     temps.attribute("units").ifPresent(a -> System.out.println(a.readStrings()[0]));
 }
 ```
 
 Files open from a path (memory-mapped), from a `byte[]`, or through a `RangeReader` (an object store,
 HTTP byte ranges, any channel), which Falcon reads on demand: the metadata and only the data asked for.
+A resolver opens the other files such a file names (external raw data, virtual-dataset sources).
 
 **Write** — create a file, add groups, datasets (contiguous or chunked + filters), and attributes:
 

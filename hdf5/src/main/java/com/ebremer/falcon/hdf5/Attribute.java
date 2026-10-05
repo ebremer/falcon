@@ -1,106 +1,111 @@
 package com.ebremer.falcon.hdf5;
 
 import com.ebremer.falcon.hdf5.data.Elements;
-import com.ebremer.falcon.hdf5.data.VlenSequences;
-import com.ebremer.falcon.hdf5.data.VlenStrings;
 import com.ebremer.falcon.hdf5.datatype.Datatype;
 import com.ebremer.falcon.hdf5.io.FileContext;
 import java.lang.foreign.MemorySegment;
 
 /**
  * A named attribute on a {@link Hdf5Object}: a small typed, shaped value. Read it with the typed
- * accessors, or {@link #read()} for the natural Java type. Variable-length string values are resolved
- * through the global heap.
+ * accessors, or {@link #read()} for the natural Java type; they read as a dataset's do (see
+ * {@link Dataset#read()}). Variable-length string values are resolved through the global heap.
+ * Obtained from {@link Hdf5Object#attributes()} and {@link Hdf5Object#attribute(String)}.
  */
 public final class Attribute {
 
     private final FileContext ctx;
     private final String name;
-    private final Datatype datatype;
+    private final Datatype datatype;   // the type read: the attribute's, or a member's
     private final Dataspace dataspace;
     private final long dataOffset;
     private final int dataSize;
+    private final int elementSize;     // the stored element's size (the attribute's own datatype's)
+    private final int memberOffset;    // where in each stored element the type read lies
+    private final boolean member;      // true for a member of a compound attribute
 
-    /** Constructs an attribute value. Normally obtained via {@link Hdf5Object#attributes()}. */
-    public Attribute(FileContext ctx, String name, Datatype datatype, Dataspace dataspace,
-                     long dataOffset, int dataSize) {
+    Attribute(FileContext ctx, String name, Datatype datatype, Dataspace dataspace, long dataOffset, int dataSize) {
+        this(ctx, name, datatype, dataspace, dataOffset, dataSize, datatype.size(), 0, false);
+    }
+
+    private Attribute(FileContext ctx, String name, Datatype datatype, Dataspace dataspace, long dataOffset,
+                      int dataSize, int elementSize, int memberOffset, boolean member) {
         this.ctx = ctx;
         this.name = name;
         this.datatype = datatype;
         this.dataspace = dataspace;
         this.dataOffset = dataOffset;
         this.dataSize = dataSize;
+        this.elementSize = elementSize;
+        this.memberOffset = memberOffset;
+        this.member = member;
     }
 
+    /** The attribute's name. */
     public String name() {
         return name;
     }
 
+    /** The attribute's datatype; for a {@linkplain #member(String) member}, the member's. */
     public Datatype datatype() {
         return datatype;
     }
 
+    /** The attribute's shape. */
     public Dataspace dataspace() {
         return dataspace;
     }
 
-    /** Reads the value into the most natural Java array (see {@link Dataset#read()}). */
+    /**
+     * The member {@code name} of each element of a compound attribute (or of a member that is itself a
+     * compound): an attribute of the same name and shape whose datatype is the member's, read like one.
+     *
+     * @throws IllegalArgumentException if the datatype is not a compound
+     * @throws java.util.NoSuchElementException if it has no member of that name
+     */
+    public Attribute member(String name) {
+        Datatype.Compound.Member m = ElementReader.member(datatype, name, describe());
+        return new Attribute(ctx, this.name, m.type(), dataspace, dataOffset, dataSize, elementSize,
+                memberOffset + m.offset(), true);
+    }
+
+    /** Reads the value into the most natural Java value (see {@link Dataset#read()}). */
     public Object read() {
-        if (datatype instanceof Datatype.FixedPoint fp) {
-            return Elements.toNaturalIntegers(data(), count(), fp);
-        }
-        if (datatype instanceof Datatype.FloatingPoint) {
-            return readDoubles();
-        }
-        if (datatype instanceof Datatype.StringType) {
-            return readStrings();
-        }
-        if (datatype instanceof Datatype.VariableLength vlen) {
-            if (vlen.kind() == Datatype.VlenKind.STRING) {
-                return readStrings();
-            }
-            return switch (vlen.base()) {
-                case Datatype.FixedPoint fp -> fp.size() <= 4 && Elements.fitsInt(fp) ? readVlenInts() : readVlenLongs();
-                case Datatype.FloatingPoint fp -> readVlenDoubles();
-                default -> throw new HdfUnsupportedException("reading attribute variable-length sequences of "
-                        + vlen.base().typeClass() + " is not yet supported: " + name);
-            };
-        }
-        if (Hdf5Object.isReference(datatype, Datatype.ReferenceKind.DATASET_REGION)) {
-            return readRegionReferences();
-        }
-        if (datatype instanceof Datatype.Reference ref && ref.kind() != Datatype.ReferenceKind.OTHER) {
-            return readObjectReferences();
-        }
-        throw new HdfUnsupportedException(
-                "reading attribute datatype " + datatype.typeClass() + " is not yet supported: " + name);
+        return reader().natural();
     }
 
     /** Reads an integer attribute as {@code int} values; exact, as {@link Dataset#readInts()}. */
     public int[] readInts() {
-        return Elements.toInts(data(), count(), datatype);
+        return reader().ints();
     }
 
     /** Reads an integer attribute as {@code long} values; exact, as {@link Dataset#readLongs()}. */
     public long[] readLongs() {
-        return Elements.toLongs(data(), count(), datatype);
+        return reader().longs();
     }
 
     /** Reads a floating-point or integer attribute as {@code float} values, as {@link Dataset#readFloats()}. */
     public float[] readFloats() {
-        return Elements.toFloats(data(), count(), datatype);
+        return reader().floats();
     }
 
     /** Reads a floating-point or integer attribute as {@code double} values, as {@link Dataset#readDoubles()}. */
     public double[] readDoubles() {
-        return Elements.toDoubles(data(), count(), datatype);
+        return reader().doubles();
     }
 
+    /** Reads complex values as interleaved (real, imaginary) pairs, as {@link Dataset#readComplexDoubles()}. */
+    public double[] readComplexDoubles() {
+        return reader().complexDoubles();
+    }
+
+    /** Reads complex values as interleaved (real, imaginary) {@code float} pairs, as {@link Dataset#readComplexFloats()}. */
+    public float[] readComplexFloats() {
+        return reader().complexFloats();
+    }
+
+    /** Reads fixed- or variable-length strings, or enumeration names, as {@link Dataset#readStrings()}. */
     public String[] readStrings() {
-        if (datatype instanceof Datatype.VariableLength vlen && vlen.kind() == Datatype.VlenKind.STRING) {
-            return readVariableLengthStrings(vlen);
-        }
-        return Elements.toStrings(data(), count(), datatype);
+        return reader().strings();
     }
 
     /** Convenience for a scalar (single-element) string attribute. */
@@ -136,29 +141,22 @@ public final class Attribute {
 
     /** Reads a variable-length sequence attribute, one {@code int[]} row per element. */
     public int[][] readVlenInts() {
-        return VlenSequences.toInts(ctx, data(), count(), requireVlenSequence());
+        return reader().vlenInts();
     }
 
     /** Reads a variable-length sequence attribute, one {@code long[]} row per element. */
     public long[][] readVlenLongs() {
-        return VlenSequences.toLongs(ctx, data(), count(), requireVlenSequence());
+        return reader().vlenLongs();
     }
 
     /** Reads a variable-length sequence attribute, one {@code double[]} row per element. */
     public double[][] readVlenDoubles() {
-        return VlenSequences.toDoubles(ctx, data(), count(), requireVlenSequence());
+        return reader().vlenDoubles();
     }
 
     /** Reads a variable-length sequence attribute, one {@code float[]} row per element. */
     public float[][] readVlenFloats() {
-        return VlenSequences.toFloats(ctx, data(), count(), requireVlenSequence());
-    }
-
-    private Datatype.VariableLength requireVlenSequence() {
-        if (datatype instanceof Datatype.VariableLength vlen && vlen.kind() == Datatype.VlenKind.SEQUENCE) {
-            return vlen;
-        }
-        throw new HdfUnsupportedException("readVlen* requires a variable-length sequence attribute: " + name);
+        return reader().vlenFloats();
     }
 
     /**
@@ -166,11 +164,7 @@ public final class Attribute {
      * revised references as {@link Dataset#readObjectReferences()} reads them.
      */
     public Hdf5Object[] readObjectReferences() {
-        boolean revised = Hdf5Object.isRevisedReference(datatype);
-        if (!revised && !Hdf5Object.isReference(datatype, Datatype.ReferenceKind.OBJECT)) {
-            throw new HdfUnsupportedException("readObjectReferences requires an object-reference attribute: " + name);
-        }
-        return Hdf5Object.resolveObjectReferences(ctx, data(), count(), datatype.size(), revised);
+        return reader().objectReferences();
     }
 
     /**
@@ -178,11 +172,7 @@ public final class Attribute {
      * null reference), original or revised, as {@link Dataset#readRegionReferences()} does.
      */
     public Selection[] readRegionReferences() {
-        boolean revised = Hdf5Object.isRevisedReference(datatype);
-        if (!revised && !Hdf5Object.isReference(datatype, Datatype.ReferenceKind.DATASET_REGION)) {
-            throw new HdfUnsupportedException("readRegionReferences requires a region-reference attribute: " + name);
-        }
-        return Hdf5Object.resolveRegionReferences(ctx, data(), count(), datatype.size(), revised);
+        return reader().regionReferences();
     }
 
     /**
@@ -190,26 +180,40 @@ public final class Attribute {
      * reference), as {@link Dataset#readAttributeReferences()} does.
      */
     public Attribute[] readAttributeReferences() {
-        if (!Hdf5Object.isRevisedReference(datatype)) {
-            throw new HdfUnsupportedException("readAttributeReferences requires a revised reference attribute: " + name);
-        }
-        return Hdf5Object.resolveAttributeReferences(ctx, data(), count(), datatype.size());
+        return reader().attributeReferences();
     }
 
-    private String[] readVariableLengthStrings(Datatype.VariableLength vlen) {
-        return VlenStrings.read(ctx, data(), count(), vlen);
+    /** The value's bytes as stored, in the datatype's byte order. */
+    public byte[] readRawBytes() {
+        return reader().rawBytes();
     }
 
+    private ElementReader reader() {
+        return new ElementReader(ctx, datatype, count(), this::data, describe());
+    }
+
+    /** The stored bytes, or for a member, its bytes from each element. */
     private MemorySegment data() {
-        long needed = (long) count() * datatype.size();
+        int count = count();
+        long needed = (long) count * elementSize;
         if (needed > dataSize) {
             throw new HdfFormatException("attribute '" + name + "' holds " + dataSize + " bytes but its dataspace"
                     + " and datatype need " + needed + " (corrupt attribute message?)");
         }
-        return ctx.buffer().segmentSlice(dataOffset, dataSize);
+        MemorySegment stored = ctx.buffer().segmentSlice(dataOffset, dataSize);
+        return member ? ElementReader.column(stored, count, elementSize, memberOffset, datatype.size()) : stored;
     }
 
     private int count() {
-        return com.ebremer.falcon.hdf5.data.Elements.checkedInt(dataspace.elementCount());
+        return Elements.checkedInt(dataspace.elementCount());
+    }
+
+    private String describe() {
+        return "attribute '" + name + "'";
+    }
+
+    @Override
+    public String toString() {
+        return "Attribute[" + name + "]";
     }
 }

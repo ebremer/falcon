@@ -14,7 +14,10 @@ import com.ebremer.falcon.hdf5.superblock.Superblock;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.lang.foreign.MemorySegment;
+import java.nio.channels.SeekableByteChannel;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.Objects;
 import java.util.Optional;
 
@@ -32,14 +35,17 @@ import java.util.Optional;
  * }</pre>
  *
  * <p><b>Sources.</b> A file opened from a {@link Path} is memory-mapped, so it must remain available
- * while this object is open. One already in memory opens from its bytes ({@link #open(byte[])}), and one
- * elsewhere (an object store, an HTTP server, a channel) from a {@link RangeReader}, which Falcon reads on
- * demand: the metadata it parses and the data it is asked for. A read that the reader fails throws
- * {@link java.io.UncheckedIOException}.
+ * while this object is open; on a file system whose files cannot be mapped (a zip file system, an
+ * in-memory one), it is read on demand through a channel instead. One already in memory opens from its
+ * bytes ({@link #open(byte[])}), and one elsewhere (an object store, an HTTP server, a channel) from a
+ * {@link RangeReader}, which Falcon reads on demand: the metadata it parses and the data it is asked for.
+ * A read that the reader fails throws {@link java.io.UncheckedIOException}.
  *
  * <p><b>Other files.</b> External raw data and virtual-dataset sources are opened only as the
- * {@link ExternalFileAccess} policy allows: by default, files in this file's own directory tree.
- * {@link OpenOptions} set it, and how virtual datasets with unlimited mappings are read.
+ * {@link ExternalFileAccess} policy allows: by default, files in this file's own directory tree; a
+ * {@linkplain ExternalFileAccess#resolvedBy resolver} can open them from anywhere, such as next to a file
+ * read through a {@link RangeReader}. {@link OpenOptions} set it, how virtual datasets with unlimited
+ * mappings are read, and the cache sizes.
  *
  * <p><b>Lifecycle.</b> {@link #close()} is idempotent. Once closed, reading anything obtained from the
  * file throws {@link HdfClosedException}; {@link #isOpen()} tells whether it is still open.
@@ -77,11 +83,41 @@ public final class Hdf5File implements AutoCloseable {
         return open(path, OpenOptions.defaults().externalFileAccess(externalFileAccess));
     }
 
-    /** Opens and memory-maps an HDF5 file for reading, as {@code options} say. */
+    /**
+     * Opens and memory-maps an HDF5 file for reading, as {@code options} say. A file whose file system
+     * cannot map it is read on demand through a channel instead, as through a {@link RangeReader}
+     * ({@link OpenOptions#readerPageSize} and {@link OpenOptions#readerCacheSize} apply); the channel is
+     * closed with the file.
+     */
     public static Hdf5File open(Path path, OpenOptions options) throws IOException {
         Objects.requireNonNull(options, "options");
-        MappedHdfFile mapped = MappedHdfFile.openReadOnly(path);
+        MappedHdfFile mapped;
+        try {
+            mapped = MappedHdfFile.openReadOnly(path);
+        } catch (UnsupportedOperationException e) {
+            return openUnmapped(path, options); // a file system without memory-mapped channels
+        }
         return open(mapped.buffer(), path, mapped::close, options);
+    }
+
+    /** Opens {@code path} read on demand through a channel of its file system, which closes with the file. */
+    private static Hdf5File openUnmapped(Path path, OpenOptions options) throws IOException {
+        SeekableByteChannel channel = Files.newByteChannel(path, StandardOpenOption.READ);
+        PagedSource source;
+        try {
+            source = PagedSource.open(RangeReader.of(channel), options.readerPageSize(), options.readerCacheSize());
+        } catch (IOException | RuntimeException e) {
+            channel.close();
+            throw e;
+        }
+        return open(new HdfBuffer(source), path, () -> {
+            source.close();
+            try {
+                channel.close();
+            } catch (IOException e) {
+                // nothing more is read through it
+            }
+        }, options);
     }
 
     /**
@@ -126,7 +162,7 @@ public final class Hdf5File implements AutoCloseable {
     public static Hdf5File open(RangeReader reader, OpenOptions options) throws IOException {
         Objects.requireNonNull(reader, "reader");
         Objects.requireNonNull(options, "options");
-        PagedSource source = PagedSource.open(reader);
+        PagedSource source = PagedSource.open(reader, options.readerPageSize(), options.readerCacheSize());
         return open(new HdfBuffer(source), null, source::close, options);
     }
 
@@ -231,8 +267,9 @@ public final class Hdf5File implements AutoCloseable {
     }
 
     /**
-     * Unmaps the file, or releases what was cached from a {@link RangeReader} (which stays open). Calling
-     * it again does nothing.
+     * Unmaps the file (or closes the channel it was read through), or releases what was cached from a
+     * {@link RangeReader} (which stays open). Closes the files its virtual datasets opened. Calling it again
+     * does nothing.
      */
     @Override
     public void close() {
