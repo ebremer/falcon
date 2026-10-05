@@ -1,7 +1,7 @@
 package com.ebremer.falcon.hdf5.index;
 
 import com.ebremer.falcon.hdf5.HdfFormatException;
-import com.ebremer.falcon.hdf5.HdfUnsupportedException;
+import com.ebremer.falcon.hdf5.checksum.MetadataChecksum;
 import com.ebremer.falcon.hdf5.io.FileContext;
 import com.ebremer.falcon.hdf5.io.HdfBuffer;
 import com.ebremer.falcon.hdf5.layout.ChunkRecord;
@@ -10,8 +10,9 @@ import java.util.List;
 
 /**
  * Extensible Array chunk index (spec Appendix C.D): the index for chunked datasets with a single
- * unlimited dimension. Elements (chunk entries) are addressed by the chunk's row-major linear index
- * and stored in a tiered structure rooted at the header ({@code "EAHD"}):
+ * unlimited dimension. Elements (chunk entries) are addressed by the chunk's linear index (see
+ * {@link ChunkGrid#forExtensibleArray}) and stored in a tiered structure rooted at the header
+ * ({@code "EAHD"}):
  *
  * <ul>
  *   <li>the <b>index block</b> ({@code "EAIB"}) holds the first {@code idxBlkElmts} elements inline,
@@ -25,9 +26,10 @@ import java.util.List;
  * <p>Super block {@code u} contains {@code 2^(u/2)} data blocks of {@code dblkMinElmts * 2^((u+1)/2)}
  * elements each; a super block is addressed directly from the index block when its data-block count is
  * below {@code sblkMinPtrs}, and via a secondary block otherwise. Element encoding matches the fixed
- * array: an address for unfiltered chunks (client id 0), or address + stored size + filter mask for
- * filtered chunks (client id 1). Very large data blocks are <b>paged</b> (split into fixed-size,
- * individually checksummed pages), with a page-init bitmap in the owning secondary block.
+ * array (see {@link FixedArray}). Data blocks larger than one page are <b>paged</b>: each page is a run
+ * of elements plus its own checksum, and the owning secondary block carries a page-init bitmap (bit
+ * {@code dataBlock * pagesPerBlock + page}, most-significant bit first); pages whose bit is clear were
+ * never written, so their chunks are unallocated.
  */
 public final class ExtensibleArray {
 
@@ -39,14 +41,14 @@ public final class ExtensibleArray {
     private ExtensibleArray() {
     }
 
-    public static List<ChunkRecord> readChunks(FileContext ctx, long headerAddress, int chunkBytes,
-                                               long[] datasetDims, int[] chunkDims) {
+    public static List<ChunkRecord> readChunks(FileContext ctx, long headerAddress, int chunkBytes, ChunkGrid grid) {
         HdfBuffer buf = ctx.buffer();
         if (!buf.hasSignature(headerAddress, EAHD)) {
             throw new HdfFormatException("expected extensible array header 'EAHD' at " + headerAddress);
         }
         int offsets = ctx.sizeOfOffsets();
         int lengths = ctx.sizeOfLengths();
+        MetadataChecksum.verify(buf, headerAddress, 12L + 6L * lengths + offsets, "extensible array header");
         int clientId = buf.getUnsignedByte(headerAddress + 5);
         int elemSize = buf.getUnsignedByte(headerAddress + 6);
         int maxBits = buf.getUnsignedByte(headerAddress + 7);
@@ -56,151 +58,129 @@ public final class ExtensibleArray {
         int maxPageBits = buf.getUnsignedByte(headerAddress + 11);
         long maxIndexSet = buf.getUnsignedValue(headerAddress + 12 + 4L * lengths, lengths);
         long indexBlock = buf.getAddress(headerAddress + 12 + 6L * lengths, offsets);
+        FixedArray.EntryFormat format = FixedArray.EntryFormat.of(clientId, elemSize, offsets, headerAddress);
+        if (maxBits < 1 || maxBits > 62 || dblkMinElmts == 0 || Integer.bitCount(dblkMinElmts) != 1
+                || log2(dblkMinElmts) > maxBits || sblkMinPtrs == 0 || Integer.bitCount(sblkMinPtrs) != 1
+                || maxPageBits < 1 || maxPageBits > 31) {
+            throw new HdfFormatException("invalid extensible array parameters at " + headerAddress);
+        }
         if (indexBlock == HdfBuffer.UNDEFINED_ADDRESS || maxIndexSet == 0) {
             return List.of();
+        }
+        if (maxIndexSet < 0 || maxIndexSet > (1L << maxBits)) {
+            throw new HdfFormatException("extensible array index set " + maxIndexSet + " exceeds its bounds at " + headerAddress);
         }
         if (!buf.hasSignature(indexBlock, EAIB)) {
             throw new HdfFormatException("expected extensible array index block 'EAIB' at " + indexBlock);
         }
 
-        int rank = datasetDims.length;
-        int[] chunksPerDim = new int[rank];
-        for (int d = 0; d < rank; d++) {
-            chunksPerDim[d] = (int) ((datasetDims[d] + chunkDims[d] - 1) / chunkDims[d]);
-        }
-
         int nsblks = 1 + (maxBits - log2(dblkMinElmts));
-        int pageElmts = 1 << maxPageBits;
+        long pageElmts = 1L << maxPageBits;
         int offsetBytes = (maxBits + 7) / 8; // width of a block's "block offset" field
 
         long elemBase = indexBlock + 6 + offsets;                          // inline element buffer
         long directRegion = elemBase + (long) idxBlkElmts * elemSize;      // direct data-block addresses
         int ndblkAddrs = 0;
+        int nsblkAddrs = 0;
         for (int u = 0; u < nsblks; u++) {
             if (superBlockDataBlocks(u) < sblkMinPtrs) {
-                ndblkAddrs += superBlockDataBlocks(u);
+                ndblkAddrs += (int) superBlockDataBlocks(u);
+            } else {
+                nsblkAddrs++;
             }
         }
         long secondaryRegion = directRegion + (long) ndblkAddrs * offsets; // secondary-block addresses
+        MetadataChecksum.verify(buf, indexBlock,
+                secondaryRegion + (long) nsblkAddrs * offsets - indexBlock, "extensible array index block");
 
         List<ChunkRecord> chunks = new ArrayList<>();
         long linear = 0;
         // Inline elements (chunk indices 0 .. idxBlkElmts-1).
         for (int i = 0; i < idxBlkElmts && linear < maxIndexSet; i++, linear++) {
-            addRecord(chunks, buf, elemBase + (long) i * elemSize, linear,
-                    clientId, offsets, lengths, chunkBytes, chunksPerDim, chunkDims);
+            format.read(buf, elemBase + (long) i * elemSize, linear, chunkBytes, grid, chunks);
         }
 
         int directCursor = 0;
         int secondaryCursor = 0;
         for (int u = 0; u < nsblks && linear < maxIndexSet; u++) {
-            int ndblks = superBlockDataBlocks(u);
-            long dblkNelmts = (long) (1 << ((u + 1) / 2)) * dblkMinElmts;
-            long[] dblkAddrs = new long[ndblks];
+            long ndblks = superBlockDataBlocks(u);
+            long dblkNelmts = (1L << ((u + 1) / 2)) * dblkMinElmts;
+            boolean paged = dblkNelmts > pageElmts;
+            long pagesPerBlock = paged ? dblkNelmts / pageElmts : 0;
+            if (ndblks * offsets > buf.size()) {
+                throw new HdfFormatException("extensible array super block " + u + " is larger than the file");
+            }
+            long[] dblkAddrs = new long[(int) ndblks];
+            long bitmap = -1; // address of the secondary block's page-init bitmap, if paged
             if (ndblks < sblkMinPtrs) {
                 for (int k = 0; k < ndblks; k++) {
                     dblkAddrs[k] = buf.getAddress(directRegion + (long) (directCursor + k) * offsets, offsets);
                 }
-                directCursor += ndblks;
+                directCursor += (int) ndblks;
             } else {
                 long secondary = buf.getAddress(secondaryRegion + (long) secondaryCursor * offsets, offsets);
                 secondaryCursor++;
                 if (secondary == HdfBuffer.UNDEFINED_ADDRESS) {
-                    java.util.Arrays.fill(dblkAddrs, HdfBuffer.UNDEFINED_ADDRESS);
-                } else {
-                    if (!buf.hasSignature(secondary, EASB)) {
-                        throw new HdfFormatException("expected extensible array secondary block 'EASB' at " + secondary);
-                    }
-                    long ptrs = secondary + 6 + offsets + offsetBytes; // sig, ver, client, header addr, block offset
-                    if (dblkNelmts > pageElmts) {
-                        // Paged data blocks: a page-init bitmap (ceil(pages-per-block / 8) bytes per data
-                        // block) precedes the data-block address list.
-                        long pagesPerBlock = dblkNelmts / pageElmts;
-                        ptrs += (long) ndblks * ((pagesPerBlock + 7) / 8);
-                    }
-                    for (int k = 0; k < ndblks; k++) {
-                        dblkAddrs[k] = buf.getAddress(ptrs + (long) k * offsets, offsets);
-                    }
+                    // The whole super block is unallocated; skip its elements without visiting them.
+                    linear = Math.min(maxIndexSet, linear + ndblks * dblkNelmts);
+                    continue;
+                }
+                if (!buf.hasSignature(secondary, EASB)) {
+                    throw new HdfFormatException("expected extensible array secondary block 'EASB' at " + secondary);
+                }
+                long ptrs = secondary + 6 + offsets + offsetBytes; // sig, ver, client, header addr, block offset
+                if (paged) {
+                    // Page-init bitmap: ceil(pages-per-block / 8) bytes per data block, then the addresses.
+                    bitmap = ptrs;
+                    ptrs += ndblks * ((pagesPerBlock + 7) / 8);
+                }
+                MetadataChecksum.verify(buf, secondary, ptrs + ndblks * offsets - secondary,
+                        "extensible array secondary block");
+                for (int k = 0; k < ndblks; k++) {
+                    dblkAddrs[k] = buf.getAddress(ptrs + (long) k * offsets, offsets);
                 }
             }
             for (int k = 0; k < ndblks && linear < maxIndexSet; k++) {
                 long addr = dblkAddrs[k];
-                boolean allocated = addr != HdfBuffer.UNDEFINED_ADDRESS;
-                if (allocated) {
-                    validateDataBlock(buf, addr);
+                if (addr == HdfBuffer.UNDEFINED_ADDRESS) {
+                    linear = Math.min(maxIndexSet, linear + dblkNelmts); // unallocated data block
+                    continue;
                 }
-                for (long j = 0; j < dblkNelmts && linear < maxIndexSet; j++, linear++) {
-                    if (allocated) {
-                        long element = elementAddress(addr, j, dblkNelmts, pageElmts, elemSize, offsets, offsetBytes);
-                        addRecord(chunks, buf, element, linear,
-                                clientId, offsets, lengths, chunkBytes, chunksPerDim, chunkDims);
+                if (!buf.hasSignature(addr, EADB)) {
+                    throw new HdfFormatException("expected extensible array data block 'EADB' at " + addr);
+                }
+                long base = addr + 6 + offsets + offsetBytes; // signature, version, client id, header, block offset
+                if (!paged) {
+                    long count = Math.min(dblkNelmts, maxIndexSet - linear);
+                    MetadataChecksum.verify(buf, addr, base + dblkNelmts * elemSize - addr, "extensible array data block");
+                    for (long j = 0; j < count; j++) {
+                        format.read(buf, base + j * elemSize, linear + j, chunkBytes, grid, chunks);
                     }
+                    linear += dblkNelmts;
+                    continue;
+                }
+                MetadataChecksum.verify(buf, addr, base - addr, "extensible array data block");
+                long pageStart = base + 4;
+                long pageStride = pageElmts * elemSize + 4;
+                for (long page = 0; page < pagesPerBlock && linear < maxIndexSet; page++) {
+                    long count = Math.min(pageElmts, maxIndexSet - linear);
+                    if (bitmap >= 0 && FixedArray.bitSet(buf, bitmap, k * pagesPerBlock + page)) {
+                        long pageAddress = pageStart + page * pageStride;
+                        MetadataChecksum.verify(buf, pageAddress, pageElmts * elemSize, "extensible array data block page");
+                        for (long j = 0; j < count; j++) {
+                            format.read(buf, pageAddress + j * elemSize, linear + j, chunkBytes, grid, chunks);
+                        }
+                    }
+                    linear += pageElmts; // a clear bit means the page was never written: all unallocated
                 }
             }
         }
         return chunks;
     }
 
-    private static long validateDataBlock(HdfBuffer buf, long addr) {
-        if (!buf.hasSignature(addr, EADB)) {
-            throw new HdfFormatException("expected extensible array data block 'EADB' at " + addr);
-        }
-        return addr;
-    }
-
-    /**
-     * Address of element {@code j} within a data block. A small block stores its elements contiguously
-     * after the block prefix; a large block is <b>paged</b> — after the prefix, each page is a 4-byte
-     * checksum followed by {@code pageElmts} elements.
-     */
-    private static long elementAddress(long dataBlock, long j, long dblkNelmts, int pageElmts,
-                                       int elemSize, int offsets, int offsetBytes) {
-        long base = dataBlock + 6 + offsets + offsetBytes; // signature, version, client id, header, block offset
-        if (dblkNelmts > pageElmts) {
-            long page = j / pageElmts;
-            long index = j % pageElmts;
-            return base + 4 + page * ((long) pageElmts * elemSize + 4) + index * elemSize;
-        }
-        return base + j * elemSize;
-    }
-
     /** Number of data blocks in super block {@code u}. */
-    private static int superBlockDataBlocks(int u) {
-        return 1 << (u / 2);
-    }
-
-    private static void addRecord(List<ChunkRecord> out, HdfBuffer buf, long elemAddr, long linear,
-                                  int clientId, int offsets, int lengths, int chunkBytes,
-                                  int[] chunksPerDim, int[] chunkDims) {
-        long address = buf.getAddress(elemAddr, offsets);
-        if (address == HdfBuffer.UNDEFINED_ADDRESS) {
-            return; // unallocated chunk -> fill value
-        }
-        int size;
-        int filterMask;
-        if (clientId == 1) { // filtered
-            size = (int) buf.getUnsignedValue(elemAddr + offsets, lengths);
-            filterMask = (int) buf.getUnsignedInt(elemAddr + offsets + lengths);
-        } else if (clientId == 0) {
-            size = chunkBytes;
-            filterMask = 0;
-        } else {
-            throw new HdfUnsupportedException("unsupported extensible array client id " + clientId);
-        }
-        out.add(new ChunkRecord(chunkOffset(linear, chunksPerDim, chunkDims), address, size, filterMask));
-    }
-
-    /** Maps a row-major linear chunk index to element coordinates. */
-    private static long[] chunkOffset(long linear, int[] chunksPerDim, int[] chunkDims) {
-        int rank = chunksPerDim.length;
-        long[] offset = new long[rank];
-        long remaining = linear;
-        for (int d = rank - 1; d >= 0; d--) {
-            long coord = chunksPerDim[d] == 0 ? 0 : remaining % chunksPerDim[d];
-            remaining = chunksPerDim[d] == 0 ? remaining : remaining / chunksPerDim[d];
-            offset[d] = coord * chunkDims[d];
-        }
-        return offset;
+    private static long superBlockDataBlocks(int u) {
+        return 1L << (u / 2);
     }
 
     /** Floor log2 of a power-of-two value. */

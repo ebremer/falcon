@@ -5,10 +5,12 @@ import com.ebremer.falcon.hdf5.HdfUnsupportedException;
 import com.ebremer.falcon.hdf5.btree.ChunkBTreeV1;
 import com.ebremer.falcon.hdf5.filter.FilterPipeline;
 import com.ebremer.falcon.hdf5.index.ChunkBTreeV2;
+import com.ebremer.falcon.hdf5.index.ChunkGrid;
 import com.ebremer.falcon.hdf5.index.ExtensibleArray;
 import com.ebremer.falcon.hdf5.index.FixedArray;
 import com.ebremer.falcon.hdf5.index.ImplicitIndex;
 import com.ebremer.falcon.hdf5.io.FileContext;
+import com.ebremer.falcon.hdf5.io.HdfBuffer;
 import com.ebremer.falcon.hdf5.layout.ChunkRecord;
 import com.ebremer.falcon.hdf5.layout.DataLayout;
 import java.util.List;
@@ -24,25 +26,21 @@ public final class ChunkedReader {
     private ChunkedReader() {
     }
 
-    public static byte[] assemble(FileContext ctx, DataLayout.Chunked layout, long[] datasetDims,
+    /**
+     * Assembles the whole dataset. {@code maxDims} are the dataspace's maximum dimensions (or
+     * {@code null} if it stores none): the array-style chunk indexes number their chunks over the
+     * maximum chunk grid, so they are needed to locate each chunk.
+     */
+    public static byte[] assemble(FileContext ctx, DataLayout.Chunked layout, long[] datasetDims, long[] maxDims,
                                   int elementSize, FilterPipeline pipeline, byte[] fill) {
-        long elements = 1;
-        for (long d : datasetDims) {
-            elements *= d;
-        }
-        byte[] output = new byte[Elements.checkedByteCount(elements, elementSize)];
+        byte[] output = new byte[Elements.checkedByteCount(product(datasetDims), elementSize)];
         tileFill(output, fill, elementSize);
 
-        int rank = datasetDims.length;
         int[] chunkDims = layout.chunkDimensions();
-        long chunkElements = 1;
-        for (int d : chunkDims) {
-            chunkElements *= d;
-        }
-        int chunkBytes = Elements.checkedByteCount(chunkElements, elementSize);
-        for (ChunkRecord chunk : enumerateChunks(ctx, layout, chunkBytes, datasetDims, chunkDims, rank)) {
+        int chunkBytes = chunkBytes(chunkDims, elementSize);
+        for (ChunkRecord chunk : enumerateChunks(ctx, layout, chunkBytes, datasetDims, maxDims)) {
             copyChunk(output, datasetDims, chunkDims, chunk.offset(),
-                    readChunk(ctx, chunk, pipeline, elementSize, chunkBytes), elementSize);
+                    readChunk(ctx, layout, chunk, datasetDims, pipeline, elementSize, chunkBytes), elementSize);
         }
         return output;
     }
@@ -53,56 +51,67 @@ public final class ChunkedReader {
      * large chunked dataset does not touch the whole dataset.
      */
     public static byte[] assembleSelection(FileContext ctx, DataLayout.Chunked layout, long[] datasetDims,
-                                           int elementSize, FilterPipeline pipeline, byte[] fill,
+                                           long[] maxDims, int elementSize, FilterPipeline pipeline, byte[] fill,
                                            long[] selOffset, long[] selCount) {
-        long selElements = 1;
-        for (long c : selCount) {
-            selElements *= c;
-        }
-        byte[] output = new byte[Elements.checkedByteCount(selElements, elementSize)];
+        byte[] output = new byte[Elements.checkedByteCount(product(selCount), elementSize)];
         tileFill(output, fill, elementSize);
 
-        int rank = datasetDims.length;
         int[] chunkDims = layout.chunkDimensions();
-        long chunkElements = 1;
-        for (int d : chunkDims) {
-            chunkElements *= d;
-        }
-        int chunkBytes = Elements.checkedByteCount(chunkElements, elementSize);
-        for (ChunkRecord chunk : enumerateChunks(ctx, layout, chunkBytes, datasetDims, chunkDims, rank)) {
+        int chunkBytes = chunkBytes(chunkDims, elementSize);
+        for (ChunkRecord chunk : enumerateChunks(ctx, layout, chunkBytes, datasetDims, maxDims)) {
             if (!overlaps(chunk.offset(), chunkDims, datasetDims, selOffset, selCount)) {
                 continue;
             }
-            byte[] bytes = readChunk(ctx, chunk, pipeline, elementSize, chunkBytes);
+            byte[] bytes = readChunk(ctx, layout, chunk, datasetDims, pipeline, elementSize, chunkBytes);
             copyIntersection(output, selOffset, selCount, chunk.offset(), chunkDims, datasetDims, bytes, elementSize);
         }
         return output;
     }
 
     private static List<ChunkRecord> enumerateChunks(FileContext ctx, DataLayout.Chunked layout, int chunkBytes,
-                                                     long[] datasetDims, int[] chunkDims, int rank) {
+                                                     long[] datasetDims, long[] maxDims) {
+        int rank = datasetDims.length;
+        int[] chunkDims = layout.chunkDimensions();
+        if (chunkDims.length != rank) {
+            throw new HdfFormatException("chunk rank " + chunkDims.length + " does not match dataset rank " + rank);
+        }
+        if (layout.indexAddress() == HdfBuffer.UNDEFINED_ADDRESS) {
+            return List.of(); // no chunk has ever been written: the whole dataset reads as the fill value
+        }
         return switch (layout.indexType()) {
             case DataLayout.INDEX_V1_BTREE -> ChunkBTreeV1.read(ctx, layout.indexAddress(), rank);
-            case DataLayout.INDEX_SINGLE_CHUNK ->
-                    List.of(new ChunkRecord(new long[rank], layout.indexAddress(), chunkBytes, 0));
-            case DataLayout.INDEX_IMPLICIT ->
-                    ImplicitIndex.readChunks(layout.indexAddress(), chunkBytes, datasetDims, chunkDims);
-            case DataLayout.INDEX_FIXED_ARRAY ->
-                    FixedArray.readChunks(ctx, layout.indexAddress(), chunkBytes, datasetDims, chunkDims);
-            case DataLayout.INDEX_EXTENSIBLE_ARRAY ->
-                    ExtensibleArray.readChunks(ctx, layout.indexAddress(), chunkBytes, datasetDims, chunkDims);
+            case DataLayout.INDEX_SINGLE_CHUNK -> {
+                // A filtered single chunk records its stored size and filter mask in the layout message.
+                long size = layout.singleChunkSize() >= 0 ? layout.singleChunkSize() : chunkBytes;
+                if (size > Integer.MAX_VALUE) {
+                    throw new HdfFormatException("single chunk is too large: " + size + " bytes");
+                }
+                yield List.of(new ChunkRecord(new long[rank], layout.indexAddress(), (int) size,
+                        layout.singleChunkFilterMask()));
+            }
+            case DataLayout.INDEX_IMPLICIT -> ImplicitIndex.readChunks(layout.indexAddress(), chunkBytes,
+                    ChunkGrid.forFixedArray(datasetDims, maxDims, chunkDims), ctx.buffer().size());
+            case DataLayout.INDEX_FIXED_ARRAY -> FixedArray.readChunks(ctx, layout.indexAddress(), chunkBytes,
+                    ChunkGrid.forFixedArray(datasetDims, maxDims, chunkDims));
+            case DataLayout.INDEX_EXTENSIBLE_ARRAY -> ExtensibleArray.readChunks(ctx, layout.indexAddress(), chunkBytes,
+                    ChunkGrid.forExtensibleArray(datasetDims, maxDims, chunkDims));
             case DataLayout.INDEX_V2_BTREE ->
                     ChunkBTreeV2.readChunks(ctx, layout.indexAddress(), chunkBytes, datasetDims, chunkDims);
-            default -> throw new HdfUnsupportedException(
-                    "chunk index type " + layout.indexType() + " is implemented in a later increment");
+            default -> throw new HdfUnsupportedException("unknown chunk index type " + layout.indexType());
         };
     }
 
-    private static byte[] readChunk(FileContext ctx, ChunkRecord chunk, FilterPipeline pipeline,
-                                    int elementSize, int chunkBytes) {
-        if (pipeline == null) {
+    private static byte[] readChunk(FileContext ctx, DataLayout.Chunked layout, ChunkRecord chunk,
+                                    long[] datasetDims, FilterPipeline pipeline, int elementSize, int chunkBytes) {
+        boolean filtered = pipeline != null
+                && !(layout.dontFilterPartialBoundChunks() && isPartialEdgeChunk(chunk.offset(), layout, datasetDims));
+        if (!filtered) {
             // Unfiltered chunks are a cheap copy straight from the memory mapping; no need to cache.
-            return ctx.buffer().getBytes(chunk.address(), chunk.size());
+            if (chunk.size() < chunkBytes) {
+                throw new HdfFormatException("unfiltered chunk at " + chunk.address() + " is " + chunk.size()
+                        + " bytes, expected " + chunkBytes);
+            }
+            return ctx.buffer().getBytes(chunk.address(), chunkBytes);
         }
         byte[] cached = ctx.chunkCache().get(chunk.address());
         if (cached != null) {
@@ -115,6 +124,45 @@ public final class ChunkedReader {
         }
         ctx.chunkCache().put(chunk.address(), bytes);
         return bytes;
+    }
+
+    /**
+     * True if the chunk extends past the dataset's current extent in any dimension
+     * ({@code H5D__chunk_is_partial_edge_chunk}). With the layout's "don't filter partial bound chunks"
+     * flag, such chunks are stored without passing through the filter pipeline.
+     */
+    private static boolean isPartialEdgeChunk(long[] chunkOffset, DataLayout.Chunked layout, long[] datasetDims) {
+        int[] chunkDims = layout.chunkDimensions();
+        for (int d = 0; d < chunkOffset.length; d++) {
+            if (chunkOffset[d] + chunkDims[d] > datasetDims[d]) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static int chunkBytes(int[] chunkDims, int elementSize) {
+        long chunkElements = 1;
+        for (int d : chunkDims) {
+            chunkElements = multiply(chunkElements, d);
+        }
+        return Elements.checkedByteCount(chunkElements, elementSize);
+    }
+
+    private static long product(long[] dims) {
+        long n = 1;
+        for (long d : dims) {
+            n = multiply(n, d);
+        }
+        return n;
+    }
+
+    private static long multiply(long a, long b) {
+        try {
+            return Math.multiplyExact(a, b);
+        } catch (ArithmeticException e) {
+            throw new HdfFormatException("dataset extent overflows: " + a + " x " + b);
+        }
     }
 
     /** True if a chunk (clamped to the dataset extent) intersects the selection in every dimension. */

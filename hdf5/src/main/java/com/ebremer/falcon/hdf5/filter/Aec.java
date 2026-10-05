@@ -11,8 +11,9 @@ package com.ebremer.falcon.hdf5.filter;
  * with optional nearest-neighbour (unit-delay) preprocessing. Bits are read most-significant-first.
  *
  * <p>Both <b>unsigned</b> and <b>signed</b> samples are decoded; signed data (libaec's
- * {@code DATA_SIGNED}, used by HDF5 for signed integer types under nearest-neighbour preprocessing)
- * sign-extends the reference/raw samples and unmaps against the signed value bounds.
+ * {@code DATA_SIGNED}) sign-extends the reference/raw samples and unmaps against the signed value
+ * bounds. HDF5's szip filter never sets it &mdash; libaec's SZ compatibility layer codes every sample
+ * unsigned (see {@link Szip}) &mdash; but the libaec reference vectors cover it.
  */
 public final class Aec {
 
@@ -33,6 +34,9 @@ public final class Aec {
      * decoded by {@link #decode} (and by libaec) with {@code flags = 0} and matching parameters.
      */
     public static byte[] encode(long[] samples, int bitsPerSample, int blockSize) {
+        if (bitsPerSample < 1 || bitsPerSample > 32) {
+            throw new IllegalArgumentException("AEC samples are 1 to 32 bits wide, not " + bitsPerSample);
+        }
         int idLen = idLen(bitsPerSample);
         int idMax = (1 << idLen) - 1;
         int maxSplitK = Math.min(bitsPerSample - 1, idMax - 2);
@@ -86,9 +90,19 @@ public final class Aec {
      * @param flags     libaec flags ({@link #FLAG_PREPROCESS} and {@link #FLAG_SIGNED} affect decoding)
      */
     public static long[] decode(byte[] data, int sampleCount, int bitsPerSample, int blockSize, int rsi, int flags) {
+        return decode(data, 0, sampleCount, bitsPerSample, blockSize, rsi, flags);
+    }
+
+    /** As {@link #decode(byte[], int, int, int, int, int)}, for a bitstream starting at byte {@code offset}. */
+    public static long[] decode(byte[] data, int offset, int sampleCount, int bitsPerSample, int blockSize,
+                                int rsi, int flags) {
+        if (bitsPerSample < 1 || bitsPerSample > 32 || blockSize < 1 || rsi < 1) {
+            throw new IllegalArgumentException("invalid AEC parameters: bits=" + bitsPerSample
+                    + " block=" + blockSize + " rsi=" + rsi);
+        }
         boolean preprocess = (flags & FLAG_PREPROCESS) != 0;
         boolean signed = (flags & FLAG_SIGNED) != 0;
-        BitReader in = new BitReader(data);
+        BitReader in = new BitReader(data, offset);
         int idLen = idLen(bitsPerSample);
         int idMax = (1 << idLen) - 1;
         long xmin = signed ? -(1L << (bitsPerSample - 1)) : 0;
@@ -142,15 +156,15 @@ public final class Aec {
                         }
                     } else { // zero block
                         long zeroBlocks = in.fundamentalSequence() + 1;
-                        long count;
-                        if (zeroBlocks == 5) { // remainder of segment
-                            count = rsiSamples - produced;
-                        } else {
-                            if (zeroBlocks > 5) {
-                                zeroBlocks--;
-                            }
-                            count = zeroBlocks * blockSize - ref;
+                        if (zeroBlocks == 5) {
+                            // "remainder of segment": to the end of the current 64-block segment, or of
+                            // the RSI if that comes first (libaec m_zero_block).
+                            int used = produced / blockSize;
+                            zeroBlocks = Math.min(rsi - used, 64 - (used % 64));
+                        } else if (zeroBlocks > 5) {
+                            zeroBlocks--;
                         }
+                        long count = zeroBlocks * blockSize - ref;
                         for (long i = 0; i < count && produced < rsiSamples && pos < sampleCount; i++) {
                             out[pos] = preprocess ? out[pos - 1] : 0;
                             pos++;
@@ -255,10 +269,11 @@ public final class Aec {
     /** Most-significant-first bit reader over a byte array. */
     private static final class BitReader {
         private final byte[] data;
-        private int bit;
+        private long bit;
 
-        BitReader(byte[] data) {
+        BitReader(byte[] data, int offset) {
             this.data = data;
+            this.bit = (long) offset * 8;
         }
 
         int read(int n) {
@@ -268,7 +283,7 @@ public final class Aec {
         long readLong(int n) {
             long v = 0;
             for (int i = 0; i < n; i++) {
-                int b = (data[bit >> 3] >> (7 - (bit & 7))) & 1;
+                int b = (data[(int) (bit >> 3)] >> (7 - (int) (bit & 7))) & 1;
                 v = (v << 1) | b;
                 bit++;
             }
@@ -278,7 +293,7 @@ public final class Aec {
         /** Counts zero bits up to (and consuming) the next 1 bit. */
         int fundamentalSequence() {
             int c = 0;
-            while (((data[bit >> 3] >> (7 - (bit & 7))) & 1) == 0) {
+            while (((data[(int) (bit >> 3)] >> (7 - (int) (bit & 7))) & 1) == 0) {
                 c++;
                 bit++;
             }

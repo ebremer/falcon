@@ -8,9 +8,10 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 
 /**
- * Validates the szip filter end to end: an szip-parameterized AEC stream (produced by libaec with
- * {@code SZ_LSB | SZ_NN}, simulating a little-endian HDF5 szip chunk) decodes back to the original
- * chunk bytes.
+ * Validates the szip filter end to end against chunks in the exact form libhdf5 + libaec store them
+ * (produced by libaec's SZ compatibility layer: a 4-byte size header, byte-interleaved 32/64-bit
+ * pixels, padded scanlines, EC and NN coding, both byte orders). Whole datasets of such chunks are
+ * covered by {@code SzipDatasetTest}.
  */
 class SzipFilterTest {
 
@@ -32,12 +33,12 @@ class SzipFilterTest {
 
             FilterPipeline pipeline = new FilterPipeline(List.of(new FilterPipeline.Filter(
                     Filters.SZIP, 0, new int[] {mask, pixelsPerBlock, bitsPerPixel, pixelsPerScanline})));
-            byte[] actual = pipeline.decode(encoded, 0, elementSize, expected.length);
+            byte[] actual = pipeline.decode(encoded, 0, Math.max(1, elementSize), expected.length);
 
             assertArrayEquals(expected, actual,
                     "szip chunk mask=" + mask + " ppb=" + pixelsPerBlock + " bpp=" + bitsPerPixel);
             count++;
         }
-        assertTrue(count >= 4, "expected several szip chunk vectors, parsed " + count);
+        assertTrue(count >= 8, "expected several szip chunk vectors, parsed " + count);
     }
 }

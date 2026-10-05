@@ -320,9 +320,9 @@ public final class Dataset extends Hdf5Object {
                 yield ctx.buffer().segmentSlice(c.address(), byteCount);
             }
             case DataLayout.Chunked chunked -> {
-                long[] dims = dataspace().dimensions();
-                byte[] assembled = ChunkedReader.assemble(
-                        ctx, chunked, dims, datatype().size(), filterPipeline(), fillValue());
+                Dataspace space = dataspace();
+                byte[] assembled = ChunkedReader.assemble(ctx, chunked, space.dimensions(), space.maxDimensions(),
+                        datatype().size(), filterPipeline(), fillValue());
                 yield MemorySegment.ofArray(assembled);
             }
             case DataLayout.Virtual virtual -> {
@@ -342,8 +342,8 @@ public final class Dataset extends Hdf5Object {
         int elementSize = datatype().size();
         long[] dims = dataspace().dimensions();
         if (layout() instanceof DataLayout.Chunked chunked) {
-            return MemorySegment.ofArray(ChunkedReader.assembleSelection(
-                    ctx, chunked, dims, elementSize, filterPipeline(), fillValue(), offset, count));
+            return MemorySegment.ofArray(ChunkedReader.assembleSelection(ctx, chunked, dims,
+                    dataspace().maxDimensions(), elementSize, filterPipeline(), fillValue(), offset, count));
         }
         return MemorySegment.ofArray(Hyperslab.extract(rawData(), dims, offset, count, elementSize));
     }

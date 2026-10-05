@@ -1,8 +1,10 @@
 package com.ebremer.falcon.hdf5;
 
+import com.ebremer.falcon.hdf5.checksum.Fletcher32;
 import com.ebremer.falcon.hdf5.checksum.Lookup3;
-import com.ebremer.falcon.hdf5.filter.Aec;
 import com.ebremer.falcon.hdf5.filter.Filters;
+import com.ebremer.falcon.hdf5.filter.ScaleOffset;
+import com.ebremer.falcon.hdf5.filter.Szip;
 import com.ebremer.falcon.hdf5.write.GrowBuffer;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -446,7 +448,11 @@ public final class Hdf5Writer implements AutoCloseable {
         }
     }
 
-    /** Attaches attributes and (for chunked datasets) filters to a dataset. */
+    /**
+     * Attaches attributes and (for chunked datasets) filters to a dataset. Filters form a pipeline
+     * applied to each chunk in the order they are added (and reversed on read), as in libhdf5; each may
+     * be added once.
+     */
     public static final class DatasetWriter {
         private final DatasetSpec spec;
 
@@ -457,53 +463,79 @@ public final class Hdf5Writer implements AutoCloseable {
         /** Compresses each chunk with deflate (gzip) at the given level (0&ndash;9). Chunked datasets only. */
         public DatasetWriter deflate(int level) {
             requireChunked();
-            spec.deflateLevel = level;
+            if (level < 0 || level > 9) {
+                throw new IllegalArgumentException("deflate level must be 0-9, not " + level);
+            }
+            addFilter(Filters.DEFLATE, level);
             return this;
         }
 
         /** Byte-shuffles each chunk (grouping like-position bytes) to improve compression. Chunked only. */
         public DatasetWriter shuffle() {
             requireChunked();
-            spec.shuffle = true;
+            addFilter(Filters.SHUFFLE, 0);
             return this;
         }
 
         /** Appends a Fletcher-32 checksum to each stored chunk. Chunked datasets only. */
         public DatasetWriter fletcher32() {
             requireChunked();
-            spec.fletcher32 = true;
+            addFilter(Filters.FLETCHER32, 0);
             return this;
         }
 
         /**
-         * Losslessly compresses integer chunks with the scale-offset filter (subtract the minimum, then
-         * bit-pack). Chunked {@code int32} datasets only, and not combined with other filters.
+         * Losslessly compresses integer chunks with the scale-offset filter, exactly as libhdf5 does with
+         * automatic minbits: elements equal to the fill value get a reserved code, the rest are stored
+         * as their offset from the chunk minimum in as few bits as the range needs. Chunked integer
+         * datasets only, as the first filter.
          */
         public DatasetWriter scaleOffset() {
             requireChunked();
-            spec.scaleOffset = true;
+            requireInteger("scaleOffset");
+            requireFirst("scaleOffset");
+            addFilter(Filters.SCALEOFFSET, 0);
             return this;
         }
 
         /**
          * Stores each element in only its {@code precision} low bits with the n-bit filter (an unsigned
-         * integer datatype of that precision). Chunked {@code int32} datasets only; values must be
-         * non-negative and fit in {@code precision} bits.
+         * integer datatype of that precision). Chunked integer datasets only, as the first filter; values
+         * must be non-negative and fit in {@code precision} bits.
          */
         public DatasetWriter nbit(int precision) {
             requireChunked();
+            requireInteger("nbit");
+            requireFirst("nbit");
+            if (precision < 1 || precision > spec.elementSize * 8) {
+                throw new IllegalArgumentException("n-bit precision must be 1-" + spec.elementSize * 8 + ", not " + precision);
+            }
             spec.nbitPrecision = precision;
+            addFilter(Filters.NBIT, precision);
             return this;
         }
 
         /**
-         * Compresses integer chunks with the szip filter (pure-Java CCSDS extended-Rice encoder, no
-         * preprocessing). Chunked {@code int32} datasets only. Note: this environment's h5py has szip
-         * disabled, so verify round-trips with Falcon (or libaec), not h5py.
+         * Compresses chunks with the szip filter in the form libhdf5 + libaec store it (entropy coding,
+         * 8 pixels per block; Falcon's pure-Java CCSDS encoder does not apply nearest-neighbour
+         * preprocessing). Chunked integer or floating-point datasets; only {@link #shuffle()} may come
+         * before it. A chunk that szip cannot shrink is stored unfiltered, as libhdf5 does.
          */
         public DatasetWriter szip() {
             requireChunked();
-            spec.szip = true;
+            int typeClass = spec.datatype[0] & 0x0F;
+            if (typeClass != 0 && typeClass != 1) {
+                throw new IllegalStateException("szip requires an integer or floating-point dataset");
+            }
+            for (FilterSpec filter : spec.filters) {
+                if (filter.id() != Filters.SHUFFLE) {
+                    throw new IllegalStateException("szip must come before every filter except shuffle");
+                }
+            }
+            if (elementCount(spec.chunkShape) < SZIP_PIXELS_PER_BLOCK) {
+                throw new IllegalStateException("szip needs at least " + SZIP_PIXELS_PER_BLOCK + " elements per chunk");
+            }
+            addFilter(Filters.SZIP, 0);
             return this;
         }
 
@@ -511,6 +543,30 @@ public final class Hdf5Writer implements AutoCloseable {
             if (spec.chunkShape == null) {
                 throw new IllegalStateException("filters require a chunked dataset");
             }
+        }
+
+        private void requireInteger(String filter) {
+            if ((spec.datatype[0] & 0x0F) != 0) {
+                throw new IllegalStateException(filter + " requires an integer dataset");
+            }
+        }
+
+        private void requireFirst(String filter) {
+            if (!spec.filters.isEmpty()) {
+                throw new IllegalStateException(filter + " must be the first filter in the pipeline");
+            }
+        }
+
+        private void addFilter(int id, int parameter) {
+            for (FilterSpec filter : spec.filters) {
+                if (filter.id() == id) {
+                    throw new IllegalStateException("filter " + id + " is already in the pipeline");
+                }
+            }
+            if (spec.nbitPrecision >= 0 && id == Filters.SCALEOFFSET) {
+                throw new IllegalStateException("scaleOffset cannot follow nbit");
+            }
+            spec.filters.add(new FilterSpec(id, parameter));
         }
 
         /**
@@ -712,8 +768,7 @@ public final class Hdf5Writer implements AutoCloseable {
         messages.add(new Message(3, 0x01, datatype));
         messages.add(new Message(5, 0x01, fillValueBody(dataset.fillValue)));
         messages.add(new Message(8, 0x00, layout));
-        if (dataset.shuffle || dataset.deflateLevel >= 0 || dataset.fletcher32 || dataset.scaleOffset
-                || dataset.nbitPrecision >= 0 || dataset.szip) {
+        if (!dataset.filters.isEmpty()) {
             messages.add(new Message(11, 0x00, filterPipelineBody(dataset)));
         }
         if (attributeInfo != null) {
@@ -727,56 +782,83 @@ public final class Hdf5Writer implements AutoCloseable {
         return headerAddress;
     }
 
+    /** Fixed-array page size, as {@code 2^FA_PAGE_BITS} entries (libhdf5's default page bits). */
+    private static final int FA_PAGE_BITS = 10;
+    /** Pixels per szip block: libaec decodes block sizes 8, 16, 32 and 64. */
+    private static final int SZIP_PIXELS_PER_BLOCK = 8;
+    // Filter flags in the pipeline message: libhdf5 marks every filter optional except fletcher32.
+    private static final int FILTER_OPTIONAL = 1;
+    private static final int FILTER_MANDATORY = 0;
+
+    /** One encoded chunk: its stored bytes, and the mask of filters that were skipped for it. */
+    private record EncodedChunk(byte[] bytes, int filterMask) {
+    }
+
     /**
-     * Writes chunked storage: each chunk's (fill-padded) data block, then a fixed-array index (a
-     * {@code "FADB"} data block listing chunk addresses in row-major order, and its {@code "FAHD"}
-     * header). Returns the version-4 chunked data-layout message body.
+     * Writes chunked storage: each chunk's (fill-padded, filtered) data, then a fixed-array index
+     * listing chunk addresses in row-major order &mdash; a {@code "FADB"} data block (paged, with a
+     * page-init bitmap and per-page checksums, beyond 1024 chunks) and its {@code "FAHD"} header.
+     * Returns the version-4 chunked data-layout message body, which HDF5 1.10 and later read.
      */
     private static byte[] writeChunkedStorage(GrowBuffer buf, DatasetSpec dataset) {
         List<byte[]> chunks = splitChunks(dataset);
-        boolean filtered = dataset.shuffle || dataset.deflateLevel >= 0 || dataset.fletcher32
-                || dataset.scaleOffset || dataset.nbitPrecision >= 0 || dataset.szip;
+        boolean filtered = !dataset.filters.isEmpty();
+        int chunkBytes = Math.toIntExact(elementCount(dataset.chunkShape) * dataset.elementSize);
         long[] chunkAddresses = new long[chunks.size()];
         int[] chunkSizes = new int[chunks.size()];
+        int[] filterMasks = new int[chunks.size()];
         for (int i = 0; i < chunks.size(); i++) {
-            byte[] block;
-            if (dataset.scaleOffset) {
-                block = scaleOffsetEncode(chunks.get(i), dataset.elementSize);
-            } else if (dataset.szip) {
-                block = szipEncode(chunks.get(i), dataset.elementSize);
-            } else if (dataset.nbitPrecision >= 0) {
-                block = nbitEncode(chunks.get(i), dataset.elementSize, dataset.nbitPrecision);
-            } else {
-                block = applyFilters(chunks.get(i), dataset);
-            }
+            EncodedChunk encoded = encodeChunk(chunks.get(i), dataset);
             buf.align(8);
             chunkAddresses[i] = buf.position();
-            chunkSizes[i] = block.length;
-            buf.bytes(block);
+            chunkSizes[i] = encoded.bytes().length;
+            filterMasks[i] = encoded.filterMask();
+            buf.bytes(encoded.bytes());
         }
 
         int offsets = 8;
-        int lengths = 8;
         int clientId = filtered ? 1 : 0;
-        int entrySize = filtered ? offsets + lengths + 4 : offsets; // filtered: address + stored size + mask
-        int dataBlockSize = 6 + offsets + chunks.size() * entrySize + 4;
+        // A filtered entry is address + stored chunk size + filter mask; layout version 4 (HDF5 1.10-1.14)
+        // sizes the chunk-size field to the unfiltered chunk size plus one byte (H5D__farray_crt_context).
+        int sizeWidth = filtered ? chunkSizeWidth(chunkBytes) : 0;
+        int entrySize = offsets + (filtered ? sizeWidth + 4 : 0);
+        int count = chunks.size();
+        int pageEntries = 1 << FA_PAGE_BITS;
+        boolean paged = count > pageEntries;
+        int pages = paged ? (count + pageEntries - 1) / pageEntries : 0;
+        int bitmapBytes = (pages + 7) / 8;
+        long dataBlockSize = paged
+                ? 6 + offsets + bitmapBytes + 4 + (long) count * entrySize + 4L * pages
+                : 6 + offsets + (long) count * entrySize + 4;
         buf.align(8);
-        long dataBlockAddress = buf.position();
+        int dataBlockAddress = buf.position();
         long headerAddress = align8(dataBlockAddress + dataBlockSize);
 
-        // Fixed-array data block: signature, version, client id, heap header address, entries, checksum.
+        // Fixed-array data block: signature, version, client id, header address, then either the entries
+        // or (paged) the page-init bitmap; the prefix checksum; then (paged) each page and its checksum.
         buf.bytes(new byte[] {'F', 'A', 'D', 'B'});
         buf.u8(0);
         buf.u8(clientId);
         buf.u64(headerAddress);
-        for (int i = 0; i < chunks.size(); i++) {
-            buf.u64(chunkAddresses[i]);
-            if (filtered) {
-                buf.u64(chunkSizes[i]);
-                buf.u32(0); // filter mask: all filters applied
+        if (!paged) {
+            for (int i = 0; i < count; i++) {
+                writeEntry(buf, chunkAddresses[i], chunkSizes[i], filterMasks[i], filtered, sizeWidth);
+            }
+            buf.u32(buf.checksum(dataBlockAddress, buf.position()));
+        } else {
+            for (int b = 0; b < bitmapBytes; b++) { // every page is written: one bit per page, MSB first
+                int bits = Math.min(8, pages - 8 * b);
+                buf.u8((0xFF << (8 - bits)) & 0xFF);
+            }
+            buf.u32(buf.checksum(dataBlockAddress, buf.position()));
+            for (int page = 0; page < pages; page++) {
+                int pageStart = buf.position();
+                for (int i = page * pageEntries; i < Math.min(count, (page + 1) * pageEntries); i++) {
+                    writeEntry(buf, chunkAddresses[i], chunkSizes[i], filterMasks[i], filtered, sizeWidth);
+                }
+                buf.u32(buf.checksum(pageStart, buf.position()));
             }
         }
-        buf.u32(buf.checksum((int) dataBlockAddress, buf.position()));
 
         // Fixed-array header: signature, version, client id, entry size, page bits, max entries,
         // data block address, checksum.
@@ -786,118 +868,103 @@ public final class Hdf5Writer implements AutoCloseable {
         buf.u8(0);
         buf.u8(clientId);
         buf.u8(entrySize);
-        buf.u8(10);                    // page bits (data block is not paged for these sizes)
-        buf.u64(chunks.size());        // max entries
+        buf.u8(FA_PAGE_BITS);
+        buf.u64(count);                // max entries: one per chunk of the (fixed) chunk grid
         buf.u64(dataBlockAddress);
         buf.u32(buf.checksum(headerStart, buf.position()));
 
-        return chunkedLayoutBody(dataset.chunkShape, dataset.elementSize, headerAddress, filtered);
+        return chunkedLayoutBody(dataset.chunkShape, dataset.elementSize, headerAddress);
     }
 
-    /** Applies the dataset's filter chain to a chunk, in write order: shuffle, deflate, fletcher32. */
-    private static byte[] applyFilters(byte[] chunk, DatasetSpec dataset) {
-        byte[] block = chunk;
-        if (dataset.shuffle) {
-            block = shuffle(block, dataset.elementSize);
+    private static void writeEntry(GrowBuffer buf, long address, int size, int filterMask, boolean filtered,
+                                   int sizeWidth) {
+        buf.u64(address);
+        if (filtered) {
+            buf.uvar(size, sizeWidth);
+            buf.u32(filterMask);
         }
-        if (dataset.deflateLevel >= 0) {
-            block = deflate(block, dataset.deflateLevel);
-        }
-        if (dataset.fletcher32) {
-            block = appendFletcher32(block);
-        }
-        return block;
-    }
-
-    /** The filter-pipeline message, listing the filters in the order they are applied on write. */
-    private static byte[] filterPipelineBody(DatasetSpec dataset) {
-        GrowBuffer b = new GrowBuffer();
-        b.u8(2); // version
-        if (dataset.szip) {
-            b.u8(1);
-            // szip client data: option mask (EC + LSB, no NN/MSB), pixels-per-block, bits-per-pixel,
-            // pixels-per-scanline (= block size, so one block per reference-sample interval).
-            writeFilter(b, Filters.SZIP, 0, 0x0c, 8, dataset.elementSize * 8, 8);
-            return b.toByteArray();
-        }
-        if (dataset.nbitPrecision >= 0) {
-            b.u8(1);
-            int elements = 1;
-            for (long c : dataset.chunkShape) {
-                elements *= (int) c;
-            }
-            // n-bit client data: total, flag, nelmts, ATOMIC, size, byte order (0=LE), precision, offset.
-            writeFilter(b, Filters.NBIT, 0,
-                    8, 0, elements, 1, dataset.elementSize, 0, dataset.nbitPrecision, 0);
-            return b.toByteArray();
-        }
-        if (dataset.scaleOffset) {
-            b.u8(1);
-            int elements = 1;
-            for (long c : dataset.chunkShape) {
-                elements *= (int) c;
-            }
-            // scale-offset client data for a signed little-endian int (size, sign, order, fill available).
-            writeFilter(b, Filters.SCALEOFFSET, 1,
-                    2, 0, elements, 0, dataset.elementSize, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
-            return b.toByteArray();
-        }
-        int count = (dataset.shuffle ? 1 : 0) + (dataset.deflateLevel >= 0 ? 1 : 0) + (dataset.fletcher32 ? 1 : 0);
-        b.u8(count);
-        if (dataset.shuffle) {
-            writeFilter(b, Filters.SHUFFLE, 1, dataset.elementSize);
-        }
-        if (dataset.deflateLevel >= 0) {
-            writeFilter(b, Filters.DEFLATE, 1, dataset.deflateLevel);
-        }
-        if (dataset.fletcher32) {
-            writeFilter(b, Filters.FLETCHER32, 0);
-        }
-        return b.toByteArray();
     }
 
     /**
-     * Integer scale-offset encode: a 21-byte header ({@code minbits}, minimum value, fill value) then
-     * each element packed as {@code minbits} bits (value minus the minimum, MSB-first). {@code minbits}
-     * reserves the all-ones code (the fill marker), so no real value ever encodes to it.
+     * Bytes for a filtered chunk's stored size in layout version 4: enough for the unfiltered chunk
+     * size plus one more byte, in case a filter grows the chunk ({@code 1 + (log2(size) + 8) / 8}).
      */
-    private static byte[] scaleOffsetEncode(byte[] chunk, int elementSize) {
-        int elements = chunk.length / elementSize;
-        long[] values = new long[elements];
-        long min = Long.MAX_VALUE;
-        long max = Long.MIN_VALUE;
-        for (int i = 0; i < elements; i++) {
-            long v = signedLittleEndian(chunk, i * elementSize, elementSize);
-            values[i] = v;
-            min = Math.min(min, v);
-            max = Math.max(max, v);
-        }
-        long range = max - min;
-        int minBits = 0;
-        if (range != 0) {
-            minBits = 64 - Long.numberOfLeadingZeros(range);
-            if (range == (1L << minBits) - 1) {
-                minBits++; // keep the all-ones code free for the fill marker
-            }
-        }
+    private static int chunkSizeWidth(int chunkBytes) {
+        int log2 = 31 - Integer.numberOfLeadingZeros(Math.max(1, chunkBytes));
+        return Math.min(8, 1 + (log2 + 8) / 8);
+    }
 
-        GrowBuffer b = new GrowBuffer();
-        b.u32(minBits);
-        b.u8(8);       // width of the minimum-value field
-        b.u64(min);    // minimum value
-        b.u64(0);      // fill value
-        if (minBits > 0) {
-            int packedBytes = (elements * minBits + 7) / 8;
-            byte[] packed = new byte[packedBytes];
-            int bit = 0;
-            for (long value : values) {
-                long code = value - min;
-                for (int k = minBits - 1; k >= 0; k--) {
-                    packed[bit >> 3] |= (int) ((code >> k) & 1) << (7 - (bit & 7));
-                    bit++;
-                }
+    /**
+     * Runs a chunk through the dataset's filters in pipeline order. A filter that cannot help a chunk
+     * (szip on incompressible data) is skipped for it, recorded in the chunk's filter mask, as libhdf5
+     * does for optional filters.
+     */
+    private static EncodedChunk encodeChunk(byte[] chunk, DatasetSpec dataset) {
+        byte[] block = chunk;
+        int mask = 0;
+        for (int i = 0; i < dataset.filters.size(); i++) {
+            FilterSpec filter = dataset.filters.get(i);
+            byte[] next = switch (filter.id()) {
+                case Filters.SHUFFLE -> shuffle(block, dataset.elementSize);
+                case Filters.DEFLATE -> deflate(block, filter.parameter());
+                case Filters.FLETCHER32 -> appendFletcher32(block);
+                case Filters.NBIT -> filter.parameter() == dataset.elementSize * 8
+                        ? block // full precision: libhdf5 flags "no compression needed" and stores it as is
+                        : nbitEncode(block, dataset.elementSize, filter.parameter());
+                case Filters.SCALEOFFSET -> ScaleOffset.encodeInteger(block, dataset.elementSize, true,
+                        fillBits(dataset));
+                case Filters.SZIP -> Szip.encode(block, szipClientData(dataset));
+                default -> throw new IllegalStateException("unknown filter " + filter.id());
+            };
+            if (next == null) {
+                mask |= 1 << i;
+            } else {
+                block = next;
             }
-            b.bytes(packed);
+        }
+        return new EncodedChunk(block, mask);
+    }
+
+    /** The dataset's fill value bits (its custom fill value, or the default 0), little-endian. */
+    private static long fillBits(DatasetSpec dataset) {
+        long bits = 0;
+        if (dataset.fillValue != null) {
+            for (int b = 0; b < Math.min(8, dataset.fillValue.length); b++) {
+                bits |= (long) (dataset.fillValue[b] & 0xff) << (8 * b);
+            }
+        }
+        return bits;
+    }
+
+    private static int[] szipClientData(DatasetSpec dataset) {
+        return Szip.clientData(Szip.EC, SZIP_PIXELS_PER_BLOCK, dataset.elementSize * 8, false, dataset.chunkShape);
+    }
+
+    /**
+     * The filter-pipeline message (version 2), listing the filters in the order they are applied on
+     * write, each with the flags and client data libhdf5 stores for it.
+     */
+    private static byte[] filterPipelineBody(DatasetSpec dataset) {
+        GrowBuffer b = new GrowBuffer();
+        b.u8(2); // version
+        b.u8(dataset.filters.size());
+        int chunkElements = Math.toIntExact(elementCount(dataset.chunkShape));
+        for (FilterSpec filter : dataset.filters) {
+            switch (filter.id()) {
+                case Filters.DEFLATE -> writeFilter(b, Filters.DEFLATE, FILTER_OPTIONAL, filter.parameter());
+                case Filters.SHUFFLE -> writeFilter(b, Filters.SHUFFLE, FILTER_OPTIONAL, dataset.elementSize);
+                case Filters.FLETCHER32 -> writeFilter(b, Filters.FLETCHER32, FILTER_MANDATORY);
+                // n-bit client data: total, "no compression needed", nelmts, ATOMIC, size, byte order (0=LE),
+                // precision, offset.
+                case Filters.NBIT -> writeFilter(b, Filters.NBIT, FILTER_OPTIONAL, 8,
+                        filter.parameter() == dataset.elementSize * 8 ? 1 : 0, chunkElements, 1,
+                        dataset.elementSize, 0, filter.parameter(), 0);
+                case Filters.SCALEOFFSET -> writeFilter(b, Filters.SCALEOFFSET, FILTER_OPTIONAL,
+                        ScaleOffset.integerClientData(chunkElements, dataset.elementSize, true, false,
+                                fillBits(dataset)));
+                case Filters.SZIP -> writeFilter(b, Filters.SZIP, FILTER_OPTIONAL, szipClientData(dataset));
+                default -> throw new IllegalStateException("unknown filter " + filter.id());
+            }
         }
         return b.toByteArray();
     }
@@ -935,34 +1002,6 @@ public final class Hdf5Writer implements AutoCloseable {
         return out;
     }
 
-    /** Szip encode: read each element as an unsigned sample and run the AEC entropy coder (block size 8). */
-    private static byte[] szipEncode(byte[] chunk, int elementSize) {
-        int elements = chunk.length / elementSize;
-        long[] samples = new long[elements];
-        for (int i = 0; i < elements; i++) {
-            long v = 0;
-            for (int b = 0; b < elementSize; b++) {
-                v |= (long) (chunk[i * elementSize + b] & 0xff) << (8 * b);
-            }
-            samples[i] = v;
-        }
-        return Aec.encode(samples, elementSize * 8, 8);
-    }
-
-    private static long signedLittleEndian(byte[] data, int offset, int size) {
-        long v = 0;
-        for (int i = 0; i < size; i++) {
-            v |= (long) (data[offset + i] & 0xff) << (8 * i);
-        }
-        if (size < 8) {
-            long signBit = 1L << (size * 8 - 1);
-            if ((v & signBit) != 0) {
-                v |= -(1L << (size * 8));
-            }
-        }
-        return v;
-    }
-
     private static void writeFilter(GrowBuffer b, int id, int flags, int... clientData) {
         b.u16(id);
         b.u16(flags);
@@ -990,31 +1029,7 @@ public final class Hdf5Writer implements AutoCloseable {
 
     /** Appends the 4-byte (little-endian) Fletcher-32 checksum HDF5 uses. */
     private static byte[] appendFletcher32(byte[] data) {
-        long sum1 = 0;
-        long sum2 = 0;
-        int words = data.length / 2;
-        int i = 0;
-        while (words > 0) {
-            int batch = Math.min(words, 360);
-            words -= batch;
-            do {
-                int word = ((data[i] & 0xff) << 8) | (data[i + 1] & 0xff);
-                sum1 += word;
-                sum2 += sum1;
-                i += 2;
-            } while (--batch > 0);
-            sum1 = (sum1 & 0xffff) + (sum1 >>> 16);
-            sum2 = (sum2 & 0xffff) + (sum2 >>> 16);
-        }
-        if ((data.length & 1) != 0) {
-            sum1 += (data[i] & 0xff) << 8;
-            sum2 += sum1;
-            sum1 = (sum1 & 0xffff) + (sum1 >>> 16);
-            sum2 = (sum2 & 0xffff) + (sum2 >>> 16);
-        }
-        sum1 = (sum1 & 0xffff) + (sum1 >>> 16);
-        sum2 = (sum2 & 0xffff) + (sum2 >>> 16);
-        long checksum = (sum2 << 16) | sum1;
+        int checksum = Fletcher32.checksum(data, data.length);
         byte[] out = java.util.Arrays.copyOf(data, data.length + 4);
         out[data.length] = (byte) checksum;
         out[data.length + 1] = (byte) (checksum >>> 8);
@@ -1081,8 +1096,8 @@ public final class Hdf5Writer implements AutoCloseable {
         return chunks;
     }
 
-    private static byte[] chunkedLayoutBody(long[] chunkShape, int elementSize, long fixedArrayHeaderAddress,
-                                            boolean filtered) {
+    /** The version-4 chunked data-layout message: chunk dimensions and a fixed-array chunk index. */
+    private static byte[] chunkedLayoutBody(long[] chunkShape, int elementSize, long fixedArrayHeaderAddress) {
         int rank = chunkShape.length;
         long maxDim = elementSize;
         for (long c : chunkShape) {
@@ -1090,9 +1105,7 @@ public final class Hdf5Writer implements AutoCloseable {
         }
         int encodedLength = (63 - Long.numberOfLeadingZeros(maxDim)) / 8 + 1;
         GrowBuffer b = new GrowBuffer();
-        // Filtered fixed-array entries use an 8-byte stored-size field, which the library expects for
-        // layout version 5; unfiltered chunks use version 4.
-        b.u8(filtered ? 5 : 4);      // version
+        b.u8(4);                     // version 4 (HDF5 1.10+; version 5 is HDF5 2.0-only)
         b.u8(2);                     // layout class: chunked
         b.u8(0);                     // flags
         b.u8(rank + 1);              // dimensionality (chunk dims + element size)
@@ -1102,7 +1115,7 @@ public final class Hdf5Writer implements AutoCloseable {
         }
         b.uvar(elementSize, encodedLength);
         b.u8(3);                     // index type: fixed array
-        b.u8(10);                    // page bits
+        b.u8(FA_PAGE_BITS);          // page bits
         b.u64(fixedArrayHeaderAddress);
         return b.toByteArray();
     }
@@ -1346,8 +1359,17 @@ public final class Hdf5Writer implements AutoCloseable {
         return b.toByteArray();
     }
 
-    /** Writes a version-2 B-tree with a single leaf holding {@code records} (already sorted); returns its header. */
+    /**
+     * Writes a version-2 B-tree with a single leaf holding {@code records} (already sorted); returns its
+     * header. The node size is a header field, so the leaf is sized to hold every record (at least the
+     * library's default 512 bytes): a fixed 512-byte leaf holds only 45 link or 29 attribute records.
+     */
     private static long writeV2BTree(GrowBuffer buf, int type, int recordSize, List<byte[]> records) {
+        if (records.size() > 0xFFFF) {
+            throw new HdfUnsupportedException("too many dense-storage records for a single B-tree node: " + records.size());
+        }
+        int needed = 4 + 1 + 1 + records.size() * recordSize + 4; // prefix, records, checksum
+        int nodeSize = Math.max(BT2_NODE_SIZE, Integer.highestOneBit(needed - 1) << 1);
         buf.align(8);
         int leaf = buf.position();
         buf.bytes(BTLF_SIGNATURE);
@@ -1358,8 +1380,8 @@ public final class Hdf5Writer implements AutoCloseable {
         }
         // The checksum sits immediately after the records (covering the prefix + records)...
         buf.u32(buf.checksum(leaf, buf.position()));
-        // ...then the node is padded out to the fixed node size it is allocated at on disk.
-        while (buf.position() - leaf < BT2_NODE_SIZE) {
+        // ...then the node is padded out to the node size it is allocated at on disk.
+        while (buf.position() - leaf < nodeSize) {
             buf.u8(0);
         }
 
@@ -1368,7 +1390,7 @@ public final class Hdf5Writer implements AutoCloseable {
         buf.bytes(BTHD_SIGNATURE);
         buf.u8(0);
         buf.u8(type);
-        buf.u32(BT2_NODE_SIZE);
+        buf.u32(nodeSize);
         buf.u16(recordSize);
         buf.u16(0);            // depth (single leaf)
         buf.u8(100);           // split percent
@@ -1727,10 +1749,10 @@ public final class Hdf5Writer implements AutoCloseable {
         return Math.max(1, (bits + 7) / 8);
     }
 
-    /** Builds a compound (class 6, version 5) datatype message: members packed at the given offsets. */
+    /** Builds a compound (class 6, version 3) datatype message: members packed at the given offsets. */
     private static byte[] compoundDatatype(CompoundField[] fields, int[] offsets, int recordSize) {
         GrowBuffer b = new GrowBuffer();
-        b.u8(0x56); // version 5, class 6 (compound)
+        b.u8(0x36); // version 3, class 6 (compound): readable by HDF5 1.8+
         b.u8(fields.length & 0xFF);
         b.u8((fields.length >>> 8) & 0xFF);
         b.u8(0);
@@ -1756,10 +1778,10 @@ public final class Hdf5Writer implements AutoCloseable {
         return b.toByteArray();
     }
 
-    /** Builds an array (class 10, version 5) datatype message with the given element shape and base. */
+    /** Builds an array (class 10, version 3) datatype message with the given element shape and base. */
     private static byte[] arrayDatatype(int[] arrayDims, int baseSize, byte[] base) {
         GrowBuffer b = new GrowBuffer();
-        b.u8(0x5A); // version 5, class 10 (array)
+        b.u8(0x3A); // version 3, class 10 (array): readable by HDF5 1.8+
         b.u8(0);
         b.u8(0);
         b.u8(0);
@@ -1819,11 +1841,11 @@ public final class Hdf5Writer implements AutoCloseable {
         return out;
     }
 
-    /** Builds an enumerated (class 8, version 5) datatype message over a 32-bit base type. */
+    /** Builds an enumerated (class 8, version 3) datatype message over a 32-bit base type. */
     private static byte[] enumDatatype(EnumType type) {
         GrowBuffer b = new GrowBuffer();
         int members = type.names.size();
-        b.u8(0x58); // version 5, class 8 (enumerated)
+        b.u8(0x38); // version 3, class 8 (enumerated): readable by HDF5 1.8+
         b.u8(members & 0xFF);
         b.u8((members >>> 8) & 0xFF);
         b.u8(0);
@@ -1917,11 +1939,7 @@ public final class Hdf5Writer implements AutoCloseable {
         byte[] fillValue;                // custom fill value (datatype-order bytes), or null for the default 0
         boolean compact;                 // store the element data inline in the object header
         final List<AttributeSpec> attributes = new ArrayList<>();
-        int deflateLevel = -1;          // -1 = no compression
-        boolean shuffle;
-        boolean fletcher32;
-        boolean scaleOffset;
-        boolean szip;
+        final List<FilterSpec> filters = new ArrayList<>(); // the chunk filter pipeline, in write order
         int nbitPrecision = -1;         // -1 = no n-bit filter
 
         DatasetSpec(String name, byte[] datatype, int elementSize, long[] shape, long[] chunkShape,
@@ -1937,5 +1955,9 @@ public final class Hdf5Writer implements AutoCloseable {
     }
 
     private record AttributeSpec(String name, byte[] datatype, long[] shape, byte[] data) {
+    }
+
+    /** One filter of a dataset's pipeline: its id and its parameter (deflate level, n-bit precision). */
+    private record FilterSpec(int id, int parameter) {
     }
 }

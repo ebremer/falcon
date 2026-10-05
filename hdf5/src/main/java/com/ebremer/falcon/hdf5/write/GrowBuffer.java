@@ -1,5 +1,6 @@
 package com.ebremer.falcon.hdf5.write;
 
+import com.ebremer.falcon.hdf5.HdfUnsupportedException;
 import com.ebremer.falcon.hdf5.checksum.Lookup3;
 import java.util.Arrays;
 
@@ -8,6 +9,9 @@ import java.util.Arrays;
  * write position (the buffer grows as needed); already-written positions can be patched in place to
  * fill forward references (e.g. the superblock's root-group address, resolved after the root header is
  * laid out). All multi-byte integers are little-endian, matching HDF5 metadata.
+ *
+ * <p>The whole file is assembled in memory, so it is bounded by the largest Java array; growing past
+ * that fails with {@link HdfUnsupportedException} rather than overflowing.
  */
 public final class GrowBuffer {
 
@@ -20,25 +24,25 @@ public final class GrowBuffer {
     }
 
     public void u8(int value) {
-        ensure(length + 1);
+        ensure((long) length + 1);
         data[length++] = (byte) value;
     }
 
     public void u16(int value) {
-        ensure(length + 2);
+        ensure((long) length + 2);
         data[length++] = (byte) value;
         data[length++] = (byte) (value >>> 8);
     }
 
     public void u32(long value) {
-        ensure(length + 4);
+        ensure((long) length + 4);
         for (int i = 0; i < 4; i++) {
             data[length++] = (byte) (value >>> (8 * i));
         }
     }
 
     public void u64(long value) {
-        ensure(length + 8);
+        ensure((long) length + 8);
         for (int i = 0; i < 8; i++) {
             data[length++] = (byte) (value >>> (8 * i));
         }
@@ -46,14 +50,14 @@ public final class GrowBuffer {
 
     /** Appends {@code count} bytes of an unsigned little-endian value. */
     public void uvar(long value, int count) {
-        ensure(length + count);
+        ensure((long) length + count);
         for (int i = 0; i < count; i++) {
             data[length++] = (byte) (value >>> (8 * i));
         }
     }
 
     public void bytes(byte[] value) {
-        ensure(length + value.length);
+        ensure((long) length + value.length);
         System.arraycopy(value, 0, data, length, value.length);
         length += value.length;
     }
@@ -61,7 +65,7 @@ public final class GrowBuffer {
     /** Appends {@code count} zero bytes and returns the position they start at (for later patching). */
     public int reserve(int count) {
         int at = length;
-        ensure(length + count);
+        ensure((long) length + count);
         length += count;
         return at;
     }
@@ -98,13 +102,16 @@ public final class GrowBuffer {
         return Arrays.copyOf(data, length);
     }
 
-    private void ensure(int capacity) {
+    private static final int MAX_SIZE = Integer.MAX_VALUE - 8; // the largest array the JVM reliably allocates
+
+    private void ensure(long capacity) {
         if (capacity > data.length) {
-            int grown = data.length;
-            while (grown < capacity) {
-                grown *= 2;
+            if (capacity > MAX_SIZE) {
+                throw new HdfUnsupportedException("the file being written exceeds " + MAX_SIZE
+                        + " bytes; Hdf5Writer assembles files in memory and cannot write one this large");
             }
-            data = Arrays.copyOf(data, grown);
+            long grown = Math.max(capacity, Math.min(MAX_SIZE, (long) data.length * 2));
+            data = Arrays.copyOf(data, (int) grown);
         }
     }
 }

@@ -83,20 +83,21 @@ public final class DataLayoutMessage {
         int dimensionality = buf.getUnsignedByte(off + 2); // rank + 1 (last is element size)
         long indexAddress = buf.getAddress(off + 3, offsets);
         long p = off + 3 + offsets;
-        int rank = dimensionality - 1;
+        int rank = checkedRank(dimensionality, off);
         int[] chunkDimensions = new int[rank];
         for (int i = 0; i < rank; i++) {
-            chunkDimensions[i] = (int) buf.getUnsignedInt(p);
+            chunkDimensions[i] = checkedDimension(buf.getUnsignedInt(p), off);
             p += 4;
         }
-        int elementSize = (int) buf.getUnsignedInt(p);
+        int elementSize = checkedDimension(buf.getUnsignedInt(p), off);
         return new DataLayout.Chunked(DataLayout.INDEX_V1_BTREE, indexAddress, chunkDimensions, elementSize);
     }
 
     /**
      * Version-4/5 chunked layout: {@code flags(1) · dimensionality(1) · dim-size-encoded-length(1) ·
      * chunk dimensions (last is the element size) · index type(1) · index-specific fields}. The
-     * chunk index address is extracted per index type.
+     * chunk index address is extracted per index type. A filtered single-chunk index (flag bit 1)
+     * stores the chunk's filtered size ("size of lengths") and filter mask (4) before its address.
      */
     private static DataLayout parseChunkedV4(FileContext ctx, long off) {
         HdfBuffer buf = ctx.buffer();
@@ -105,22 +106,29 @@ public final class DataLayoutMessage {
         int flags = buf.getUnsignedByte(off + 2);
         int dimensionality = buf.getUnsignedByte(off + 3);
         int encodedLength = buf.getUnsignedByte(off + 4);
+        if (encodedLength < 1 || encodedLength > 8) {
+            throw new HdfFormatException("invalid chunk dimension encoded length " + encodedLength + " at " + off);
+        }
         long p = off + 5;
-        int rank = dimensionality - 1;
+        int rank = checkedRank(dimensionality, off);
         int[] chunkDimensions = new int[rank];
         for (int i = 0; i < rank; i++) {
-            chunkDimensions[i] = (int) buf.getUnsignedValue(p, encodedLength);
+            chunkDimensions[i] = checkedDimension(buf.getUnsignedValue(p, encodedLength), off);
             p += encodedLength;
         }
-        int elementSize = (int) buf.getUnsignedValue(p, encodedLength);
+        int elementSize = checkedDimension(buf.getUnsignedValue(p, encodedLength), off);
         p += encodedLength;
 
         int indexType = buf.getUnsignedByte(p);
         p += 1;
+        long singleChunkSize = -1;
+        int singleChunkFilterMask = 0;
         long indexAddress = switch (indexType) {
             case DataLayout.INDEX_SINGLE_CHUNK -> {
-                if ((flags & 0x02) != 0) {
-                    p += lengths + 4; // filtered single chunk: size + filter mask
+                if ((flags & DataLayout.FLAG_SINGLE_INDEX_WITH_FILTER) != 0) {
+                    singleChunkSize = buf.getUnsignedValue(p, lengths);
+                    singleChunkFilterMask = buf.getInt(p + lengths);
+                    p += lengths + 4;
                 }
                 yield buf.getAddress(p, offsets);
             }
@@ -130,6 +138,23 @@ public final class DataLayoutMessage {
             case DataLayout.INDEX_V2_BTREE -> buf.getAddress(p + 6, offsets); // node size(4)+split+merge, then address
             default -> throw new HdfFormatException("unknown chunk index type " + indexType + " at " + off);
         };
-        return new DataLayout.Chunked(indexType, indexAddress, chunkDimensions, elementSize);
+        return new DataLayout.Chunked(indexType, indexAddress, chunkDimensions, elementSize,
+                flags, singleChunkSize, singleChunkFilterMask);
+    }
+
+    /** The chunk rank from a stored dimensionality (rank + 1): HDF5 allows 1..32 dimensions. */
+    private static int checkedRank(int dimensionality, long off) {
+        if (dimensionality < 2 || dimensionality > 33) {
+            throw new HdfFormatException("invalid chunked layout dimensionality " + dimensionality + " at " + off);
+        }
+        return dimensionality - 1;
+    }
+
+    /** A chunk dimension (or element size): positive and small enough for a Java array index. */
+    private static int checkedDimension(long value, long off) {
+        if (value <= 0 || value > Integer.MAX_VALUE) {
+            throw new HdfFormatException("invalid chunk dimension " + value + " in layout at " + off);
+        }
+        return (int) value;
     }
 }

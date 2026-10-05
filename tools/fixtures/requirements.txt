@@ -1,0 +1,20 @@
+# Dev-time oracles for generating and checking Falcon's test fixtures. None of these is a Falcon
+# dependency: the Maven build is hermetic (fixtures are committed) and needs only JDK 25.
+#
+#   python -m venv .venv-fixtures
+#   .venv-fixtures/bin/pip install -r tools/fixtures/requirements.txt      (Scripts\pip on Windows)
+#
+# HDF5 fixtures and the writer interop check (gen_fixtures.py, check_hdf5_writer.py):
+h5py==3.16.0          # bundles HDF5 2.0.0 -- the reference oracle
+numpy>=2.0
+imagecodecs>=2026.1   # libaec: AEC / szip reference vectors and real-format szip chunks
+#
+# check_hdf5_writer.py can additionally read Falcon's output with an HDF5 1.14 build. Put that in a
+# second environment (its own venv) and pass it with --python114:
+#   h5py==3.14.0       # bundles HDF5 1.14.6
+#
+# Zarr fixtures and codec vectors (gen_zarr_fixtures.py, gen_zarr_v2_fixtures.py, gen_zstd_vectors.py,
+# gen_blosc_vectors.py, check_zstd_encoder.py, check_blosc_encoder.py):
+zarr>=3.2,<4
+numcodecs>=0.15
+zstandard>=0.23

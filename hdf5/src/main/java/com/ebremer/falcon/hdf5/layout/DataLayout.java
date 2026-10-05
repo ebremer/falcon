@@ -25,12 +25,28 @@ public sealed interface DataLayout {
     /**
      * Chunked storage (layout class 2). {@code indexType} selects the chunk index
      * ({@link #INDEX_V1_BTREE} for version-3 layouts, or one of the version-4/5 index types);
-     * {@code indexAddress} points at that index (or, for a single-chunk index, at the chunk itself);
-     * {@code chunkDimensions} is the chunk shape in elements; {@code elementSize} is one element's
-     * size in bytes.
+     * {@code indexAddress} points at that index (or, for a single-chunk index, at the chunk itself) and
+     * is undefined when no chunk has been written; {@code chunkDimensions} is the chunk shape in
+     * elements; {@code elementSize} is one element's size in bytes.
+     *
+     * <p>{@code flags} are the version-4/5 layout flags ({@link #FLAG_DONT_FILTER_PARTIAL_BOUND_CHUNKS},
+     * {@link #FLAG_SINGLE_INDEX_WITH_FILTER}). A filtered single-chunk index stores the chunk's
+     * filtered size and filter mask in the layout message itself ({@code singleChunkSize},
+     * {@code singleChunkFilterMask}); both are {@code -1}/{@code 0} otherwise.
      */
-    record Chunked(int indexType, long indexAddress, int[] chunkDimensions, int elementSize)
+    record Chunked(int indexType, long indexAddress, int[] chunkDimensions, int elementSize,
+                   int flags, long singleChunkSize, int singleChunkFilterMask)
             implements DataLayout {
+
+        /** A chunked layout with no version-4/5 flags (a version-3 v1-B-tree layout). */
+        public Chunked(int indexType, long indexAddress, int[] chunkDimensions, int elementSize) {
+            this(indexType, indexAddress, chunkDimensions, elementSize, 0, -1, 0);
+        }
+
+        /** True if partial edge chunks are stored without passing through the filter pipeline. */
+        public boolean dontFilterPartialBoundChunks() {
+            return (flags & FLAG_DONT_FILTER_PARTIAL_BOUND_CHUNKS) != 0;
+        }
     }
 
     /**
@@ -49,4 +65,9 @@ public sealed interface DataLayout {
     int INDEX_FIXED_ARRAY = 3;
     int INDEX_EXTENSIBLE_ARRAY = 4;
     int INDEX_V2_BTREE = 5;
+
+    /** Layout flag (v4/5): partial edge chunks are written unfiltered ({@code H5Pset_chunk_opts}). */
+    int FLAG_DONT_FILTER_PARTIAL_BOUND_CHUNKS = 0x01;
+    /** Layout flag (v4/5): a single-chunk index carries the filtered chunk size and filter mask. */
+    int FLAG_SINGLE_INDEX_WITH_FILTER = 0x02;
 }

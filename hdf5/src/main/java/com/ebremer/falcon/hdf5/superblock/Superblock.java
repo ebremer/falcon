@@ -25,6 +25,7 @@ public final class Superblock {
         (byte) 0x0d, (byte) 0x0a, (byte) 0x1a, (byte) 0x0a
     };
 
+    private final long location;
     private final int version;
     private final int sizeOfOffsets;
     private final int sizeOfLengths;
@@ -33,8 +34,9 @@ public final class Superblock {
     private final long endOfFileAddress;
     private final long rootObjectHeaderAddress;
 
-    private Superblock(int version, int sizeOfOffsets, int sizeOfLengths, long baseAddress,
+    private Superblock(long location, int version, int sizeOfOffsets, int sizeOfLengths, long baseAddress,
                        long superblockExtensionAddress, long endOfFileAddress, long rootObjectHeaderAddress) {
+        this.location = location;
         this.version = version;
         this.sizeOfOffsets = sizeOfOffsets;
         this.sizeOfLengths = sizeOfLengths;
@@ -42,6 +44,15 @@ public final class Superblock {
         this.superblockExtensionAddress = superblockExtensionAddress;
         this.endOfFileAddress = endOfFileAddress;
         this.rootObjectHeaderAddress = rootObjectHeaderAddress;
+    }
+
+    /**
+     * The absolute file offset at which the superblock was found (0, 512, 1024, ...). libhdf5 treats this
+     * as the base address that every other file address is relative to, whatever the stored
+     * {@link #baseAddress()} says, so a file with a prepended user block stays readable.
+     */
+    public long location() {
+        return location;
     }
 
     public int version() {
@@ -111,7 +122,7 @@ public final class Superblock {
         long rootEntry = addressesStart + 4L * sizeOfOffsets;
         long rootObjectHeader = buf.getAddress(rootEntry + sizeOfOffsets, sizeOfOffsets);
         // Versions 0–1 have no superblock extension.
-        return new Superblock(version, sizeOfOffsets, sizeOfLengths, baseAddress,
+        return new Superblock(addr, version, sizeOfOffsets, sizeOfLengths, baseAddress,
                 HdfBuffer.UNDEFINED_ADDRESS, endOfFile, rootObjectHeader);
     }
 
@@ -130,7 +141,7 @@ public final class Superblock {
             throw new HdfFormatException(String.format(
                     "superblock checksum mismatch: stored=0x%08x computed=0x%08x", stored, computed));
         }
-        return new Superblock(version, sizeOfOffsets, sizeOfLengths, baseAddress,
+        return new Superblock(addr, version, sizeOfOffsets, sizeOfLengths, baseAddress,
                 extension, endOfFile, rootObjectHeader);
     }
 }

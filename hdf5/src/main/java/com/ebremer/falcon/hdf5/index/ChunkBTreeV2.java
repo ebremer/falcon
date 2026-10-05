@@ -46,6 +46,11 @@ public final class ChunkBTreeV2 {
         int recordSize = buf.getUnsignedShort(headerAddress + 10);
         int rank = datasetDims.length;
         int sizeWidth = recordType == RECORD_FILTERED ? recordSize - offsets - 4 - rank * 8 : 0;
+        int expected = recordType == RECORD_FILTERED ? offsets + sizeWidth + 4 + rank * 8 : offsets + rank * 8;
+        if (recordSize != expected || (recordType == RECORD_FILTERED && (sizeWidth < 1 || sizeWidth > 8))) {
+            throw new HdfFormatException("chunk v2 B-tree record size " + recordSize + " does not fit rank "
+                    + rank + " at " + headerAddress);
+        }
 
         List<byte[]> records = BTreeV2.readRecords(ctx, headerAddress);
         List<ChunkRecord> chunks = new ArrayList<>(records.size());
@@ -59,7 +64,11 @@ public final class ChunkBTreeV2 {
             int filterMask;
             long scaledBase;
             if (recordType == RECORD_FILTERED) {
-                size = (int) record.getUnsignedValue(offsets, sizeWidth);
+                long stored = record.getUnsignedValue(offsets, sizeWidth);
+                if (stored < 0 || stored > Integer.MAX_VALUE) {
+                    throw new HdfFormatException("invalid stored chunk size " + stored + " in v2 B-tree at " + headerAddress);
+                }
+                size = (int) stored;
                 filterMask = (int) record.getUnsignedInt(offsets + sizeWidth);
                 scaledBase = offsets + sizeWidth + 4;
             } else {

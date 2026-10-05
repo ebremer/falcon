@@ -145,8 +145,8 @@ class WriteTest {
 
     @Test
     void roundTripSzipDataset() throws IOException {
-        // h5py has szip disabled in this environment, so this verifies Falcon's own szip round-trip
-        // (its AEC decoder is validated byte-for-byte against libaec).
+        // Falcon writes szip in libhdf5's on-disk form (4-byte size header, libaec SZ layout); that
+        // libaec decodes it is checked by tools/fixtures/check_hdf5_writer.py (h5py ships szip disabled).
         Path file = Files.createTempFile("falcon-szip", ".h5");
         try {
             int[] data = new int[64];
@@ -510,6 +510,110 @@ class WriteTest {
                 assertArrayEquals(new double[] {1.5, -2.25, 3.0}, values.readDoubles());
                 assertArrayEquals(new double[] {0.125}, values.attribute("offset").orElseThrow().readDoubles());
             }
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    /** Beyond 1024 chunks the fixed-array index is paged (page bitmap + per-page checksums). */
+    @Test
+    void roundTripPagedFixedArray() throws IOException {
+        Path file = Files.createTempFile("falcon-paged", ".h5");
+        try {
+            int[] data = range(100_000);
+            try (Hdf5Writer w = Hdf5Writer.create(file)) {
+                w.intChunkedDataset("plain", data, new long[] {data.length}, new long[] {64});
+                w.intChunkedDataset("deflated", data, new long[] {data.length}, new long[] {64}).deflate(1);
+            }
+            try (Hdf5File h5 = Hdf5File.open(file)) {
+                assertArrayEquals(data, h5.root().dataset("plain").readInts());
+                assertArrayEquals(data, h5.root().dataset("deflated").readInts());
+                assertArrayEquals(new int[] {50_000, 50_001},
+                        h5.root().dataset("plain").select(new long[] {50_000}, new long[] {2}).readInts());
+            }
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    /** Dense storage sizes its B-tree leaf to the records (a 512-byte leaf holds only 45 links / 29 attributes). */
+    @Test
+    void roundTripLargeDenseStorage() throws IOException {
+        Path file = Files.createTempFile("falcon-dense-large", ".h5");
+        try {
+            try (Hdf5Writer w = Hdf5Writer.create(file)) {
+                Hdf5Writer.GroupWriter g = w.group("g");
+                for (int i = 0; i < 2000; i++) {
+                    g.intDataset(String.format("item%04d", i), new int[] {i}, new long[] {1});
+                }
+                Hdf5Writer.DatasetWriter d = w.intDataset("d", new int[] {1}, new long[] {1});
+                for (int i = 0; i < 300; i++) {
+                    d.intAttribute(String.format("attr%03d", i), new int[] {i}, new long[] {});
+                }
+            }
+            try (Hdf5File h5 = Hdf5File.open(file)) {
+                Group g = h5.root().group("g");
+                assertEquals(2000, g.childNames().size());
+                assertArrayEquals(new int[] {1234}, g.dataset("item1234").readInts());
+                Dataset d = h5.root().dataset("d");
+                assertEquals(300, d.attributes().size());
+                assertArrayEquals(new int[] {299}, d.attribute("attr299").orElseThrow().readInts());
+            }
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    /** Filters apply in call order, combine freely, and a chunk szip cannot shrink is stored raw. */
+    @Test
+    void roundTripFilterPipelines() throws IOException {
+        Path file = Files.createTempFile("falcon-pipelines", ".h5");
+        try {
+            int[] data = range(1000);
+            int[] noise = new java.util.Random(3).ints(64).toArray();
+            int[] fillHeavy = {-1, 5, -1, 9, 100, -1, 3, 3, 7, 7, 7, 7, 7, 7, 7, 7};
+            try (Hdf5Writer w = Hdf5Writer.create(file)) {
+                w.intChunkedDataset("so_deflate", data, new long[] {1000}, new long[] {128}).scaleOffset().deflate(6);
+                w.intChunkedDataset("so_fill", fillHeavy, new long[] {16}, new long[] {8}).fillValue(-1).scaleOffset();
+                w.intChunkedDataset("shuffle_szip", data, new long[] {1000}, new long[] {100}).shuffle().szip();
+                w.doubleChunkedDataset("f64_szip", new double[] {1.5, -2.25, 1e300, 0, 3, 4, 5, 6},
+                        new long[] {8}, new long[] {8}).szip();
+                w.intChunkedDataset("noise_szip", noise, new long[] {64}, new long[] {32}).szip(); // stored raw
+                w.intChunkedDataset("nbit_full", data, new long[] {1000}, new long[] {100}).nbit(32);
+            }
+            try (Hdf5File h5 = Hdf5File.open(file)) {
+                assertArrayEquals(data, h5.root().dataset("so_deflate").readInts());
+                assertArrayEquals(fillHeavy, h5.root().dataset("so_fill").readInts());
+                assertArrayEquals(data, h5.root().dataset("shuffle_szip").readInts());
+                assertArrayEquals(new double[] {1.5, -2.25, 1e300, 0, 3, 4, 5, 6},
+                        h5.root().dataset("f64_szip").readDoubles());
+                assertArrayEquals(noise, h5.root().dataset("noise_szip").readInts());
+                assertArrayEquals(data, h5.root().dataset("nbit_full").readInts());
+            }
+        } finally {
+            Files.deleteIfExists(file);
+        }
+    }
+
+    @Test
+    void rejectsInvalidFilterPipelines() throws IOException {
+        Path file = Files.createTempFile("falcon-bad-pipelines", ".h5");
+        try (Hdf5Writer w = Hdf5Writer.create(file)) {
+            int[] data = range(16);
+            long[] shape = {16};
+            long[] chunk = {8};
+            org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class,
+                    () -> w.intChunkedDataset("a", data, shape, chunk).deflate(1).deflate(2));      // duplicate
+            org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class,
+                    () -> w.intChunkedDataset("b", data, shape, chunk).shuffle().nbit(8));         // nbit not first
+            org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class,
+                    () -> w.intChunkedDataset("c", data, shape, chunk).deflate(1).szip());         // szip after deflate
+            org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class,
+                    () -> w.doubleChunkedDataset("d", new double[16], shape, chunk).scaleOffset()); // float
+            org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                    () -> w.intChunkedDataset("e", data, shape, chunk).deflate(10));               // bad level
+            org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class,
+                    () -> w.intChunkedDataset("f", range(4), new long[] {4}, new long[] {4}).szip()); // < 8 pixels
         } finally {
             Files.deleteIfExists(file);
         }

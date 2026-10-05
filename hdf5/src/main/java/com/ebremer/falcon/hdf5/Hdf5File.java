@@ -44,11 +44,16 @@ public final class Hdf5File implements AutoCloseable {
         MappedHdfFile mapped = MappedHdfFile.openReadOnly(path);
         try {
             Superblock superblock = Superblock.parse(mapped.buffer());
-            if (superblock.baseAddress() != 0) {
-                throw new HdfUnsupportedException(
-                        "non-zero base address (user block) is not yet supported: " + superblock.baseAddress());
+            // Every file address is relative to the base address, which is the superblock's own offset:
+            // non-zero when the file starts with a user block (e.g. MATLAB v7.3 .mat files, h5py
+            // userblock_size=). Like libhdf5 (H5F__super_read), use where the superblock actually sits
+            // rather than the stored base address, then read through a view that starts there.
+            HdfBuffer data = mapped.buffer();
+            long base = superblock.location();
+            if (base != 0) {
+                data = data.slice(base, data.size() - base);
             }
-            FileContext ctx = new FileContext(mapped.buffer(),
+            FileContext ctx = new FileContext(data,
                     superblock.sizeOfOffsets(), superblock.sizeOfLengths(), path);
             Group root = Group.root(ctx, superblock.rootObjectHeaderAddress());
             return new Hdf5File(mapped, superblock, ctx, root);

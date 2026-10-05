@@ -20,8 +20,22 @@ class AecTest {
 
     @Test
     void decodesLibaecReferenceVectors() throws IOException {
+        assertTrue(decodeVectors("/fixtures/aec_vectors.txt") >= 80, "expected many reference vectors");
+    }
+
+    /**
+     * Zero runs coded as "remainder of segment" inside a reference-sample interval longer than 64 blocks
+     * (HDF5 allows up to 128 blocks per scanline): the run ends at the 64-block segment boundary, not at
+     * the end of the interval.
+     */
+    @Test
+    void zeroBlockRemainderOfSegmentStopsAtSegmentBoundary() throws IOException {
+        assertTrue(decodeVectors("/fixtures/aec_ros_vectors.txt") >= 6, "expected remainder-of-segment vectors");
+    }
+
+    private static int decodeVectors(String resource) throws IOException {
         int count = 0;
-        for (String line : lines("/fixtures/aec_vectors.txt")) {
+        for (String line : lines(resource)) {
             if (line.isBlank() || line.startsWith("#")) {
                 continue;
             }
@@ -40,7 +54,7 @@ class AecTest {
             assertArrayEquals(expected, actual, "bpp=" + bpp + " bs=" + bs + " rsi=" + rsi + " flags=" + flags);
             count++;
         }
-        assertTrue(count >= 80, "expected many reference vectors, parsed " + count);
+        return count;
     }
 
     static List<String> lines(String resource) throws IOException {
