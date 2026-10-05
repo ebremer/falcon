@@ -426,11 +426,9 @@ Items 1–5 of the previous TODO's top-5 are F1–F5 below.
     omits `data`.
   - The §2 "shared model note" contradicts the §10 deferral.
 - [ ] **D4 — Javadoc lint:** 245 `-Xdoclint:all` warnings (134 missing `@return`); 0 errors.
-- [ ] **D5 — Python tooling.** zarr-python isn't installed in the default `python`; the reviewers used
-  scratch installs.
-  - **Add:** `tools/fixtures/requirements.txt` pinning zarr (3.2.1, the fixture version), numcodecs,
-    zstandard, and imagecodecs, with venv instructions.
-  - Repo-wide; mirrored in `../hdf5/TODO.md` D5.
+- [x] **D5 — Python tooling.** `tools/fixtures/requirements.txt` now exists (added with the HDF5 fixes).
+  It lists `zarr>=3.2,<4`, numcodecs, zstandard, h5py and imagecodecs, with venv instructions.
+  - Remaining: pin zarr to the exact fixture version (3.2.1) if byte-identical regeneration matters.
 - [ ] **B1 — the surefire `argLine` `--add-reads com.ebremer.falcon.zarr=jdk.httpserver` prints
   `WARNING: Unknown module` on every test run** (`zarr/pom.xml`). It is dead; remove it, or fix it so it
   takes effect.

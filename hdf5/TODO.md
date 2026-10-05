@@ -1,16 +1,19 @@
 # Falcon HDF5 — remaining work (prioritized)
 
-**Status (2026-10-04, after a full code review):** the build is green and all 144 tests pass. However,
-the review checked Falcon against files from **real libhdf5 builds**: HDF5 2.0.0 (h5py 3.16), 1.14.6
-(h5py 3.14), and 1.14.4 with libaec (HDFView's JNI). That found **silent wrong data in the reader** and
-**writer output that libhdf5 rejects**. The suite missed both because:
+**Status (2026-10-04, after the code review and the first fix pass):** build green, **187 HDF5 tests**
+(up from 144). The review's top 10 are done (see *Done* at the end). Falcon now:
 
-- every fixture is HDF5 2.0 / `libver='latest'`;
-- the szip vectors are bare AEC streams, not real szip chunks;
-- writer output is only ever read back by Falcon itself.
+- reads the files the review showed it misreading: real libhdf5 szip and scale-offset data, every chunk
+  index shape (maximum dims, layout v4, paged and sparse arrays, filtered single chunks, unwritten
+  datasets), user-block (MATLAB v7.3) files;
+- writes files that **HDF5 2.0 and 1.14 read**, checked by `tools/fixtures/check_hdf5_writer.py`. The
+  final run read 46/46 objects with HDF5 2.0 and 41/41 with 1.14.6; the same matrix written by the old
+  writer failed 11 and 24;
+- verifies metadata and fletcher32 checksums, rejects loops and runaway sizes in corrupt files, and
+  supports concurrent reads of one open file.
 
-**The "1.0-ready" claim should be withdrawn until P0 is closed.** Land each fix with the fixture that
-reproduces it (see T1/T2).
+The remaining P0 items are edge cases, but they are still silent wrong data or files libhdf5 rejects.
+Hold the "1.0-ready" claim until they are closed.
 
 How to read this list:
 - **P0** — silent wrong data, or files other HDF5 tools reject or misread. Fix before any release.
@@ -20,34 +23,37 @@ How to read this list:
 - **P3** — docs, build, housekeeping.
 
 Each item gives the location, the failure, and the fix. "✔" means the failure was reproduced during the
-review; anything else comes from code reading or the spec. Line numbers are as of commit `a887633`.
-Abbreviations: `W` = `Hdf5Writer.java`; other paths are under `src/main/java/com/ebremer/falcon/hdf5/`.
+review; anything else comes from code reading or the spec. Line numbers are as of commit `a887633`, the
+review baseline. Abbreviations: `W` = `Hdf5Writer.java`; other paths are under
+`src/main/java/com/ebremer/falcon/hdf5/`.
 
-## Do these first — top 10
+**Tooling.**
+- Regenerate fixtures with `tools/fixtures/gen_fixtures.py`. Pass names to regenerate only those.
+- Check writer interop with `tools/fixtures/check_hdf5_writer.py [--python114 PATH]`.
+- The Python environment is pinned in `tools/fixtures/requirements.txt`.
 
-1. **R1 szip decode vs real libhdf5** (+ W4 encode). Every real szip dataset (NASA / HDF-EOS) reads as
-   garbage.
-2. **R2 scale-offset decode** (+ W3 encode). Ordinary h5py `scaleoffset=` files read wrong.
-3. **The chunk-index family, R3–R7:**
-   - maxshape linearization;
-   - layout-v4 filtered entry width;
-   - filtered single-chunk layout;
-   - extensible-array (EA) page bitmap;
-   - paged fixed-array (FA) blocks.
-4. **R8/R9:** a chunked dataset that was created but never written throws; so do unwritten vlen
-   strings.
-5. **W1/W2:** writer files with more than 1024 chunks, more than 45 links, or more than 29 attributes
-   are unreadable by libhdf5.
-6. **W5:** writer output for compound, enum, array, or filtered data is unreadable by HDF5 ≤ 1.14.
-7. **V1 user block:** every MATLAB v7.3 `.mat` file is refused.
-8. **T1 oracle in the loop:** read Falcon output with h5py (2.0 and 1.14), and add 1.10/1.14 fixtures,
-   so P0 can't regress.
-9. **H1–H4 hardening:**
-   - verify checksums (metadata and fletcher32);
-   - guard against cycles and recursion depth;
-   - cap decompressed size.
-10. **C1 thread safety:** concurrent reads of one `Hdf5File` throw `ConcurrentModificationException`.
-    Fix it, or document single-threaded use.
+## Next up — top 10
+
+1. **R10 — bit offset/precision is ignored.** A 12-bit integer, or a non-IEEE float, reads as garbage.
+2. **R13 — unsigned values read as negative.** `read()` maps `uint32` to `int[]`.
+3. **W6–W10, W13, W14 — writer edge cases libhdf5 rejects or misreads:**
+   - zero-size datasets;
+   - more than 65,535 vlen elements;
+   - messages over 64 KiB;
+   - unvalidated names;
+   - typed fill values;
+   - non-ASCII fixed strings;
+   - out-of-range n-bit values.
+4. **V3/V4 — links.** An old-style soft link makes its whole group unreadable, and new-style soft and
+   external links are hidden.
+5. **V5 — fractal-heap limits.** A dense attribute over 4 KiB, or a group of about 40k links, fails.
+6. **V6/V7 — default-libver encodings.** VDS and region references written with the default libver are
+   refused.
+7. **H6 — security.** External-file and VDS paths can reach any local file.
+8. **C2/C3 — lifecycle.** Use after `close()` is untyped, and a writer that fails part-way still writes a
+   partial file.
+9. **R14 — VDS byte order.** A source with a different byte order is copied without conversion.
+10. **WF1 — streaming writes.** The writer builds the whole file in memory, which caps it at about 2 GB.
 
 ---
 
@@ -55,139 +61,28 @@ Abbreviations: `W` = `Hdf5Writer.java`; other paths are under `src/main/java/com
 
 ### Reader
 
-- [ ] **R1 — szip decode doesn't match libhdf5 + libaec output.** ✔ (checked against HDF5 1.14.4 + libaec files)
-  - **Where:** `filter/Filters.java:248-262`.
-  - **Defects:**
-    - It never skips H5Z-szip's 4-byte little-endian uncompressed-size header.
-    - It doesn't undo libaec's SZ-compat byte interleaving: 32/64-bit pixels are coded as 8-bit samples.
-    - It uses `rsi = floor(ppsl/ppb)` and doesn't strip scanline padding when `ppsl % ppb != 0`.
-  - **Failure:** int16, float32, and int32 szip datasets decode to constants or garbage; padded
-    scanlines throw.
-  - **Why tests missed it:** `szip_chunks.txt` comes from `imagecodecs.aec_encode`, a bare AEC stream.
-  - **Fix:** handle the header, interleaving, and padding. Regenerate the vectors with
-    `imagecodecs.szip_encode(header=True)`, and commit real libhdf5 szip files.
-  - **Same item, also fix:** signed szip at the filter level (old TODO item), and the AEC zero-block bug
-    in R12.
-- [ ] **R2 — scale-offset decode is wrong.** ✔
-  - **Where (integer):** `Filters.java:69-86`.
-    - Packed data is located "at the chunk's end". libhdf5 always starts it at byte 21, and its buffer is
-      `floor(n·minbits/8)+1` bytes.
-    - The all-ones code is treated as fill even when no fill is defined.
-    - Fill decodes to 0 instead of `cd_values[8..]`.
-    - Output is always little-endian, ignoring `cd[6]`.
-    - The full-precision raw-copy path is missing.
-  - **Failure (integer):** `arange(256,i4)` reads `[1,2,…,255,1]`; 1000..1015 reads `[1008,1016,1025,…]`.
-    Big-endian, fill, and full-range data come back as garbage.
-  - **Where (float):** `Filters.java:106,123`.
-    - The fill is read from chunk bytes 13..20.
-    - The decode multiplies by `10^-D` instead of dividing by `10^D`, so `25.5` reads as
-      `25.500000000000004`.
-    - Output is always little-endian.
-  - **Fix:** port `H5Z__filter_scaleoffset` (decompress) exactly.
-- [ ] **R3 — chunk-grid linearization uses the *current* dims.** ✔
-  - **Where:** `index/FixedArray.java:46-50`, `index/ExtensibleArray.java:66-70,194-204`,
-    `index/ImplicitIndex.java:22-28`.
-  - **Defect:** libhdf5 linearizes over the *max* dims (`max_down_chunks`). For an EA it also moves the
-    unlimited dimension to the slowest position.
-  - **Failure:** `maxshape=(3,None)` reads scrambled (`[0,1,2,3,8,9,10,11,16,…]`), as do `maxshape>shape`
-    on a non-leading fixed dim and the implicit index with maxshape.
-  - **Fix:** pass `maxDims` in and apply the EA swizzle.
-- [ ] **R4 — the filtered FA/EA chunk-size field width is hard-coded to `sizeOfLengths`.** ✔
-  - **Where:** `index/FixedArray.java:63-64`, `index/ExtensibleArray.java:182-183`.
-  - **Defect:** in layout v4 (HDF5 1.10–1.14) the width is variable: bytes(unfiltered chunk size) + 1,
-    at most 8.
-  - **Failure:** every filtered FA/EA dataset from those versions reads the wrong sizes and filter
-    masks, and returns raw zlib bytes as data.
-  - **Fix:** width = `entrySize − sizeOfOffsets − 4`, the same derivation `ChunkBTreeV2` already uses.
-- [ ] **R5 — the filtered single-chunk index drops the filtered size and filter mask.** ✔
-  - **Where:** `layout/DataLayoutMessage.java:121-126`, `data/ChunkedReader.java:86-87`.
-  - **Failure:** h5py `libver='latest'` + compression + one chunk (the auto-chunk case for small
-    datasets) reads out of bounds or as garbage.
-  - **Fix:** carry the size and mask in `DataLayout.Chunked`.
-- [ ] **R6 — the extensible-array page-init bitmap is skipped.** ✔
-  - **Where:** `index/ExtensibleArray.java:114-123,132-137`.
-  - **Failure:** for sparse appends, the uninitialized pages decode as chunk address 0, which holds the
-    `\x89HDF` superblock bytes.
-  - **Fix:** honour the bitmap, and reject chunk addresses of 0 or inside the superblock.
-- [ ] **R7 — paged fixed-array data blocks are parsed flat.** ✔
-  - **Where:** `index/FixedArray.java:52-55`.
-  - **Defect:** blocks with more than 1024 entries (`1<<pageBits`) are paged, but the page bitmap and
-    per-page checksums are read as if they were elements.
-  - **Failure:** any `libver='latest'` dataset with more than 1024 chunks throws or reads garbage.
-  - **Fix:** implement page addressing. Until then, throw `HdfUnsupportedException`.
-- [ ] **R8 — a chunked dataset that was created but never written throws instead of returning fill.** ✔
-  - **Where:** `ChunkedReader.java:84-98`.
-  - **Failure:** "expected B-tree signature 'TREE' at -1". The same happens for FAHD, EAHD, BTHD, and
-    single-chunk indexes.
-  - **Fix:** if the index address is UNDEFINED, there are no chunks, so return all fill.
-- [ ] **R9 — null vlen-string heap IDs are dereferenced.** ✔
-  - **Where:** `data/VlenStrings.java:30-31`.
-  - **Failure:** any partly written vlen-string dataset throws "expected 'GCOL' at 0". h5py returns `b''`.
-  - **Fix:** treat length 0 or address 0 as empty, as `VlenSequences` already does.
 - [ ] **R10 — fixed-point `bitOffset`/`bitPrecision` are ignored, and floats are decoded by size alone.** ✔
   - **Where:** `data/Elements.java:47-69,153-160`.
   - **Failure:** a 12-bit int at offset 4 reads `[-80,1600,32752]` instead of `[-5,100,2047]`. A bfloat16
     layout reads as IEEE half.
   - **Fix:** shift, mask, and sign-extend. Decode floats from their exponent/mantissa fields, or throw
     Unsupported for non-IEEE layouts.
-- [ ] **R11 — the n-bit "no compression needed" flag (`cd[1]`) is ignored.** ✔
-  - **Where:** `Filters.java:150-170`.
-  - **Failure:** full-precision `<i4` data comes back byte-swapped.
-  - **Fix:** if `cd[1]==1`, return the data unchanged. Also implement the NOOPTYPE member class (4)
-    instead of throwing.
-- [ ] **R12 — the AEC zero-block "remainder of segment" fills to the end of the RSI.** ✔
-  - **Where:** `filter/Aec.java:147`.
-  - **Defect:** libaec fills only to the next 64-block segment boundary.
-  - **Failure:** with rsi > 64 (HDF5 allows up to 128), samples diverge from 512 onward.
-  - **Fix:** apply `min(rsi−b, 64−(b%64))`.
 - [ ] **R13 — unsigned values surface as negative.** ✔
   - **Where:** `Elements.java:64`, `Dataset.java:186`, `Attribute.java:204`.
   - **Failure:** `read()` maps uint32 to `int[]`, so 4000000000 reads as -294967296. `readInts()` on
     uint32 wraps silently. uint64 wraps in `readLongs()` with no documentation.
   - **Fix:** have `read()` return `long[]` for uint32; throw on out-of-range narrowing; document uint64,
     or add `readUnsignedLongs` / a `BigInteger` path.
-- [ ] **R14 — VDS source/virtual datatype mismatch is neither converted nor rejected.** ✔ (the AIOOBE)
-  - **Where:** `VirtualDataset.java:79-83`.
-  - **Failure:** a `>i2` source in an `<i4` VDS throws a raw AIOOBE. A same-size source with different
-    byte order would be silently byte-swapped.
-  - **Fix:** convert via `Elements`, or throw Unsupported.
+- [ ] **R14 — a VDS source with a different byte order is copied without conversion.**
+  - **Done:** a source whose element *size* differs now throws `HdfUnsupportedException`; it used to
+    throw a raw AIOOBE.
+  - **Remaining:** a same-size source in the other byte order (or another layout) is still copied
+    verbatim.
+  - **Where:** `VirtualDataset.java`.
+  - **Fix:** convert via `Elements`, or compare the datatypes and throw Unsupported.
 
 ### Writer (files that libhdf5 rejects or misreads; every one passes Falcon's own round trip)
 
-- [ ] **W1 — the fixed-array index is never paged.** ✔
-  - **Where:** `W:758-792, W:1105`.
-  - **Failure:** a chunked dataset with more than 1024 chunks (e.g. 100k ints, chunk 64) fails in h5py
-    with "incorrect metadata checksum". Exactly 1024 chunks is fine.
-  - **Fix:** emit the page bitmap, paged entries, and per-page checksums, or switch to an EA or v2
-    B-tree index for large counts.
-- [ ] **W2 — the dense-storage v2 B-tree is a single 512-byte leaf with no split.** ✔
-  - **Where:** `W:1350-1381`; `BT2_NODE_SIZE` at `W:69`.
-  - **Failure:** a group with more than 45 links, or an object with more than 29 attributes, is
-    unreadable ("incorrect metadata checksum").
-  - **Fix:** size the node to fit the records (node size is a header field), or build internal nodes.
-- [ ] **W3 — the scale-offset encoder doesn't follow libhdf5's rules.** ✔
-  - **Where:** `W:841-842, W:875-901`.
-  - **Defect:** it emits minbits 0 for constant chunks while `filavail=1`, and it bit-packs when minbits
-    ≥ 8×size instead of copying raw.
-  - **Failure:** `[7]*16` reads as zeros in libhdf5; full-range int32 fails to decode.
-  - **Fix:** mirror `H5Z__filter_scaleoffset` (compress). Shares a test matrix with R2.
-- [ ] **W4 — szip output is not libhdf5-compatible.** ✔ (via libaec)
-  - **Where:** `W:820, W:939-950`; hang at `Aec.java:47-58,232-237`.
-  - **Defects:**
-    - There is no 4-byte size header.
-    - 32/64-bit samples are not interleaved.
-    - The mask lacks RAW (128).
-    - For 64-bit samples the cost sum overflows `long`, so `doubleChunkedDataset(...).szip()` **hangs**.
-  - **Fix:** mirror the R1 fixes; cap bits per pixel or interleave; saturate the cost.
-- [ ] **W5 — HDF5 2.0-only message versions are used everywhere.** ✔ (HDF5 1.14.6)
-  - **Where:** `W:1095` (layout v5), `W:1733,1762,1826` (datatype v5).
-  - **Failure:** HDF5 ≤ 1.14 rejects compound, enum, array, and every filtered dataset — even under
-    `Format.EARLIEST`.
-  - **Fix:**
-    - Use datatype v3 for compound/enum/array; keep v5 only for complex.
-    - Use layout v4 with the computed chunk-size width (FAHD element size 14, not 20).
-    - Make `EARLIEST` avoid 1.8+ messages.
-    - Consider a `Format.V110` / "maximally compatible" default.
 - [ ] **W6 — a zero-size contiguous dataset gets a defined address.** ✔
   - **Where:** `W:694-700`.
   - **Failure:** libhdf5 reports "invalid dataset size, likely file corruption" for `int[0]`, shape
@@ -224,39 +119,24 @@ Abbreviations: `W` = `Hdf5Writer.java`; other paths are under `src/main/java/com
     - `.fillValue(5.0)` on int32 stores 1084227584.
     - On a vlen string, the creation properties become unreadable.
   - **Fix:** convert numerically for the datatype; reject fill on vlen, reference, and compound.
-- [ ] **W11 — filter setters don't validate the datatype or filter combination, and encode order ≠ message order.** ✔
-  - **Where:** `W:482-508, 743-751` vs `816-844`.
-  - **Failure:**
-    - `scaleOffset()` and `nbit()` on float64 write garbage or zeros.
-    - `nbit(8)` on -1 stores 255.
-    - `scaleOffset().deflate()` silently drops deflate.
-    - `scaleOffset().szip()` is unreadable.
-  - **Fix:** use one ordered filter list for both encode and the message; validate when each filter is
-    set.
-- [ ] **W12 — `GrowBuffer.ensure()` doubles an `int`.** ✔
-  - **Where:** `write/GrowBuffer.java:101-109`, `W:208-220`.
-  - **Failure:** past 2^30 it overflows to 0 and **spins forever**, so any file over 1 GiB hangs. Because
-    the whole file is built in memory and then copied, a 256 MB dataset peaks at 1.55 GB of heap.
-  - **Fix:** throw immediately on overflow (a stopgap). The real fix is in **WF1**: stream data to a
-    `FileChannel` with `long` offsets.
 - [ ] **W13 — fixed-length strings, compound field names, and enum member names are encoded as US-ASCII.** ✔
   - **Where:** `W:271-288, 1740, 1833, 1877-1885`.
   - **Failure:** `"café"` is stored as `caf?` with no error.
   - **Fix:** use UTF-8 with cset=1, or reject non-ASCII.
+- [ ] **W14 — `nbit(precision)` silently drops bits that don't fit.**
+  - **Where:** `nbitEncode`.
+  - **Failure:** `nbit(8)` on -1 stores 255.
+  - **Fix:** validate values when writing (they must be non-negative and fit in `precision` bits), or
+    document a clamp.
+- [ ] **W15 — `Format.EARLIEST` still emits HDF5 1.8-era message versions.**
+  - **Detail:** dataspace v2, fill value v3, attribute v3, and compound/enum/array datatype v3.
+  - **Impact:** HDF5 1.8+ reads them, so this only matters for pre-1.8 readers.
+  - **Fix:** use the v1 encodings in EARLIEST for full fidelity to the name.
 
 ## P1 — valid files that fail; hardening; concurrency; test gaps
 
 ### Valid files that fail to read
 
-- [ ] **V1 — a user block (non-zero base address) is refused.** ✔
-  - **Where:** `Hdf5File.java:47`.
-  - **Failure:** every MATLAB v7.3 `.mat` file and every h5py `userblock_size=` file throws
-    `HdfUnsupportedException`. It isn't listed in USER_GUIDE "Not supported".
-  - **Fix:** add the base address to every file address, e.g. by slicing the mapped segment at the base.
-- [ ] **V2 — the `DONT_FILTER_PARTIAL_BOUND_CHUNKS` layout flag (bit 0) is ignored.** ✔
-  - **Where:** `layout/DataLayoutMessage.java:105`.
-  - **Failure:** "deflate: incorrect header check" on the raw edge chunk.
-  - **Fix:** carry the flag, and skip the pipeline for partial edge chunks.
 - [ ] **V3 — old-style soft links (symbol-table cache type 2) are classified at address -1.** ✔
   - **Where:** `group/SymbolTableNode.java:37-40` → `Group.java:160-167`.
   - **Failure:** the *whole group* becomes unreadable.
@@ -303,51 +183,8 @@ Abbreviations: `W` = `Hdf5Writer.java`; other paths are under `src/main/java/com
 
 ### Corrupt-input hardening
 
-The README promises corrupt input "never crashes the JVM or returns wrong data". These items break that.
+H1–H5 (checksums, cycles, runaway sizes, raw exceptions) are done; see *Done*.
 
-- [ ] **H1 — checksums are never verified.**
-  - **Metadata:** only the superblock checksum is checked. OHDR, OCHK, BTHD/BTIN/BTLF, FRHP/FHIB/FHDB,
-    FAHD/FADB, and EA blocks/pages are not.
-    - **Failure:** a single flipped dataspace byte silently changes dims and data, where libhdf5 refuses
-      the file. ✔
-  - **Data:** fletcher32 is stripped but never verified (`Filters.java:319`).
-    - **Failure:** a flipped chunk bit returns 66 instead of 2, where h5py raises. ✔
-  - **Fix:** verify lookup3 everywhere; compute fletcher32, including libhdf5's odd-length and legacy
-    byte-swapped variants.
-- [ ] **H2 — cycles and unbounded recursion become `StackOverflowError`, OOM, or hangs.** ✔
-  - **Cycles:**
-    - Object-header continuation loops (`header/ObjectHeader.java:134-139,186-195`).
-    - B-tree self-pointers and shared subtrees, with no level-decrement check (`btree/BTreeV2.java:76-81`,
-      `ChunkBTreeV1.java:61-65`, `GroupBTreeV1.java:60-64`).
-    - VDS self-reference (`VirtualDataset.java:70,79`).
-  - **Deep nesting:** nested datatypes (`DatatypeMessage.java:144-202`).
-  - **Fix:** iterative worklists with visited sets; depth caps; record budgets bounded by file size.
-- [ ] **H3 — corrupt length fields cause hangs and runaway allocation.** ✔
-  - **Global heap:** an object size of -16 never advances the cursor, so it **hangs**
-    (`heap/GlobalHeap.java:41`).
-  - **Extensible array:** `maxBits` 255 hangs (`ExtensibleArray.java:72,97-99,168-170`). It also walks
-    unallocated blocks element by element.
-  - **Fixed array:** `entrySize` 0 with a huge `maxEntries` gives OOM.
-  - **szip:** `ppb==0` or `ppsl<ppb` **hangs** (`Aec.java:99-103`).
-  - **deflate:** unbounded inflate is a zip bomb; a 0.5 MB chunk gives OOM (`Filters.java:277-296`).
-  - **Fix:** validate every count; pass the expected size into decompression and stop on overrun.
-- [ ] **H4 — raw RuntimeExceptions escape instead of `HdfException`.** ✔
-  - Layout rank 0 → `NegativeArraySizeException`.
-  - v2 B-tree record size 0 → `ArithmeticException`.
-  - A short fractal-heap ID → AIOOBE.
-  - `Attribute.readInt()` on an empty attribute → AIOOBE.
-  - `select({0,0},{0,3})` on 2-D contiguous data → IOOBE (`data/Hyperslab.java:29-30` checks only the
-    last dim).
-  - `blocks(1)` on a NULL dataspace → IOOBE.
-  - A short unfiltered chunk → AIOOBE (`ChunkedReader.java:105`).
-  - **Silent truncation:** the `(int)` narrowing casts silently truncate (`GlobalHeap.java:39`,
-    `LinkMessage.java:66`, `ChunkBTreeV2.java:62`, `DataLayoutMessage.java:89,112,115`,
-    `DatatypeMessage.java:78,193`, `BTreeV2.java:38,78`).
-  - **Overflow:** `Dataspace.elementCount`, `select` with `offset+count`, and `blocks(Long.MAX_VALUE)`
-    overflow.
-  - **Fix:** checked narrowing and `Math.*Exact`.
-- [ ] **H5 — a local heap name offset past the data segment silently returns `""`.**
-  - **Where:** `heap/LocalHeap.java:39-48`.
 - [ ] **H6 — security: external-file and VDS source paths are opened as written.** ✔
   - **Where:** `message/ExternalFileList.java:76`, `VirtualDataset.java:69`.
   - **Defect:** absolute paths, `..`, and Windows UNC paths are honoured. A crafted `.h5` can read any
@@ -357,13 +194,6 @@ The README promises corrupt input "never crashes the JVM or returns wrong data".
 
 ### Concurrency & lifecycle
 
-- [ ] **C1 — the `ChunkCache` is an access-ordered `LinkedHashMap` that `get()` mutates.** ✔
-  - **Where:** `io/ChunkCache.java:19-43`; lazy fields in `io/FileContext.java:36-41` and `Dataset`.
-  - **Failure:** 16 threads doing `select().readDoubles()` hit 62–69 `ConcurrentModificationException`s
-    per 6400 reads. `blocks()` returns a Stream that invites `.parallel()`.
-  - **Fix:** decide the contract. Concurrent reads of an mmapped file are a natural expectation, so
-    prefer a synchronized or concurrent LRU plus safe publication. Document the contract in the Javadoc
-    and USER_GUIDE either way, and add a concurrency test.
 - [ ] **C2 — use after `close()` gives a raw `IllegalStateException`, and a second `close()` throws.** ✔
   - **Fix:** make `close()` idempotent, throw a typed exception on use after close, and add `isOpen()`.
 - [ ] **C3 — writer failure semantics.** ✔
@@ -383,35 +213,27 @@ The README promises corrupt input "never crashes the JVM or returns wrong data".
 
 ### Test & oracle gaps (what let P0 through)
 
-- [ ] **T1 — put an HDF5 oracle in the loop for the writer.**
-  - **Gap:** `WriteTest` only round-trips through Falcon. Add `tools/fixtures/check_hdf5_writer.py`
-    (like `check_zstd_encoder.py`) that writes the `WriteTest` matrix and reads it with h5py 3.16
-    (HDF5 2.0) **and** h5py 3.14 (HDF5 1.14). Run it before every release.
-  - **Optionally:** an opt-in CI job. It needs Python in CI, so ask Erich first.
-- [ ] **T2 — add the reader fixtures the bugs above live in.** Each one needs a generator entry in
-  `gen_fixtures.py`:
-  - HDF5 1.10/1.14 files (layout v4 FA/EA, filtered);
-  - `maxshape > shape`, and an unlimited dim that isn't first;
-  - sparse EA pages;
-  - more than 1024 FA chunks;
-  - a filtered single chunk;
-  - datasets that were created but never written (every index type);
-  - null vlen elements;
-  - **real libhdf5 szip chunks** (the review used HDFView's HDF5 1.14.4 JNI with libaec);
-  - scale-offset with power-of-two chunks, fill, big-endian, and full range;
-  - default-libver VDS and region references;
-  - a user block;
-  - old-style soft links;
-  - `DONT_FILTER_PARTIAL`;
-  - a dense attribute over 4 KiB;
-  - full-precision n-bit.
-- [ ] **T3 — strengthen `RobustnessTest`.**
-  - **Coverage:** add `vds.h5`, `ea_paged.h5`, and `dense_links_big.h5` to the fixture list. Have
-    `readEverything` also resolve vlen data, references, and typed reads, not just `readRawBytes()`.
-  - **Crafted cases:** add cases for cycles, self-continuations, zero or negative sizes, and zip bombs.
-    Run under a small `-Xss`/`-Xmx`.
-  - **Assertions:** `StackOverflowError` and OOM must never occur.
-- [ ] **T4 — add a concurrency test** once C1's contract is chosen.
+- [ ] **T2 — add the reader fixtures the remaining bugs live in.**
+  - **Done:** fixtures for every fixed item now exist: `chunk_maxshape`, `layout_v4`, `paged_sparse`,
+    `filtered_single`, `unwritten_*`, `scaleoffset` (plus `scaleoffset_chunks.txt`), real-format
+    `szip` (plus `szip_chunks.txt`), `userblock_v0/v3`, `filter_edge`, `vds_loop`, and
+    `aec_ros_vectors.txt`.
+  - **Still to add**, each as a generator entry in `gen_fixtures.py`:
+    - default-libver VDS (including same-file `"."` sources) and region references (V6, V7);
+    - old-style soft links (V3), and new-style soft and external links (V4);
+    - a dense attribute over 4 KiB, and a group of ~40k links (V5);
+    - SOHM shared messages (V10, S1).
+- [ ] **T3 — strengthen `RobustnessTest` further.**
+  - **Done:**
+    - The fuzz set now includes 10 more fixtures (`vds`, `dense_links_big`, and the new ones).
+    - `readEverything` does typed reads that resolve vlen data and references; this found a
+      region-reference leak, now fixed.
+    - `HardeningTest` covers crafted cycles, self-continuations, negative sizes, deep nesting, and zip
+      bombs.
+  - **Still to do:**
+    - Add `ea_paged.h5` (slow: 150k chunks per mutation).
+    - Run the fuzz tests under a small `-Xss`/`-Xmx` in a dedicated surefire execution, so a regression
+      to unbounded recursion or allocation fails fast.
 
 ## P2 — features, API, performance
 
@@ -500,15 +322,15 @@ The README promises corrupt input "never crashes the JVM or returns wrong data".
   - `PLAN.md`: "1.0-ready", "read back identically … by h5py", "szip verified via libaec", and "every
     structure on a read path is covered".
   - README: "corrupt input never … returns wrong data".
-  - USER_GUIDE.md:125: "filters apply in call order" — the order is hard-coded
-    shuffle → deflate → fletcher32.
+  - ~~USER_GUIDE.md:125 "filters apply in call order"~~ — now true (W11).
   - Javadoc of `readRawBytes`: says "not yet de-filtered", but the data *is* de-filtered.
-- [ ] **D2 — USER_GUIDE gaps.** Document:
-  - the thread-safety contract (C1);
-  - the write-on-close lifecycle and memory use (WF1);
-  - unsigned handling (R13);
-  - the user-block limitation (until V1 lands);
-  - external-path policy (H6).
+- [ ] **D2 — USER_GUIDE gaps.**
+  - **Done:** thread safety, filter rules, the writer's HDF5 1.10+ compatibility, and checksum
+    verification are now documented.
+  - **Still to document:**
+    - the write-on-close lifecycle and memory use (WF1);
+    - unsigned handling (R13);
+    - the external-path policy (H6).
 - [ ] **D3 — PLAN.md is stale.**
   - §6 lists the non-existent `dataspace` and `util` packages, omits `data`, `index`, and `group`, and
     says only one package is exported (`datatype` is exported too).
@@ -517,10 +339,6 @@ The README promises corrupt input "never crashes the JVM or returns wrong data".
   - §5 claims a ByteBuffer fallback.
 - [ ] **D4 — Javadoc lint:** 318 `-Xdoclint:all` warnings, including 78 undocumented public members
   (28 in `Hdf5Writer`). 0 errors.
-- [ ] **D5 — Python tooling.** CLAUDE.md says h5py 3.16 is installed, but the default `python` (the
-  WindowsApps 3.12 install) has neither h5py nor zarr; the reviewers had to use scratch venvs.
-  - **Add:** `tools/fixtures/requirements.txt` pinning h5py==3.16.0 (plus a 3.14 / HDF5 1.14 env for T1),
-    numpy, and imagecodecs, with venv instructions.
 - [ ] **B1 — CI: add a `windows-latest` leg** (mmap and file-deletion semantics differ). Repo-wide.
 - [ ] **B2 — release plumbing.**
   - **Add:** source and Javadoc jars, `maven-enforcer` (JDK 25 / Maven 3.9 / banned dependencies),
@@ -533,6 +351,63 @@ The README promises corrupt input "never crashes the JVM or returns wrong data".
   - The root `pom.xml` description says "a zarr module is planned".
 
   Editing CLAUDE.md is Erich's call.
+
+## Done — 2026-10-04 (the review's top 10)
+
+Each fix landed with the fixture or test that reproduces it.
+
+- [x] **R1 szip decode** (+ **W4** encode) — new `filter/Szip.java` implements libaec's SZ layer: the
+  4-byte size header, byte interleaving for 32/64-bit pixels, and padded scanlines. Falcon writes EC
+  coding at 8 pixels per block and stores chunks szip cannot shrink unfiltered, as libhdf5 does.
+  - Verified by `FilterConformanceTest.szipMatchesLibhdf5` and `SzipFilterTest`.
+  - The vectors are byte-identical to HDF5 1.14.4 + libaec output.
+  - The old "signed szip at the filter level" item is moot: the SZ layer codes every sample unsigned.
+- [x] **R2 scale-offset decode** (+ **W3** encode) — `filter/ScaleOffset.java` ports
+  `H5Z__filter_scaleoffset`.
+  - **Decode:** `FilterConformanceTest.scaleOffsetMatchesLibhdf5`, 13 datasets including lossy floats,
+    each compared with libhdf5's own decoding.
+  - **Encode:** byte-identical to libhdf5's chunks (`ScaleOffsetTest`).
+- [x] **R3–R7 chunk indexes**
+  - **Code:** new `index/ChunkGrid.java` (max-dims linearization plus the EA swizzle); `FixedArray` and
+    `ExtensibleArray` derive the entry width and honour paging and page-init bitmaps;
+    `DataLayout.Chunked` carries the filtered single chunk's size and mask.
+  - **Tests:** `ChunkIndexTest`.
+- [x] **R8/R9** — an undefined chunk-index address reads as fill, and a null vlen-string id reads as
+  `""`. Tested by `ChunkIndexTest`.
+- [x] **R11 (bonus)** — n-bit "no compression needed" is honoured.
+- [x] **R12** — the AEC remainder-of-segment stops at the 64-block segment. Tested by
+  `AecTest.zeroBlockRemainderOfSegmentStopsAtSegmentBoundary`; the old decoder fails all 6 vectors.
+- [x] **V1 user block** — addresses are taken relative to the superblock's actual location, as libhdf5
+  does, so a user block prepended after the fact also works. Tested by `UserBlockTest`.
+- [x] **V2 (bonus)** — `DONT_FILTER_PARTIAL_BOUND_CHUNKS` is honoured.
+- [x] **W1/W2** — the fixed array is paged beyond 1024 chunks, and the dense-storage v2 B-tree leaf is
+  sized to its records. Tested by `WriteTest.roundTripPagedFixedArray` and `roundTripLargeDenseStorage`.
+- [x] **W5** — compound, enum, and array datatypes are written as v3, and chunked layouts as v4 with the
+  1.10–1.14 chunk-size width. Files are readable by HDF5 1.10+; native complex is 2.0-only.
+- [x] **W11** — one ordered filter pipeline:
+  - filters apply in call order, each at most once;
+  - scale-offset and n-bit are integer-only and must come first;
+  - szip may only follow shuffle;
+  - each chunk carries its own filter mask.
+  - **Tests:** `WriteTest.roundTripFilterPipelines` and `rejectsInvalidFilterPipelines`.
+- [x] **W12** — `GrowBuffer` growth no longer overflows; past the array limit it throws instead of
+  spinning. The real fix is WF1.
+- [x] **H1–H5 hardening:**
+  - **Checksums:** lookup3 verified on OHDR/OCHK, BTHD/BTIN/BTLF, FRHP/FHIB/FHDB, and FAHD/FADB/pages,
+    EAHD/EAIB/EASB/EADB/pages; fletcher32 verified (including the legacy byte-swapped value).
+  - **Loops and nesting:** iterative continuation chunks with a visited set; B-trees checked for level,
+    visited nodes, and a record budget; datatype nesting capped at 64; VDS nesting capped at 32.
+  - **Sizes:** global-heap, local-heap, EA/FA, and szip parameters validated; deflate output bounded by
+    the chunk size.
+  - **Edges:** API-edge overflow and empty-selection fixes.
+  - **Tests:** `HardeningTest` and the widened `RobustnessTest`.
+- [x] **C1 concurrent reads** — synchronized chunk cache, safely published lazy metadata, and the
+  contract documented. Tested by `ConcurrencyTest`, which fails with `ConcurrentModificationException`
+  if the cache synchronization is removed.
+- [x] **T1 oracle in the loop** — `WriterInteropExport` plus `tools/fixtures/check_hdf5_writer.py`. An
+  opt-in CI job would need Python in CI (ask Erich).
+- [x] **T4** — `ConcurrencyTest`.
+- [x] **D5** — `tools/fixtures/requirements.txt`. Repo-wide.
 
 ## Explicit non-goals (unchanged)
 
