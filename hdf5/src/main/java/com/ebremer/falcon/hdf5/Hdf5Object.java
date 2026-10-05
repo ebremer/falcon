@@ -28,7 +28,7 @@ public abstract sealed class Hdf5Object permits Group, Dataset, CommittedDatatyp
     private final String name;
     private final String path;
     private final long objectHeaderAddress;
-    private ObjectHeader header; // parsed lazily, then cached
+    private volatile ObjectHeader header; // parsed lazily, then cached (safely published across threads)
 
     Hdf5Object(FileContext ctx, String name, String path, long objectHeaderAddress) {
         this.ctx = ctx;
@@ -39,10 +39,12 @@ public abstract sealed class Hdf5Object permits Group, Dataset, CommittedDatatyp
 
     /** This object's header, parsed on first use. */
     ObjectHeader header() {
-        if (header == null) {
-            header = ObjectHeader.parse(ctx, objectHeaderAddress);
+        ObjectHeader result = header;
+        if (result == null) {
+            result = ObjectHeader.parse(ctx, objectHeaderAddress);
+            header = result;
         }
-        return header;
+        return result;
     }
 
     /** The object's local link name ({@code ""} for the root group). */

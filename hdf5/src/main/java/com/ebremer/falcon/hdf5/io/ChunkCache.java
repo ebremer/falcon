@@ -10,7 +10,8 @@ import java.util.Map;
  * (e.g. adjacent blocks sharing a boundary chunk) reuse the filter-decode result instead of decoding it
  * again. Cached arrays are treated as read-only.
  *
- * <p>Not thread-safe &mdash; like the rest of the reader's cursor state, it is used from a single thread.
+ * <p>Thread-safe: an open file may be read from several threads at once, and every lookup reorders the
+ * access-ordered map, so access is synchronized (the critical sections are tiny next to a filter decode).
  */
 public final class ChunkCache {
 
@@ -20,12 +21,12 @@ public final class ChunkCache {
     private long cachedBytes;
 
     /** The decoded bytes cached for the chunk at {@code address}, or {@code null} if not cached. */
-    public byte[] get(long address) {
+    public synchronized byte[] get(long address) {
         return entries.get(address);
     }
 
     /** Caches the decoded bytes for the chunk at {@code address}, evicting least-recently-used entries. */
-    public void put(long address, byte[] decoded) {
+    public synchronized void put(long address, byte[] decoded) {
         if (decoded.length > MAX_BYTES) {
             return; // a single chunk larger than the whole budget is not worth caching
         }

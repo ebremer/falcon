@@ -7,6 +7,9 @@ import java.nio.file.Path;
  * superblock's "size of offsets" (file address width) and "size of lengths" (object size width). The
  * file's own path is carried too, so a virtual dataset can resolve relative source-file names.
  *
+ * <p>Shared by every object of one open file, including across threads: it is immutable apart from the
+ * (thread-safe) decoded-chunk cache.
+ *
  * <p>Internal type &mdash; lives in a non-exported package.
  */
 public final class FileContext {
@@ -15,7 +18,7 @@ public final class FileContext {
     private final int sizeOfOffsets;
     private final int sizeOfLengths;
     private final Path path;
-    private ChunkCache chunkCache; // per-file decoded-chunk cache, created on first use
+    private final ChunkCache chunkCache = new ChunkCache(); // per-file decoded-chunk cache
 
     public FileContext(HdfBuffer buffer, int sizeOfOffsets, int sizeOfLengths) {
         this(buffer, sizeOfOffsets, sizeOfLengths, null);
@@ -32,11 +35,8 @@ public final class FileContext {
         return buffer;
     }
 
-    /** This file's decoded-chunk cache (created lazily), shared across reads of the file. */
+    /** This file's decoded-chunk cache, shared across reads (and reading threads) of the file. */
     public ChunkCache chunkCache() {
-        if (chunkCache == null) {
-            chunkCache = new ChunkCache();
-        }
         return chunkCache;
     }
 

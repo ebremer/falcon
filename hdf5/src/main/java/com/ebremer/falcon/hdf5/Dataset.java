@@ -31,13 +31,13 @@ import java.nio.file.Path;
  */
 public final class Dataset extends Hdf5Object {
 
-    private Datatype datatype;
-    private Dataspace dataspace;
-    private DataLayout layout;
-    private FilterPipeline filterPipeline;
-    private boolean filterPipelineResolved;
-    private byte[] fillValue;
-    private boolean fillValueResolved;
+    // Parsed lazily, then cached. Each cache is one volatile field, read once into a local, so a dataset
+    // shared between threads is never seen half-initialized (Optional distinguishes "none" from "not yet").
+    private volatile Datatype datatype;
+    private volatile Dataspace dataspace;
+    private volatile DataLayout layout;
+    private volatile java.util.Optional<FilterPipeline> filterPipeline;
+    private volatile java.util.Optional<byte[]> fillValue;
 
     private Dataset(FileContext ctx, String name, String path, long objectHeaderAddress) {
         super(ctx, name, path, objectHeaderAddress);
@@ -54,19 +54,23 @@ public final class Dataset extends Hdf5Object {
 
     /** This dataset's element datatype (resolving a committed/shared type if referenced). */
     public Datatype datatype() {
-        if (datatype == null) {
+        Datatype result = datatype;
+        if (result == null) {
             HeaderMessage message = require(MessageType.DATATYPE, "datatype");
-            datatype = DatatypeMessage.resolve(ctx, message.bodyOffset(), SharedMessage.isShared(message));
+            result = DatatypeMessage.resolve(ctx, message.bodyOffset(), SharedMessage.isShared(message));
+            datatype = result;
         }
-        return datatype;
+        return result;
     }
 
     /** This dataset's shape. */
     public Dataspace dataspace() {
-        if (dataspace == null) {
-            dataspace = DataspaceMessage.parse(ctx, require(MessageType.DATASPACE, "dataspace").bodyOffset());
+        Dataspace result = dataspace;
+        if (result == null) {
+            result = DataspaceMessage.parse(ctx, require(MessageType.DATASPACE, "dataspace").bodyOffset());
+            dataspace = result;
         }
-        return dataspace;
+        return result;
     }
 
     // ------------------------------------------------------------------ reads
@@ -277,33 +281,37 @@ public final class Dataset extends Hdf5Object {
     // --------------------------------------------------------------- internals
 
     private DataLayout layout() {
-        if (layout == null) {
-            layout = DataLayoutMessage.parse(ctx, require(MessageType.DATA_LAYOUT, "data layout").bodyOffset());
+        DataLayout result = layout;
+        if (result == null) {
+            result = DataLayoutMessage.parse(ctx, require(MessageType.DATA_LAYOUT, "data layout").bodyOffset());
+            layout = result;
         }
-        return layout;
+        return result;
     }
 
     private byte[] fillValue() {
-        if (!fillValueResolved) {
+        java.util.Optional<byte[]> result = fillValue;
+        if (result == null) {
             HeaderMessage message = header().find(MessageType.FILL_VALUE);
             if (message == null) {
                 message = header().find(MessageType.FILL_VALUE_OLD);
             }
-            fillValue = message == null ? null
-                    : FillValueMessage.parse(ctx.buffer(), message.bodyOffset(), message.type());
-            fillValueResolved = true;
+            result = java.util.Optional.ofNullable(message == null ? null
+                    : FillValueMessage.parse(ctx.buffer(), message.bodyOffset(), message.type()));
+            fillValue = result;
         }
-        return fillValue;
+        return result.orElse(null);
     }
 
     private FilterPipeline filterPipeline() {
-        if (!filterPipelineResolved) {
+        java.util.Optional<FilterPipeline> result = filterPipeline;
+        if (result == null) {
             HeaderMessage message = header().find(MessageType.FILTER_PIPELINE);
-            filterPipeline = message == null ? null
-                    : FilterPipelineMessage.parse(ctx.buffer(), message.bodyOffset());
-            filterPipelineResolved = true;
+            result = java.util.Optional.ofNullable(message == null ? null
+                    : FilterPipelineMessage.parse(ctx.buffer(), message.bodyOffset()));
+            filterPipeline = result;
         }
-        return filterPipeline;
+        return result.orElse(null);
     }
 
     MemorySegment rawData() {

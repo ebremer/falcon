@@ -127,6 +127,12 @@ w.intChunkedDataset("big", data, new long[]{100_000}, new long[]{4096})
 // also: .fletcher32(), .scaleOffset(), .nbit(precision), .szip()
 ```
 
+Filters form a pipeline applied to each chunk in the order they are added, exactly as libhdf5 does, and
+each may be added once. `scaleOffset()` and `nbit(precision)` work on integer data and must come first;
+`szip()` works on integer or floating-point data and may only follow `shuffle()`. Every filter writes
+the on-disk form libhdf5 reads: scale-offset chunks are byte-identical to libhdf5's, and szip chunks use
+libhdf5's framing (a chunk szip cannot shrink is stored unfiltered, as libhdf5 does).
+
 ### Compound, enum, reference, array, sequence, complex
 
 ```java
@@ -160,6 +166,10 @@ Hdf5Writer.create(path, Hdf5Writer.Format.LATEST);    // modern: v3 superblock, 
 Hdf5Writer.create(path, Hdf5Writer.Format.EARLIEST);  // original: v0 superblock, symbol-table groups
 ```
 
+Files Falcon writes are readable by HDF5 1.10 and later (native complex datasets, a type introduced by
+HDF5 2.0, need HDF5 2.0). `tools/fixtures/check_hdf5_writer.py` verifies this against h5py's HDF5 2.0
+and, optionally, an HDF5 1.14 build.
+
 ---
 
 ## Error handling
@@ -167,8 +177,10 @@ Hdf5Writer.create(path, Hdf5Writer.Format.EARLIEST);  // original: v0 superblock
 Every failure Falcon raises is an unchecked `HdfException`:
 
 - `HdfFormatException` — bytes on disk violate the spec (bad signature/checksum, out-of-range address,
-  truncated or corrupt input). Corrupt input always fails this way — never a raw runtime exception, JVM
-  crash, or infinite loop.
+  truncated or corrupt input). Corrupt input fails this way rather than as a raw runtime exception, a
+  JVM crash, or an infinite loop: every checksummed metadata structure (object headers, B-trees,
+  fractal heaps, chunk indexes) and every `fletcher32` chunk is verified, loops and over-deep nesting in
+  the file's structure are detected, and decompression is bounded by the chunk size.
 - `HdfUnsupportedException` — a valid but not-yet-implemented structure.
 
 Catch `HdfException` to handle any Falcon read/write failure.
@@ -183,6 +195,9 @@ Catch `HdfException` to handle any Falcon read/write failure.
   only the chunks overlapping the selection; contiguous selections are extracted zero-copy from the map.
 - **Decoded-chunk cache.** Repeated or streaming reads reuse the filter-decode result for a chunk
   (~16 MB LRU per file).
+- **Concurrent reads.** An open `Hdf5File` and everything obtained from it may be read from many
+  threads at once (e.g. `dataset.blocks(n).parallel()`); close it only after those reads finish.
+  `Hdf5Writer` is single-threaded.
 
 ---
 

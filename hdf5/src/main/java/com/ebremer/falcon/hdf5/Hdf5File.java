@@ -17,13 +17,20 @@ import java.util.Optional;
  *
  * <p>Open a file, walk its hierarchy from {@link #root()}, and {@link #close()} to unmap it (or use
  * try-with-resources). Reads are backed by a memory mapping, so the file must remain available for the
- * lifetime of this object.
+ * lifetime of this object. A file that begins with a user block (as MATLAB v7.3 {@code .mat} files do)
+ * is read like any other.
  *
  * <pre>{@code
  * try (Hdf5File h5 = Hdf5File.open(Path.of("data.h5"))) {
  *     for (String name : h5.root().childNames()) { ... }
  * }
  * }</pre>
+ *
+ * <p><b>Thread safety.</b> An open file, and every object, attribute and selection obtained from it, may
+ * be read from any number of threads at once (for example through {@code dataset.blocks(n).parallel()}):
+ * the mapping is read without shared cursors, the decoded-chunk cache is synchronized, and lazily parsed
+ * metadata is safely published. Close the file only once those reads have finished; a read racing with
+ * {@link #close()} fails with {@link IllegalStateException}.
  */
 public final class Hdf5File implements AutoCloseable {
 

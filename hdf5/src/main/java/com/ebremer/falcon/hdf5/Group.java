@@ -28,7 +28,7 @@ import java.util.Optional;
  */
 public final class Group extends Hdf5Object {
 
-    private List<Hdf5Object> children;
+    private volatile List<Hdf5Object> children; // loaded lazily, then cached (immutable)
 
     private Group(FileContext ctx, String name, String path, long objectHeaderAddress) {
         super(ctx, name, path, objectHeaderAddress);
@@ -49,10 +49,12 @@ public final class Group extends Hdf5Object {
 
     /** This group's direct children, in the order the group indexes them. */
     public List<Hdf5Object> children() {
-        if (children == null) {
-            children = loadChildren();
+        List<Hdf5Object> result = children;
+        if (result == null) {
+            result = List.copyOf(loadChildren());
+            children = result;
         }
-        return children;
+        return result;
     }
 
     /** The direct children's names. */
