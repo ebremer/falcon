@@ -2063,7 +2063,9 @@ public final class Hdf5Writer implements AutoCloseable {
         // Symbol-table nodes: name-sorted entries distributed across nodes of <= perNode symbols each,
         // each padded to its fixed allocated size.
         List<SymbolChild> sorted = new ArrayList<>(children);
-        sorted.sort((a, b) -> a.name().compareTo(b.name()));
+        // libhdf5 orders and looks up names with strcmp: by UTF-8 bytes, not by Java's UTF-16 order.
+        sorted.sort((a, b) -> java.util.Arrays.compareUnsigned(
+                a.name().getBytes(StandardCharsets.UTF_8), b.name().getBytes(StandardCharsets.UTF_8)));
         int nodeCount = Math.max(1, (sorted.size() + perNode - 1) / perNode);
         int snodSize = 8 + perNode * SYMBOL_ENTRY_SIZE;
         int[] snodAddresses = new int[nodeCount];

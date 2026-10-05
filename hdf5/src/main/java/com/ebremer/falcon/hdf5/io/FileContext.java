@@ -5,6 +5,8 @@ import com.ebremer.falcon.hdf5.HdfClosedException;
 import com.ebremer.falcon.hdf5.OpenOptions;
 import com.ebremer.falcon.hdf5.header.SharedMessageTable;
 import java.nio.file.Path;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Supplier;
 
 /**
  * Per-file addressing context threaded through the format parsers: the mapped bytes plus the
@@ -14,7 +16,8 @@ import java.nio.file.Path;
  * so is the superblock extension, which locates the shared-message table.
  *
  * <p>Shared by every object of one open file, including across threads: it is immutable apart from the
- * (thread-safe) decoded-chunk cache, the lazily read shared-message table, and the closed flag.
+ * (thread-safe) decoded-chunk cache, the lazily read shared-message table, the per-file resources (such as
+ * the source files virtual datasets keep open), and the closed flag.
  *
  * <p>Internal type &mdash; lives in a non-exported package.
  */
@@ -29,6 +32,7 @@ public final class FileContext {
     private final long superblockExtensionAddress;
     private final ChunkCache chunkCache = new ChunkCache(); // per-file decoded-chunk cache
     private volatile SharedMessageTable sharedMessageTable; // read on first use, then cached
+    private final ConcurrentHashMap<Class<?>, AutoCloseable> resources = new ConcurrentHashMap<>();
     private volatile boolean closed;
 
     public FileContext(HdfBuffer buffer, int sizeOfOffsets, int sizeOfLengths) {
@@ -109,9 +113,28 @@ public final class FileContext {
         return sizeOfLengths;
     }
 
-    /** Marks the file closed: every later read of it fails with {@link HdfClosedException}. */
+    /**
+     * This file's resource of type {@code type}, made by {@code create} on first use and closed when the
+     * file is: the files its virtual datasets read, for one.
+     */
+    public <T extends AutoCloseable> T resource(Class<T> type, Supplier<T> create) {
+        checkOpen();
+        return type.cast(resources.computeIfAbsent(type, key -> create.get()));
+    }
+
+    /**
+     * Marks the file closed, so every later read of it fails with {@link HdfClosedException}, and closes
+     * its resources.
+     */
     public void markClosed() {
         closed = true;
+        for (AutoCloseable resource : resources.values()) {
+            try {
+                resource.close();
+            } catch (Exception e) {
+                // closing what this file opened cannot fail the close of the file itself
+            }
+        }
     }
 
     public boolean isClosed() {

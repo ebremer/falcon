@@ -1,9 +1,11 @@
 package com.ebremer.falcon.hdf5.group;
 
 import com.ebremer.falcon.hdf5.HdfFormatException;
+import com.ebremer.falcon.hdf5.heap.LocalHeap;
 import com.ebremer.falcon.hdf5.io.FileContext;
 import com.ebremer.falcon.hdf5.io.HdfBuffer;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 /**
@@ -20,6 +22,25 @@ public final class SymbolTableNode {
 
     private SymbolTableNode() {
         // Static parser only.
+    }
+
+    /** The entry named {@code name} (UTF-8 bytes), by binary search over the name-sorted entries, or null. */
+    public static SymbolTableEntry find(FileContext ctx, long addr, LocalHeap heap, byte[] name) {
+        List<SymbolTableEntry> entries = parse(ctx, addr);
+        int lo = 0;
+        int hi = entries.size() - 1;
+        while (lo <= hi) {
+            int mid = (lo + hi) >>> 1;
+            int c = Arrays.compareUnsigned(name, heap.nameBytes(ctx, entries.get(mid).linkNameOffset()));
+            if (c < 0) {
+                hi = mid - 1;
+            } else if (c > 0) {
+                lo = mid + 1;
+            } else {
+                return entries.get(mid);
+            }
+        }
+        return null;
     }
 
     public static List<SymbolTableEntry> parse(FileContext ctx, long addr) {

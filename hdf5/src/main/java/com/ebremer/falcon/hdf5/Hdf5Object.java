@@ -1,6 +1,7 @@
 package com.ebremer.falcon.hdf5;
 
 import com.ebremer.falcon.hdf5.btree.BTreeV2;
+import com.ebremer.falcon.hdf5.checksum.Lookup3;
 import com.ebremer.falcon.hdf5.data.DataspaceSelection;
 import com.ebremer.falcon.hdf5.datatype.Datatype;
 import com.ebremer.falcon.hdf5.header.HeaderMessage;
@@ -32,6 +33,7 @@ public abstract sealed class Hdf5Object permits Group, Dataset, CommittedDatatyp
     private final String path;
     private final long objectHeaderAddress;
     private volatile ObjectHeader header; // parsed lazily, then cached (safely published across threads)
+    private volatile List<Attribute> attributes; // read on first attributes(), then cached (immutable)
 
     Hdf5Object(FileContext ctx, String name, String path, long objectHeaderAddress) {
         this.ctx = ctx;
@@ -66,8 +68,21 @@ public abstract sealed class Hdf5Object permits Group, Dataset, CommittedDatatyp
         return objectHeaderAddress;
     }
 
-    /** This object's attributes (compact header messages and/or dense fractal-heap storage). */
+    /**
+     * This object's attributes (compact header messages and/or dense fractal-heap storage), read on first
+     * use and then kept. The list is unmodifiable.
+     */
     public List<Attribute> attributes() {
+        ctx.checkOpen();
+        List<Attribute> result = attributes;
+        if (result == null) {
+            result = List.copyOf(loadAttributes());
+            attributes = result;
+        }
+        return result;
+    }
+
+    private List<Attribute> loadAttributes() {
         ObjectHeader header = header();
         List<Attribute> out = new ArrayList<>();
         for (HeaderMessage message : header.messages()) {
@@ -81,29 +96,81 @@ public abstract sealed class Hdf5Object permits Group, Dataset, CommittedDatatyp
             if (fractalHeap != HdfBuffer.UNDEFINED_ADDRESS) {
                 FractalHeap heap = FractalHeap.parse(ctx, fractalHeap);
                 for (byte[] record : BTreeV2.readRecords(ctx, AttributeInfoMessage.nameBTreeAddress(ctx, attributeInfo))) {
-                    // attribute-name-index record (type 8): heap ID, then the message flags. A shared
-                    // attribute's ID names its copy in the shared-message heap, not in this object's heap.
-                    byte[] heapId = Arrays.copyOfRange(record, 0, heap.idLength());
-                    if ((record[heap.idLength()] & SharedMessage.SHARED_FLAG) != 0) {
-                        out.add(AttributeMessage.parse(ctx, SharedMessage.heapMessage(ctx, heapId, MessageType.ATTRIBUTE)));
-                    } else {
-                        FractalHeap.HeapObject object = heap.locate(heapId);
-                        out.add(AttributeMessage.parse(ctx, object.address(), object.length()));
-                    }
+                    out.add(denseAttribute(heap, record));
                 }
             }
         }
         return out;
     }
 
-    /** The attribute with the given name, if present. */
+    /**
+     * The attribute an attribute-name-index record (v2 B-tree type 8) points at: the record is the heap ID,
+     * the message flags, the creation order, and the name's hash. A shared attribute's ID names its copy
+     * in the shared-message heap, not in this object's heap.
+     */
+    private Attribute denseAttribute(FractalHeap heap, byte[] record) {
+        if (record.length < heap.idLength() + 1) {
+            throw new HdfFormatException("attribute name index record of " + record.length + " bytes");
+        }
+        byte[] heapId = Arrays.copyOfRange(record, 0, heap.idLength());
+        if ((record[heap.idLength()] & SharedMessage.SHARED_FLAG) != 0) {
+            return AttributeMessage.parse(ctx, SharedMessage.heapMessage(ctx, heapId, MessageType.ATTRIBUTE));
+        }
+        FractalHeap.HeapObject object = heap.locate(heapId);
+        return AttributeMessage.parse(ctx, object.address(), object.length());
+    }
+
+    /**
+     * The attribute with the given name, if present. Once {@link #attributes()} has been read it is
+     * searched; otherwise dense storage is searched through its name index, as libhdf5 does: the records
+     * whose name hash matches, so one lookup reads a few nodes rather than every attribute.
+     */
     public Optional<Attribute> attribute(String name) {
-        for (Attribute attribute : attributes()) {
-            if (attribute.name().equals(name)) {
-                return Optional.of(attribute);
+        ctx.checkOpen();
+        List<Attribute> loaded = attributes;
+        if (loaded != null) {
+            return loaded.stream().filter(a -> a.name().equals(name)).findFirst();
+        }
+        ObjectHeader header = header();
+        for (HeaderMessage message : header.messages()) {
+            if (message.type() == MessageType.ATTRIBUTE) {
+                Attribute attribute = AttributeMessage.parse(ctx, SharedMessage.resolve(ctx, message));
+                if (attribute.name().equals(name)) {
+                    return Optional.of(attribute);
+                }
+            }
+        }
+        HeaderMessage attributeInfo = header.find(MessageType.ATTRIBUTE_INFO);
+        if (attributeInfo != null) {
+            long fractalHeap = AttributeInfoMessage.fractalHeapAddress(ctx, attributeInfo);
+            if (fractalHeap != HdfBuffer.UNDEFINED_ADDRESS) {
+                FractalHeap heap = FractalHeap.parse(ctx, fractalHeap);
+                int hash = nameHash(name);
+                // The record ends with the name's hash, which orders the index.
+                for (byte[] record : BTreeV2.find(ctx, AttributeInfoMessage.nameBTreeAddress(ctx, attributeInfo),
+                        record -> Integer.compareUnsigned(hashAt(record, record.length - 4), hash))) {
+                    Attribute attribute = denseAttribute(heap, record);
+                    if (attribute.name().equals(name)) {
+                        return Optional.of(attribute);
+                    }
+                }
             }
         }
         return Optional.empty();
+    }
+
+    /** The hash libhdf5 indexes a link or attribute name by: lookup3 of its UTF-8 bytes. */
+    static int nameHash(String name) {
+        return Lookup3.hashLittle(name.getBytes(StandardCharsets.UTF_8));
+    }
+
+    /** The little-endian 32-bit name hash at {@code offset} in a name-index record. */
+    static int hashAt(byte[] record, int offset) {
+        if (offset < 0 || offset + 4 > record.length) {
+            throw new HdfFormatException("name index record of " + record.length + " bytes has no hash");
+        }
+        return (record[offset] & 0xff) | (record[offset + 1] & 0xff) << 8 | (record[offset + 2] & 0xff) << 16
+                | (record[offset + 3] & 0xff) << 24;
     }
 
     public abstract boolean isGroup();

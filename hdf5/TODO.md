@@ -1,9 +1,10 @@
 # Falcon HDF5 — remaining work (prioritized)
 
-**Status (2026-10-05, after P2 S1–S7 and A2, A3, A5, A6):** build green, **439 HDF5 tests** (144 at
-the review, 187 after the top 10, 206 after P0, 228 after P1, 243 after S1–S3, 256 after S4–S7), plus 33
-in the `core` module. The review's top 10, every P1 item, **P2 S1–S7**, and **P2 A2, A3, A5, and A6**
-are done (see *Done* at the end). P0 has one item, inherited with the shared zstd decoder. Falcon now:
+**Status (2026-10-05, after P2 S1–S7, A2, A3, A5, A6, and PF1–PF4):** build green, **610 HDF5 tests**
+(144 at the review, 187 after the top 10, 206 after P0, 228 after P1, 243 after S1–S3, 256 after S4–S7,
+439 after A2–A6), plus 33 in the `core` module. The review's top 10, every P1 item, **P2 S1–S7**,
+**A2, A3, A5, A6**, and **PF1–PF4** are done (see *Done* at the end). P0 has one item, inherited with the
+shared zstd decoder. Falcon now:
 
 - reads the files the review showed it misreading:
   - real libhdf5 szip and scale-offset data;
@@ -26,6 +27,10 @@ are done (see *Done* at the end). P0 has one item, inherited with the shared zst
   ranges, any channel) that it reads on demand;
 - looks objects up by path, reads integers as floating point as libhdf5 converts them, and reports each
   dataset's layout, chunk shape, filters, and storage size as libhdf5 does;
+- reads only what a read needs:
+  - chunks are looked up by coordinate in an index read once per dataset;
+  - virtual-dataset selections read only the parts of the sources they map to;
+  - names are found through the name indexes (see `BENCHMARKS.md`);
 - writes files that **HDF5 2.0 and 1.14 read**, checked by `tools/fixtures/check_hdf5_writer.py`. The
   final run read 83/83 objects with HDF5 2.0 and 78/78 with 1.14.6. The P0 edge-case files written by
   the previous writer fail 19 objects under each version.
@@ -36,6 +41,17 @@ are done (see *Done* at the end). P0 has one item, inherited with the shared zst
 
 P1 is empty, and P0 holds only Z6/Z7, the zstd decoder's defects. What remains is features and API (P2)
 and docs and build (P3).
+
+**Behaviour changes in P2 PF1–PF4** (pre-1.0; no API change):
+- `Hdf5Object.attributes()` returns an unmodifiable list, read once per handle. It used to return a new
+  mutable list on each call.
+- A `Dataset` handle keeps its chunk index, and a virtual dataset's source datasets, for later reads.
+- **Source files stay open:** the files a virtual dataset reads stay open until its file closes, as in
+  libhdf5. They used to be opened and closed on every read.
+- **Corrupt chunk indexes fail:** a chunk at a misaligned offset, or two chunks at the same one, is now a
+  format error. Only a corrupt index makes them, and libhdf5 would not find them either.
+- **Writer:** `Hdf5Writer` (EARLIEST format) orders symbol tables by UTF-8 bytes, as libhdf5's `strcmp`
+  does, so libhdf5 and Falcon find every name by lookup.
 
 **API changes in P2 A2, A3, A5, A6** (pre-1.0):
 - **Numeric reads:** `readDoubles()` and `readFloats()` (on `Dataset`, `Attribute`, `Selection`, and
@@ -136,14 +152,14 @@ review baseline. Abbreviations: `W` = `Hdf5Writer.java`; other paths are under
 5. **A4 — selections:**
    - strided and point selections in `select`;
    - vlen readers on `Selection`.
-6. **PF1/PF3 — lookups:** cache each dataset's chunk index; look attributes up by name.
-7. **A8 — internal types out of the public API.** `Attribute`'s public constructor exposes `FileContext`;
+6. **A8 — internal types out of the public API.** `Attribute`'s public constructor exposes `FileContext`;
    pre-1.0 is the time to fix it.
-8. **D1/D3 — docs that overclaim, and a stale PLAN.md.**
-9. **B1/B2 — CI and release plumbing:** a Windows CI leg, source and Javadoc jars, and the enforcer.
-    New plugins need Erich's approval.
-10. **A9/A10 — remote files, continued:** other files of a remote file (external raw data, VDS sources)
-    through the reader, and paths that cannot be mapped.
+7. **D1/D3 — docs that overclaim, and a stale PLAN.md.**
+8. **B1/B2 — CI and release plumbing:** a Windows CI leg, source and Javadoc jars, and the enforcer.
+   New plugins need Erich's approval.
+9. **A9/A10 — remote files, continued:** other files of a remote file (external raw data, VDS sources)
+   through the reader, and paths that cannot be mapped.
+10. **PF5 — chunk lookups without reading the whole index,** for very large or remote datasets.
 
 ---
 
@@ -224,22 +240,27 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
 - [ ] **WF7 — lower-priority options:**
   - a user-block option;
   - szip better-ratio modes (NN preprocessing, zero-block, second extension) — carried over;
-  - sort EARLIEST symbol tables by UTF-8 bytes (`strcmp`), not UTF-16 (`W:1602`) ✔;
+  - ~~sort EARLIEST symbol tables by UTF-8 bytes (`strcmp`), not UTF-16~~ — done in PF3, which looks
+    names up by that order;
   - ~~set the UTF-8 cset on link and attribute names~~ — done in the P0 pass (LATEST format).
 
 ### Performance
 
-- [ ] **PF1 — cache the chunk index per dataset and look up by coordinate.** Every `Selection` read
-  re-walks the whole index, so `blocks()` costs O(blocks × chunks). (`ChunkedReader.java:72`)
-- [ ] **PF2 — read VDS selections lazily.** Today they re-assemble the whole VDS and re-map every source
-  file per call (`Dataset.java:348`). With unlimited mappings, `dataspace()` maps the sources once more
-  to find the extent.
-- [ ] **PF3 — use name indexes for lookup.**
-  - `attribute(name)` reparses every attribute on each call.
-  - A dense group's `link(name)` scans the link list; the name-hash B-tree could find it directly.
-  - Partly done: `child(name)` now classifies only the object it returns, not every child.
-- [ ] **PF4 — benchmark / perf-regression harness.** Still optional; the Zarr module's opt-in
-  `Benchmarks` pattern works. (carried over)
+- PF1–PF4 are done (see *Done — 2026-10-05 (P2: PF1–PF4)*). Still open around them:
+  - [ ] **PF5 — look chunks up without reading the whole index.** PF1 reads a dataset's whole chunk
+    index on its first read, about 32 bytes kept per chunk.
+    - **Cost:** for a dataset of millions of chunks, or a remote one through a `RangeReader`, the first
+      small read pays for the whole index.
+    - **Fix:** each index type can find one chunk directly:
+      - an implicit, fixed-array, or extensible-array index by arithmetic on the chunk's linear index;
+      - a v1 or v2 B-tree by descending its keys.
+  - [ ] **PF6 — share per-object caches between handles.** Each `Dataset`, `Group`, or attribute list is
+    cached per handle, and `group.dataset("x")` returns a new handle each time. A per-file cache keyed by
+    object-header address would share them. Bound it, since a file can hold millions of objects.
+  - [ ] **PF7 — virtual mappings that scatter.** A virtual selection reads the bounding box of the source
+    elements it needs. For regular mappings that is about what it needs. For a mapping whose virtual and
+    source shapes differ, or whose source is strided, the box can be much larger than the elements:
+    read those by runs.
 
 ## P3 — docs, build, housekeeping
 
@@ -260,6 +281,7 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
     are looked for.
   - **Also done (P2 A2–A6):** other sources (bytes, `RangeReader`), paths, integers as floating point,
     and storage metadata.
+  - **Also done (P2 PF1–PF4):** what reads keep per handle and per file, and `BENCHMARKS.md`.
   - **Still to document:** the writer's memory use (WF1).
 - [ ] **D3 — PLAN.md is stale.**
   - §6 lists the non-existent `dataspace` and `util` packages, omits `data`, `index`, and `group`, and
@@ -281,6 +303,68 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
   - The root `pom.xml` description says "a zarr module is planned".
 
   Editing CLAUDE.md is Erich's call.
+
+## Done — 2026-10-05 (P2: PF1–PF4)
+
+Measured with the new `Benchmarks` before and after on one machine (`BENCHMARKS.md`):
+- 1,000 small chunked selections: 13× faster;
+- one-element virtual selections: 93–127× faster;
+- lookups by name on new handles: 25–75× faster;
+- whole reads and listings: unchanged within run-to-run noise.
+
+- [x] **PF1 — chunk index read once per dataset, looked up by coordinate.**
+  - **The index.** `data/ChunkIndex` keeps every stored chunk compactly, sorted by grid position: about
+    32 bytes per chunk.
+  - **Lookups.** A selection binary-searches each grid cell it covers, or, when it covers more cells than
+    there are chunks, makes one pass over the chunks. A whole read uses the chunks within the extent.
+    `storageSize()` uses the same index.
+  - **Corrupt indexes.** A misaligned or duplicated chunk offset fails as a format error.
+  - **Tests:** `ChunkIndex` against a brute-force scan (200 random sparse grids, 4,000 queries). Every
+    chunked and virtual fixture dataset (148) is read in 12 random boxes and in `blocks()`, and
+    each must match the same part of a whole read.
+- [x] **PF2 — virtual datasets read lazily.**
+  - **Pairing by position.** `data/SelectedElements` gives a selection's elements by their position in
+    iteration order. A regular hyperslab or "all" is kept as per-dimension runs, so position and
+    coordinate convert by arithmetic, and the elements inside a box cost only what the box holds.
+  - **Selections.** A virtual selection skips mappings that miss the box, before looking for their
+    sources. It pairs each virtual element in the box with its source element, and reads the source's
+    bounding box of those through the source's own selection reads.
+  - **Kept for later reads:**
+    - each `Dataset` keeps its parsed mappings and the sources it found;
+    - the printf sources found when the extent was set are reused for reading, so the two agree;
+    - source files stay open in a per-file `SourceFiles` until the file closes;
+    - a missing source is looked for again on the next read, as libhdf5 does.
+  - **Tests:**
+    - a corrupt second source fails only the selections that reach it;
+    - sources survive repeated reads, and a closed file refuses them;
+    - every virtual fixture dataset matches its whole read box by box.
+- [x] **PF3 — lookups through the name indexes.**
+  - **`attribute(name)`:** a dense attribute set is searched through its name-hash v2 B-tree (type-8
+    records).
+  - **`Group.link(name)`** (and so `child`, `group`, `dataset`, and paths):
+    - a dense group through its type-5 name-hash B-tree;
+    - an old-style group by descending its v1 B-tree of names and binary-searching the symbol-table
+      node, as libhdf5's `H5G__node_found` does;
+    - a compact group from its header.
+  - **The search.** `BTreeV2.find` descends only the children whose key range can hold the hash, so
+    colliding names are all found.
+  - **Caching.** Once a handle has read its full lists, lookups use them (by a map); `attributes()` is
+    read once per handle.
+  - **Writer order.** Falcon's EARLIEST writer now orders symbol tables by UTF-8 bytes (`strcmp`). Before,
+    a supplementary character sorted as UTF-16 does, and lookups, libhdf5's and now Falcon's, could miss
+    it. libhdf5 2.0 and 1.14.6 find all 67 names of a Falcon-written test file.
+  - **Fixtures.** `dense_big.h5` (20,000 dense links, 3,000 dense attributes) and `oldstyle_big.h5`
+    (5,000 links, a multi-level B-tree) are new. Both hold non-ASCII names whose UTF-8 and UTF-16 orders
+    differ.
+  - **Tests:** every link and attribute of 13 fixtures is found on a new handle, and missing names are
+    not. A dense-group lookup through a `RangeReader` reads under a third of the bytes the listing reads.
+    The old-sort regression is caught.
+- [x] **PF4 — benchmark harness.** `Benchmarks` (opt-in, `-Dfalcon.bench=true`, as in Zarr) times whole,
+  partial, streaming, virtual, lookup, and remote reads. `BENCHMARKS.md` gives the before-and-after
+  table. Deterministic guards run in every build: `PerformanceTest`'s byte counts, and the
+  lookup-not-listing check.
+- **T3:** the fuzz test also looks names up on new handles, reads a one-element box of every dataset
+  (chunk lookup and lazy virtual read), and covers `oldstyle_big.h5` (126 s against a 300 s limit).
 
 ## Done — 2026-10-05 (P2: A2, A3, A5, A6)
 

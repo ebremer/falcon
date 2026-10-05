@@ -16,10 +16,10 @@ import com.ebremer.falcon.hdf5.layout.DataLayout;
 import java.util.List;
 
 /**
- * Assembles a chunked dataset's full element data into a single contiguous, row-major byte array by
- * reading each chunk (via the chunk index), reversing its filter pipeline, and copying its in-bounds
- * region into place. Boundary chunks that extend past the dataset extent contribute only their valid
- * elements; any elements no chunk covers keep the fill value.
+ * Assembles a chunked dataset's element data, whole or a hyperslab of it, into a contiguous row-major
+ * byte array: each chunk the {@link ChunkIndex} finds overlapping is read, its filter pipeline reversed,
+ * and its in-bounds part copied into place. Boundary chunks that extend past the dataset extent
+ * contribute only their valid elements; any elements no chunk covers keep the fill value.
  */
 public final class ChunkedReader {
 
@@ -27,18 +27,25 @@ public final class ChunkedReader {
     }
 
     /**
-     * Assembles the whole dataset. {@code maxDims} are the dataspace's maximum dimensions (or
-     * {@code null} if it stores none): the array-style chunk indexes number their chunks over the
-     * maximum chunk grid, so they are needed to locate each chunk.
+     * Reads the dataset's chunk index, once: every chunk stored. {@code maxDims} are the dataspace's
+     * maximum dimensions (or {@code null} if it stores none): the array-style chunk indexes number their
+     * chunks over the maximum chunk grid, so they are needed to locate each chunk.
      */
-    public static byte[] assemble(FileContext ctx, DataLayout.Chunked layout, long[] datasetDims, long[] maxDims,
+    public static ChunkIndex readIndex(FileContext ctx, DataLayout.Chunked layout, long[] datasetDims, long[] maxDims,
+                                       int elementSize) {
+        int chunkBytes = chunkBytes(layout.chunkDimensions(), elementSize);
+        return ChunkIndex.of(enumerateChunks(ctx, layout, chunkBytes, datasetDims, maxDims), layout.chunkDimensions());
+    }
+
+    /** Assembles the whole dataset from the chunks within its extent. */
+    public static byte[] assemble(FileContext ctx, DataLayout.Chunked layout, ChunkIndex index, long[] datasetDims,
                                   int elementSize, FilterPipeline pipeline, byte[] fill) {
         byte[] output = new byte[Elements.checkedByteCount(product(datasetDims), elementSize)];
         tileFill(output, fill, elementSize);
 
         int[] chunkDims = layout.chunkDimensions();
         int chunkBytes = chunkBytes(chunkDims, elementSize);
-        for (ChunkRecord chunk : enumerateChunks(ctx, layout, chunkBytes, datasetDims, maxDims)) {
+        for (ChunkRecord chunk : index.overlapping(new long[datasetDims.length], datasetDims, datasetDims)) {
             copyChunk(output, datasetDims, chunkDims, chunk.offset(),
                     readChunk(ctx, layout, chunk, datasetDims, pipeline, elementSize, chunkBytes), elementSize);
         }
@@ -47,39 +54,22 @@ public final class ChunkedReader {
 
     /**
      * Assembles just the hyperslab {@code [selOffset, selOffset+selCount)}: only the chunks that overlap
-     * the selection are read and de-filtered (the rest are skipped), so reading a small window of a
-     * large chunked dataset does not touch the whole dataset.
+     * the selection are looked up, read, and de-filtered, so reading a small window of a large chunked
+     * dataset does not touch the whole dataset.
      */
-    public static byte[] assembleSelection(FileContext ctx, DataLayout.Chunked layout, long[] datasetDims,
-                                           long[] maxDims, int elementSize, FilterPipeline pipeline, byte[] fill,
+    public static byte[] assembleSelection(FileContext ctx, DataLayout.Chunked layout, ChunkIndex index,
+                                           long[] datasetDims, int elementSize, FilterPipeline pipeline, byte[] fill,
                                            long[] selOffset, long[] selCount) {
         byte[] output = new byte[Elements.checkedByteCount(product(selCount), elementSize)];
         tileFill(output, fill, elementSize);
 
         int[] chunkDims = layout.chunkDimensions();
         int chunkBytes = chunkBytes(chunkDims, elementSize);
-        for (ChunkRecord chunk : enumerateChunks(ctx, layout, chunkBytes, datasetDims, maxDims)) {
-            if (!overlaps(chunk.offset(), chunkDims, datasetDims, selOffset, selCount)) {
-                continue;
-            }
+        for (ChunkRecord chunk : index.overlapping(selOffset, selCount, datasetDims)) {
             byte[] bytes = readChunk(ctx, layout, chunk, datasetDims, pipeline, elementSize, chunkBytes);
             copyIntersection(output, selOffset, selCount, chunk.offset(), chunkDims, datasetDims, bytes, elementSize);
         }
         return output;
-    }
-
-    /**
-     * The bytes the dataset's stored chunks take in the file, filtered sizes summed over the chunk index,
-     * as libhdf5's {@code H5Dget_storage_size} counts them. Zero if no chunk has been written.
-     */
-    public static long storedBytes(FileContext ctx, DataLayout.Chunked layout, long[] datasetDims, long[] maxDims,
-                                   int elementSize) {
-        int chunkBytes = chunkBytes(layout.chunkDimensions(), elementSize);
-        long total = 0;
-        for (ChunkRecord chunk : enumerateChunks(ctx, layout, chunkBytes, datasetDims, maxDims)) {
-            total += chunk.size();
-        }
-        return total;
     }
 
     private static List<ChunkRecord> enumerateChunks(FileContext ctx, DataLayout.Chunked layout, int chunkBytes,
@@ -177,19 +167,6 @@ public final class ChunkedReader {
         } catch (ArithmeticException e) {
             throw new HdfFormatException("dataset extent overflows: " + a + " x " + b);
         }
-    }
-
-    /** True if a chunk (clamped to the dataset extent) intersects the selection in every dimension. */
-    private static boolean overlaps(long[] chunkOffset, int[] chunkDims, long[] datasetDims,
-                                    long[] selOffset, long[] selCount) {
-        for (int d = 0; d < chunkOffset.length; d++) {
-            long lo = Math.max(chunkOffset[d], selOffset[d]);
-            long hi = Math.min(Math.min(chunkOffset[d] + chunkDims[d], datasetDims[d]), selOffset[d] + selCount[d]);
-            if (lo >= hi) {
-                return false;
-            }
-        }
-        return true;
     }
 
     /** Copies the chunk&cap;selection intersection into {@code output} (shaped like the selection). */

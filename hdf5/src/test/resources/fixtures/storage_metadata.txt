@@ -84,6 +84,7 @@ datatypes.h5	/unlimited	CHUNKED	3	0	0
 datatypes.h5	/vlen_i4	CONTIGUOUS	-	0	0
 datatypes.h5	/vlen_str	CONTIGUOUS	-	0	0
 dense_attrs.h5	/d	CONTIGUOUS	-	12	0
+dense_big.h5	/d	CONTIGUOUS	-	4	0
 dense_links.h5	/dense/link00	CONTIGUOUS	-	4	0
 dense_links.h5	/dense/link01	CONTIGUOUS	-	4	0
 dense_links.h5	/dense/link02	CONTIGUOUS	-	4	0
@@ -771,6 +772,7 @@ numeric.h5	/x87	CONTIGUOUS	-	64	0
 old_style_groups.h5	/alpha/beta/gamma	CONTIGUOUS	-	24	0
 old_style_groups.h5	/alpha/delta	CONTIGUOUS	-	24	0
 old_style_groups.h5	/root_ds	CONTIGUOUS	-	8	0
+oldstyle_big.h5	/d	CONTIGUOUS	-	4	0
 paged_sparse.h5	/ea_sparse	CHUNKED	1	56	0
 paged_sparse.h5	/fa_paged	CHUNKED	2	20000	0
 paged_sparse.h5	/fa_paged_gz	CHUNKED	2	35000	1	1	1	4	deflate

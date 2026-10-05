@@ -761,6 +761,37 @@ def _links(f, dense):
         big["ext"] = h5py.ExternalLink("links_ext.h5", "/y")
 
 
+# Names whose order differs between Java's UTF-16 compareTo and strcmp's UTF-8 bytes (a supplementary
+# character sorts below U+E000 in UTF-16, above it in UTF-8), plus other non-ASCII and case variants.
+LOOKUP_NAMES = ["\u00e9t\u00e9", "\u65e5\u672c\u8a9e", "\U0001f600", "\ue000", "Zeta", "zeta", "a b", "x.y"]
+
+
+def build_lookup_big(out):
+    """Groups and attributes large enough that a lookup by name differs from reading them all: a dense
+    group of 20,000 links and an object with 3,000 dense attributes (libver latest: name-hash v2 B-trees
+    over fractal heaps with indirect blocks), and an old-style group of 5,000 links (a multi-level
+    version-1 B-tree over symbol-table nodes). Each also holds LOOKUP_NAMES."""
+    with h5py.File(os.path.join(out, "dense_big.h5"), "w", libver="latest") as f:
+        d = f.create_dataset("d", data=np.int32(1))
+        g = f.create_group("many")
+        for i in range(20000):
+            g[f"link{i:05d}"] = d
+        for name in LOOKUP_NAMES:
+            g[name] = d
+        for i in range(3000):
+            d.attrs[f"attr{i:04d}"] = np.int32(i)
+        for k, name in enumerate(LOOKUP_NAMES):
+            d.attrs[name] = np.int32(-1 - k)
+    with h5py.File(os.path.join(out, "oldstyle_big.h5"), "w", libver="earliest") as f:
+        d = f.create_dataset("d", data=np.int32(1))
+        g = f.create_group("many")
+        for i in range(5000):
+            g[f"link{i:04d}"] = d
+        for name in LOOKUP_NAMES:
+            g[name] = d
+        g["soft"] = h5py.SoftLink("/d")
+
+
 def build_links(out):
     """Every link kind in new-style (compact and dense) and old-style (symbol-table) groups, plus the
     external file the external links name."""
@@ -1417,6 +1448,7 @@ FIXTURES = {
     "external_paths": lambda: build_external_paths(OUT),
     "numeric": lambda: _with_file("numeric.h5", build_numeric, libver="latest"),
     "conversions": lambda: _with_file("conversions.h5", build_conversions),
+    "lookup_big": lambda: build_lookup_big(OUT),
     "vds_byteorder": lambda: build_vds_byteorder(OUT),
     "userblock": lambda: build_userblock(OUT),
     "chunk_maxshape": lambda: _with_file("chunk_maxshape.h5", build_chunk_maxshape, libver="latest"),

@@ -37,6 +37,11 @@ public final class LocalHeap {
 
     /** Reads the null-terminated name at {@code offset} bytes into the heap's data segment. */
     public String name(FileContext ctx, long offset) {
+        return new String(nameBytes(ctx, offset), StandardCharsets.UTF_8);
+    }
+
+    /** The bytes of the null-terminated name at {@code offset}, without the terminator. */
+    public byte[] nameBytes(FileContext ctx, long offset) {
         HdfBuffer buf = ctx.buffer();
         if (offset < 0 || offset >= dataSegmentSize) {
             throw new HdfFormatException("local heap name offset " + offset + " is outside the "
@@ -48,7 +53,6 @@ public final class LocalHeap {
         while (p < limit && buf.getByte(p) != 0) {
             p++;
         }
-        byte[] bytes = buf.getBytes(start, (int) (p - start));
-        return new String(bytes, StandardCharsets.UTF_8);
+        return buf.getBytes(start, (int) (p - start));
     }
 }

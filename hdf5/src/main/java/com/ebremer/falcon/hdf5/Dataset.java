@@ -1,5 +1,6 @@
 package com.ebremer.falcon.hdf5;
 
+import com.ebremer.falcon.hdf5.data.ChunkIndex;
 import com.ebremer.falcon.hdf5.data.ChunkedReader;
 import com.ebremer.falcon.hdf5.data.Elements;
 import com.ebremer.falcon.hdf5.data.Hyperslab;
@@ -41,6 +42,8 @@ public final class Dataset extends Hdf5Object {
     private volatile DataLayout layout;
     private volatile java.util.Optional<FilterPipeline> filterPipeline;
     private volatile java.util.Optional<byte[]> fillValue;
+    private volatile ChunkIndex chunkIndex; // a chunked dataset's index, read once (see chunkIndex())
+    private volatile VirtualDataset virtual; // a virtual dataset's mappings and sources, kept for later reads
 
     private Dataset(FileContext ctx, String name, String path, long objectHeaderAddress) {
         super(ctx, name, path, objectHeaderAddress);
@@ -80,7 +83,7 @@ public final class Dataset extends Hdf5Object {
             // Only an unlimited dimension can hold an unlimited mapping.
             boolean unlimited = java.util.stream.IntStream.range(0, result.rank()).anyMatch(result::isUnlimited);
             if (unlimited && dataLayout() instanceof DataLayout.Virtual virtual) {
-                long[] dims = VirtualDataset.extent(ctx, virtual, result.dimensions());
+                long[] dims = virtual(virtual).extent(result.dimensions());
                 if (!java.util.Arrays.equals(dims, result.dimensions())) {
                     result = new Dataspace(result.version(), result.kind(), dims, result.maxDimensions());
                 }
@@ -160,8 +163,7 @@ public final class Dataset extends Hdf5Object {
                 // Layout messages before version 3 do not record the size; libhdf5 computes it.
                 yield c.size() >= 0 ? c.size() : byteCount();
             }
-            case DataLayout.Chunked chunked -> ChunkedReader.storedBytes(ctx, chunked, dataspace().dimensions(),
-                    dataspace().maxDimensions(), datatype().size());
+            case DataLayout.Chunked chunked -> chunkIndex(chunked).storedBytes();
             case DataLayout.Virtual v -> 0;
         };
     }
@@ -454,6 +456,30 @@ public final class Dataset extends Hdf5Object {
         return result;
     }
 
+    /**
+     * The chunk index, read on the first read that needs it and then kept, so that later selections (each
+     * block of {@link #blocks}, say) look their chunks up instead of walking the index again.
+     */
+    private ChunkIndex chunkIndex(DataLayout.Chunked chunked) {
+        ChunkIndex result = chunkIndex;
+        if (result == null) {
+            Dataspace space = dataspace();
+            result = ChunkedReader.readIndex(ctx, chunked, space.dimensions(), space.maxDimensions(), datatype().size());
+            chunkIndex = result;
+        }
+        return result;
+    }
+
+    /** The virtual dataset behind this dataset's layout, made on first use and then kept. */
+    private VirtualDataset virtual(DataLayout.Virtual layout) {
+        VirtualDataset result = virtual;
+        if (result == null) {
+            result = VirtualDataset.of(ctx, layout);
+            virtual = result;
+        }
+        return result;
+    }
+
     private byte[] fillValue() {
         java.util.Optional<byte[]> result = fillValue;
         if (result == null) {
@@ -504,32 +530,31 @@ public final class Dataset extends Hdf5Object {
                 }
                 yield ctx.buffer().segmentSlice(c.address(), byteCount);
             }
-            case DataLayout.Chunked chunked -> {
-                Dataspace space = dataspace();
-                byte[] assembled = ChunkedReader.assemble(ctx, chunked, space.dimensions(), space.maxDimensions(),
-                        datatype().size(), filterPipeline(), fillValue());
-                yield MemorySegment.ofArray(assembled);
-            }
+            case DataLayout.Chunked chunked -> MemorySegment.ofArray(ChunkedReader.assemble(ctx, chunked,
+                    chunkIndex(chunked), dataspace().dimensions(), datatype().size(), filterPipeline(), fillValue()));
             case DataLayout.Virtual virtual -> {
-                byte[] assembled = VirtualDataset.assemble(
-                        ctx, virtual, dataspace().dimensions(), datatype(), fillValue());
-                yield MemorySegment.ofArray(assembled);
+                long[] dims = dataspace().dimensions();
+                yield MemorySegment.ofArray(virtual(virtual).read(dims, datatype(), fillValue(), new long[dims.length], dims));
             }
         };
     }
 
     /**
      * The raw bytes of the hyperslab {@code [offset, offset+count)}, flattened row-major. For chunked
-     * datasets only the chunks overlapping the selection are read and de-filtered, and for contiguous
-     * data in this file only the selected runs; other layouts extract from the assembled full data.
+     * datasets only the chunks overlapping the selection are read and de-filtered, for contiguous data in
+     * this file only the selected runs, and for virtual datasets only the parts of the sources the
+     * selection maps to; other layouts extract from the assembled full data.
      */
     MemorySegment selectionData(long[] offset, long[] count) {
         int elementSize = datatype().size();
         long[] dims = dataspace().dimensions();
         DataLayout layout = dataLayout();
         if (layout instanceof DataLayout.Chunked chunked) {
-            return MemorySegment.ofArray(ChunkedReader.assembleSelection(ctx, chunked, dims,
-                    dataspace().maxDimensions(), elementSize, filterPipeline(), fillValue(), offset, count));
+            return MemorySegment.ofArray(ChunkedReader.assembleSelection(ctx, chunked, chunkIndex(chunked), dims,
+                    elementSize, filterPipeline(), fillValue(), offset, count));
+        }
+        if (layout instanceof DataLayout.Virtual v) {
+            return MemorySegment.ofArray(virtual(v).read(dims, datatype(), fillValue(), offset, count));
         }
         if (layout instanceof DataLayout.Contiguous c && c.address() != HdfBuffer.UNDEFINED_ADDRESS
                 && header().find(MessageType.EXTERNAL_DATA_FILES) == null) {

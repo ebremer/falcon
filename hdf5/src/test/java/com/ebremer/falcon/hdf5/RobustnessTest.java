@@ -32,7 +32,7 @@ class RobustnessTest {
         "regionrefs_default.h5", "regionrefs_latest.h5", "sohm.h5", "external_paths.h5", "ea_paged.h5",
         "sohm_latest.h5", "refs_revised.h5", "vds_unlimited.h5",
         "plugin_filters.h5", "legacy_layouts.h5", "vax.h5", "fsinfo_v0_persist.h5", "btree_k_earliest.h5",
-        "family_latest_0.h5", "vds_views.h5", "conversions.h5",
+        "family_latest_0.h5", "vds_views.h5", "conversions.h5", "oldstyle_big.h5",
     };
 
     @Test
@@ -148,8 +148,19 @@ class RobustnessTest {
                 // fine: keep reading the rest of the file
             }
         }
+        // Lookups by name on a new handle go through the name indexes rather than the lists just read.
+        Hdf5Object fresh = Hdf5Object.classify(object.ctx, object.name(), "", object.objectHeaderAddress());
+        try {
+            fresh.attribute(attributes.isEmpty() ? "absent" : attributes.getFirst().name());
+        } catch (HdfUnsupportedException unsupported) {
+            // fine: keep reading the rest of the file
+        }
         if (object instanceof Group group) {
-            group.links();
+            List<Link> links = group.links();
+            if (fresh instanceof Group freshGroup) {
+                freshGroup.link(links.isEmpty() ? "absent" : links.getLast().name());
+                freshGroup.link("absent");
+            }
             for (Hdf5Object child : group.children()) {
                 readEverything(child);
             }
@@ -167,6 +178,11 @@ class RobustnessTest {
                         dataset.select(new long[dims.length], ones(dims.length)).readDoubles();
                     }
                     return;
+                }
+                if (Arrays.stream(dims).allMatch(d -> d > 0)) {
+                    // A one-element box: the chunk index lookup, or a virtual dataset's lazy read.
+                    long[] last = Arrays.stream(dims).map(d -> d - 1).toArray();
+                    dataset.selectionData(last, ones(dims.length));
                 }
                 dataset.readRawBytes();
                 readSelections(dataset.read());

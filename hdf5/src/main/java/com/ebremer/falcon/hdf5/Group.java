@@ -13,9 +13,12 @@ import com.ebremer.falcon.hdf5.io.HdfBuffer;
 import com.ebremer.falcon.hdf5.message.LinkInfoMessage;
 import com.ebremer.falcon.hdf5.message.LinkMessage;
 import com.ebremer.falcon.hdf5.message.SymbolTableMessage;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Optional;
 
@@ -26,7 +29,9 @@ import java.util.Optional;
  * links (objects in other files). {@link #children()} and {@link #child(String)} follow hard and soft
  * links to the objects they reach; external links are listed but not followed, and a soft link that does
  * not resolve (a missing target, or a cycle) reaches nothing. Links are read lazily on first access and
- * cached, for old-style (symbol-table) and new-style (compact or dense link storage) groups alike.
+ * cached, for old-style (symbol-table) and new-style (compact or dense link storage) groups alike. A
+ * lookup by name before then reads only what it needs: the group's name index (a dense group's name-hash
+ * B-tree, or an old-style group's B-tree of names), as libhdf5 does.
  *
  * <p><b>Paths.</b> {@link #child(String)}, {@link #link(String)}, {@link #group(String)},
  * {@link #dataset(String)} and {@link #committedType(String)} take a path, as libhdf5's functions do: link
@@ -45,6 +50,7 @@ public final class Group extends Hdf5Object {
     private static final int MAX_SOFT_LINKS = 16;
 
     private volatile List<Link> links;          // loaded lazily, then cached (immutable)
+    private volatile Map<String, Link> linksByName; // built from links when a lookup finds them loaded
     private volatile List<Hdf5Object> children;
 
     private Group(FileContext ctx, String name, String path, long objectHeaderAddress) {
@@ -116,9 +122,54 @@ public final class Group extends Hdf5Object {
             return resolvePath(slash == 0 ? "/" : trimmed.substring(0, slash), 0)
                     .flatMap(parent -> parent instanceof Group group ? group.link(name) : Optional.empty());
         }
-        for (Link link : links()) {
-            if (link.name().equals(name)) {
-                return Optional.of(link);
+        return named(name);
+    }
+
+    /** This group's link called {@code name}: from the loaded links, or else through the name index. */
+    private Optional<Link> named(String name) {
+        ctx.checkOpen();
+        List<Link> loaded = links;
+        if (loaded != null) {
+            Map<String, Link> byName = linksByName;
+            if (byName == null) {
+                Map<String, Link> map = new HashMap<>();
+                for (Link link : loaded) {
+                    map.putIfAbsent(link.name(), link);
+                }
+                byName = Map.copyOf(map);
+                linksByName = byName;
+            }
+            return Optional.ofNullable(byName.get(name));
+        }
+        ObjectHeader header = header();
+        HeaderMessage symbolTable = header.find(MessageType.SYMBOL_TABLE);
+        if (symbolTable != null) {
+            SymbolTableMessage message = SymbolTableMessage.parse(ctx, symbolTable);
+            LocalHeap heap = LocalHeap.parse(ctx, message.localHeapAddress());
+            SymbolTableEntry entry = GroupBTreeV1.find(ctx, message.btreeAddress(), heap,
+                    name.getBytes(StandardCharsets.UTF_8));
+            return Optional.ofNullable(entry == null ? null : oldStyleLink(heap, name, entry));
+        }
+        HeaderMessage linkInfo = header.find(MessageType.LINK_INFO);
+        if (linkInfo != null && LinkInfoMessage.fractalHeapAddress(ctx, linkInfo) != HdfBuffer.UNDEFINED_ADDRESS) {
+            FractalHeap heap = FractalHeap.parse(ctx, LinkInfoMessage.fractalHeapAddress(ctx, linkInfo));
+            int hash = nameHash(name);
+            // A link-name-index record (type 5) is the name's hash, which orders the index, and the heap ID.
+            for (byte[] record : BTreeV2.find(ctx, LinkInfoMessage.nameBTreeAddress(ctx, linkInfo),
+                    record -> Integer.compareUnsigned(hashAt(record, 0), hash))) {
+                Link link = denseLink(heap, record);
+                if (link.name().equals(name)) {
+                    return Optional.of(link);
+                }
+            }
+            return Optional.empty();
+        }
+        for (HeaderMessage message : header.messages()) {
+            if (message.type() == MessageType.LINK) {
+                Link link = LinkMessage.parse(ctx, message);
+                if (link.name().equals(name)) {
+                    return Optional.of(link);
+                }
             }
         }
         return Optional.empty();
@@ -296,11 +347,15 @@ public final class Group extends Hdf5Object {
         long nameBTree = LinkInfoMessage.nameBTreeAddress(ctx, linkInfo);
         List<Link> result = new ArrayList<>();
         for (byte[] record : BTreeV2.readRecords(ctx, nameBTree)) {
-            // link-name-index record: name hash (4 bytes) followed by the heap ID.
-            byte[] heapId = Arrays.copyOfRange(record, 4, 4 + heap.idLength());
-            result.add(LinkMessage.parse(HdfBuffer.of(heap.readObject(heapId)), 0, ctx.sizeOfOffsets()));
+            result.add(denseLink(heap, record));
         }
         return result;
+    }
+
+    /** The link a link-name-index record points at: the record is the name hash (4 bytes), then the heap ID. */
+    private Link denseLink(FractalHeap heap, byte[] record) {
+        byte[] heapId = Arrays.copyOfRange(record, 4, 4 + heap.idLength());
+        return LinkMessage.parse(HdfBuffer.of(heap.readObject(heapId)), 0, ctx.sizeOfOffsets());
     }
 
     /** Old-style storage: symbol-table entries, whose names (and soft-link paths) live in a local heap. */
@@ -310,12 +365,16 @@ public final class Group extends Hdf5Object {
         List<SymbolTableEntry> entries = GroupBTreeV1.readEntries(ctx, message.btreeAddress());
         List<Link> result = new ArrayList<>(entries.size());
         for (SymbolTableEntry entry : entries) {
-            String name = heap.name(ctx, entry.linkNameOffset());
-            result.add(entry.isSoftLink()
-                    ? new Link.Soft(name, heap.name(ctx, entry.linkValueOffset()))
-                    : new Link.Hard(name, entry.objectHeaderAddress()));
+            result.add(oldStyleLink(heap, heap.name(ctx, entry.linkNameOffset()), entry));
         }
         return result;
+    }
+
+    /** The link a symbol-table entry named {@code name} stands for: soft (its target in the heap) or hard. */
+    private Link oldStyleLink(LocalHeap heap, String name, SymbolTableEntry entry) {
+        return entry.isSoftLink()
+                ? new Link.Soft(name, heap.name(ctx, entry.linkValueOffset()))
+                : new Link.Hard(name, entry.objectHeaderAddress());
     }
 
     private String displayPath() {

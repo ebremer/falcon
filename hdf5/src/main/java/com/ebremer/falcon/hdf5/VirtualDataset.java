@@ -1,22 +1,23 @@
 package com.ebremer.falcon.hdf5;
 
 import com.ebremer.falcon.hdf5.data.DataspaceSelection;
+import com.ebremer.falcon.hdf5.data.SelectedElements;
 import com.ebremer.falcon.hdf5.datatype.Datatype;
 import com.ebremer.falcon.hdf5.heap.GlobalHeap;
 import com.ebremer.falcon.hdf5.io.FileContext;
 import com.ebremer.falcon.hdf5.io.HdfBuffer;
 import com.ebremer.falcon.hdf5.layout.DataLayout;
-import java.io.IOException;
+import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashMap;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
 
 /**
@@ -52,11 +53,15 @@ import java.util.function.Supplier;
  * <p>Source files are found where libhdf5 looks for them, as the file's {@link ExternalFileAccess} policy
  * allows (see there); a refused one fails the read. A missing source file or dataset leaves the fill
  * value, as in libhdf5.
+ *
+ * <p><b>Reading part of it.</b> A read asks for a box of the virtual dataset. Mappings that do not reach
+ * the box are skipped without opening their sources. For the others, the virtual elements inside the box
+ * are paired with their source elements by position (arithmetic, for the regular selections nearly every
+ * mapping uses), and only the source's bounding box of those is read, through the source's own selection
+ * reads (a chunked source reads just its overlapping chunks). Source files stay open, and source datasets
+ * found are kept, so a later read does not look them up again.
  */
 final class VirtualDataset {
-
-    private VirtualDataset() {
-    }
 
     /** Source datasets may themselves be virtual; this bounds that nesting (a VDS can name itself). */
     private static final int MAX_NESTING = 32;
@@ -83,18 +88,43 @@ final class VirtualDataset {
         }
     }
 
+    private final FileContext ctx;
+    private final DataLayout.Virtual layout;
+    private final Path directory;
+    private volatile List<Mapping> mappings;                                   // parsed once
+    private final Map<String, Dataset> sources = new ConcurrentHashMap<>();     // found sources, by file and name
+    private final Map<Integer, List<Dataset>> printf = new ConcurrentHashMap<>(); // a printf mapping's sources
+
+    private VirtualDataset(FileContext ctx, DataLayout.Virtual layout) {
+        this.ctx = ctx;
+        this.layout = layout;
+        this.directory = ctx.directory();
+    }
+
+    /**
+     * The virtual dataset whose layout is {@code layout}. It keeps its mapping list, and the source
+     * datasets it finds, for later reads; their files stay open until this file closes.
+     */
+    static VirtualDataset of(FileContext ctx, DataLayout.Virtual layout) {
+        return new VirtualDataset(ctx, layout);
+    }
+
     /**
      * The extent of the virtual dataset whose stored extent is {@code storedDims}: the stored one, except
      * in a dimension in which a mapping is unlimited, which the sources set (the largest extent any such
      * mapping reaches, and at least what the other mappings cover there).
      */
-    static long[] extent(FileContext ctx, DataLayout.Virtual layout, long[] storedDims) {
-        return nested(() -> computeExtent(ctx, layout, storedDims));
+    long[] extent(long[] storedDims) {
+        return nested(() -> computeExtent(storedDims));
     }
 
-    static byte[] assemble(FileContext ctx, DataLayout.Virtual layout, long[] virtualDims,
-                           Datatype type, byte[] fill) {
-        return nested(() -> assembleSources(ctx, layout, virtualDims, type, fill));
+    /**
+     * The virtual dataset's elements in the box {@code [offset, offset + count)} of its extent
+     * {@code virtualDims}, row-major: only the mappings that reach the box are looked at, and from each
+     * source only the part those elements come from is read.
+     */
+    byte[] read(long[] virtualDims, Datatype type, byte[] fill, long[] offset, long[] count) {
+        return nested(() -> readBox(virtualDims, type, fill, offset, count));
     }
 
     private static <T> T nested(Supplier<T> work) {
@@ -111,9 +141,18 @@ final class VirtualDataset {
         }
     }
 
-    private static long[] computeExtent(FileContext ctx, DataLayout.Virtual layout, long[] storedDims) {
-        List<Mapping> mappings = mappings(ctx, layout);
-        if (mappings.stream().noneMatch(m -> !m.isEmpty() && m.virtual().isUnlimited())) {
+    private List<Mapping> mappings() {
+        List<Mapping> result = mappings;
+        if (result == null) {
+            result = List.copyOf(mappings(ctx, layout));
+            mappings = result;
+        }
+        return result;
+    }
+
+    private long[] computeExtent(long[] storedDims) {
+        List<Mapping> all = mappings();
+        if (all.stream().noneMatch(m -> !m.isEmpty() && m.virtual().isUnlimited())) {
             return storedDims;
         }
         boolean firstMissing = ctx.options().virtualView() == OpenOptions.VirtualView.FIRST_MISSING;
@@ -121,28 +160,27 @@ final class VirtualDataset {
         long[] unlimited = new long[rank];
         Arrays.fill(unlimited, -1); // -1: no unlimited mapping in this dimension
         long[] covered = new long[rank];
-        try (Sources sources = new Sources(ctx)) {
-            for (Mapping mapping : mappings) {
-                if (mapping.isEmpty()) {
-                    continue;
-                }
-                int u = mapping.virtual().unlimitedDimension();
-                long[] high = mapping.virtual().highCorner();
-                if (high != null) {
-                    requireRank(high.length, rank);
-                    for (int d = 0; d < rank; d++) {
-                        if (d != u) {
-                            covered[d] = Math.max(covered[d], high[d] + 1);
-                        }
+        for (int i = 0; i < all.size(); i++) {
+            Mapping mapping = all.get(i);
+            if (mapping.isEmpty()) {
+                continue;
+            }
+            int u = mapping.virtual().unlimitedDimension();
+            long[] high = mapping.virtual().highCorner();
+            if (high != null) {
+                requireRank(high.length, rank);
+                for (int d = 0; d < rank; d++) {
+                    if (d != u) {
+                        covered[d] = Math.max(covered[d], high[d] + 1);
                     }
                 }
-                if (u >= 0) {
-                    long reach = mapping.isPrintf() ? printfExtent(sources, mapping, firstMissing)
-                            : unlimitedExtent(sources, mapping, firstMissing);
-                    // "Last available" takes the furthest-reaching mapping, "first missing" the shortest.
-                    unlimited[u] = unlimited[u] < 0 ? reach
-                            : firstMissing ? Math.min(unlimited[u], reach) : Math.max(unlimited[u], reach);
-                }
+            }
+            if (u >= 0) {
+                long reach = mapping.isPrintf() ? printfExtent(i, mapping, firstMissing)
+                        : unlimitedExtent(mapping, firstMissing);
+                // "Last available" takes the furthest-reaching mapping, "first missing" the shortest.
+                unlimited[u] = unlimited[u] < 0 ? reach
+                        : firstMissing ? Math.min(unlimited[u], reach) : Math.max(unlimited[u], reach);
             }
         }
         long[] dims = storedDims.clone();
@@ -158,8 +196,8 @@ final class VirtualDataset {
      * How far an unlimited, non-printf mapping reaches: as many indices as its source holds (in the
      * "first missing" view, on to where its next block would start). A missing source reaches nowhere.
      */
-    private static long unlimitedExtent(Sources sources, Mapping mapping, boolean firstMissing) {
-        Dataset source = sources.find(expand(mapping.fileName(), -1), expand(mapping.datasetName(), -1), false);
+    private long unlimitedExtent(Mapping mapping, boolean firstMissing) {
+        Dataset source = find(expand(mapping.fileName(), -1), expand(mapping.datasetName(), -1), false);
         if (source == null) {
             return 0;
         }
@@ -173,8 +211,8 @@ final class VirtualDataset {
      * "first missing" view, to the start of the block of its first missing source, whatever the printf
      * gap (as libhdf5 2.0 and 1.14 read it).
      */
-    private static long printfExtent(Sources sources, Mapping mapping, boolean firstMissing) {
-        List<Dataset> found = printfSources(sources, mapping);
+    private long printfExtent(int index, Mapping mapping, boolean firstMissing) {
+        List<Dataset> found = printfSources(index, mapping);
         if (found.isEmpty()) {
             return 0;
         }
@@ -188,143 +226,219 @@ final class VirtualDataset {
     /**
      * A printf-style mapping's sources, from block 0 up to the last one found, with null for those
      * missing: the search goes on past a missing source only while no more are missing in a row than the
-     * printf gap allows (libhdf5's {@code first_missing} loop).
+     * printf gap allows (libhdf5's {@code first_missing} loop). Searched once, as the extent depends on it.
      */
-    private static List<Dataset> printfSources(Sources sources, Mapping mapping) {
-        long gap = sources.ctx.options().virtualPrintfGap();
-        List<Dataset> found = new ArrayList<>();
-        long next = 0; // one past the last source found
-        for (long block = 0; block < MAX_PRINTF_SOURCES && block - next <= gap; block++) {
-            // Past the first source, a refused name ends the search like a missing one: an absolute name
-            // whose files were moved resolves by file name, and the names after the last one never do.
-            Dataset source = sources.find(expand(mapping.fileName(), block), expand(mapping.datasetName(), block),
-                    block > 0);
-            if (source != null) {
-                while (found.size() < block) {
-                    found.add(null);
+    private List<Dataset> printfSources(int index, Mapping mapping) {
+        return printf.computeIfAbsent(index, i -> {
+            long gap = ctx.options().virtualPrintfGap();
+            List<Dataset> found = new ArrayList<>();
+            long next = 0; // one past the last source found
+            for (long block = 0; block < MAX_PRINTF_SOURCES && block - next <= gap; block++) {
+                // Past the first source, a refused name ends the search like a missing one: an absolute
+                // name whose files were moved resolves by file name, and the names after the last one never do.
+                Dataset source = find(expand(mapping.fileName(), block), expand(mapping.datasetName(), block),
+                        block > 0);
+                if (source != null) {
+                    while (found.size() < block) {
+                        found.add(null);
+                    }
+                    found.add(source);
+                    next = block + 1;
                 }
-                found.add(source);
-                next = block + 1;
             }
-        }
-        return found;
+            return Collections.unmodifiableList(found);
+        });
     }
 
-    private static byte[] assembleSources(FileContext ctx, DataLayout.Virtual layout, long[] virtualDims,
-                                          Datatype type, byte[] fill) {
+    private byte[] readBox(long[] virtualDims, Datatype type, byte[] fill, long[] offset, long[] count) {
         if (containsHeapData(type)) {
             // Variable-length and reference elements point into their own file's heaps and objects.
             throw new HdfUnsupportedException("virtual datasets of variable-length or reference data are not supported");
         }
         int elementSize = type.size();
         long elements = 1;
-        for (long d : virtualDims) {
-            elements *= d;
+        for (long c : count) {
+            elements = Math.multiplyExact(elements, c);
         }
         byte[] output = new byte[com.ebremer.falcon.hdf5.data.Elements.checkedByteCount(elements, elementSize)];
         tileFill(output, fill, elementSize);
-
-        try (Sources sources = new Sources(ctx)) {
-            for (Mapping mapping : mappings(ctx, layout)) {
-                if (mapping.isEmpty()) {
-                    continue;
-                }
-                DataspaceSelection virtual = mapping.virtual();
-                int u = virtual.unlimitedDimension();
-                if (u >= 0 && mapping.isPrintf()) {
-                    requireRank(virtual.highCorner().length, virtualDims.length);
-                    List<Dataset> found = printfSources(sources, mapping);
-                    for (int block = 0; block < found.size() && virtual.blockStart(block) < virtualDims[u]; block++) {
-                        Dataset source = found.get(block);
-                        if (source != null) { // a source the printf gap skipped leaves the fill value
-                            copy(output, source, mapping.source().offsets(source.dataspace().dimensions()),
-                                    blockOffsetsWithin(virtual, virtualDims, u, block), type, mapping.datasetName());
-                        }
-                    }
-                    continue;
-                }
-                String datasetName = expand(mapping.datasetName(), -1);
-                Dataset source = sources.find(expand(mapping.fileName(), -1), datasetName, false);
-                if (source == null) {
-                    continue; // a missing source leaves the fill value in place, as in libhdf5
-                }
-                long[] sourceDims = source.dataspace().dimensions();
-                long[] sourceOffsets;
-                long[] virtualOffsets;
-                if (u >= 0) {
-                    // Clip the virtual selection to the extent (which the "first missing" view may set
-                    // short of this mapping's reach), and the source selection to match it.
-                    int su = requireUnlimitedSource(mapping, sourceDims.length);
-                    long reach = virtual.extentSelecting(mapping.source().selectedBelow(sourceDims[su]));
-                    long virtualClip = Math.min(reach, virtualDims[u]);
-                    long sourceClip = Math.min(sourceDims[su],
-                            mapping.source().extentSelecting(virtual.selectedBelow(virtualClip)));
-                    sourceOffsets = mapping.source().clippedOffsets(sourceDims, sourceClip);
-                    virtualOffsets = virtual.clippedOffsets(virtualDims, virtualClip);
-                } else if (mapping.source().isUnlimited()) {
-                    throw new HdfFormatException("virtual dataset mapping has an unlimited source selection"
-                            + " but a limited virtual one");
-                } else {
-                    sourceOffsets = mapping.source().offsets(sourceDims);
-                    virtualOffsets = virtual.offsets(virtualDims);
-                }
-                copy(output, source, sourceOffsets, virtualOffsets, type, datasetName);
+        if (elements == 0) {
+            return output;
+        }
+        List<Mapping> all = mappings();
+        for (int i = 0; i < all.size(); i++) {
+            Mapping mapping = all.get(i);
+            if (mapping.isEmpty()) {
+                continue;
             }
+            DataspaceSelection virtual = mapping.virtual();
+            int u = virtual.unlimitedDimension();
+            if (u >= 0 && mapping.isPrintf()) {
+                requireRank(virtual.highCorner().length, virtualDims.length);
+                List<Dataset> found = printfSources(i, mapping);
+                for (int block = 0; block < found.size() && virtual.blockStart(block) < virtualDims[u]; block++) {
+                    Dataset source = found.get(block);
+                    if (source == null) {
+                        continue; // a source the printf gap skipped leaves the fill value
+                    }
+                    SelectedElements target = virtual.blockElements(virtualDims, block);
+                    if (target.mayIntersect(offset, count)) {
+                        copy(output, offset, count, source, target,
+                                mapping.source().elements(source.dataspace().dimensions()), type, mapping.datasetName());
+                    }
+                }
+                continue;
+            }
+            // The virtual elements this mapping can reach (for an unlimited one, at most to the extent): a
+            // mapping that misses the box is skipped before its source is looked for.
+            SelectedElements reach = u >= 0 ? virtual.clippedElements(virtualDims, virtualDims[u])
+                    : virtual.elements(virtualDims);
+            if (!reach.mayIntersect(offset, count)) {
+                continue;
+            }
+            String datasetName = expand(mapping.datasetName(), -1);
+            Dataset source = find(expand(mapping.fileName(), -1), datasetName, false);
+            if (source == null) {
+                continue; // a missing source leaves the fill value in place, as in libhdf5
+            }
+            long[] sourceDims = source.dataspace().dimensions();
+            SelectedElements target;
+            SelectedElements selected;
+            if (u >= 0) {
+                // Clip the virtual selection to the extent (which the "first missing" view may set short
+                // of this mapping's reach), and the source selection to match it.
+                int su = requireUnlimitedSource(mapping, sourceDims.length);
+                long reached = virtual.extentSelecting(mapping.source().selectedBelow(sourceDims[su]));
+                long virtualClip = Math.min(reached, virtualDims[u]);
+                long sourceClip = Math.min(sourceDims[su],
+                        mapping.source().extentSelecting(virtual.selectedBelow(virtualClip)));
+                selected = mapping.source().clippedElements(sourceDims, sourceClip);
+                target = virtual.clippedElements(virtualDims, virtualClip);
+            } else if (mapping.source().isUnlimited()) {
+                throw new HdfFormatException("virtual dataset mapping has an unlimited source selection"
+                        + " but a limited virtual one");
+            } else {
+                selected = mapping.source().elements(sourceDims);
+                target = reach;
+            }
+            copy(output, offset, count, source, target, selected, type, datasetName);
         }
         return output;
     }
 
     /**
-     * The flat offsets of block {@code block} of a printf-style selection, in iteration order, with -1 for
-     * elements beyond the extent: in the "first missing" view another mapping can cut a block short.
+     * Copies into {@code output} (the box {@code [offset, offset + count)}, row-major) the source elements
+     * that the virtual elements inside the box pair with: the <i>i</i>th of {@code target} takes the
+     * <i>i</i>th of {@code selected}. Only the bounding box of those source elements is read.
      */
-    private static long[] blockOffsetsWithin(DataspaceSelection virtual, long[] dims, int u, int block) {
-        long end = virtual.blockEnd(block);
-        if (end <= dims[u]) {
-            return virtual.blockOffsets(dims, block);
+    private static void copy(byte[] output, long[] offset, long[] count, Dataset source, SelectedElements target,
+                             SelectedElements selected, Datatype type, String sourceName) {
+        long n = Math.min(target.count(), selected.count());
+        if (n == 0) {
+            return;
         }
-        long[] whole = dims.clone();
-        whole[u] = end;
-        long[][] coordinates = virtual.blockCoordinates(whole, block);
-        long[] offsets = new long[coordinates.length];
-        for (int i = 0; i < offsets.length; i++) {
-            long[] c = coordinates[i];
-            long flat = -1;
-            if (c[u] < dims[u]) {
-                flat = 0;
-                for (int d = 0; d < dims.length; d++) {
-                    flat = flat * dims[d] + c[d];
+        int elementSize = type.size();
+        boolean swap = byteSwapNeeded(source.datatype(), type, sourceName);
+        int sourceRank = selected.rank();
+        long[] low = new long[sourceRank];
+        long[] high = new long[sourceRank];
+        Arrays.fill(low, Long.MAX_VALUE);
+        Arrays.fill(high, Long.MIN_VALUE);
+        long[] at = new long[sourceRank];
+        boolean[] any = new boolean[1];
+        target.forEachInBox(offset, count, (position, coordinates) -> {
+            if (position < n) {
+                selected.coordinates(position, at);
+                for (int d = 0; d < sourceRank; d++) {
+                    low[d] = Math.min(low[d], at[d]);
+                    high[d] = Math.max(high[d], at[d]);
                 }
+                any[0] = true;
             }
-            offsets[i] = flat;
+        });
+        if (!any[0]) {
+            return;
         }
-        return offsets;
+        long[] shape = new long[sourceRank];
+        for (int d = 0; d < sourceRank; d++) {
+            shape[d] = high[d] - low[d] + 1;
+        }
+        MemorySegment bytes = source.selectionData(low, shape);
+        long[] sourceStride = strides(shape);
+        long[] outStride = strides(count);
+        target.forEachInBox(offset, count, (position, coordinates) -> {
+            if (position >= n) {
+                return;
+            }
+            selected.coordinates(position, at);
+            long from = 0;
+            for (int d = 0; d < sourceRank; d++) {
+                from += (at[d] - low[d]) * sourceStride[d];
+            }
+            long to = 0;
+            for (int d = 0; d < coordinates.length; d++) {
+                to += (coordinates[d] - offset[d]) * outStride[d];
+            }
+            int out = (int) (to * elementSize);
+            if (swap) {
+                for (int b = 0; b < elementSize; b++) {
+                    output[out + b] = bytes.get(ValueLayout.JAVA_BYTE, from * elementSize + elementSize - 1 - b);
+                }
+            } else {
+                MemorySegment.copy(bytes, ValueLayout.JAVA_BYTE, from * elementSize, output, out, elementSize);
+            }
+        });
+    }
+
+    private static long[] strides(long[] shape) {
+        long[] stride = new long[shape.length];
+        long s = 1;
+        for (int d = shape.length - 1; d >= 0; d--) {
+            stride[d] = s;
+            s *= shape[d];
+        }
+        return stride;
     }
 
     /**
-     * Copies the source elements at {@code sourceOffsets} to the virtual ones at {@code virtualOffsets},
-     * pairing them in order; a negative virtual offset is skipped.
+     * The source dataset, or null if its file or the dataset itself is missing. A name the policy refuses
+     * fails, unless {@code refusalIsMissing}. A source found is kept for later reads; one missing is
+     * looked for again next time, as libhdf5 does.
      */
-    private static void copy(byte[] output, Dataset source, long[] sourceOffsets, long[] virtualOffsets,
-                             Datatype type, String sourceName) {
-        int elementSize = type.size();
-        boolean swap = byteSwapNeeded(source.datatype(), type, sourceName);
-        byte[] sourceBytes = source.rawData().toArray(ValueLayout.JAVA_BYTE);
-        int n = Math.min(sourceOffsets.length, virtualOffsets.length);
-        for (int i = 0; i < n; i++) {
-            if (virtualOffsets[i] < 0) {
-                continue;
-            }
-            int from = (int) (sourceOffsets[i] * elementSize);
-            int to = (int) (virtualOffsets[i] * elementSize);
-            if (swap) {
-                for (int b = 0; b < elementSize; b++) {
-                    output[to + b] = sourceBytes[from + elementSize - 1 - b];
-                }
-            } else {
-                System.arraycopy(sourceBytes, from, output, to, elementSize);
-            }
+    private Dataset find(String fileName, String datasetName, boolean refusalIsMissing) {
+        String key = fileName + '\0' + datasetName;
+        Dataset cached = sources.get(key);
+        if (cached != null) {
+            return cached;
         }
+        Group root;
+        if (fileName.equals(".")) {
+            root = Group.root(ctx, ctx.rootAddress()); // the source is in this same file
+        } else {
+            Path path;
+            try {
+                path = ctx.externalFileAccess().resolveVirtualSource(fileName, directory);
+            } catch (HdfUnsupportedException e) {
+                if (refusalIsMissing) {
+                    return null;
+                }
+                throw e;
+            }
+            if (path == null) {
+                return null;
+            }
+            Hdf5File file = ctx.resource(SourceFiles.class, SourceFiles::new).open(path, ctx.options());
+            if (file == null) {
+                return null;
+            }
+            root = file.root();
+        }
+        Dataset found = root.child(datasetName).orElse(null) instanceof Dataset dataset ? dataset : null;
+        if (found != null) {
+            Dataset raced = sources.putIfAbsent(key, found);
+            return raced != null ? raced : found;
+        }
+        return null;
     }
 
     /** Reads the mapping block from the global heap. */
@@ -441,69 +555,6 @@ final class VirtualDataset {
     private static void requireRank(int rank, int expected) {
         if (rank != expected) {
             throw new HdfFormatException("virtual dataset selection of rank " + rank + " in a dataspace of rank " + expected);
-        }
-    }
-
-    /** Opens source datasets for one read, each source file once, and closes them at the end. */
-    private static final class Sources implements AutoCloseable {
-        final FileContext ctx;
-        private final Path directory;
-        private final Map<Path, Optional<Hdf5File>> files = new HashMap<>();
-
-        Sources(FileContext ctx) {
-            this.ctx = ctx;
-            this.directory = ctx.directory();
-        }
-
-        /**
-         * The source dataset, or null if its file or the dataset itself is missing. A name the policy
-         * refuses fails, unless {@code refusalIsMissing}.
-         */
-        Dataset find(String fileName, String datasetName, boolean refusalIsMissing) {
-            Group root;
-            if (fileName.equals(".")) {
-                root = Group.root(ctx, ctx.rootAddress()); // the source is in this same file
-            } else {
-                Path path;
-                try {
-                    path = ctx.externalFileAccess().resolveVirtualSource(fileName, directory);
-                } catch (HdfUnsupportedException e) {
-                    if (refusalIsMissing) {
-                        return null;
-                    }
-                    throw e;
-                }
-                if (path == null) {
-                    return null;
-                }
-                Optional<Hdf5File> file = files.computeIfAbsent(path,
-                        p -> Optional.ofNullable(openOrNull(p, ctx.options())));
-                if (file.isEmpty()) {
-                    return null;
-                }
-                root = file.get().root();
-            }
-            return navigate(root, datasetName);
-        }
-
-        @Override
-        public void close() {
-            for (Optional<Hdf5File> file : files.values()) {
-                file.ifPresent(Hdf5File::close);
-            }
-        }
-    }
-
-    /** The dataset at {@code path} from {@code root}, or null if there is none (libhdf5 then fills). */
-    private static Dataset navigate(Group root, String path) {
-        return root.child(path).orElse(null) instanceof Dataset dataset ? dataset : null;
-    }
-
-    private static Hdf5File openOrNull(Path path, OpenOptions options) {
-        try {
-            return Hdf5File.open(path, options);
-        } catch (IOException e) {
-            return null; // an unavailable source contributes only the fill value
         }
     }
 

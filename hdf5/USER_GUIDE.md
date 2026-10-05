@@ -443,8 +443,18 @@ also fail to be read at all: that is `java.io.UncheckedIOException`, wrapping th
   2³¹ elements.
 - **Remote files.** Through a `RangeReader`, metadata is read in cached 64 KiB pages and data a chunk or
   run at a time, so a reader pays for what it reads, not for the file's size.
+- **Keep the handle.** A `Dataset` reads its chunk index once, on its first read, and then looks each
+  selection's chunks up by coordinate; `blocks()` and repeated selections reuse it. A virtual dataset
+  keeps its mappings and the sources it found. So reuse a handle for many reads, rather than looking the
+  dataset up again each time. An object's attribute list is likewise read once per handle.
+- **Virtual datasets read lazily.** A selection skips mappings that do not reach it, and reads from each
+  source only the part it maps to. Source files are opened once and stay open until the virtual
+  dataset's file is closed.
+- **Lookups by name read the index.** `attribute(name)`, `link(name)`, and path lookups search a large
+  group's or object's name index (as libhdf5 does) instead of reading every link or attribute.
 - **Decoded-chunk cache.** Repeated or streaming reads reuse the filter-decode result for a chunk
   (~16 MB LRU per file).
+- **Measuring.** `Benchmarks` (opt-in) times the common read paths; see [`BENCHMARKS.md`](BENCHMARKS.md).
 - **Concurrent reads.** An open `Hdf5File` and everything obtained from it may be read from many
   threads at once (e.g. `dataset.blocks(n).parallel()`); close it only after those reads finish.
   `Hdf5Writer` is single-threaded.
