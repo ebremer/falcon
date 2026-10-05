@@ -737,8 +737,9 @@ def build_typed(f):
     """Typed reads of the composite datatypes: a compound with nested compound, array, enumeration, string
     and complex members (contiguous, and a chunked, filtered 2-D one); enumerations (big-endian and
     signed, unsigned, and one holding a value no member has); arrays; complex numbers (h5py's compound
-    and HDF5 2.0's native type, in both byte orders and three precisions); bit fields; opaque data; a
-    sequence of compounds; and compound, enumeration and complex attributes."""
+    and HDF5 2.0's native type, in both byte orders and three precisions); bit fields; opaque data; time
+    values (Unix time_t, which h5py cannot read); a sequence of compounds; and compound, enumeration,
+    complex and time attributes."""
     color = h5py.enum_dtype({"RED": 0, "GREEN": 1, "BLUE": 2}, basetype="<i4")
     inner = np.dtype([("x", "<i2"), ("y", ">f4")])
     record = np.dtype([("id", "<i4"), ("pos", inner), ("vec", "<f8", (3,)), ("color", color),
@@ -788,6 +789,12 @@ def build_typed(f):
     opaque = h5py.h5t.create(h5py.h5t.OPAQUE, 4)
     opaque.set_tag(b"falcon-tag")
     _lowlevel(f, "opaque", opaque, np.array([b"\x00\x01\x02\x03", b"\xff\xfe\xfd\xfc"], dtype="V4"))
+
+    # Time values (Unix time_t), which h5py cannot read: libhdf5 stores them as given.
+    _lowlevel(f, "time_d32le", h5py.h5t.UNIX_D32LE, np.array([0, 1700000000, -86400], dtype="<i4"))
+    _lowlevel(f, "time_d64be", h5py.h5t.UNIX_D64BE, np.array([253402300799, -1], dtype=">i8"))
+    when = h5py.h5a.create(records.id, b"when", h5py.h5t.UNIX_D64LE, h5py.h5s.create_simple((1,)))
+    when.write(np.array([1234567890], dtype="<i8"), mtype=h5py.h5t.UNIX_D64LE)
 
     pair = np.dtype([("a", "<i4"), ("b", "<f8")])
     seq = f.create_dataset("vlen_rec", (3,), dtype=h5py.vlen_dtype(pair))
@@ -899,6 +906,55 @@ def build_links(out):
         _links(f, dense=True)
     with h5py.File(os.path.join(out, "links_old.h5"), "w", libver="earliest") as f:
         _links(f, dense=False)  # old-style groups store soft links as symbol-table cache type 2
+
+
+ELINKS = ["to_group", "to_dataset", "via_soft", "chain", "loop", "sub", "moved", "missing_file",
+          "missing_object", "escape", "root"]
+
+
+def build_elinks(out):
+    """External links, which Falcon follows as libhdf5 does: to a group, a dataset, a soft link and the root
+    of another file; through a chain of links across two files and around a loop between them; to a file in
+    a subdirectory; by an absolute name that does not exist, which libhdf5 then looks for by its file name
+    alone; and to a missing file, a missing object, and a file outside the directory. The root attribute
+    "h5py_names" holds h5py's (libhdf5's) name for the object each link reaches, or "" for none: the
+    oracle."""
+    with h5py.File(os.path.join(out, "elinks_target.h5"), "w", libver="latest") as t:
+        d = t.create_group("grp").create_dataset("d", data=np.array([1, 2, 3], dtype="i4"))
+        d.attrs["unit"] = "m"
+        t["back"] = h5py.ExternalLink("elinks.h5", "/local")
+        t["loop"] = h5py.ExternalLink("elinks.h5", "/loop")
+        t["soft"] = h5py.SoftLink("/grp/d")
+    os.makedirs(os.path.join(out, "elinks_sub"), exist_ok=True)
+    with h5py.File(os.path.join(out, "elinks_sub", "inner.h5"), "w", libver="latest") as s:
+        s.create_dataset("z", data=np.array([5], dtype="i4"))
+    with h5py.File(os.path.join(out, "elinks.h5"), "w", libver="latest") as f:
+        f.create_dataset("local", data=np.array([9], dtype="i4"))
+        f["to_group"] = h5py.ExternalLink("elinks_target.h5", "/grp")
+        f["to_dataset"] = h5py.ExternalLink("elinks_target.h5", "/grp/d")
+        f["via_soft"] = h5py.ExternalLink("elinks_target.h5", "/soft")
+        f["chain"] = h5py.ExternalLink("elinks_target.h5", "/back")
+        f["loop"] = h5py.ExternalLink("elinks_target.h5", "/loop")
+        f["sub"] = h5py.ExternalLink("elinks_sub/inner.h5", "/z")
+        f["moved"] = h5py.ExternalLink("/no/such/dir/elinks_target.h5", "/grp/d")
+        f["missing_file"] = h5py.ExternalLink("elinks_missing.h5", "/x")
+        f["missing_object"] = h5py.ExternalLink("elinks_target.h5", "/nope")
+        f["escape"] = h5py.ExternalLink("../elinks_escape.h5", "/x")
+        f["root"] = h5py.ExternalLink("elinks_target.h5", "/")
+    cwd = os.getcwd()
+    os.chdir(os.path.dirname(out))  # not the fixture directory: libhdf5 must find the files by itself
+    try:
+        names = []
+        with h5py.File(os.path.join(out, "elinks.h5"), "r") as f:
+            for link in ELINKS:
+                try:
+                    names.append(f[link].name)
+                except (KeyError, OSError, RuntimeError):
+                    names.append("")
+        with h5py.File(os.path.join(out, "elinks.h5"), "a") as f:
+            f.attrs["h5py_names"] = names
+    finally:
+        os.chdir(cwd)
 
 
 def build_heap_limits(f):
@@ -1398,10 +1454,20 @@ def _revised_refs(lib, f, ext):
             raise RuntimeError("H5Rcreate_region failed")
         return ref
 
-    def attr(name, attr_name):
+    def attr(name, attr_name, loc=None):
         ref = _RefT()
-        if lib.H5Rcreate_attr(fid, name.encode(), attr_name.encode(), ctypes.c_int64(0), ctypes.byref(ref)) < 0:
+        if lib.H5Rcreate_attr(loc if loc is not None else fid, name.encode(), attr_name.encode(), ctypes.c_int64(0),
+                              ctypes.byref(ref)) < 0:
             raise RuntimeError("H5Rcreate_attr failed")
+        return ref
+
+    def ext_region():
+        ref = _RefT()
+        sel = h5py.h5s.create_simple((3,))
+        sel.select_hyperslab((1,), (2,))
+        if lib.H5Rcreate_region(ctypes.c_int64(ext.id.id), b"data", ctypes.c_int64(sel.id), ctypes.c_int64(0),
+                                ctypes.byref(ref)) < 0:
+            raise RuntimeError("H5Rcreate_region failed")
         return ref
 
     block = space()
@@ -1418,14 +1484,15 @@ def _revised_refs(lib, f, ext):
         "regions": [region(block), region(points), None, region(every), region(blocks)],
         "attributes": [attr("data", "note"), attr("grp", "title"), None],
         "mixed": [obj(f.id.id, "grp"), region(block), attr("data", "note"), None],
-        "external": [obj(ext.id.id, "data")],
+        "external": [obj(ext.id.id, "data"), ext_region(), attr("data", "unit", ctypes.c_int64(ext.id.id))],
     }
 
 
 def build_revised_refs(out):
     """Revised references (H5R_ref_t, HDF5 1.12+) through h5py's bundled libhdf5, which h5py does not
     wrap: datasets of H5T_STD_REF holding object, region (block, points, all, several blocks) and attribute
-    references, null ones, a mix, one into another file, and an attribute of them. libhdf5 stores the
+    references, null ones, a mix, an object, a region and an attribute reference into another file, and an
+    attribute of them. libhdf5 stores the
     datatype as an object reference whatever an element holds, so each element carries its own kind."""
     lib = _hdf5_library()
     lib.H5open()
@@ -1436,7 +1503,7 @@ def build_revised_refs(out):
     os.chdir(out)  # an external reference stores the other file's name as it was opened
     try:
         with h5py.File("refs_revised_ext.h5", "w", libver="latest") as ext:
-            ext.create_dataset("data", data=np.arange(3, dtype="i4"))
+            ext.create_dataset("data", data=np.arange(3, dtype="i4")).attrs["unit"] = "m"
             with h5py.File("refs_revised.h5", "w", libver="latest") as f:
                 data = f.create_dataset("data", data=np.arange(20, dtype="i4").reshape(4, 5))
                 data.attrs["note"] = np.int32(42)
@@ -1558,6 +1625,7 @@ FIXTURES = {
     "szip": lambda: _with_file("szip.h5", build_szip, libver="latest"),
     "filter_edge": lambda: _with_file("filter_edge.h5", build_filter_edge, libver="latest"),
     "typed": lambda: _with_file("typed.h5", build_typed),
+    "elinks": lambda: build_elinks(OUT),
     "paths": lambda: build_paths(OUT),
 }
 

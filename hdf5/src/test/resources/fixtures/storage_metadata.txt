@@ -706,6 +706,8 @@ dense_links_big.h5	/big/link0597	CONTIGUOUS	-	4	0
 dense_links_big.h5	/big/link0598	CONTIGUOUS	-	4	0
 dense_links_big.h5	/big/link0599	CONTIGUOUS	-	4	0
 ea_paged.h5	/d	CHUNKED	1	600000	0
+elinks.h5	/local	CONTIGUOUS	-	4	0
+elinks_target.h5	/grp/d	CONTIGUOUS	-	12	0
 external.h5	/ext	CONTIGUOUS	-	48	0
 external_paths.h5	/absolute	CONTIGUOUS	-	8	0
 external_paths.h5	/parent	CONTIGUOUS	-	8	0
@@ -777,6 +779,54 @@ paged_sparse.h5	/ea_sparse	CHUNKED	1	56	0
 paged_sparse.h5	/fa_paged	CHUNKED	2	20000	0
 paged_sparse.h5	/fa_paged_gz	CHUNKED	2	35000	1	1	1	4	deflate
 paged_sparse.h5	/fa_paged_sparse	CHUNKED	2	80	0
+paths.h5	/a/b/c/deep	CONTIGUOUS	-	24	0
+paths.h5	/many/alias_a	CONTIGUOUS	-	8	0
+paths.h5	/many/t01	CONTIGUOUS	-	8	0
+paths.h5	/many/t02	CONTIGUOUS	-	8	0
+paths.h5	/many/t03	CONTIGUOUS	-	8	0
+paths.h5	/many/t04	CONTIGUOUS	-	8	0
+paths.h5	/many/t05	CONTIGUOUS	-	8	0
+paths.h5	/many/t06	CONTIGUOUS	-	8	0
+paths.h5	/many/t07	CONTIGUOUS	-	8	0
+paths.h5	/many/t08	CONTIGUOUS	-	8	0
+paths.h5	/many/t09	CONTIGUOUS	-	8	0
+paths.h5	/many/t10	CONTIGUOUS	-	8	0
+paths.h5	/many/t11	CONTIGUOUS	-	8	0
+paths.h5	/many/t12	CONTIGUOUS	-	8	0
+paths.h5	/many/t13	CONTIGUOUS	-	8	0
+paths.h5	/many/t14	CONTIGUOUS	-	8	0
+paths.h5	/many/t15	CONTIGUOUS	-	8	0
+paths.h5	/many/t16	CONTIGUOUS	-	8	0
+paths.h5	/many/t17	CONTIGUOUS	-	8	0
+paths.h5	/many/t18	CONTIGUOUS	-	8	0
+paths.h5	/many/t19	CONTIGUOUS	-	8	0
+paths.h5	/many/t20	CONTIGUOUS	-	8	0
+paths.h5	/plain	CONTIGUOUS	-	8	0
+paths.h5	/refs	CONTIGUOUS	-	64	0
+paths_latest.h5	/a/b/c/deep	CONTIGUOUS	-	24	0
+paths_latest.h5	/many/alias_a	CONTIGUOUS	-	8	0
+paths_latest.h5	/many/t01	CONTIGUOUS	-	8	0
+paths_latest.h5	/many/t02	CONTIGUOUS	-	8	0
+paths_latest.h5	/many/t03	CONTIGUOUS	-	8	0
+paths_latest.h5	/many/t04	CONTIGUOUS	-	8	0
+paths_latest.h5	/many/t05	CONTIGUOUS	-	8	0
+paths_latest.h5	/many/t06	CONTIGUOUS	-	8	0
+paths_latest.h5	/many/t07	CONTIGUOUS	-	8	0
+paths_latest.h5	/many/t08	CONTIGUOUS	-	8	0
+paths_latest.h5	/many/t09	CONTIGUOUS	-	8	0
+paths_latest.h5	/many/t10	CONTIGUOUS	-	8	0
+paths_latest.h5	/many/t11	CONTIGUOUS	-	8	0
+paths_latest.h5	/many/t12	CONTIGUOUS	-	8	0
+paths_latest.h5	/many/t13	CONTIGUOUS	-	8	0
+paths_latest.h5	/many/t14	CONTIGUOUS	-	8	0
+paths_latest.h5	/many/t15	CONTIGUOUS	-	8	0
+paths_latest.h5	/many/t16	CONTIGUOUS	-	8	0
+paths_latest.h5	/many/t17	CONTIGUOUS	-	8	0
+paths_latest.h5	/many/t18	CONTIGUOUS	-	8	0
+paths_latest.h5	/many/t19	CONTIGUOUS	-	8	0
+paths_latest.h5	/many/t20	CONTIGUOUS	-	8	0
+paths_latest.h5	/plain	CONTIGUOUS	-	8	0
+paths_latest.h5	/refs	CONTIGUOUS	-	64	0
 plugin_filters.h5	/bitshuffle_i4	CHUNKED	250	4000	1	32008	1	0 4 4 0 0	bitshuffle; see https://github.com/kiyo-masui/bitshuffle
 plugin_filters.h5	/bitshuffle_lz4_f8	CHUNKED	16,16	9871	1	32008	1	0 4 8 0 2	bitshuffle; see https://github.com/kiyo-masui/bitshuffle
 plugin_filters.h5	/bitshuffle_lz4_u1	CHUNKED	1003	2130	1	32008	1	0 4 1 64 2	bitshuffle; see https://github.com/kiyo-masui/bitshuffle
@@ -824,7 +874,7 @@ references.h5	/target_a	CONTIGUOUS	-	20	0
 references.h5	/target_g/inner	CONTIGUOUS	-	12	0
 refs_revised.h5	/attributes	CONTIGUOUS	-	54	0
 refs_revised.h5	/data	CONTIGUOUS	-	80	0
-refs_revised.h5	/external	CONTIGUOUS	-	18	0
+refs_revised.h5	/external	CONTIGUOUS	-	54	0
 refs_revised.h5	/mixed	CONTIGUOUS	-	72	0
 refs_revised.h5	/objects	CONTIGUOUS	-	72	0
 refs_revised.h5	/regions	CONTIGUOUS	-	90	0
@@ -869,6 +919,24 @@ szip.h5	/i32_2d	CHUNKED	5,30	420	1	4	1	169 8 32 30	Unknown library filter
 szip.h5	/i32_nn_multi	CHUNKED	256	698	1	4	1	169 8 32 256	Unknown library filter
 szip.h5	/u16_pad_nn	CHUNKED	10,100	451	1	4	1	169 32 16 100	Unknown library filter
 szip.h5	/u8_ec_pad	CHUNKED	300	295	1	4	1	141 8 8 300	Unknown library filter
+typed.h5	/arr_f4	CONTIGUOUS	-	48	0
+typed.h5	/arr_s	CONTIGUOUS	-	12	0
+typed.h5	/bits_b16be	CONTIGUOUS	-	6	0
+typed.h5	/bits_b32	CONTIGUOUS	-	8	0
+typed.h5	/bits_b8	CONTIGUOUS	-	3	0
+typed.h5	/cx_h5py	CONTIGUOUS	-	24	0
+typed.h5	/cx_native	CONTIGUOUS	-	48	0
+typed.h5	/cx_native_be	CONTIGUOUS	-	16	0
+typed.h5	/cx_native_f16	CONTIGUOUS	-	8	0
+typed.h5	/enum_be	CONTIGUOUS	-	8	0
+typed.h5	/enum_u8	CONTIGUOUS	-	3	0
+typed.h5	/enum_unknown	CONTIGUOUS	-	12	0
+typed.h5	/opaque	CONTIGUOUS	-	8	0
+typed.h5	/records	CONTIGUOUS	-	204	0
+typed.h5	/table	CHUNKED	4,2	255	1	1	1	4	deflate
+typed.h5	/time_d32le	CONTIGUOUS	-	12	0
+typed.h5	/time_d64be	CONTIGUOUS	-	16	0
+typed.h5	/vlen_rec	CONTIGUOUS	-	48	0
 unwritten_earliest.h5	/chunked	CHUNKED	5	0	0
 unwritten_earliest.h5	/chunked_gz	CHUNKED	2,2	0	1	1	1	4	deflate
 unwritten_earliest.h5	/vlen	CONTIGUOUS	-	48	0

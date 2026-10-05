@@ -192,11 +192,14 @@ class P2ApiTest {
                     () -> root.dataset("links/dangling/x"));
             assertTrue(dangling.getMessage().contains("'dangling' in /links is a soft link to /nowhere"), dangling.getMessage());
             if (file.equals("links.h5")) {
-                HdfUnsupportedException external = assertThrows(HdfUnsupportedException.class,
-                        () -> root.dataset("links/ext"));
-                assertTrue(external.getMessage().contains("external link"), external.getMessage());
-                assertTrue(root.child("links/ext/y").isEmpty());
-                assertEquals(Optional.empty(), root.child("dense/ext"));
+                // External links are followed; what they reach is named by its path in the other file.
+                Dataset external = root.dataset("links/ext");
+                assertArrayEquals(new int[] {42}, external.readInts());
+                assertEquals("/y", external.path());
+                assertTrue(root.child("links/ext/y").isEmpty()); // /y is a dataset
+                NoSuchElementException beyond = assertThrows(NoSuchElementException.class, () -> root.dataset("links/ext/y"));
+                assertTrue(beyond.getMessage().contains("/y is not a group"), beyond.getMessage());
+                assertEquals(Optional.of("/y"), root.child("dense/ext").map(Hdf5Object::path));
                 assertArrayEquals(new int[] {1, 2, 3}, root.dataset("dense/soft").readInts());
             }
         }

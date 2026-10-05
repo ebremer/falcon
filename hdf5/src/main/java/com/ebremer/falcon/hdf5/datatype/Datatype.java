@@ -77,7 +77,11 @@ public sealed interface Datatype {
         RESERVED
     }
 
-    /** Time type (class 2). */
+    /**
+     * Time type (class 2): a Unix {@code time_t}, the signed number of seconds since
+     * 1970-01-01T00:00:00Z, in its low {@code bitPrecision} bits. HDF5's only time types are
+     * {@code H5T_UNIX_D32BE/LE} and {@code H5T_UNIX_D64BE/LE}.
+     */
     record Time(int size, ByteOrder byteOrder, int bitPrecision) implements Datatype {
         @Override public DatatypeClass typeClass() {
             return DatatypeClass.TIME;

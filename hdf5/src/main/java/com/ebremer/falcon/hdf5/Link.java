@@ -3,7 +3,8 @@ package com.ebremer.falcon.hdf5;
 /**
  * One link in a {@link Group}: how a name in the group reaches an object. A <b>hard</b> link points at
  * an object in this file; a <b>soft</b> link holds a path in this file (absolute, or relative to the
- * link's group), which need not resolve; an <b>external</b> link names an object in another file.
+ * link's group), which need not resolve; an <b>external</b> link names an object in another file, which
+ * a group follows as the file's {@link ExternalFileAccess} policy allows.
  *
  * <pre>{@code
  * for (Link link : group.links()) {

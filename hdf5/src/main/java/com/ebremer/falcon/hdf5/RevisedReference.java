@@ -20,14 +20,15 @@ import java.nio.charset.StandardCharsets;
  * so each element's own type says what it holds.
  *
  * @param type          {@link #OBJECT}, {@link #REGION}, or {@link #ATTRIBUTE}
- * @param address       the header address of the object pointed at (or into)
+ * @param address       the header address of the object pointed at (or into), in its file
+ * @param tokenSize     the bytes the address takes: its file's size of offsets
  * @param externalFile  the file the object is in, or null for this file
  * @param region        a region reference's selection, else null
  * @param rank          a region reference's rank, else -1
  * @param attributeName an attribute reference's attribute name, else null
  */
-record RevisedReference(int type, long address, String externalFile, DataspaceSelection region, int rank,
-                        String attributeName) {
+record RevisedReference(int type, long address, int tokenSize, String externalFile, DataspaceSelection region,
+                        int rank, String attributeName) {
 
     static final int OBJECT = 2;    // H5R_OBJECT2
     static final int REGION = 3;    // H5R_DATASET_REGION2
@@ -80,7 +81,10 @@ record RevisedReference(int type, long address, String externalFile, DataspaceSe
             throw new HdfFormatException("revised reference token of " + tokenSize + " bytes in a file whose"
                     + " addresses are " + offsets + " bytes");
         }
-        long address = external ? HdfBuffer.UNDEFINED_ADDRESS : encoded.getAddress(p + 1, tokenSize);
+        if (tokenSize < 1 || tokenSize > 8) {
+            throw new HdfFormatException("revised reference token of " + tokenSize + " bytes");
+        }
+        long address = encoded.getAddress(p + 1, tokenSize); // in the other file, for an external reference
         p += 1 + tokenSize;
         String file = null;
         if (external) {
@@ -97,14 +101,14 @@ record RevisedReference(int type, long address, String externalFile, DataspaceSe
                 if (rank < 1 || rank > 32) {
                     throw new HdfFormatException("invalid region reference rank " + rank);
                 }
-                yield new RevisedReference(type, address, file, selection, (int) rank, null);
+                yield new RevisedReference(type, address, tokenSize, file, selection, (int) rank, null);
             }
             case ATTRIBUTE -> {
                 int length = encoded.getUnsignedShort(require(p, 2, end));
                 String name = string(encoded, require(p + 2, length, end), length);
-                yield new RevisedReference(type, address, file, null, -1, name);
+                yield new RevisedReference(type, address, tokenSize, file, null, -1, name);
             }
-            default -> new RevisedReference(type, address, file, null, -1, null);
+            default -> new RevisedReference(type, address, tokenSize, file, null, -1, null);
         };
     }
 
@@ -117,12 +121,27 @@ record RevisedReference(int type, long address, String externalFile, DataspaceSe
         };
     }
 
-    /** Fails for a reference into another file, which Falcon does not follow. */
-    void requireLocal() {
-        if (externalFile != null) {
-            throw new HdfUnsupportedException(kind() + " into another file (" + externalFile
-                    + "); Falcon does not follow references into other files (open that file instead)");
+    /**
+     * The file this reference points into: {@code ctx}'s own, or the other file it names, found and opened
+     * as the file's {@link ExternalFileAccess} policy says and kept open until that file closes.
+     *
+     * @throws HdfUnsupportedException if the policy refuses the other file
+     * @throws HdfException if the other file is not found
+     * @throws HdfFormatException if the reference's address is not as wide as that file's addresses
+     */
+    FileContext file(FileContext ctx) {
+        if (externalFile == null) {
+            return ctx;
         }
+        FileContext other = SourceFiles.find(ctx, externalFile, ExternalFileAccess.Purpose.REFERENCE);
+        if (other == null) {
+            throw new HdfException(kind() + " points into " + externalFile + ", which is not found");
+        }
+        if (other.sizeOfOffsets() != tokenSize) {
+            throw new HdfFormatException(kind() + " into " + externalFile + " holds a " + tokenSize
+                    + "-byte address, but that file's addresses are " + other.sizeOfOffsets() + " bytes");
+        }
+        return other;
     }
 
     private static long require(long p, long length, long end) {

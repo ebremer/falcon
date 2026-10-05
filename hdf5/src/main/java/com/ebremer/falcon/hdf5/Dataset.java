@@ -190,7 +190,8 @@ public final class Dataset extends Hdf5Object {
      * Reads every element of an integer dataset as an {@code int}. Values are exact: one that does not
      * fit (a {@code uint32} above {@link Integer#MAX_VALUE}, a large {@code int64}) throws rather than
      * wrapping. An enumeration reads as the integers its elements hold, a bit field as the unsigned integer
-     * of its bits, and an array type as its base elements, every element's in turn.
+     * of its bits, a time value as its seconds since 1970, and an array type as its base elements, every
+     * element's in turn.
      *
      * @throws HdfUnsupportedException if the datatype is not an integer type or a value does not fit
      */
@@ -287,10 +288,12 @@ public final class Dataset extends Hdf5Object {
      *
      * <p>Revised references (HDF5 1.12's {@code H5R_ref_t}) are read too, whatever each element holds: an
      * object reference resolves to its object, a region reference to its dataset, and an attribute
-     * reference to the object the attribute is on.
+     * reference to the object the attribute is on. A revised reference may point into another file, which
+     * is found and opened as the file's {@link ExternalFileAccess} policy allows, and stays open until this
+     * file closes; the object read is that file's.
      *
-     * @throws HdfUnsupportedException for a revised reference into another file, which Falcon does not
-     *         follow
+     * @throws HdfUnsupportedException for a reference into a file the policy refuses
+     * @throws HdfException for a reference into a file that is not found
      */
     public Hdf5Object[] readObjectReferences() {
         return reader().objectReferences();
@@ -300,8 +303,9 @@ public final class Dataset extends Hdf5Object {
      * Reads a region-reference dataset, resolving each element to a {@link Selection} of the dataset it
      * points into (or {@code null} for a null reference). Read the selection to get the referenced data.
      *
-     * <p>Revised references (HDF5 1.12's {@code H5R_ref_t}) are read too. An element that is an object or
-     * attribute reference, or points into another file, becomes a selection that throws when used.
+     * <p>Revised references (HDF5 1.12's {@code H5R_ref_t}) are read too, into other files as for
+     * {@link #readObjectReferences()}. An element that is an object or attribute reference, or points into
+     * a file that is refused or not found, becomes a selection that throws when used.
      */
     public Selection[] readRegionReferences() {
         return reader().regionReferences();
@@ -311,8 +315,9 @@ public final class Dataset extends Hdf5Object {
      * Reads a dataset of revised attribute references (HDF5 1.12's {@code H5R_ATTR}), resolving each
      * element to the attribute it names, or {@code null} for a null reference.
      *
-     * @throws HdfUnsupportedException if the datatype is not a revised reference, or an element is not an
-     *         attribute reference or points into another file
+     * @throws HdfUnsupportedException if the datatype is not a revised reference, an element is not an
+     *         attribute reference, or one points into a file the {@link ExternalFileAccess} policy refuses
+     * @throws HdfException if an element points into a file that is not found
      * @throws HdfFormatException if a referenced attribute does not exist
      */
     public Attribute[] readAttributeReferences() {
@@ -346,13 +351,12 @@ public final class Dataset extends Hdf5Object {
      *       values read the same way (see {@link #member(String)});</li>
      *   <li>for an array type, its base elements' values, every element's in turn;</li>
      *   <li>{@code byte[][]} for opaque data, one array per element;</li>
+     *   <li>{@code java.time.Instant[]} for time values (Unix seconds);</li>
      *   <li>variable-length sequences as {@code int[][]}, {@code long[][]} or {@code double[][]} rows, or
      *       for other base types {@code Object[]} rows each read the same way;</li>
      *   <li>{@code Selection[]} for region references, and {@code Hdf5Object[]} for object references and
      *       revised references (see {@link #readObjectReferences()}).</li>
      * </ul>
-     *
-     * @throws HdfUnsupportedException for the time datatype, which Falcon does not read
      */
     public Object read() {
         return reader().natural();

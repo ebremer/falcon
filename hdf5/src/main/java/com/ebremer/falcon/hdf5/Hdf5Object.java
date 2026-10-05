@@ -268,10 +268,12 @@ public abstract sealed class Hdf5Object permits Group, Dataset, CommittedDatatyp
     /**
      * Resolves an object-reference buffer: each {@code stride}-byte element is a target object-header
      * address (or, if {@code revised}, a {@link RevisedReference} of any kind), resolved to the object it
-     * points at or into (or {@code null} for a null reference). Each object's name and path are found
-     * when first asked for (see {@link #path()}).
+     * points at or into (or {@code null} for a null reference), in this file or, for a revised reference
+     * into another file, in that file. Each object's name and path are found when first asked for (see
+     * {@link #path()}).
      *
-     * @throws HdfUnsupportedException for a revised reference into another file
+     * @throws HdfUnsupportedException for a revised reference into a file the external-file policy refuses
+     * @throws HdfException for one into a file that is not found
      */
     static Hdf5Object[] resolveObjectReferences(FileContext ctx, MemorySegment data, int count, int stride,
                                                 boolean revised) {
@@ -282,8 +284,7 @@ public abstract sealed class Hdf5Object permits Group, Dataset, CommittedDatatyp
             if (revised) {
                 RevisedReference reference = RevisedReference.decode(ctx, buffer, (long) i * stride, stride);
                 if (reference != null) {
-                    reference.requireLocal();
-                    out[i] = dereference(ctx, reference.address());
+                    out[i] = dereference(reference.file(ctx), reference.address());
                 }
                 continue;
             }
@@ -300,8 +301,9 @@ public abstract sealed class Hdf5Object permits Group, Dataset, CommittedDatatyp
      * Resolves revised attribute references ({@code H5R_ATTR}) to the attributes they name, or
      * {@code null} for a null reference.
      *
-     * @throws HdfUnsupportedException for an element that is not an attribute reference, or one into
-     *         another file
+     * @throws HdfUnsupportedException for an element that is not an attribute reference, or one into a
+     *         file the external-file policy refuses
+     * @throws HdfException for one into a file that is not found
      * @throws HdfFormatException if the object has no attribute of the referenced name
      */
     static Attribute[] resolveAttributeReferences(FileContext ctx, MemorySegment data, int count, int stride) {
@@ -316,8 +318,7 @@ public abstract sealed class Hdf5Object permits Group, Dataset, CommittedDatatyp
                 throw new HdfUnsupportedException("element " + i + " is " + reference.kind()
                         + ", not an attribute reference (read it with readObjectReferences)");
             }
-            reference.requireLocal();
-            Hdf5Object object = dereference(ctx, reference.address());
+            Hdf5Object object = dereference(reference.file(ctx), reference.address());
             out[i] = object.attribute(reference.attributeName()).orElseThrow(() -> new HdfFormatException(
                     "attribute reference names '" + reference.attributeName() + "', which the object at "
                     + reference.address() + " does not have"));
@@ -330,8 +331,8 @@ public abstract sealed class Hdf5Object permits Group, Dataset, CommittedDatatyp
      * object holds a target dataset's address followed by a serialized dataspace selection (or, if
      * {@code revised}, a {@link RevisedReference}). Returns a {@link Selection} of the referenced dataset
      * per element, or {@code null} for a null reference (an all-zero or undefined heap address). An
-     * element that cannot be resolved, or a revised reference that is not a region in this file, becomes
-     * a selection that throws when used, so it does not fail the others.
+     * element that cannot be resolved (a revised reference that is not a region, or into a file that is
+     * refused or not found), becomes a selection that throws when used, so it does not fail the others.
      */
     static Selection[] resolveRegionReferences(FileContext ctx, MemorySegment data, int count, int stride,
                                                boolean revised) {
@@ -350,8 +351,7 @@ public abstract sealed class Hdf5Object permits Group, Dataset, CommittedDatatyp
                         throw new HdfUnsupportedException("element " + i + " is " + reference.kind()
                                 + ", not a region reference");
                     }
-                    reference.requireLocal();
-                    out[i] = region(ctx, reference.address(), reference.region(), reference.rank());
+                    out[i] = region(reference.file(ctx), reference.address(), reference.region(), reference.rank());
                 } catch (HdfException e) {
                     out[i] = Selection.unresolved(e);
                 }

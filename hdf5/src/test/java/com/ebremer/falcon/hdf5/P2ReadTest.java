@@ -104,10 +104,9 @@ class P2ReadTest {
             assertNull(mixedRegions[3]);
             assertThrows(HdfUnsupportedException.class, mixed::readAttributeReferences);
 
-            // A reference into another file names it; Falcon does not follow it.
+            // A reference into another file is followed into it (see OtherFileObjectsTest).
             Dataset external = root.dataset("external");
-            HdfUnsupportedException e = assertThrows(HdfUnsupportedException.class, external::readObjectReferences);
-            assertTrue(e.getMessage().contains("refs_revised_ext.h5"), e.getMessage());
+            assertArrayEquals(new int[] {0, 1, 2}, ((Dataset) external.readObjectReferences()[0]).readInts());
 
             Attribute onRoot = root.attribute("refs").orElseThrow();
             assertArrayEquals(new int[] {6, 7, 8, 11, 12, 13}, onRoot.readRegionReferences()[0].readInts());

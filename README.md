@@ -56,7 +56,8 @@ try (Hdf5File h5 = Hdf5File.open(Path.of("data.h5"))) {
 
 Files open from a path (memory-mapped), from a `byte[]`, or through a `RangeReader` (an object store,
 HTTP byte ranges, any channel), which Falcon reads on demand: the metadata and only the data asked for.
-A resolver opens the other files such a file names (external raw data, virtual-dataset sources).
+A resolver opens the other files such a file names (external raw data, virtual-dataset sources, the
+files its external links lead to and its references point into).
 
 **Write** — create a file, add groups, datasets (contiguous or chunked + filters), and attributes:
 
@@ -73,7 +74,7 @@ try (Hdf5Writer w = Hdf5Writer.create(Path.of("out.h5"))) {
 ```
 
 The reader handles every HDF5 structure (all superblock/header/group forms, chunk indexes, filters,
-vlen, references, virtual datasets); the writer covers the common datatypes, all six filters, compact
+vlen, references, virtual datasets, external links); the writer covers the common datatypes, all six filters, compact
 and dense storage, and both the modern and earliest on-disk formats. Full walkthrough in the
 **[HDF5 User Guide](hdf5/USER_GUIDE.md)**.
 

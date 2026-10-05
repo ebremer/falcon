@@ -378,8 +378,9 @@ Each stage ends with a **milestone** and concrete **acceptance criteria**. "Refe
 - **API ergonomics ✓**: scalar convenience reads (`Dataset.readInt/readLong/readDouble/readString`,
   `Attribute.readInt/…`) and **block streaming** (`Dataset.blocks(rows)` &rarr; `Stream<Selection>`) for
   processing a large dataset without materializing it whole.
-- **Typed reads and selections ✓** (P2 A1, A4): every datatype class but time reads into Java values
-  (compound members by name, enumeration names, complex pairs, bit fields, opaque bytes), and strided and
+- **Typed reads and selections ✓** (P2 A1, A4, A12): every datatype class reads into Java values
+  (compound members by name, enumeration names, complex pairs, bit fields, opaque bytes, time as
+  `Instant`), and strided and
   point selections read only the chunks they touch, with every reader a dataset has.
 - **CI ✓**: GitHub Actions builds + tests the reactor on **JDK 25** (fixtures are committed and hermetic,
   so no HDF5/h5py at build time). **Docs ✓**: README usage examples + a standalone

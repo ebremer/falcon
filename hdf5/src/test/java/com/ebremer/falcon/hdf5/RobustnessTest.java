@@ -33,6 +33,7 @@ class RobustnessTest {
         "sohm_latest.h5", "refs_revised.h5", "vds_unlimited.h5",
         "plugin_filters.h5", "legacy_layouts.h5", "vax.h5", "fsinfo_v0_persist.h5", "btree_k_earliest.h5",
         "family_latest_0.h5", "vds_views.h5", "conversions.h5", "oldstyle_big.h5", "typed.h5", "paths_latest.h5",
+        "elinks.h5",
     };
 
     @Test

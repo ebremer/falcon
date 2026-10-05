@@ -196,6 +196,11 @@ public final class Hdf5File implements AutoCloseable {
         return root;
     }
 
+    /** This file's context, which every object read from it shares. */
+    FileContext context() {
+        return ctx;
+    }
+
     /** The file's path, or {@code null} if it was opened from bytes or a {@link RangeReader}. */
     public Path path() {
         return ctx.path();

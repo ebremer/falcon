@@ -109,19 +109,25 @@ for (Link link : group.links()) {
 ```
 
 `childNames()` names every link. `children()`, `child(name)`, `group(name)` and `dataset(name)` follow
-hard links and soft links:
+hard, soft, and external links:
 - An object reached through a soft link takes the link's path (e.g. `/links/soft`).
-- **External links are not followed.** `dataset(name)` on one throws `HdfUnsupportedException` naming
-  the target file; open that file yourself.
-- A soft link whose target is missing, or which loops (more than 16 soft links on one path, as in
-  libhdf5), reaches nothing.
+- **External links are followed as libhdf5 follows them.** The link's file is looked for, and opened, as
+  the `ExternalFileAccess` policy allows (see *Files outside the HDF5 file*): by default, only in the
+  HDF5 file's own directory tree. It stays open until the HDF5 file closes. The object reached is named
+  by its path in that file, as libhdf5 names it (`/y`, for a link to `other.h5:/y`), and paths continue
+  across the link (`group("ext_group/sub")`).
+- A link whose file the policy refuses fails `child`, `group` and `dataset` with
+  `HdfUnsupportedException` naming the file, and is left out of `children()`.
+- A soft or external link whose target or file is missing, or which loops (more than 16 soft and
+  external links on one path, across files, as in libhdf5), reaches nothing.
 
 ### Files outside the HDF5 file
 
-External raw data (an External File List) and virtual-dataset sources are other files named inside the
-HDF5 file. An untrusted file could otherwise point Falcon at any local file, or at a network share. So
-by default Falcon opens only files in the HDF5 file's own directory tree; any other name fails the read
-with `HdfUnsupportedException`. Choose a different policy when opening:
+External raw data (an External File List), virtual-dataset sources, the files external links lead to,
+and the files references point into are other files named inside the HDF5 file. An untrusted file could
+otherwise point Falcon at any local file, or at a network share. So by default Falcon opens only files
+in the HDF5 file's own directory tree; any other name fails the read with `HdfUnsupportedException`.
+Choose a different policy when opening:
 
 ```java
 Hdf5File.open(path);                                                         // = ExternalFileAccess.sameDirectory()
@@ -131,8 +137,9 @@ Hdf5File.open(path, ExternalFileAccess.none());                              // 
 Hdf5File.open(path, ExternalFileAccess.resolvedBy(resolver));                // your resolver decides
 ```
 
-A **resolver** is given every name the file holds (and why: `RAW_DATA` or `VIRTUAL_SOURCE`) and returns a
-`RangeReader` for it, `null` if there is no such file, or throws `HdfUnsupportedException` to refuse it.
+A **resolver** is given every name the file holds (and why: `RAW_DATA`, `VIRTUAL_SOURCE`, `EXTERNAL_LINK`,
+or `REFERENCE`) and returns a `RangeReader` for it, `null` if there is no such file, or throws
+`HdfUnsupportedException` to refuse it.
 It is the policy for a file read through a `RangeReader`, whose other files are not local paths:
 
 ```java
@@ -141,23 +148,28 @@ ExternalFileAccess sources = ExternalFileAccess.resolvedBy((name, purpose) ->
 Hdf5File.open(store.reader(prefix + "data.h5"), OpenOptions.defaults().externalFileAccess(sources));
 ```
 
-Names in the files a resolver opens (a virtual source's own sources) come to it too. A reader it returns
-that is `AutoCloseable` is closed once Falcon is done with it: after a read of external raw data, and
-for a virtual dataset's source when the file closes. A source it does not find, or cannot open
-(`IOException`), reads as the fill value; external raw data it does not find fails the read.
+Names in the files a resolver opens (a virtual source's own sources, the links in a linked file) come to
+it too. A reader it returns that is `AutoCloseable` is closed once Falcon is done with it: after a read
+of external raw data, and for another HDF5 file when the file closes. A file it does not find, or cannot
+open (`IOException`), is missing: a virtual source reads as the fill value, an external link reaches
+nothing, and external raw data or a reference fails the read.
 
 A name is read as a path of the HDF5 file's own file system, so the files next to a file inside a zip
 file system are found in it.
 
-A virtual-dataset source is looked for where libhdf5 looks, among the places the policy allows:
+Another HDF5 file (a virtual-dataset source, an external link's file, a reference's file) is looked for
+where libhdf5 looks for a virtual source or an external link's file, among the places the policy
+allows:
 - **An absolute name** is tried as written. If that fails, its file name alone is tried, as libhdf5 does
-  for a file moved together with its sources.
+  for a file moved together with the files it names.
 - **A relative name** is tried in the HDF5 file's directory.
 - **Then, for both,** each allowed directory, and under `unrestricted()` the working directory.
 
-A source found nowhere is missing and reads as the fill value. There is one exception: when the
-policy refuses the name's own location and no allowed candidate exists, the read fails, because the
-refused file may be the real source.
+A file found nowhere is missing: a virtual source reads as the fill value, and an external link reaches
+nothing. There is one exception: when the policy refuses the name's own location and no allowed
+candidate exists, the read fails, because the refused file may be the real one. (libhdf5 opens a
+reference's file by the name as written, from the working directory; Falcon looks in the HDF5 file's
+directory first.)
 
 ### Read a dataset
 
@@ -301,9 +313,11 @@ libhdf5 gives every revised-reference datatype the same code, so each element ca
 - `readRegionReferences()` gives an element that is not a region a selection that throws when used.
 - `readAttributeReferences()` fails if an element is not an attribute reference.
 - `read()` returns the objects, as `readObjectReferences()` does.
-- A reference into another file names that file, but Falcon does not follow it:
-  - `readObjectReferences()` and `readAttributeReferences()` throw `HdfUnsupportedException`.
-  - `readRegionReferences()` gives that element a selection that throws when used.
+- A reference into another file is followed into it: the file is looked for and opened as the
+  `ExternalFileAccess` policy allows, and stays open until the HDF5 file closes. If the policy refuses
+  it, or it is not found, `readObjectReferences()` and `readAttributeReferences()` fail
+  (`HdfUnsupportedException` or `HdfException`), and `readRegionReferences()` gives that element a
+  selection that throws when used.
 
 Virtual datasets are read transparently: `ds.readDoubles()` assembles the data from the source files
 (resolved relative to the virtual dataset's own file), filling unmapped regions with the fill value.
@@ -334,7 +348,7 @@ Two `OpenOptions` settings work as libhdf5's dataset access properties do (`H5Ps
 ### Datatypes
 
 The reader decodes every HDF5 datatype class (`ds.datatype()` describes it), and reads the data of every
-class but time:
+class:
 
 | Datatype | Readers | `read()` returns |
 |---|---|---|
@@ -347,6 +361,7 @@ class but time:
 | complex (HDF5 2.0) | `readComplexDoubles`, `readComplexFloats`; `readDoubles` and `readFloats` give the real part, as libhdf5 converts | `double[]` of (real, imaginary) pairs |
 | bit field | the integer readers, as unsigned integers (as h5py reads them) | as for an unsigned integer |
 | opaque | `readRawBytes` | `byte[][]`, one array per element |
+| time | the integer readers: signed seconds since 1970 (HDF5's time types are Unix `time_t`) | `java.time.Instant[]` |
 | reference | `readObjectReferences`, `readRegionReferences`, `readAttributeReferences` | `Hdf5Object[]` or `Selection[]` |
 | variable-length sequence | `readVlenInts`, `readVlenLongs`, `readVlenFloats`, `readVlenDoubles` | `int[][]`, `long[][]`, `double[][]`, or `Object[]` of rows |
 
@@ -548,9 +563,6 @@ The following are not supported:
 - **Filters other than the built-in six and the five third-party ones above.**
 - **Multi-file drivers** (family, multi, split). `driverInfo()` reports them, and Falcon reads only the
   file it opened.
-- **Following external links, and references into other files.**
-- **Reading the time datatype** (class 2), which HDF5 itself has never fully supported. `datatype()`
-  describes it, and `readRawBytes()` gives its bytes.
 
 On the write side, the bitfield/opaque/time datatype classes and indirect-block dense storage are not
 yet emitted. See [`PLAN.md`](PLAN.md) for the full roadmap.

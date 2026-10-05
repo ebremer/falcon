@@ -7,6 +7,8 @@ import com.ebremer.falcon.hdf5.datatype.Datatype;
 import com.ebremer.falcon.hdf5.io.FileContext;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
+import java.time.DateTimeException;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -28,6 +30,9 @@ import java.util.function.Supplier;
  *   <li>a <b>complex</b> number reads as its real part where a real number is asked for, as libhdf5
  *       converts it, or as (real, imaginary) pairs;</li>
  *   <li>a <b>bit field</b> reads as the unsigned integer of its bits, as h5py reads it;</li>
+ *   <li>a <b>time</b> value reads as the signed number of seconds since 1970-01-01T00:00:00Z it holds
+ *       (the only time types HDF5 defines, {@code H5T_UNIX_D32*} and {@code H5T_UNIX_D64*}, are Unix
+ *       {@code time_t} values), and {@link #natural()} gives {@link Instant}s;</li>
  *   <li>an <b>opaque</b> element reads as its bytes.</li>
  * </ul>
  * The data is fetched only once the datatype is known to suit the read.
@@ -271,9 +276,24 @@ final class ElementReader {
             case Datatype.Complex c -> complexDoubles();
             case Datatype.BitField b -> Elements.toNaturalIntegers(data.get(), n, unsigned(b));
             case Datatype.Opaque o -> elementBytes(data.get(), n, o.size());
+            case Datatype.Time t -> instants(Elements.toLongs(data.get(), n, seconds(t)));
             default -> throw new HdfUnsupportedException(
                     "reading datatype class " + flat.type().typeClass() + " is not yet supported: " + what);
         };
+    }
+
+    /** Seconds since 1970-01-01T00:00:00Z as instants. */
+    private Instant[] instants(long[] seconds) {
+        Instant[] out = new Instant[seconds.length];
+        for (int i = 0; i < seconds.length; i++) {
+            try {
+                out[i] = Instant.ofEpochSecond(seconds[i]);
+            } catch (DateTimeException e) {
+                throw new HdfUnsupportedException("time value " + seconds[i] + " (element " + i + ") lies beyond"
+                        + " the range of java.time.Instant; read it with readLongs(): " + what);
+            }
+        }
+        return out;
     }
 
     /** A sequence's rows in their most natural form: {@code int[][]}, {@code long[][]}, {@code double[][]}, or {@code Object[]}. */
@@ -401,14 +421,15 @@ final class ElementReader {
     }
 
     /**
-     * The integer type an integer read decodes: an integer, an enumeration's base, or a bit field read as
-     * an unsigned integer.
+     * The integer type an integer read decodes: an integer, an enumeration's base, a bit field read as an
+     * unsigned integer, or a time value's seconds.
      */
     private Datatype.FixedPoint integerType(Datatype t, String op) {
         return switch (t) {
             case Datatype.FixedPoint fp -> fp;
             case Datatype.Enumeration e -> enumBase(e);
             case Datatype.BitField b -> unsigned(b);
+            case Datatype.Time time -> seconds(time);
             default -> throw new HdfUnsupportedException(op + " requires an integer datatype, not " + t.typeClass()
                     + ": " + what);
         };
@@ -419,7 +440,8 @@ final class ElementReader {
         if (t instanceof Datatype.FloatingPoint) {
             return t;
         }
-        if (t instanceof Datatype.FixedPoint || t instanceof Datatype.Enumeration || t instanceof Datatype.BitField) {
+        if (t instanceof Datatype.FixedPoint || t instanceof Datatype.Enumeration || t instanceof Datatype.BitField
+                || t instanceof Datatype.Time) {
             return integerType(t, op);
         }
         throw new HdfUnsupportedException(op + " requires a floating-point or integer datatype, not "
@@ -449,6 +471,11 @@ final class ElementReader {
         }
         throw new HdfFormatException("enumeration of " + e.size() + " bytes over " + e.base().typeClass()
                 + " is not over an integer type of its size: " + what);
+    }
+
+    /** A time value as the signed integer of its seconds since 1970, a Unix {@code time_t}. */
+    private static Datatype.FixedPoint seconds(Datatype.Time t) {
+        return new Datatype.FixedPoint(t.size(), t.byteOrder(), true, 0, t.bitPrecision());
     }
 
     /** A bit field as the unsigned integer of the same bits (h5py reads {@code H5T_STD_B8} as {@code uint8}). */

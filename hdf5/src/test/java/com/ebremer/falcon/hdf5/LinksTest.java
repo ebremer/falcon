@@ -42,7 +42,8 @@ class LinksTest {
             assertArrayEquals(new int[] {7}, links.dataset("soft_rel").readInts());
             assertArrayEquals(new int[] {1, 2, 3}, links.dataset("chain").readInts());
             assertArrayEquals(new int[] {1, 2, 3}, links.group("soft_group").dataset("x").readInts());
-            assertEquals(List.of("chain", "hard", "soft_abs", "soft_group", "soft_rel", "sub"),
+            // The external link reaches links_ext.h5's /y, named by its path in that file.
+            assertEquals(List.of("chain", "hard", "soft_abs", "soft_group", "soft_rel", "sub", "y"),
                     links.children().stream().map(Hdf5Object::name).sorted().toList());
         }
     }
@@ -53,11 +54,16 @@ class LinksTest {
             Group links = h5.root().group("links");
             assertTrue(links.child("dangling").isEmpty());
             assertTrue(links.child("loop_a").isEmpty());   // a soft-link cycle stops after 16 links
-            assertTrue(links.child("ext").isEmpty());      // external links are not followed
-            HdfUnsupportedException external = assertThrows(HdfUnsupportedException.class, () -> links.dataset("ext"));
-            assertTrue(external.getMessage().contains("links_ext.h5:/y"), external.getMessage());
             assertThrows(NoSuchElementException.class, () -> links.dataset("dangling"));
             assertThrows(NoSuchElementException.class, () -> links.dataset("missing"));
+        }
+        // With no other file allowed, the external link is refused.
+        try (Hdf5File h5 = Hdf5File.open(Fixtures.path("links.h5"), ExternalFileAccess.none())) {
+            Group links = h5.root().group("links");
+            HdfUnsupportedException external = assertThrows(HdfUnsupportedException.class, () -> links.dataset("ext"));
+            assertTrue(external.getMessage().contains("links_ext.h5"), external.getMessage());
+            assertThrows(HdfUnsupportedException.class, () -> links.child("ext"));
+            assertEquals(6, links.children().size()); // a refused external link reaches nothing in the listing
         }
     }
 
@@ -76,7 +82,7 @@ class LinksTest {
             Group dense = h5.root().group("dense");
             assertEquals(14, dense.links().size());
             assertEquals(new Link.External("ext", "links_ext.h5", "/y"), dense.link("ext").orElseThrow());
-            assertEquals(13, dense.children().size());
+            assertEquals(14, dense.children().size()); // twelve hard links, a soft one, and an external one
             assertArrayEquals(new int[] {1, 2, 3}, dense.dataset("soft").readInts());
         }
     }

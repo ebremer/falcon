@@ -26,9 +26,15 @@ import java.util.Optional;
  * A group in the HDF5 hierarchy: a named collection of {@linkplain Link links} to other objects.
  *
  * <p>{@link #links()} lists every link: hard links, soft links (paths within this file), and external
- * links (objects in other files). {@link #children()} and {@link #child(String)} follow hard and soft
- * links to the objects they reach; external links are listed but not followed, and a soft link that does
- * not resolve (a missing target, or a cycle) reaches nothing. Links are read lazily on first access and
+ * links (objects in other files). {@link #children()} and {@link #child(String)} follow them to the
+ * objects they reach. A soft or external link that does not resolve (a missing target or file, or a
+ * cycle) reaches nothing.
+ *
+ * <p><b>External links</b> are followed as libhdf5 follows them: the file is looked for, and opened, as
+ * the file's {@link ExternalFileAccess} policy allows (by default, only in this file's directory tree),
+ * and stays open until this file closes; the object reached is named by its path in that file, as
+ * libhdf5 names it. A file the policy refuses fails the lookup with {@link HdfUnsupportedException}, and
+ * is left out of {@link #children()}. Links are read lazily on first access and
  * cached, for old-style (symbol-table) and new-style (compact or dense link storage) groups alike. A
  * lookup by name before then reads only what it needs: the group's name index (a dense group's name-hash
  * B-tree, or an old-style group's B-tree of names), as libhdf5 does.
@@ -36,8 +42,9 @@ import java.util.Optional;
  * <p><b>Paths.</b> {@link #child(String)}, {@link #link(String)}, {@link #group(String)},
  * {@link #dataset(String)} and {@link #committedType(String)} take a path, as libhdf5's functions do: link
  * names separated by {@code /}, relative to this group or, starting with {@code /}, to the root group.
- * Repeated slashes and a trailing slash are ignored, and {@code .} names the group it is in. Soft links
- * along the way are followed. An object is named by the path it was reached through:
+ * Repeated slashes and a trailing slash are ignored, and {@code .} names the group it is in. Soft and
+ * external links along the way are followed. An object is named by the path it was reached through (or,
+ * past an external link, by its path in that link's file):
  *
  * <pre>{@code
  * Dataset temperature = h5.root().dataset("climate/2024/temperature"); // path() "/climate/2024/temperature"
@@ -46,7 +53,10 @@ import java.util.Optional;
  */
 public final class Group extends Hdf5Object {
 
-    /** Soft links followed while resolving one path before giving up (libhdf5's default H5L_NUM_LINKS). */
+    /**
+     * Soft and external links followed while resolving one path before giving up (libhdf5's default
+     * {@code H5L_NUM_LINKS}, which counts both, across files).
+     */
     private static final int MAX_SOFT_LINKS = 16;
 
     private volatile List<Link> links;          // loaded lazily, then cached (immutable)
@@ -82,9 +92,11 @@ public final class Group extends Hdf5Object {
     }
 
     /**
-     * The objects this group's hard and soft links reach, in link order. External links, and soft links
-     * that do not resolve, are left out (see {@link #links()}). An object reached through a soft link is
-     * named by the link.
+     * The objects this group's links reach, in link order. Links that reach nothing are left out (see
+     * {@link #links()}): soft and external links that do not resolve, external links to files the
+     * {@link ExternalFileAccess} policy refuses or that cannot be read, and user-defined links. An object
+     * reached through a soft link is named by the link; one reached through an external link, by its path
+     * in that link's file.
      */
     public List<Hdf5Object> children() {
         ctx.checkOpen();
@@ -92,7 +104,16 @@ public final class Group extends Hdf5Object {
         if (result == null) {
             List<Hdf5Object> reached = new ArrayList<>();
             for (Link link : links()) {
-                follow(link, 0).ifPresent(reached::add);
+                try {
+                    follow(link, 0).ifPresent(reached::add);
+                } catch (HdfClosedException e) {
+                    throw e;
+                } catch (HdfException e) {
+                    if (!(link instanceof Link.External)) {
+                        throw e;
+                    }
+                    // an external link whose file is refused or unreadable reaches nothing here
+                }
             }
             result = List.copyOf(reached);
             children = result;
@@ -100,7 +121,7 @@ public final class Group extends Hdf5Object {
         return result;
     }
 
-    /** The name of every link in this group (including external and unresolved soft links). */
+    /** The name of every link in this group (including links that reach nothing). */
     public List<String> childNames() {
         return links().stream().map(Link::name).toList();
     }
@@ -178,8 +199,12 @@ public final class Group extends Hdf5Object {
     /**
      * The object at {@code path}, following soft links within this file (see <b>Paths</b> above). For a
      * plain name, the object this group's link of that name reaches. Empty if a component is missing, is
-     * an external or user-defined link or a soft link that does not resolve, or is not a group but is
-     * followed by more of the path; and for an empty path.
+     * a user-defined link, or a soft or external link that does not resolve (its target or file missing,
+     * or more than 16 such links in a row), or is not a group but is followed by more of the path; and for
+     * an empty path.
+     *
+     * @throws HdfUnsupportedException if the path crosses an external link to a file the
+     *         {@link ExternalFileAccess} policy refuses
      */
     public Optional<Hdf5Object> child(String path) {
         return path.isEmpty() ? Optional.empty() : resolvePath(path, 0);
@@ -189,7 +214,8 @@ public final class Group extends Hdf5Object {
      * The group at {@code path} (see <b>Paths</b> above).
      *
      * @throws NoSuchElementException if no object is there
-     * @throws HdfUnsupportedException if the path crosses an external or user-defined link
+     * @throws HdfUnsupportedException if the path crosses a user-defined link, or an external link to a
+     *         file the {@link ExternalFileAccess} policy refuses
      * @throws IllegalArgumentException if the object there is not a group
      */
     public Group group(String path) {
@@ -200,7 +226,8 @@ public final class Group extends Hdf5Object {
      * The dataset at {@code path} (see <b>Paths</b> above).
      *
      * @throws NoSuchElementException if no object is there
-     * @throws HdfUnsupportedException if the path crosses an external or user-defined link
+     * @throws HdfUnsupportedException if the path crosses a user-defined link, or an external link to a
+     *         file the {@link ExternalFileAccess} policy refuses
      * @throws IllegalArgumentException if the object there is not a dataset
      */
     public Dataset dataset(String path) {
@@ -211,7 +238,8 @@ public final class Group extends Hdf5Object {
      * The committed (named) datatype at {@code path} (see <b>Paths</b> above).
      *
      * @throws NoSuchElementException if no object is there
-     * @throws HdfUnsupportedException if the path crosses an external or user-defined link
+     * @throws HdfUnsupportedException if the path crosses a user-defined link, or an external link to a
+     *         file the {@link ExternalFileAccess} policy refuses
      * @throws IllegalArgumentException if the object there is not a committed datatype
      */
     public CommittedDatatype committedType(String path) {
@@ -249,16 +277,17 @@ public final class Group extends Hdf5Object {
             current = reached.get();
         }
         return new NoSuchElementException(path.isEmpty() ? "an empty path names no object"
-                : "'" + path + "' in " + displayPath() + " follows more than " + MAX_SOFT_LINKS + " soft links");
+                : "'" + path + "' in " + displayPath() + " follows more than " + MAX_SOFT_LINKS
+                        + " soft or external links");
     }
 
     /** Why a link of this group reaches no object. */
     private RuntimeException unfollowed(Link link, String context) {
         String name = "'" + link.name() + "' in " + displayPath();
         return switch (link) {
-            case Link.External e -> new HdfUnsupportedException(name + " is an external link to " + e.fileName()
-                    + ":" + e.objectPath() + "; Falcon does not follow external links (open that file instead)"
-                    + context);
+            case Link.External e -> new NoSuchElementException(name + " is an external link to " + e.fileName()
+                    + ":" + e.objectPath() + (SourceFiles.find(ctx, e.fileName(), ExternalFileAccess.Purpose.EXTERNAL_LINK) == null
+                    ? ", whose file is not found" : ", which does not resolve in that file") + context);
             case Link.Soft s -> new NoSuchElementException(
                     name + " is a soft link to " + s.targetPath() + ", which does not resolve" + context);
             default -> new HdfUnsupportedException(
@@ -274,14 +303,38 @@ public final class Group extends Hdf5Object {
         return path.substring(0, end);
     }
 
-    /** The object a link reaches, named by the link; empty for external, user-defined, or dangling links. */
+    /**
+     * The object a link reaches, named by the link (or by its path in an external link's file); empty for
+     * user-defined links, and for soft and external links that do not resolve.
+     */
     private Optional<Hdf5Object> follow(Link link, int softLinks) {
         return switch (link) {
             case Link.Hard hard -> Optional.of(classify(ctx, hard.name(), path(), hard.objectHeaderAddress()));
             case Link.Soft soft -> resolvePath(soft.targetPath(), softLinks + 1)
                     .map(target -> rename(target, soft.name()));
+            case Link.External external -> followExternal(external, softLinks + 1);
             default -> Optional.empty();
         };
+    }
+
+    /**
+     * The object an external link reaches (libhdf5's {@code H5L__extern_traverse}): its object path,
+     * from the root of the file it names, found and opened as the {@link ExternalFileAccess} policy says.
+     * Empty if the file or the object is missing, or the links followed on the way number more than
+     * {@link #MAX_SOFT_LINKS}.
+     *
+     * @throws HdfUnsupportedException if the policy refuses the file
+     */
+    private Optional<Hdf5Object> followExternal(Link.External link, int softLinks) {
+        if (softLinks > MAX_SOFT_LINKS) {
+            return Optional.empty();
+        }
+        FileContext file = SourceFiles.find(ctx, link.fileName(), ExternalFileAccess.Purpose.EXTERNAL_LINK);
+        if (file == null) {
+            return Optional.empty();
+        }
+        String target = link.objectPath();
+        return Group.root(file, file.rootAddress()).resolvePath(target.startsWith("/") ? target : "/" + target, softLinks);
     }
 
     /** {@code target} as reached through a link named {@code name} in this group. */
@@ -292,8 +345,9 @@ public final class Group extends Hdf5Object {
 
     /**
      * Resolves a path, a soft link's or a caller's: absolute from the root, otherwise relative to this
-     * group, following soft links along the way. Empty if a component is missing, crosses a non-group, is
-     * an external link, or if more than {@link #MAX_SOFT_LINKS} soft links are followed (a cycle).
+     * group, following soft and external links along the way. Empty if a component is missing, crosses a
+     * non-group or a user-defined link, or if more than {@link #MAX_SOFT_LINKS} soft and external links are
+     * followed (a cycle).
      */
     private Optional<Hdf5Object> resolvePath(String targetPath, int softLinks) {
         if (softLinks > MAX_SOFT_LINKS) {
@@ -316,7 +370,7 @@ public final class Group extends Hdf5Object {
                 return Optional.empty();
             }
             current = reached.get();
-            softLinks += next.get() instanceof Link.Soft ? 1 : 0;
+            softLinks += next.get() instanceof Link.Soft || next.get() instanceof Link.External ? 1 : 0;
         }
         return Optional.of(current);
     }

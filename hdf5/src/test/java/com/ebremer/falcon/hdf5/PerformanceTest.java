@@ -244,7 +244,7 @@ class PerformanceTest {
 
     /** The same object, as a new handle with nothing loaded yet. */
     private static Hdf5Object fresh(Hdf5File h5, Hdf5Object object) {
-        return Hdf5Object.classify(h5.root().ctx, object.name(), "", object.objectHeaderAddress());
+        return Hdf5Object.classify(object.ctx, object.name(), "", object.objectHeaderAddress()); // its own file's
     }
 
     private static void forEachObject(Hdf5Object object, Set<Long> seen, Consumer<Hdf5Object> action) {

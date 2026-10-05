@@ -1,10 +1,10 @@
 # Falcon HDF5 — remaining work (prioritized)
 
-**Status (2026-10-05, after P2 S1–S7, A1–A10, and PF1–PF4):** build green, **677 HDF5 tests** (144 at
+**Status (2026-10-05, after P2 S1–S7, A1–A12, and PF1–PF4):** build green, **692 HDF5 tests** (144 at
 the review, 187 after the top 10, 206 after P0, 228 after P1, 243 after S1–S3, 256 after S4–S7, 439 after
-A2–A6, 610 after PF1–PF4), plus 38 in the `core` module. The review's top 10, every P1 item, **P2 S1–S7**,
-**A1–A10**, **PF1–PF4**, and the P0 zstd fix (Z6/Z7, in `core`) are done (see *Done* at the end). Falcon
-now:
+A2–A6, 610 after PF1–PF4, 677 after A1–A10), plus 38 in the `core` module. The review's top 10, every P1
+item, **P2 S1–S7**, **A1–A12**, **PF1–PF4**, and the P0 zstd fix (Z6/Z7, in `core`) are done (see *Done*
+at the end). Falcon now:
 
 - reads the files the review showed it misreading:
   - real libhdf5 szip and scale-offset data;
@@ -27,13 +27,15 @@ now:
   ranges, any channel) that it reads on demand;
 - looks objects up by path, reads integers as floating point as libhdf5 converts them, and reports each
   dataset's layout, chunk shape, filters, and storage size as libhdf5 does;
-- reads every datatype class but time: compound members by name, enumeration names, arrays, complex
-  numbers (as libhdf5 converts them), bit fields, and opaque data;
+- reads every datatype class: compound members by name, enumeration names, arrays, complex numbers (as
+  libhdf5 converts them), bit fields, opaque data, and time values (as `Instant`s);
 - selects regular hyperslabs with gaps and single points, reading only the chunks they touch, and
   reads anything a dataset can from a selection;
 - opens a path on a file system that cannot map it, takes its cache sizes as options, and opens the
   other files of a remote file through an application's resolver;
 - names an object reached through a reference by the path libhdf5 gives it;
+- follows external links, and references into other files, as libhdf5 does, under the same policy or
+  resolver as every other file;
 - reads only what a read needs:
   - chunks are looked up by coordinate in an index read once per dataset;
   - virtual-dataset selections read only the parts of the sources they map to;
@@ -47,6 +49,22 @@ now:
   default, and supports concurrent reads of one open file.
 
 P0 and P1 are empty. What remains is features and API (P2) and docs and build (P3).
+
+**Behaviour and API changes in P2 A11, A12** (pre-1.0):
+- **External links are followed.** `children()`, `child`, `group`, `dataset`, and paths follow them, as
+  libhdf5 does, opening the link's file under the `ExternalFileAccess` policy (by default, files in the
+  HDF5 file's directory tree only). Before, they were listed but not followed.
+  - What a link reaches is named by its path in the link's file, as libhdf5 names it.
+  - A link whose file is missing, whose object is missing, or which loops reaches nothing, as a dangling
+    soft link does; `dataset()` says which.
+  - A file the policy refuses fails `child`, `group`, and `dataset` with `HdfUnsupportedException`, and
+    is left out of `children()`.
+- **References into other files are followed** by `readObjectReferences()`, `readRegionReferences()`,
+  and `readAttributeReferences()`. They used to throw `HdfUnsupportedException`. A file that is refused
+  still throws it; one that is not found throws `HdfException`.
+- `ExternalFileAccess.Purpose` gains `EXTERNAL_LINK` and `REFERENCE`.
+- **Time values** read: `read()` gives `java.time.Instant[]`, the integer readers seconds since 1970.
+  `read()` used to throw.
 
 **API changes in P2 A1, A4, A7–A10** (pre-1.0):
 - **Typed reads** (on `Dataset`, `Attribute`, and `Selection` alike):
@@ -192,8 +210,7 @@ review baseline. Abbreviations: `W` = `Hdf5Writer.java`; other paths are under
 5. **PF5 — chunk lookups without reading the whole index,** for very large or remote datasets.
 6. **WF3 — a generic `createDataset(Datatype, Dataspace)`,** in place of about 20 per-type methods.
 7. **S8 — writing the third-party filters,** whose encoders core partly has.
-8. **A11 — external links and references into other files,** now that a policy or resolver can open
-   other files.
+8. **PF8 — selected elements copied a run at a time,** not one by one.
 9. **WF4 — writing links and references:** soft and external links; region references.
 10. **PF6/PF7 — per-file object caches, and virtual mappings that scatter.**
 
@@ -220,16 +237,8 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
 
 ### Read API
 
-- A1–A10 are done (see *Done — 2026-10-05 (P2: A1, A4, A7–A10)* and *(P2: A2, A3, A5, A6)*). Still open
-  around them:
-  - [ ] **A11 — external links and references into other files.** Both are listed (or named in the
-    error) but not followed. An external link names a file and an object path, as a virtual source
-    does, so following one can go through the same `ExternalFileAccess` policy or resolver (libhdf5's
-    `H5Pset_elink_prefix` is the analogue of `allowDirectory`). Revised references into other files
-    likewise.
-  - [ ] **A12 — the time datatype** (class 2) is described but not read. libhdf5 itself never
-    implemented it, so this matters only for files from old or other writers; `readRawBytes()` gives the
-    bytes.
+- A1–A12 are done (see *Done — 2026-10-05 (P2: A11, A12)*, *(P2: A1, A4, A7–A10)*, and
+  *(P2: A2, A3, A5, A6)*).
 
 ### Write features & API
 
@@ -304,6 +313,8 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
   - **Also done (P2 A1, A4, A7–A10):** a table of every datatype class's readers and `read()` value,
     compound members, strided and point selections, cache sizes, resolvers, paths that cannot be mapped,
     and the paths of referenced objects.
+  - **Also done (P2 A11, A12):** following external links and references into other files, and time
+    values.
   - **Still to document:** the writer's memory use (WF1).
 - [ ] **D3 — PLAN.md is stale.**
   - §6 lists the non-existent `dataspace` and `util` packages, omits `data`, `index`, and `group`, and
@@ -357,6 +368,44 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
     (`tools/fixtures/gen_zstd_corrupt_vectors.py` → `zstd_corrupt_vectors.txt`): mutations, several
     frames, skippable frames, and trailing data. The old decoder fails 137 of them.
   - The core fuzzer: 1.5M further mutated frames threw only typed exceptions.
+
+## Done — 2026-10-05 (P2: A11, A12)
+
+- [x] **A11 — external links and references into other files.**
+  - **One way to other HDF5 files.** Virtual sources, external links' files, and references' files are
+    all found by `SourceFiles.find`:
+    - under the file's `ExternalFileAccess` policy or resolver;
+    - in libhdf5's order (`H5F_prefix_open_file`, which libhdf5 uses for virtual sources and external
+      links alike);
+    - opened once and kept open until the file closes;
+    - a name that leads back to the file itself reuses it, as libhdf5 does.
+  - **External links** are followed as libhdf5's `H5L__extern_traverse` follows them:
+    - the object path is taken from the other file's root, and what it reaches is named by its path
+      there;
+    - soft and external links together are limited to 16 on one path, across files, as libhdf5's
+      `H5L_NUM_LINKS` limits them, so a loop between two files ends.
+  - **Revised references into other files** are resolved to that file's object, region, or attribute.
+    The reference's address is read at its own width and checked against the other file's.
+  - **Tests:** `OtherFileObjectsTest`, on new h5py fixtures `elinks.h5`, `elinks_target.h5`, and
+    `elinks_sub/inner.h5`, with h5py's names as the oracle:
+    - eleven links: to a group, a dataset, a soft link and a root; a chain across two files; a loop; a
+      subdirectory; an absolute name libhdf5 finds by its file name alone; a missing file; a missing
+      object; and a file outside the directory;
+    - every link reaches what libhdf5 reaches, named as libhdf5 names it;
+    - the policy (`none()` refuses), a resolver serving a file read from bytes, and closing.
+    - `refs_revised.h5` now also holds a region and an attribute reference into its other file. They are
+      read through the default policy, `none()`, a resolver, and with the other file missing.
+  - **Tests changed:** `LinksTest`, `P2ApiTest`, and `P2ReadTest` asserted that external links and
+    references were not followed. `PerformanceTest` now makes its fresh handles from each object's own
+    file. `storage_metadata.txt` is regenerated for the new fixtures.
+- [x] **A12 — time values.** HDF5's only time types are `H5T_UNIX_D32*` and `H5T_UNIX_D64*`, Unix `time_t`
+  values:
+  - the integer readers give the signed seconds;
+  - `read()` gives `Instant`s.
+
+  Tested on 32-bit little-endian and 64-bit big-endian datasets and an attribute, written by libhdf5 into
+  `typed.h5`. h5py cannot read these.
+- **T3:** the fuzz test covers `elinks.h5` (130 s against a 300 s limit).
 
 ## Done — 2026-10-05 (P2: A1, A4, A7–A10)
 

@@ -11,7 +11,6 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -90,7 +89,6 @@ final class VirtualDataset {
 
     private final FileContext ctx;
     private final DataLayout.Virtual layout;
-    private final Path directory;
     private volatile List<Mapping> mappings;                                   // parsed once
     private final Map<String, Dataset> sources = new ConcurrentHashMap<>();     // found sources, by file and name
     private final Map<Integer, List<Dataset>> printf = new ConcurrentHashMap<>(); // a printf mapping's sources
@@ -98,7 +96,6 @@ final class VirtualDataset {
     private VirtualDataset(FileContext ctx, DataLayout.Virtual layout) {
         this.ctx = ctx;
         this.layout = layout;
-        this.directory = ctx.directory();
     }
 
     /**
@@ -415,16 +412,9 @@ final class VirtualDataset {
         if (fileName.equals(".")) {
             root = Group.root(ctx, ctx.rootAddress()); // the source is in this same file
         } else {
-            ExternalFileAccess access = ctx.externalFileAccess();
-            SourceFiles files = ctx.resource(SourceFiles.class, SourceFiles::new);
-            Hdf5File file;
+            FileContext file;
             try {
-                if (access.resolver() != null) {
-                    file = files.open(fileName, access.resolver(), ctx.options());
-                } else {
-                    Path path = access.resolveVirtualSource(fileName, directory);
-                    file = path == null ? null : files.open(path, ctx.options());
-                }
+                file = SourceFiles.find(ctx, fileName, ExternalFileAccess.Purpose.VIRTUAL_SOURCE);
             } catch (HdfUnsupportedException e) {
                 if (refusalIsMissing) {
                     return null;
@@ -434,7 +424,7 @@ final class VirtualDataset {
             if (file == null) {
                 return null;
             }
-            root = file.root();
+            root = Group.root(file, file.rootAddress());
         }
         Dataset found = root.child(datasetName).orElse(null) instanceof Dataset dataset ? dataset : null;
         if (found != null) {

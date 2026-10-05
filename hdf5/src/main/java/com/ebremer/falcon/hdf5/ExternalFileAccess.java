@@ -16,9 +16,10 @@ import java.util.Objects;
 
 /**
  * Which other files an HDF5 file may make Falcon open: the raw-data files a dataset's External File
- * List names, and the source files of virtual datasets. Both are names written inside the file, so an
- * untrusted file could otherwise point Falcon at any local file (an absolute path, or one that climbs
- * out with {@code ..}), or, on Windows, at a UNC path that makes the JVM connect to a remote host.
+ * List names, the source files of virtual datasets, the files external links lead to, and the files
+ * references point into. All are names written inside the file, so an untrusted file could otherwise
+ * point Falcon at any local file (an absolute path, or one that climbs out with {@code ..}), or, on
+ * Windows, at a UNC path that makes the JVM connect to a remote host.
  *
  * <ul>
  *   <li>{@link #sameDirectory()} (the default): a name is resolved against the HDF5 file's own
@@ -35,22 +36,24 @@ import java.util.Objects;
  * </ul>
  *
  * A refused name fails the read with {@link HdfUnsupportedException} (a virtual dataset does not
- * silently substitute its fill value). Paths are compared after normalization; symbolic links inside an
- * allowed directory are not resolved. A name is read as a path of the HDF5 file's own file system (a zip
- * file system, say, for a file inside one).
+ * silently substitute its fill value, and an external link is not taken to lead nowhere). Paths are
+ * compared after normalization; symbolic links inside an allowed directory are not resolved. A name is
+ * read as a path of the HDF5 file's own file system (a zip file system, say, for a file inside one).
  *
  * <p>A file opened from bytes or a {@link RangeReader} has no directory of its own. Then only
  * {@link #allowDirectory(Path) allowed directories} are searched and allowed, and
  * {@link #unrestricted()} resolves relative names against the working directory, as libhdf5 does for a
  * file in memory; a {@link #resolvedBy(Resolver) resolver} reaches files anywhere.
  *
- * <p>A virtual dataset's source is looked for where libhdf5 looks ({@code H5F_prefix_open_file}), among
- * the places the policy allows: an absolute name as written, and then, as when a file was moved with its
- * sources, by its file name alone; a relative name in the HDF5 file's directory. Both then try each
- * allowed directory and, under {@link #unrestricted()}, the working directory. A source found nowhere is
- * missing, and libhdf5 and Falcon read its region as the fill value. But when the name's own location is
- * refused and no allowed candidate exists, the read fails rather than filling: the refused file may be
- * the real source.
+ * <p>Another HDF5 file (a virtual dataset's source, an external link's file, or a reference's) is looked
+ * for where libhdf5 looks for a virtual source or an external link's file ({@code H5F_prefix_open_file}),
+ * among the places the policy allows: an absolute name as written, and then, as when a file was moved
+ * with the files it names, by its file name alone; a relative name in the HDF5 file's directory. Both
+ * then try each allowed directory and, under {@link #unrestricted()}, the working directory. A file found
+ * nowhere is missing: a virtual dataset reads its region as the fill value, as libhdf5 does, and an
+ * external link leads nowhere. But when the name's own location is refused and no allowed candidate
+ * exists, the read fails: the refused file may be the real one. (libhdf5 opens a reference's file by its
+ * name as written, from the working directory; Falcon looks in the HDF5 file's directory first.)
  *
  * <pre>{@code
  * Hdf5File.open(path, ExternalFileAccess.sameDirectory().allowDirectory(Path.of("/data/raw")));
@@ -63,7 +66,11 @@ public final class ExternalFileAccess {
         /** A dataset's external raw data (its External File List), read as plain bytes. */
         RAW_DATA,
         /** A virtual dataset's source: another HDF5 file. */
-        VIRTUAL_SOURCE
+        VIRTUAL_SOURCE,
+        /** The HDF5 file an external link leads to. */
+        EXTERNAL_LINK,
+        /** The HDF5 file a revised reference points into. */
+        REFERENCE
     }
 
     /**
@@ -84,15 +91,16 @@ public final class ExternalFileAccess {
         /**
          * A reader for the file {@code name}, as the HDF5 file writes it, or {@code null} if there is no
          * such file: a virtual dataset then reads that source's region as the fill value, as libhdf5 does
-         * for a missing source, and a read of external raw data fails. Names in the files opened through
-         * this resolver (a virtual source's own sources) come here too, as their files write them.
+         * for a missing source, an external link leads nowhere, and a read of external raw data or of a
+         * reference fails. Names in the files opened through this resolver (a virtual source's own
+         * sources, an external link's file's links) come here too, as their files write them.
          *
          * <p>A reader that is {@link AutoCloseable} is closed once Falcon is done with it: after the read
-         * of external raw data, and for a virtual dataset's source when the HDF5 file that opened it closes.
+         * of external raw data, and for another HDF5 file when the HDF5 file that opened it closes.
          *
          * @throws HdfUnsupportedException to refuse the name: the read fails, as when another policy refuses
-         * @throws IOException if the file cannot be opened: for a virtual dataset's source, the source is
-         *         taken to be missing; for external raw data, the read fails
+         * @throws IOException if the file cannot be opened: another HDF5 file is then taken to be missing,
+         *         and a read of external raw data fails
          */
         RangeReader open(String name, Purpose purpose) throws IOException;
     }
@@ -224,16 +232,17 @@ public final class ExternalFileAccess {
     }
 
     /**
-     * Resolves a virtual dataset's source file {@code name}, as written in an HDF5 file in the absolute
-     * directory {@code baseDirectory} ({@code null} for none), in libhdf5's order (see the class
-     * description). Returns the first allowed candidate that exists, or null if the source is missing.
+     * Resolves another HDF5 file's {@code name} (a virtual source, an external link's file, a reference's
+     * file), as written in an HDF5 file in the absolute directory {@code baseDirectory} ({@code null} for
+     * none), in libhdf5's order (see the class description). Returns the first allowed candidate that
+     * exists, or null if the file is missing.
      *
+     * @param what what the name is for, for error messages (e.g. "virtual dataset source file")
      * @throws HdfUnsupportedException if the policy refuses every candidate, or refuses the name's own
      *         location and no allowed candidate exists
      * @throws HdfFormatException if the name is not a valid path
      */
-    Path resolveVirtualSource(String name, Path baseDirectory) {
-        String what = "virtual dataset source file";
+    Path resolveHdf5File(String name, Path baseDirectory, String what) {
         Path base = base(baseDirectory, name, what);
         Path named = parse(fileSystem(base), name, what);
         List<Path> candidates = new ArrayList<>();
