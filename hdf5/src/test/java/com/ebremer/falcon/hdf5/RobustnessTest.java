@@ -20,7 +20,7 @@ class RobustnessTest {
         "references.h5", "attributes.h5", "vlen_data.h5", "chunk_indexes.h5", "datatypes.h5",
         "dense_links.h5", "dense_attrs.h5", "committed_types.h5", "metadata.h5", "nbit_data.h5",
         "compound_nbit.h5", "external.h5", "free_space.h5", "implicit.h5", "committed_types_old.h5",
-        "vds.h5", "dense_links_big.h5", "chunk_maxshape.h5", "layout_v4.h5", "filtered_single.h5",
+        "vds.h5", "numeric.h5", "vds_byteorder.h5", "dense_links_big.h5", "chunk_maxshape.h5", "layout_v4.h5", "filtered_single.h5",
         "unwritten_latest.h5", "scaleoffset.h5", "szip.h5", "userblock_v3.h5", "filter_edge.h5",
     };
 

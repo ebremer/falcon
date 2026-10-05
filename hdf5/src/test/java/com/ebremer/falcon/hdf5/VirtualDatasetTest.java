@@ -1,6 +1,7 @@
 package com.ebremer.falcon.hdf5;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.io.IOException;
 import org.junit.jupiter.api.Test;
@@ -43,6 +44,24 @@ class VirtualDatasetTest {
             // source (0..3) lands on strided virtual indices 0,2,4,6; the rest keep fill value -1.
             assertArrayEquals(new int[] {0, -1, 1, -1, 2, -1, 3, -1},
                     h5.root().dataset("vds_step").readInts());
+        }
+    }
+
+    @Test
+    void convertsSourcesInTheOtherByteOrder() throws IOException {
+        // Big-endian sources under a little-endian virtual type: libhdf5 converts, and so must Falcon.
+        try (Hdf5File h5 = Hdf5File.open(Fixtures.path("vds_byteorder.h5"))) {
+            assertArrayEquals(new int[] {1, -2, 300000, -400000}, h5.root().dataset("i4").readInts());
+            assertArrayEquals(new double[] {1.5, -2.25, 1e300, -0.0}, h5.root().dataset("f8").readDoubles(), 0.0);
+        }
+    }
+
+    @Test
+    void refusesSourcesOfAnotherType() throws IOException {
+        // A uint32 source under an int32 virtual type needs a value conversion (libhdf5 clamps 4e9 to
+        // 2^31-1); copying the bits would read -294967296.
+        try (Hdf5File h5 = Hdf5File.open(Fixtures.path("vds_byteorder.h5"))) {
+            assertThrows(HdfUnsupportedException.class, () -> h5.root().dataset("u4_as_i4").readInts());
         }
     }
 }

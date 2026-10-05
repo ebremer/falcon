@@ -75,12 +75,24 @@ public final class Dataset extends Hdf5Object {
 
     // ------------------------------------------------------------------ reads
 
-    /** Reads every element as {@code int} (fixed-point datatypes up to 4 bytes). */
+    /**
+     * Reads every element of an integer dataset as an {@code int}. Values are exact: one that does not
+     * fit (a {@code uint32} above {@link Integer#MAX_VALUE}, a large {@code int64}) throws rather than
+     * wrapping.
+     *
+     * @throws HdfUnsupportedException if the datatype is not an integer type or a value does not fit
+     */
     public int[] readInts() {
         return Elements.toInts(rawData(), elementCount(), datatype());
     }
 
-    /** Reads every element as {@code long} (fixed-point datatypes up to 8 bytes). */
+    /**
+     * Reads every element of an integer dataset as a {@code long}. Values are exact: a {@code uint64}
+     * of 2<sup>63</sup> or more throws rather than reading as negative ({@link #read()} returns
+     * {@code BigInteger[]} for {@code uint64}).
+     *
+     * @throws HdfUnsupportedException if the datatype is not an integer type or a value does not fit
+     */
     public long[] readLongs() {
         return Elements.toLongs(rawData(), elementCount(), datatype());
     }
@@ -127,7 +139,7 @@ public final class Dataset extends Hdf5Object {
     /** Reads a vlen sequence into its most natural boxed 2-D array, by base type. */
     private Object readVlenSequence(Datatype.VariableLength vlen) {
         return switch (vlen.base()) {
-            case Datatype.FixedPoint fp -> fp.size() <= 4 ? readVlenInts() : readVlenLongs();
+            case Datatype.FixedPoint fp -> fp.size() <= 4 && Elements.fitsInt(fp) ? readVlenInts() : readVlenLongs();
             case Datatype.FloatingPoint fp -> readVlenDoubles();
             default -> throw new HdfUnsupportedException(
                     "reading variable-length sequences of " + vlen.base().typeClass() + " is not yet supported: " + path());
@@ -166,7 +178,7 @@ public final class Dataset extends Hdf5Object {
         return resolveRegionReferences(ctx, rawData(), elementCount(), type.size());
     }
 
-    /** The dataset's raw storage bytes (decoded from the layout; not yet de-filtered). */
+    /** The dataset's element bytes as stored, in the datatype's byte order (chunk filters already undone). */
     public byte[] readRawBytes() {
         return Elements.toRawBytes(rawData(), (long) elementCount() * datatype().size());
     }
@@ -181,13 +193,15 @@ public final class Dataset extends Hdf5Object {
     }
 
     /**
-     * Reads the whole dataset into the most natural Java array: {@code int[]}/{@code long[]} for
-     * integers, {@code double[]} for floats, {@code String[]} for fixed-length strings.
+     * Reads the whole dataset into the most natural Java array: for integers, {@code int[]} when every
+     * value of the type fits in an {@code int}, {@code long[]} when it fits in a {@code long} (so
+     * {@code uint32} reads as {@code long[]}), and {@code BigInteger[]} for {@code uint64};
+     * {@code double[]} for floats; {@code String[]} for strings.
      */
     public Object read() {
         Datatype type = datatype();
         return switch (type) {
-            case Datatype.FixedPoint fp -> fp.size() <= 4 ? readInts() : readLongs();
+            case Datatype.FixedPoint fp -> Elements.toNaturalIntegers(rawData(), elementCount(), fp);
             case Datatype.FloatingPoint fp -> readDoubles();
             case Datatype.StringType st -> readStrings();
             case Datatype.VariableLength v when v.kind() == Datatype.VlenKind.STRING -> readStrings();
@@ -338,7 +352,7 @@ public final class Dataset extends Hdf5Object {
             }
             case DataLayout.Virtual virtual -> {
                 byte[] assembled = VirtualDataset.assemble(
-                        ctx, virtual, dataspace().dimensions(), datatype().size(), fillValue());
+                        ctx, virtual, dataspace().dimensions(), datatype(), fillValue());
                 yield MemorySegment.ofArray(assembled);
             }
         };

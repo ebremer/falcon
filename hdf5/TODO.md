@@ -1,19 +1,32 @@
 # Falcon HDF5 — remaining work (prioritized)
 
-**Status (2026-10-04, after the code review and the first fix pass):** build green, **187 HDF5 tests**
-(up from 144). The review's top 10 are done (see *Done* at the end). Falcon now:
+**Status (2026-10-05, after the P0 pass):** build green, **206 HDF5 tests** (144 at the review, 187
+after the top 10). The review's top 10 and **every P0 item** are done (see *Done* at the end). Falcon
+now:
 
-- reads the files the review showed it misreading: real libhdf5 szip and scale-offset data, every chunk
-  index shape (maximum dims, layout v4, paged and sparse arrays, filtered single chunks, unwritten
-  datasets), user-block (MATLAB v7.3) files;
+- reads the files the review showed it misreading:
+  - real libhdf5 szip and scale-offset data;
+  - every chunk index shape (maximum dims, layout v4, paged and sparse arrays, filtered single chunks,
+    unwritten datasets);
+  - user-block (MATLAB v7.3) files;
+  - integers with a bit offset or reduced precision, and non-IEEE floats;
+  - unsigned values (never wrapped);
+  - virtual-dataset sources in the other byte order.
 - writes files that **HDF5 2.0 and 1.14 read**, checked by `tools/fixtures/check_hdf5_writer.py`. The
-  final run read 46/46 objects with HDF5 2.0 and 41/41 with 1.14.6; the same matrix written by the old
-  writer failed 11 and 24;
+  final run read 81/81 objects with HDF5 2.0 and 76/76 with 1.14.6. The P0 edge-case files written by
+  the previous writer fail 19 objects under each version.
 - verifies metadata and fletcher32 checksums, rejects loops and runaway sizes in corrupt files, and
   supports concurrent reads of one open file.
 
-The remaining P0 items are edge cases, but they are still silent wrong data or files libhdf5 rejects.
-Hold the "1.0-ready" claim until they are closed.
+No known P0 remains. Valid files Falcon cannot read yet are P1 (V3–V12); the lifecycle gaps (C2/C3) are
+P1 too.
+
+**API changes in the P0 pass** (pre-1.0):
+- `read()` returns `long[]` for `uint32` and `BigInteger[]` for `uint64`.
+- `readInts()` and `readLongs()` throw on a value that does not fit, instead of wrapping it.
+- `readInts()` now accepts `int64` data whose values fit in an `int`.
+- `Datatype.FloatingPoint` gains `signLocation` and `normalization`.
+- The writer rejects bad names, out-of-range fill values, and n-bit values when they are added.
 
 How to read this list:
 - **P0** — silent wrong data, or files other HDF5 tools reject or misread. Fix before any release.
@@ -34,104 +47,34 @@ review baseline. Abbreviations: `W` = `Hdf5Writer.java`; other paths are under
 
 ## Next up — top 10
 
-1. **R10 — bit offset/precision is ignored.** A 12-bit integer, or a non-IEEE float, reads as garbage.
-2. **R13 — unsigned values read as negative.** `read()` maps `uint32` to `int[]`.
-3. **W6–W10, W13, W14 — writer edge cases libhdf5 rejects or misreads:**
-   - zero-size datasets;
-   - more than 65,535 vlen elements;
-   - messages over 64 KiB;
-   - unvalidated names;
-   - typed fill values;
-   - non-ASCII fixed strings;
-   - out-of-range n-bit values.
-4. **V3/V4 — links.** An old-style soft link makes its whole group unreadable, and new-style soft and
+1. **V3/V4 — links.** An old-style soft link makes its whole group unreadable, and new-style soft and
    external links are hidden.
-5. **V5 — fractal-heap limits.** A dense attribute over 4 KiB, or a group of about 40k links, fails.
-6. **V6/V7 — default-libver encodings.** VDS and region references written with the default libver are
+2. **V5 — fractal-heap limits.** A dense attribute over 4 KiB (huge object), or a group of about 40k
+   links, fails to read.
+3. **V6/V7 — default-libver encodings.** VDS and region references written with the default libver are
    refused.
-7. **H6 — security.** External-file and VDS paths can reach any local file.
-8. **C2/C3 — lifecycle.** Use after `close()` is untyped, and a writer that fails part-way still writes a
+4. **H6 — security.** External-file and VDS paths can reach any local file.
+5. **C2/C3 — lifecycle.** Use after `close()` is untyped, and a writer that fails part-way still writes a
    partial file.
-9. **R14 — VDS byte order.** A source with a different byte order is copied without conversion.
+6. **C4 — chunk shape validation.** A bad chunk shape fails at `close()` with a raw exception.
+7. **V8–V12 — smaller format gaps:**
+   - an unlimited External File List slot;
+   - the v1 shared-message address;
+   - shared (SOHM) messages other than datatypes;
+   - reference type code 2;
+   - v1 compound member dimensions.
+8. **T2/T3 — remaining fixtures and fuzzing.** Add the V3–V7 fixtures, and run the fuzz tests under a
+   small heap and stack.
+9. **D1 — docs that overclaim.** PLAN.md and the README still say "1.0-ready" and "never returns wrong
+   data".
 10. **WF1 — streaming writes.** The writer builds the whole file in memory, which caps it at about 2 GB.
 
 ---
 
 ## P0 — silent wrong data / files libhdf5 rejects
 
-### Reader
-
-- [ ] **R10 — fixed-point `bitOffset`/`bitPrecision` are ignored, and floats are decoded by size alone.** ✔
-  - **Where:** `data/Elements.java:47-69,153-160`.
-  - **Failure:** a 12-bit int at offset 4 reads `[-80,1600,32752]` instead of `[-5,100,2047]`. A bfloat16
-    layout reads as IEEE half.
-  - **Fix:** shift, mask, and sign-extend. Decode floats from their exponent/mantissa fields, or throw
-    Unsupported for non-IEEE layouts.
-- [ ] **R13 — unsigned values surface as negative.** ✔
-  - **Where:** `Elements.java:64`, `Dataset.java:186`, `Attribute.java:204`.
-  - **Failure:** `read()` maps uint32 to `int[]`, so 4000000000 reads as -294967296. `readInts()` on
-    uint32 wraps silently. uint64 wraps in `readLongs()` with no documentation.
-  - **Fix:** have `read()` return `long[]` for uint32; throw on out-of-range narrowing; document uint64,
-    or add `readUnsignedLongs` / a `BigInteger` path.
-- [ ] **R14 — a VDS source with a different byte order is copied without conversion.**
-  - **Done:** a source whose element *size* differs now throws `HdfUnsupportedException`; it used to
-    throw a raw AIOOBE.
-  - **Remaining:** a same-size source in the other byte order (or another layout) is still copied
-    verbatim.
-  - **Where:** `VirtualDataset.java`.
-  - **Fix:** convert via `Elements`, or compare the datatypes and throw Unsupported.
-
-### Writer (files that libhdf5 rejects or misreads; every one passes Falcon's own round trip)
-
-- [ ] **W6 — a zero-size contiguous dataset gets a defined address.** ✔
-  - **Where:** `W:694-700`.
-  - **Failure:** libhdf5 reports "invalid dataset size, likely file corruption" for `int[0]`, shape
-    `{3,0}`, or an empty `stringDataset`.
-  - **Fix:** write UNDEFINED and skip the global heap.
-- [ ] **W7 — global-heap object indices are u16 in one collection per dataset.** ✔
-  - **Where:** `W:1231,1243`.
-  - **Failure:** a vlen dataset with ≥ 65,536 elements is unreadable. Every vlen dataset also costs at
-    least 4 KiB.
-  - **Fix:** split into multiple collections of at most 65,535 objects; share collections across
-    datasets.
-- [ ] **W8 — header messages over 64 KiB are silently truncated.** ✔
-  - **Where:** `W:1180` (u16 size), `W:1271-1313`, `W:525`.
-  - **Defect:** in addition, dense attributes over 4 KiB break the heap's maximum managed-object size.
-  - **Failure:** a compact 10,000-double attribute is unreadable. `compact()` accepts up to 65,535
-    bytes, but more than 65,531 is unreadable.
-  - **Fix:**
-    - Validate the body size.
-    - Store large dense attributes as huge objects (or reject them).
-    - Lower the compact limit.
-- [ ] **W9 — names are neither validated nor de-duplicated.** ✔
-  - **Where:** `W:424-446, 621-639, 1540`.
-  - **Failure:**
-    - An empty name makes the parent group unreadable.
-    - `"a/b"` is unreachable.
-    - A duplicate dataset name silently drops the first dataset; under EARLIEST it writes two symbol
-      entries.
-    - Duplicate attributes are both written.
-  - **Fix:** reject empty names, `/`, `.`, and duplicates at add time.
-- [ ] **W10 — `fillValue(long|double)` encodes by the Java argument type, not the dataset type.** ✔
-  - **Where:** `W:533-550`.
-  - **Failure:**
-    - `.fillValue(5)` on float64 stores 2.5e-323.
-    - `.fillValue(5.0)` on int32 stores 1084227584.
-    - On a vlen string, the creation properties become unreadable.
-  - **Fix:** convert numerically for the datatype; reject fill on vlen, reference, and compound.
-- [ ] **W13 — fixed-length strings, compound field names, and enum member names are encoded as US-ASCII.** ✔
-  - **Where:** `W:271-288, 1740, 1833, 1877-1885`.
-  - **Failure:** `"café"` is stored as `caf?` with no error.
-  - **Fix:** use UTF-8 with cset=1, or reject non-ASCII.
-- [ ] **W14 — `nbit(precision)` silently drops bits that don't fit.**
-  - **Where:** `nbitEncode`.
-  - **Failure:** `nbit(8)` on -1 stores 255.
-  - **Fix:** validate values when writing (they must be non-negative and fit in `precision` bits), or
-    document a clamp.
-- [ ] **W15 — `Format.EARLIEST` still emits HDF5 1.8-era message versions.**
-  - **Detail:** dataspace v2, fill value v3, attribute v3, and compound/enum/array datatype v3.
-  - **Impact:** HDF5 1.8+ reads them, so this only matters for pre-1.8 readers.
-  - **Fix:** use the v1 encodings in EARLIEST for full fidelity to the name.
+Empty: every item is done (see *Done — 2026-10-05*). A new P0 is any silent wrong value, or any written
+file that libhdf5 rejects or misreads.
 
 ## P1 — valid files that fail; hardening; concurrency; test gaps
 
@@ -303,7 +246,7 @@ H1–H5 (checksums, cycles, runaway sizes, raw exceptions) are done; see *Done*.
   - a user-block option;
   - szip better-ratio modes (NN preprocessing, zero-block, second extension) — carried over;
   - sort EARLIEST symbol tables by UTF-8 bytes (`strcmp`), not UTF-16 (`W:1602`) ✔;
-  - set the UTF-8 cset on link and attribute names (`W:1479,1546-1548`).
+  - ~~set the UTF-8 cset on link and attribute names~~ — done in the P0 pass (LATEST format).
 
 ### Performance
 
@@ -323,13 +266,14 @@ H1–H5 (checksums, cycles, runaway sizes, raw exceptions) are done; see *Done*.
     structure on a read path is covered".
   - README: "corrupt input never … returns wrong data".
   - ~~USER_GUIDE.md:125 "filters apply in call order"~~ — now true (W11).
-  - Javadoc of `readRawBytes`: says "not yet de-filtered", but the data *is* de-filtered.
+  - ~~Javadoc of `readRawBytes`: says "not yet de-filtered"~~ — fixed.
 - [ ] **D2 — USER_GUIDE gaps.**
   - **Done:** thread safety, filter rules, the writer's HDF5 1.10+ compatibility, and checksum
     verification are now documented.
+  - **Also done (P0 pass):** unsigned and non-native numeric reads, VDS type rules, writer names and
+    limits, typed fill values, and the EARLIEST message versions.
   - **Still to document:**
     - the write-on-close lifecycle and memory use (WF1);
-    - unsigned handling (R13);
     - the external-path policy (H6).
 - [ ] **D3 — PLAN.md is stale.**
   - §6 lists the non-existent `dataspace` and `util` packages, omits `data`, `index`, and `group`, and
@@ -351,6 +295,74 @@ H1–H5 (checksums, cycles, runaway sizes, raw exceptions) are done; see *Done*.
   - The root `pom.xml` description says "a zarr module is planned".
 
   Editing CLAUDE.md is Erich's call.
+
+## Done — 2026-10-05 (P0)
+
+Each fix is checked against libhdf5: reader fixtures come from h5py, and writer output is read back by
+HDF5 2.0 and 1.14.6 (`check_hdf5_writer.py`, files `edges.h5` and `edges_earliest.h5`).
+
+- [x] **R10 — bit offset/precision.** Integers are read from their `bitPrecision` bits at `bitOffset`
+  and sign-extended. Any 1–8-byte container works, including a 24-bit integer in 3 bytes. Floats
+  outside IEEE binary16/32/64 are decoded from their sign, exponent, and mantissa fields as
+  `H5T__conv_f_f` does:
+  - the bit offset is not used (libhdf5 ignores it for floats; verified);
+  - an all-ones exponent is infinity or NaN;
+  - "no normalization" (x87 extended) is a plain fraction.
+
+  `Datatype.FloatingPoint` now carries `signLocation` and `normalization`. VAX order throws Unsupported.
+  - **Fixture:** `numeric.h5` holds a 12-bit int at offset 4, a big-endian u12 at offset 3, a 24-bit
+    int, a 40-bit int at offset 20, bfloat16, float32-in-6-bytes, and x87. Each carries libhdf5's own
+    conversion as an `expected` attribute.
+  - **Test:** `NumericTypesTest`.
+- [x] **R13 — unsigned values.** `readInts()` and `readLongs()` are exact: a value that does not fit
+  throws instead of wrapping.
+  - `read()` returns `int[]` when every value of the type fits, `long[]` for `uint32` and `int64`, and
+    `BigInteger[]` for `uint64`.
+  - Attributes and vlen sequences follow the same rules.
+  - **Tests:** `NumericTypesTest.uint32ReadsAsLongAndNeverWraps` and `uint64ReadsAsBigIntegerAndNeverWraps`.
+- [x] **R14 — VDS byte order.** A source of the same atomic type in the other byte order is
+  byte-swapped. Any other type difference throws Unsupported; libhdf5 would convert it (it clamps a
+  `uint32` 4e9 to 2³¹−1). Vlen and reference VDS types also throw Unsupported, because their elements
+  point into the source file.
+  - **Fixture:** `vds_byteorder.h5`.
+  - **Tests:** `VirtualDatasetTest.convertsSourcesInTheOtherByteOrder` and `refusesSourcesOfAnotherType`.
+- [x] **W6 — empty datasets.** Written with an undefined address and no global heap (contiguous), or no
+  chunk index (chunked).
+- [x] **W7 — vlen data.** Global-heap collections are shared by every dataset in the file and written
+  last, with vlen ids patched. A new collection starts at 65,535 objects or past 1 MiB, so a dataset of
+  70,000 strings and a single 3 MiB string both work. Four tiny vlen datasets now share one 4 KiB
+  collection.
+- [x] **W8 — message sizes.**
+  - Compact data is capped at 65,524 bytes and attribute messages at 65,514; both are checked when added.
+  - Every header message is size-checked when written.
+  - A dense-storage attribute over 4 KiB stays a managed heap object: the heap's maximum managed-object
+    size is raised to fit it, so it is not a "huge" object.
+- [x] **W9 — names.** Rejected when added:
+  - an empty link name, `"."`, `'/'`, NUL, or a duplicate link;
+  - an empty or duplicate attribute name;
+  - an empty or duplicate compound field name;
+  - an enum member with a duplicate name or value.
+
+  Link names over 255 bytes use a wider length field instead of failing at `close()`. Non-ASCII link
+  and attribute names carry the UTF-8 character set.
+- [x] **W10 — fill values.** `fillValue(long)` and `fillValue(double)` convert to the dataset's type:
+  integers must be whole and in range (and fit n-bit), floats round to the type. Datasets with no numeric
+  fill throw `IllegalStateException`.
+- [x] **W13 — UTF-8.** Fixed-length strings, compound field names, and enum member names are UTF-8; the
+  string type is marked UTF-8 when needed, and truncation keeps whole characters.
+- [x] **W14 — n-bit values.** `nbit(p)` rejects data or a fill value that is negative or wider than `p`
+  bits.
+- [x] **W15 — EARLIEST message versions.** The versions libhdf5's own earliest setting writes:
+  - dataspace v1;
+  - compound and enum datatypes v1, array datatype v2;
+  - fill value v2;
+  - attribute v1.
+
+  Checked by an h5py `libver="earliest"` dump.
+- **Tests (W6–W15):** `WriterEdgeCaseTest`, with 10 cases, plus the `edges.h5` and
+  `edges_earliest.h5` interop files.
+- **Tool fix:** `check_hdf5_writer.py` no longer crashes while printing a non-ASCII failure on a Windows
+  console.
 
 ## Done — 2026-10-04 (the review's top 10)
 

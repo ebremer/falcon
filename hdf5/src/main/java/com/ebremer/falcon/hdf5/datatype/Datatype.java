@@ -25,7 +25,11 @@ public sealed interface Datatype {
     /** The on-disk size of one element, in bytes. */
     int size();
 
-    /** Integer type (class 0): a two's-complement or unsigned integer. */
+    /**
+     * Integer type (class 0): a two's-complement or unsigned integer. The value is the
+     * {@code bitPrecision} bits starting {@code bitOffset} bits above the least significant bit of the
+     * {@code size}-byte element; the remaining bits are padding.
+     */
     record FixedPoint(int size, ByteOrder byteOrder, boolean signed, int bitOffset, int bitPrecision)
             implements Datatype {
         @Override public DatatypeClass typeClass() {
@@ -33,13 +37,30 @@ public sealed interface Datatype {
         }
     }
 
-    /** IEEE-style floating-point type (class 1). */
+    /**
+     * Floating-point type (class 1): sign, exponent, and mantissa fields at the given bit locations of
+     * the element (counted from its least significant bit), so IEEE 754 binary16/32/64 and other layouts
+     * (bfloat16, x87 80-bit extended) are all described.
+     */
     record FloatingPoint(int size, ByteOrder byteOrder, int bitOffset, int bitPrecision,
                          int exponentLocation, int exponentSize, int mantissaLocation, int mantissaSize,
-                         long exponentBias) implements Datatype {
+                         long exponentBias, int signLocation, MantissaNormalization normalization)
+            implements Datatype {
         @Override public DatatypeClass typeClass() {
             return DatatypeClass.FLOATING_POINT;
         }
+    }
+
+    /** How a floating-point mantissa is normalized. */
+    enum MantissaNormalization {
+        /** No normalization: the mantissa is a plain binary fraction (x87 extended precision). */
+        NONE,
+        /** The mantissa's most significant bit is always set (except for zero) and is stored. */
+        MSB_SET,
+        /** The most significant bit is implied and not stored (IEEE 754). */
+        IMPLIED,
+        /** A reserved code. */
+        RESERVED
     }
 
     /** Time type (class 2). */

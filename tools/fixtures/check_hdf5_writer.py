@@ -115,6 +115,11 @@ def check_object(f, obj):
         if "refs" in obj:
             names = [f[r].name if r else None for r in data]
             assert names == obj["refs"], f"references {names} != {obj['refs']}"
+        if "fill" in obj:
+            assert item.fillvalue == obj["fill"], f"fill value {item.fillvalue} != {obj['fill']}"
+        if "enum" in obj:
+            mapping = h5py.check_enum_dtype(item.dtype)
+            assert mapping == obj["enum"], f"enum members {mapping} != {obj['enum']}"
     for name, expected in obj.get("attrs", {}).items():
         actual = np.asarray(item.attrs[name]).ravel()
         assert np.array_equal(actual, np.asarray(expected, dtype=actual.dtype)), f"attribute {name} differs"
@@ -160,6 +165,7 @@ def check(directory):
 
 
 def main():
+    sys.stdout.reconfigure(errors="backslashreplace")  # object names may not fit the console's code page
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--dir", help="check an existing export instead of running Maven")
     parser.add_argument("--python114", help="also check with this interpreter (an HDF5 1.14 h5py)")

@@ -47,7 +47,7 @@ public final class Attribute {
     /** Reads the value into the most natural Java array (see {@link Dataset#read()}). */
     public Object read() {
         if (datatype instanceof Datatype.FixedPoint fp) {
-            return fp.size() <= 4 ? readInts() : readLongs();
+            return Elements.toNaturalIntegers(data(), count(), fp);
         }
         if (datatype instanceof Datatype.FloatingPoint) {
             return readDoubles();
@@ -60,7 +60,7 @@ public final class Attribute {
                 return readStrings();
             }
             return switch (vlen.base()) {
-                case Datatype.FixedPoint fp -> fp.size() <= 4 ? readVlenInts() : readVlenLongs();
+                case Datatype.FixedPoint fp -> fp.size() <= 4 && Elements.fitsInt(fp) ? readVlenInts() : readVlenLongs();
                 case Datatype.FloatingPoint fp -> readVlenDoubles();
                 default -> throw new HdfUnsupportedException("reading attribute variable-length sequences of "
                         + vlen.base().typeClass() + " is not yet supported: " + name);
@@ -73,10 +73,12 @@ public final class Attribute {
                 "reading attribute datatype " + datatype.typeClass() + " is not yet supported: " + name);
     }
 
+    /** Reads an integer attribute as {@code int} values; exact, as {@link Dataset#readInts()}. */
     public int[] readInts() {
         return Elements.toInts(data(), count(), datatype);
     }
 
+    /** Reads an integer attribute as {@code long} values; exact, as {@link Dataset#readLongs()}. */
     public long[] readLongs() {
         return Elements.toLongs(data(), count(), datatype);
     }

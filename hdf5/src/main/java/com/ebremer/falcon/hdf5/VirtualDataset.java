@@ -1,5 +1,6 @@
 package com.ebremer.falcon.hdf5;
 
+import com.ebremer.falcon.hdf5.datatype.Datatype;
 import com.ebremer.falcon.hdf5.heap.GlobalHeap;
 import com.ebremer.falcon.hdf5.io.FileContext;
 import com.ebremer.falcon.hdf5.io.HdfBuffer;
@@ -7,9 +8,12 @@ import com.ebremer.falcon.hdf5.layout.DataLayout;
 import java.io.IOException;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
+import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -17,7 +21,9 @@ import java.util.Map;
  * holds, per entry, a source file name, source dataset name, and two serialized dataspace selections
  * (source and virtual). For each mapping this gathers the elements the source selection picks out and
  * scatters them into the positions the virtual selection picks out; regions no mapping covers keep the
- * fill value. Source files are resolved relative to the virtual dataset's own file.
+ * fill value. Source files are resolved relative to the virtual dataset's own file. A source must have
+ * the virtual dataset's datatype, possibly in the other byte order (converted here); other type
+ * conversions are reported as unsupported.
  *
  * <p>Selections are resolved generally: whole-space (ALL) and regular hyperslabs, including strided and
  * multi-block patterns (each dimension's selected indices are {@code start + j·stride + b} for
@@ -38,7 +44,7 @@ final class VirtualDataset {
     private static final ThreadLocal<int[]> NESTING = ThreadLocal.withInitial(() -> new int[1]);
 
     static byte[] assemble(FileContext ctx, DataLayout.Virtual layout, long[] virtualDims,
-                           int elementSize, byte[] fill) {
+                           Datatype type, byte[] fill) {
         int[] nesting = NESTING.get();
         if (nesting[0] >= MAX_NESTING) {
             throw new HdfFormatException("virtual dataset sources nest more than " + MAX_NESTING
@@ -46,14 +52,19 @@ final class VirtualDataset {
         }
         nesting[0]++;
         try {
-            return assembleSources(ctx, layout, virtualDims, elementSize, fill);
+            return assembleSources(ctx, layout, virtualDims, type, fill);
         } finally {
             nesting[0]--;
         }
     }
 
     private static byte[] assembleSources(FileContext ctx, DataLayout.Virtual layout, long[] virtualDims,
-                                          int elementSize, byte[] fill) {
+                                          Datatype type, byte[] fill) {
+        if (containsHeapData(type)) {
+            // Variable-length and reference elements point into their own file's heaps and objects.
+            throw new HdfUnsupportedException("virtual datasets of variable-length or reference data are not supported");
+        }
+        int elementSize = type.size();
         long elements = 1;
         for (long d : virtualDims) {
             elements *= d;
@@ -92,19 +103,22 @@ final class VirtualDataset {
                 }
                 Dataset sourceDataset2 = navigate(source.root(), sourceDataset);
                 long[] sourceDims = sourceDataset2.dataspace().dimensions();
-                if (sourceDataset2.datatype().size() != elementSize) {
-                    throw new HdfUnsupportedException("virtual dataset source " + sourceDataset + " has "
-                            + sourceDataset2.datatype().size() + "-byte elements, the virtual dataset "
-                            + elementSize + "-byte ones (type conversion is not supported)");
-                }
+                boolean swap = byteSwapNeeded(sourceDataset2.datatype(), type, sourceDataset);
 
                 long[] sourceOffsets = sourceSelection.selectedOffsets(sourceDims);
                 long[] virtualOffsets = virtualSelection.selectedOffsets(virtualDims);
                 byte[] sourceBytes = sourceDataset2.rawData().toArray(ValueLayout.JAVA_BYTE);
                 int n = Math.min(sourceOffsets.length, virtualOffsets.length);
                 for (int i = 0; i < n; i++) {
-                    System.arraycopy(sourceBytes, (int) (sourceOffsets[i] * elementSize),
-                            output, (int) (virtualOffsets[i] * elementSize), elementSize);
+                    int from = (int) (sourceOffsets[i] * elementSize);
+                    int to = (int) (virtualOffsets[i] * elementSize);
+                    if (swap) {
+                        for (int b = 0; b < elementSize; b++) {
+                            output[to + b] = sourceBytes[from + elementSize - 1 - b];
+                        }
+                    } else {
+                        System.arraycopy(sourceBytes, from, output, to, elementSize);
+                    }
                 }
             }
         } finally {
@@ -218,6 +232,76 @@ final class VirtualDataset {
             q += 4L * encodeSize; // start, stride, count, block
         }
         return new VdsSelection(SEL_HYPERSLAB, start, stride, count, block, 14 + rank * 4 * encodeSize);
+    }
+
+    /**
+     * Whether a source element must be byte-reversed to match the virtual dataset's datatype: false if
+     * the types are the same, true if they are the same atomic type in the other byte order. libhdf5
+     * converts any other difference (size, sign, class); Falcon reports it instead of copying the source
+     * bytes as if they were the virtual type.
+     */
+    private static boolean byteSwapNeeded(Datatype source, Datatype target, String sourceName) {
+        if (sameType(source, target)) {
+            return false;
+        }
+        Datatype normalized = withOrder(source, ByteOrder.LITTLE_ENDIAN);
+        if (normalized != null && source.size() > 1 && normalized.equals(withOrder(target, ByteOrder.LITTLE_ENDIAN))) {
+            return true;
+        }
+        throw new HdfUnsupportedException("virtual dataset source " + sourceName + " has datatype " + source
+                + ", the virtual dataset " + target + " (type conversion is not supported)");
+    }
+
+    /** Structural datatype equality (array dimensions compared by value, nested types recursively). */
+    static boolean sameType(Datatype a, Datatype b) {
+        return switch (a) {
+            case Datatype.Array x when b instanceof Datatype.Array y -> x.size() == y.size()
+                    && Arrays.equals(x.dimensions(), y.dimensions()) && sameType(x.base(), y.base());
+            case Datatype.Compound x when b instanceof Datatype.Compound y -> x.size() == y.size()
+                    && x.members().size() == y.members().size() && sameMembers(x.members(), y.members());
+            case Datatype.Enumeration x when b instanceof Datatype.Enumeration y -> x.size() == y.size()
+                    && x.members().equals(y.members()) && sameType(x.base(), y.base());
+            case Datatype.VariableLength x when b instanceof Datatype.VariableLength y -> x.size() == y.size()
+                    && x.kind() == y.kind() && x.padding() == y.padding() && x.characterSet() == y.characterSet()
+                    && sameType(x.base(), y.base());
+            case Datatype.Complex x when b instanceof Datatype.Complex y -> x.size() == y.size() && sameType(x.base(), y.base());
+            default -> a.equals(b);
+        };
+    }
+
+    private static boolean sameMembers(List<Datatype.Compound.Member> a, List<Datatype.Compound.Member> b) {
+        for (int i = 0; i < a.size(); i++) {
+            Datatype.Compound.Member x = a.get(i);
+            Datatype.Compound.Member y = b.get(i);
+            if (!x.name().equals(y.name()) || x.offset() != y.offset() || !sameType(x.type(), y.type())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** {@code type} in byte order {@code order} if it is an ordered atomic type, else null. */
+    private static Datatype withOrder(Datatype type, ByteOrder order) {
+        return switch (type) {
+            case Datatype.FixedPoint t -> new Datatype.FixedPoint(t.size(), order, t.signed(), t.bitOffset(), t.bitPrecision());
+            case Datatype.FloatingPoint t -> new Datatype.FloatingPoint(t.size(), order, t.bitOffset(), t.bitPrecision(),
+                    t.exponentLocation(), t.exponentSize(), t.mantissaLocation(), t.mantissaSize(), t.exponentBias(),
+                    t.signLocation(), t.normalization());
+            case Datatype.BitField t -> new Datatype.BitField(t.size(), order, t.bitOffset(), t.bitPrecision());
+            case Datatype.Time t -> new Datatype.Time(t.size(), order, t.bitPrecision());
+            default -> null;
+        };
+    }
+
+    /** True if elements of {@code type} hold global-heap IDs or object addresses. */
+    private static boolean containsHeapData(Datatype type) {
+        return switch (type) {
+            case Datatype.VariableLength v -> true;
+            case Datatype.Reference r -> true;
+            case Datatype.Array a -> containsHeapData(a.base());
+            case Datatype.Compound c -> c.members().stream().anyMatch(m -> containsHeapData(m.type()));
+            default -> false;
+        };
     }
 
     private static Dataset navigate(Group root, String path) {

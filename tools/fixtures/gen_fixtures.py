@@ -624,9 +624,84 @@ def build_vds_loop(out):
         f.create_virtual_dataset("v", layout, fillvalue=-1)
 
 
+def _typed_dataset(f, name, tid, values, mem_dtype):
+    """A dataset of the (non-native) file type ``tid``; libhdf5 converts ``values`` into it, and its own
+    conversion back to float64 is stored as the 'expected' attribute (the oracle for Falcon's decoding)."""
+    d = h5py.h5d.create(f.id, name.encode(), tid, h5py.h5s.create_simple((len(values),)))
+    d.write(h5py.h5s.ALL, h5py.h5s.ALL, np.asarray(values, dtype=mem_dtype))
+    back = np.empty(len(values), dtype="<f8")
+    d.read(h5py.h5s.ALL, h5py.h5s.ALL, back, mtype=h5py.h5t.NATIVE_DOUBLE)
+    d.close()
+    f[name].attrs["expected"] = back
+
+
+def build_numeric(f):
+    """Integer and floating-point layouts beyond the native ones: integers with a bit offset and reduced
+    precision, bfloat16, a float32 inside a wider element, x87 80-bit extended precision (explicit
+    leading mantissa bit), and unsigned values that do not fit Java's signed types."""
+    t = h5py.h5t.STD_I16LE.copy()                    # 12-bit signed at bit offset 4
+    t.set_precision(12)
+    t.set_offset(4)
+    _typed_dataset(f, "i12_off4", t, [-5, 100, 2047, -2048], "<i2")
+    t = h5py.h5t.STD_U16BE.copy()                    # 12-bit unsigned, big-endian, at bit offset 3
+    t.set_precision(12)
+    t.set_offset(3)
+    _typed_dataset(f, "u12be_off3", t, [0, 4095, 1234, 7], "<u2")
+    t = h5py.h5t.STD_I32BE.copy()                    # 24-bit signed in a 3-byte big-endian element
+    t.set_precision(24)
+    t.set_size(3)
+    _typed_dataset(f, "i24be", t, [-8388608, 8388607, -1, 12345], "<i4")
+    t = h5py.h5t.STD_I64LE.copy()                    # int64 with 40 significant bits at offset 20
+    t.set_precision(40)
+    t.set_offset(20)
+    _typed_dataset(f, "i40_off20", t, [-(2 ** 39), 2 ** 39 - 1, -1, 3], "<i8")
+    b = h5py.h5t.IEEE_F32LE.copy()                   # bfloat16: float32's sign/exponent, 7-bit mantissa
+    b.set_fields(15, 7, 8, 0, 7)
+    b.set_precision(16)
+    b.set_size(2)
+    b.set_ebias(127)
+    _typed_dataset(f, "bf16", b, [1.5, -2.0, 3.140625, 1e-40], "<f8")
+    t = h5py.h5t.IEEE_F32BE.copy()                   # float32 in 6 bytes with bit offset 8 (unused)
+    t.set_size(6)
+    t.set_offset(8)
+    _typed_dataset(f, "f32_in6", t, [1.5, -2.0, 3.25, float("inf")], "<f8")
+    x = h5py.h5t.IEEE_F64LE.copy()                   # x87 extended: 80 bits in 16 bytes, no implied bit
+    x.set_size(16)
+    x.set_precision(80)
+    x.set_fields(79, 64, 15, 0, 64)
+    x.set_ebias(16383)
+    x.set_norm(h5py.h5t.NORM_NONE)
+    _typed_dataset(f, "x87", x, [1.5, -2.0e-300, 3.25e300, float("-inf")], "<f8")
+    f.create_dataset("u32", data=np.array([0, 4000000000, 2 ** 31, 7], dtype="<u4"))
+    f.create_dataset("u32_small", data=np.array([0, 1, 2 ** 31 - 1, 7], dtype=">u4"))
+    f.create_dataset("u64", data=np.array([0, 2 ** 64 - 1, 2 ** 63, 7], dtype="<u8"))
+    f.create_dataset("u64_small", data=np.array([0, 5, 2 ** 62, 7], dtype="<u8"))
+    f.create_dataset("i64_small", data=np.array([0, -5, 2 ** 31 - 1, -(2 ** 31)], dtype="<i8"))
+    f.create_dataset("i64_big", data=np.array([0, 2 ** 40], dtype="<i8"))
+    f.attrs["u32_attr"] = np.array([4000000000, 1], dtype="<u4")
+    f.attrs["u16_attr"] = np.array([65535], dtype="<u2")
+
+
+def build_vds_byteorder(out):
+    """Virtual datasets whose sources hold big-endian data under a little-endian virtual type (libhdf5
+    converts), and one whose source has a different type of the same size (uint32 under int32)."""
+    src = os.path.join(out, "vds_byteorder_src.h5")
+    with h5py.File(src, "w", libver="latest") as f:
+        f.create_dataset("i4_be", data=np.array([1, -2, 300000, -400000], dtype=">i4"))
+        f.create_dataset("f8_be", data=np.array([1.5, -2.25, 1e300, -0.0], dtype=">f8"))
+        f.create_dataset("u4", data=np.array([1, 2, 3, 4000000000], dtype="<u4"))
+    with h5py.File(os.path.join(out, "vds_byteorder.h5"), "w", libver="latest") as f:
+        for name, source, dtype in (("i4", "i4_be", "<i4"), ("f8", "f8_be", "<f8"), ("u4_as_i4", "u4", "<i4")):
+            layout = h5py.VirtualLayout(shape=(4,), dtype=dtype)
+            layout[:] = h5py.VirtualSource("vds_byteorder_src.h5", source, shape=(4,))
+            f.create_virtual_dataset(name, layout, fillvalue=0)
+
+
 # name -> builder; `python gen_fixtures.py NAME ...` regenerates just those fixtures.
 FIXTURES = {
     "vds_loop": lambda: build_vds_loop(OUT),
+    "numeric": lambda: _with_file("numeric.h5", build_numeric, libver="latest"),
+    "vds_byteorder": lambda: build_vds_byteorder(OUT),
     "userblock": lambda: build_userblock(OUT),
     "chunk_maxshape": lambda: _with_file("chunk_maxshape.h5", build_chunk_maxshape, libver="latest"),
     "layout_v4": lambda: _with_file("layout_v4.h5", build_layout_v4, libver=("v110", "v110")),

@@ -13,9 +13,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.zip.Deflater;
 
 /**
@@ -64,7 +66,13 @@ public final class Hdf5Writer implements AutoCloseable {
     private static final HeapParams LINK_HEAP = new HeapParams(7, 4, 2, 32); // ids: type + 4-byte off + 2-byte len
     private static final int HEAP_TABLE_WIDTH = 4;
     private static final int HEAP_MAX_DIRECT_BLOCK = 65536;
-    private static final int HEAP_MAX_MANAGED_OBJECT = 4096;
+    private static final int HEAP_MAX_MANAGED_OBJECT = 4096;     // libhdf5's default; raised for a larger object
+    // Object-header message bodies: a version-2 header stores the size in 16 bits, and a version-1
+    // header pads each body to 8 bytes within that limit.
+    private static final int MAX_MESSAGE_BODY = 65528;
+    private static final int MAX_COMPACT_DATA = MAX_MESSAGE_BODY - 4; // the compact layout message's own fields
+    // An attribute message must also fit, as one managed object, in a dense-storage heap's direct block.
+    private static final int MAX_ATTRIBUTE_MESSAGE = HEAP_MAX_DIRECT_BLOCK - (4 + 1 + 8 + 5 + 4);
     // v2 B-tree record types for dense storage.
     private static final int BT2_ATTR_NAME = 8;    // 17-byte record: heap id(8) + flags(1) + corder(4) + hash(4)
     private static final int BT2_LINK_NAME = 5;    // 11-byte record: hash(4) + heap id(7)
@@ -90,7 +98,12 @@ public final class Hdf5Writer implements AutoCloseable {
     private final Path path;
     private final boolean legacy;
     private final GroupSpec root = new GroupSpec();
-    private final GroupWriter rootWriter = new GroupWriter(root);
+    private final GroupWriter rootWriter;
+    // Variable-length data lives in global-heap collections shared by every dataset, written last; each
+    // vlen id's collection address is patched in once the collections are placed.
+    private final List<List<byte[]>> heapCollections = new ArrayList<>();
+    private int lastCollectionBytes;
+    private final List<HeapIdPatch> heapIdPatches = new ArrayList<>();
     private final Map<String, Long> objectAddresses = new HashMap<>();     // absolute path -> object header address
     private final List<PendingReference> pendingReferences = new ArrayList<>();
     private long legacyRootBtree = UNDEFINED;  // root group's symbol-table B-tree / local heap (legacy superblock)
@@ -107,6 +120,7 @@ public final class Hdf5Writer implements AutoCloseable {
     private Hdf5Writer(Path path, Format format) {
         this.path = path;
         this.legacy = format == Format.EARLIEST;
+        this.rootWriter = new GroupWriter(root, legacy);
     }
 
     /** Begins writing a new HDF5 file at {@code path} in the modern format (written on {@link #close()}). */
@@ -214,6 +228,7 @@ public final class Hdf5Writer implements AutoCloseable {
         legacyRootBtree = rootResult.btreeAddress();
         legacyRootHeap = rootResult.heapAddress();
         objectAddresses.put("/", rootAddress);
+        writeGlobalHeaps(buf);
         resolveReferences(buf);
         long endOfFile = buf.position();
         buf.patchBytes(0, legacy
@@ -227,9 +242,11 @@ public final class Hdf5Writer implements AutoCloseable {
     /** Builds a group: datasets, subgroups, and attributes. */
     public static final class GroupWriter {
         private final GroupSpec spec;
+        private final boolean legacy;
 
-        private GroupWriter(GroupSpec spec) {
+        private GroupWriter(GroupSpec spec, boolean legacy) {
             this.spec = spec;
+            this.legacy = legacy;
         }
 
         public DatasetWriter intDataset(String name, int[] data, long[] shape) {
@@ -267,26 +284,41 @@ public final class Hdf5Writer implements AutoCloseable {
         }
 
         /**
-         * A fixed-length string dataset. Each element is stored in {@code length} bytes (the longest
-         * string's byte length if not given), null-padded; longer strings are truncated.
+         * A fixed-length string dataset. Each element is stored, UTF-8 encoded, in {@code length} bytes
+         * (the longest string's byte length if not given), null-padded. The datatype's character set is
+         * UTF-8 if any string is non-ASCII, else ASCII.
          */
         public DatasetWriter fixedStringDataset(String name, String[] data, long[] shape) {
             int length = 1;
             for (String s : data) {
-                length = Math.max(length, s.getBytes(StandardCharsets.US_ASCII).length);
+                length = Math.max(length, s.getBytes(StandardCharsets.UTF_8).length);
             }
             return fixedStringDataset(name, data, shape, length);
         }
 
-        /** A fixed-length string dataset with an explicit per-element byte {@code length}. */
+        /**
+         * A fixed-length string dataset with an explicit per-element byte {@code length}. A string whose
+         * UTF-8 encoding is longer is truncated at the last whole character that fits.
+         */
         public DatasetWriter fixedStringDataset(String name, String[] data, long[] shape, int length) {
             requireElementCount(shape, data.length);
-            byte[] bytes = new byte[data.length * length];
-            for (int i = 0; i < data.length; i++) {
-                byte[] s = data[i].getBytes(StandardCharsets.US_ASCII);
-                System.arraycopy(s, 0, bytes, i * length, Math.min(s.length, length));
+            if (length < 1) {
+                throw new IllegalArgumentException("fixed-length strings need at least 1 byte, not " + length);
             }
-            return addDataset(new DatasetSpec(name, fixedStringDatatype(length), length, shape, null, bytes, null));
+            byte[] bytes = new byte[Math.multiplyExact(data.length, length)];
+            boolean utf8 = false;
+            for (int i = 0; i < data.length; i++) {
+                byte[] s = data[i].getBytes(StandardCharsets.UTF_8);
+                int n = Math.min(s.length, length);
+                while (n < s.length && n > 0 && (s[n] & 0xC0) == 0x80) {
+                    n--; // never split a multi-byte character
+                }
+                System.arraycopy(s, 0, bytes, i * length, n);
+                for (int b = 0; b < n; b++) {
+                    utf8 |= s[b] < 0;
+                }
+            }
+            return addDataset(new DatasetSpec(name, fixedStringDatatype(length, utf8), length, shape, null, bytes, null));
         }
 
         /** A chunked {@code int32} dataset (fixed-array index). */
@@ -320,7 +352,11 @@ public final class Hdf5Writer implements AutoCloseable {
             long count = elementCount(shape);
             int recordSize = 0;
             int[] offsets = new int[fields.length];
+            Set<String> names = new HashSet<>();
             for (int i = 0; i < fields.length; i++) {
+                if (!names.add(fields[i].name)) {
+                    throw new IllegalArgumentException("duplicate compound field name \"" + fields[i].name + "\"");
+                }
                 if (fields[i].count != count) {
                     throw new IllegalArgumentException("compound field '" + fields[i].name + "' has "
                             + fields[i].count + " values but the shape implies " + count);
@@ -335,14 +371,17 @@ public final class Hdf5Writer implements AutoCloseable {
                             data, r * recordSize + offsets[i], fields[i].size);
                 }
             }
-            return addDataset(new DatasetSpec(name, compoundDatatype(fields, offsets, recordSize),
-                    recordSize, shape, null, data, null));
+            byte[] datatype = compoundDatatype(fields, offsets, recordSize, legacy);
+            requireMessageSize(datatype.length, "the compound datatype of '" + name + "'");
+            return addDataset(new DatasetSpec(name, datatype, recordSize, shape, null, data, null));
         }
 
         /** An enumerated dataset over a 32-bit base type: each value must be one of {@code type}'s codes. */
         public DatasetWriter enumDataset(String name, long[] shape, EnumType type, int[] values) {
             requireElementCount(shape, values.length);
-            return addDataset(new DatasetSpec(name, enumDatatype(type), 4, shape, null, intBytes(values), null));
+            byte[] datatype = enumDatatype(type, legacy);
+            requireMessageSize(datatype.length, "the enum datatype of '" + name + "'");
+            return addDataset(new DatasetSpec(name, datatype, 4, shape, null, intBytes(values), null));
         }
 
         /**
@@ -352,7 +391,7 @@ public final class Hdf5Writer implements AutoCloseable {
         public DatasetWriter float32ArrayDataset(String name, long[] shape, int[] arrayDims, float[] data) {
             int perElement = product(arrayDims);
             requireArrayData(shape, perElement, data.length);
-            return addDataset(new DatasetSpec(name, arrayDatatype(arrayDims, 4, DATATYPE_FLOAT32),
+            return addDataset(new DatasetSpec(name, arrayDatatype(arrayDims, 4, DATATYPE_FLOAT32, legacy),
                     perElement * 4, shape, null, float32Bytes(data), null));
         }
 
@@ -360,7 +399,7 @@ public final class Hdf5Writer implements AutoCloseable {
         public DatasetWriter int32ArrayDataset(String name, long[] shape, int[] arrayDims, int[] data) {
             int perElement = product(arrayDims);
             requireArrayData(shape, perElement, data.length);
-            return addDataset(new DatasetSpec(name, arrayDatatype(arrayDims, 4, DATATYPE_INT32),
+            return addDataset(new DatasetSpec(name, arrayDatatype(arrayDims, 4, DATATYPE_INT32, legacy),
                     perElement * 4, shape, null, intBytes(data), null));
         }
 
@@ -423,28 +462,80 @@ public final class Hdf5Writer implements AutoCloseable {
             return addDataset(spec);
         }
 
+        /**
+         * A subgroup. Link names (of groups and datasets) must be non-empty, unique within their group,
+         * and not {@code "."}, and may not contain {@code '/'} or NUL.
+         */
         public GroupWriter group(String name) {
+            claimLinkName(spec, name);
             GroupSpec child = new GroupSpec();
             child.name = name;
             spec.groups.add(child);
-            return new GroupWriter(child);
+            return new GroupWriter(child, legacy);
         }
 
         public GroupWriter intAttribute(String name, int[] data, long[] shape) {
             requireElementCount(shape, data.length);
-            spec.attributes.add(new AttributeSpec(name, DATATYPE_INT32, shape, intBytes(data)));
+            addAttribute(spec.attributes, spec.attributeNames, new AttributeSpec(name, DATATYPE_INT32, shape, intBytes(data)), legacy);
             return this;
         }
 
         public GroupWriter doubleAttribute(String name, double[] data, long[] shape) {
             requireElementCount(shape, data.length);
-            spec.attributes.add(new AttributeSpec(name, DATATYPE_FLOAT64, shape, doubleBytes(data)));
+            addAttribute(spec.attributes, spec.attributeNames, new AttributeSpec(name, DATATYPE_FLOAT64, shape, doubleBytes(data)), legacy);
             return this;
         }
 
         private DatasetWriter addDataset(DatasetSpec dataset) {
+            claimLinkName(spec, dataset.name);
             spec.datasets.add(dataset);
-            return new DatasetWriter(dataset);
+            return new DatasetWriter(dataset, legacy);
+        }
+    }
+
+    /** Validates a link name and reserves it in {@code group}; see {@link GroupWriter#group}. */
+    private static void claimLinkName(GroupSpec group, String name) {
+        requireName(name, "link");
+        if (name.equals(".") || name.indexOf('/') >= 0) {
+            throw new IllegalArgumentException("a link name may not be \".\" or contain '/': \"" + name + "\"");
+        }
+        if (!group.linkNames.add(name)) {
+            throw new IllegalArgumentException("this group already has a link named \"" + name + "\"");
+        }
+    }
+
+    private static void requireName(String name, String what) {
+        if (name == null || name.isEmpty()) {
+            throw new IllegalArgumentException(what + " name must not be empty");
+        }
+        if (name.indexOf('\0') >= 0) {
+            throw new IllegalArgumentException(what + " name must not contain NUL: \"" + name.replace('\0', '?') + "\"");
+        }
+    }
+
+    /**
+     * Adds an attribute after checking its name (non-empty, no NUL, unique on its object) and its size:
+     * its header message must stay under 64 KiB, the limit of an object-header message and of a managed
+     * object in dense storage.
+     */
+    private static void addAttribute(List<AttributeSpec> attributes, Set<String> names, AttributeSpec attribute,
+                                     boolean legacy) {
+        requireName(attribute.name(), "attribute");
+        int size = attributeBody(attribute, legacy).length;
+        if (size > MAX_ATTRIBUTE_MESSAGE) {
+            throw new IllegalArgumentException("attribute '" + attribute.name() + "' needs a " + size
+                    + "-byte header message; at most " + MAX_ATTRIBUTE_MESSAGE + " bytes fit (store large values in a dataset)");
+        }
+        if (!names.add(attribute.name())) {
+            throw new IllegalArgumentException("duplicate attribute name \"" + attribute.name() + "\"");
+        }
+        attributes.add(attribute);
+    }
+
+    private static void requireMessageSize(int size, String what) {
+        if (size > MAX_MESSAGE_BODY) {
+            throw new IllegalArgumentException(what + " needs a " + size + "-byte header message; at most "
+                    + MAX_MESSAGE_BODY + " bytes fit");
         }
     }
 
@@ -455,9 +546,11 @@ public final class Hdf5Writer implements AutoCloseable {
      */
     public static final class DatasetWriter {
         private final DatasetSpec spec;
+        private final boolean legacy;
 
-        private DatasetWriter(DatasetSpec spec) {
+        private DatasetWriter(DatasetSpec spec, boolean legacy) {
             this.spec = spec;
+            this.legacy = legacy;
         }
 
         /** Compresses each chunk with deflate (gzip) at the given level (0&ndash;9). Chunked datasets only. */
@@ -500,8 +593,10 @@ public final class Hdf5Writer implements AutoCloseable {
 
         /**
          * Stores each element in only its {@code precision} low bits with the n-bit filter (an unsigned
-         * integer datatype of that precision). Chunked integer datasets only, as the first filter; values
-         * must be non-negative and fit in {@code precision} bits.
+         * integer datatype of that precision). Chunked integer datasets only, as the first filter; every
+         * value (and the fill value, if set) must be non-negative and fit in {@code precision} bits.
+         *
+         * @throws IllegalArgumentException if a value does not fit
          */
         public DatasetWriter nbit(int precision) {
             requireChunked();
@@ -509,6 +604,17 @@ public final class Hdf5Writer implements AutoCloseable {
             requireFirst("nbit");
             if (precision < 1 || precision > spec.elementSize * 8) {
                 throw new IllegalArgumentException("n-bit precision must be 1-" + spec.elementSize * 8 + ", not " + precision);
+            }
+            int size = spec.elementSize;
+            for (int i = 0; i < spec.data.length / size; i++) {
+                long value = littleEndianSigned(spec.data, i * size, size);
+                if (!fitsUnsigned(value, precision)) {
+                    throw new IllegalArgumentException("n-bit(" + precision + ") stores unsigned " + precision
+                            + "-bit values, but element " + i + " is " + value);
+                }
+            }
+            if (spec.fillValue != null && !fitsUnsigned(littleEndianSigned(spec.fillValue, 0, size), precision)) {
+                throw new IllegalArgumentException("the fill value does not fit n-bit(" + precision + ")");
             }
             spec.nbitPrecision = precision;
             addFilter(Filters.NBIT, precision);
@@ -571,51 +677,115 @@ public final class Hdf5Writer implements AutoCloseable {
 
         /**
          * Stores the element data inline in the object header (compact layout) rather than in a separate
-         * block. For small contiguous datasets only; the data must be at most 65535 bytes.
+         * block. For small contiguous datasets only; the data must be at most 65524 bytes (an object-header
+         * message holds under 64 KiB).
          */
         public DatasetWriter compact() {
             if (spec.chunkShape != null || spec.data == null || spec.vlenStrings != null
                     || spec.referenceTargets != null) {
                 throw new IllegalStateException("compact layout requires a plain contiguous dataset");
             }
-            if (spec.data.length > 0xFFFF) {
-                throw new IllegalStateException("compact layout data must be at most 65535 bytes");
+            if (spec.data.length > MAX_COMPACT_DATA) {
+                throw new IllegalStateException("compact layout data must be at most " + MAX_COMPACT_DATA
+                        + " bytes, not " + spec.data.length);
             }
             spec.compact = true;
             return this;
         }
 
-        /** Sets the fill value (for unallocated/unwritten elements) from an integer, sized to the datatype. */
+        /**
+         * Sets the fill value (for unallocated or unwritten elements), converted to the dataset's type: an
+         * integer dataset stores it exactly (it must be in range), a floating-point one as the nearest
+         * value. Integer, enum, and floating-point datasets only.
+         *
+         * @throws IllegalArgumentException if the value is out of range for an integer dataset
+         * @throws IllegalStateException if the dataset's type has no numeric fill value
+         */
         public DatasetWriter fillValue(long value) {
-            byte[] fill = new byte[spec.elementSize];
-            for (int b = 0; b < fill.length; b++) {
-                fill[b] = (byte) (value >>> (8 * b));
+            switch (typeClass()) {
+                case 0, 8 -> spec.fillValue = integerFill(value);
+                case 1 -> spec.fillValue = floatFill(value);
+                default -> throw noNumericFill();
             }
-            spec.fillValue = fill;
             return this;
         }
 
-        /** Sets the fill value from a floating-point value (float32 or float64 per the datatype size). */
+        /**
+         * Sets the fill value from a floating-point value, converted to the dataset's type: a
+         * floating-point dataset stores it (rounded to float32 if that is the type), an integer one only a
+         * whole number in range.
+         *
+         * @throws IllegalArgumentException if an integer dataset is given a fraction or an out-of-range value
+         * @throws IllegalStateException if the dataset's type has no numeric fill value
+         */
         public DatasetWriter fillValue(double value) {
-            if (spec.elementSize == 8) {
-                spec.fillValue = doubleBytes(new double[] {value});
-            } else {
-                spec.fillValue = float32Bytes(new float[] {(float) value});
+            switch (typeClass()) {
+                case 0, 8 -> {
+                    if (value != Math.rint(value) || Math.abs(value) >= 0x1p63) {
+                        throw new IllegalArgumentException("fill value " + value + " is not an integer in range");
+                    }
+                    spec.fillValue = integerFill((long) value);
+                }
+                case 1 -> spec.fillValue = floatFill(value);
+                default -> throw noNumericFill();
             }
             return this;
+        }
+
+        private int typeClass() {
+            return spec.datatype[0] & 0x0F;
+        }
+
+        private IllegalStateException noNumericFill() {
+            return new IllegalStateException("a numeric fill value needs an integer, enum, or floating-point dataset; '"
+                    + spec.name + "' has datatype class " + typeClass());
+        }
+
+        /** {@code value} in the dataset's integer encoding, if it is representable. */
+        private byte[] integerFill(long value) {
+            int size = spec.elementSize;
+            boolean fits = spec.nbitPrecision >= 0 ? fitsUnsigned(value, spec.nbitPrecision)
+                    : size >= 8 || (value >= -(1L << (8 * size - 1)) && value < 1L << (8 * size - 1));
+            if (!fits) {
+                throw new IllegalArgumentException("fill value " + value + " does not fit the "
+                        + (spec.nbitPrecision >= 0 ? spec.nbitPrecision + "-bit unsigned" : 8 * size + "-bit")
+                        + " integer type of '" + spec.name + "'");
+            }
+            byte[] fill = new byte[size];
+            for (int b = 0; b < size; b++) {
+                fill[b] = (byte) (value >>> (8 * b));
+            }
+            return fill;
+        }
+
+        private byte[] floatFill(double value) {
+            return spec.elementSize == 8 ? doubleBytes(new double[] {value}) : float32Bytes(new float[] {(float) value});
         }
 
         public DatasetWriter intAttribute(String name, int[] data, long[] shape) {
             requireElementCount(shape, data.length);
-            spec.attributes.add(new AttributeSpec(name, DATATYPE_INT32, shape, intBytes(data)));
+            addAttribute(spec.attributes, spec.attributeNames, new AttributeSpec(name, DATATYPE_INT32, shape, intBytes(data)), legacy);
             return this;
         }
 
         public DatasetWriter doubleAttribute(String name, double[] data, long[] shape) {
             requireElementCount(shape, data.length);
-            spec.attributes.add(new AttributeSpec(name, DATATYPE_FLOAT64, shape, doubleBytes(data)));
+            addAttribute(spec.attributes, spec.attributeNames, new AttributeSpec(name, DATATYPE_FLOAT64, shape, doubleBytes(data)), legacy);
             return this;
         }
+    }
+
+    /** The two's-complement value of a little-endian integer of {@code size} bytes. */
+    private static long littleEndianSigned(byte[] data, int offset, int size) {
+        long value = 0;
+        for (int b = 0; b < size; b++) {
+            value |= (long) (data[offset + b] & 0xff) << (8 * b);
+        }
+        return size >= 8 ? value : value << (64 - 8 * size) >> (64 - 8 * size);
+    }
+
+    private static boolean fitsUnsigned(long value, int precision) {
+        return value >= 0 && (precision >= 63 || value < 1L << precision);
     }
 
     /** One named, typed column of a {@link GroupWriter#compoundDataset compound dataset}. */
@@ -634,13 +804,15 @@ public final class Hdf5Writer implements AutoCloseable {
             this.count = count;
         }
 
-        /** An {@code int32} field. */
+        /** An {@code int32} field. Field names must be non-empty, without NUL, and unique in the record. */
         public static CompoundField int32(String name, int[] values) {
+            requireName(name, "compound field");
             return new CompoundField(name, DATATYPE_INT32, 4, intBytes(values), values.length);
         }
 
         /** A {@code float64} field. */
         public static CompoundField float64(String name, double[] values) {
+            requireName(name, "compound field");
             return new CompoundField(name, DATATYPE_FLOAT64, 8, doubleBytes(values), values.length);
         }
     }
@@ -650,8 +822,15 @@ public final class Hdf5Writer implements AutoCloseable {
         private final List<String> names = new ArrayList<>();
         private final List<Integer> values = new ArrayList<>();
 
-        /** Adds a member; returns {@code this} for chaining. */
+        /**
+         * Adds a member; returns {@code this} for chaining. Names must be non-empty and without NUL, and
+         * names and values unique, as libhdf5 requires.
+         */
         public EnumType add(String name, int value) {
+            requireName(name, "enum member");
+            if (names.contains(name) || values.contains(value)) {
+                throw new IllegalArgumentException("duplicate enum member " + name + " = " + value);
+            }
             names.add(name);
             values.add(value);
             return this;
@@ -741,19 +920,29 @@ public final class Hdf5Writer implements AutoCloseable {
             layout = writeChunkedStorage(buf, dataset);
         } else {
             byte[] data = dataset.data;
+            HeapSlot[] slots = null;
             if (dataset.vlenStrings != null) {
+                slots = new HeapSlot[dataset.vlenStrings.size()];
+                for (int i = 0; i < slots.length; i++) {
+                    slots[i] = addHeapObject(dataset.vlenStrings.get(i));
+                }
+                data = vlenIds(dataset.vlenStrings, dataset.vlenElementCounts, slots);
+            }
+            if (data.length == 0) {
+                // An empty dataset has no storage: libhdf5 rejects a defined address with size 0.
+                layout = contiguousLayoutBody(UNDEFINED, 0);
+            } else {
                 buf.align(8);
-                long collection = buf.position();
-                int[] indices = writeGlobalHeap(buf, dataset.vlenStrings);
-                data = vlenIds(dataset.vlenStrings, dataset.vlenElementCounts, collection, indices);
+                int dataAddress = buf.position();
+                if (dataset.referenceTargets != null) {
+                    recordReferences(dataset.referenceTargets, dataAddress);
+                }
+                for (int i = 0; slots != null && i < slots.length; i++) {
+                    heapIdPatches.add(new HeapIdPatch(dataAddress + i * 16 + 4, slots[i].collection()));
+                }
+                buf.bytes(data);
+                layout = contiguousLayoutBody(dataAddress, data.length);
             }
-            buf.align(8);
-            long dataAddress = buf.position();
-            if (dataset.referenceTargets != null) {
-                recordReferences(dataset.referenceTargets, (int) dataAddress);
-            }
-            buf.bytes(data);
-            layout = contiguousLayoutBody(dataAddress, data.length);
         }
         // Dense attribute structures are written before the object header so it can reference them.
         byte[] attributeInfo = dataset.attributes.size() > MAX_COMPACT
@@ -764,9 +953,9 @@ public final class Hdf5Writer implements AutoCloseable {
         byte[] datatype = dataset.nbitPrecision >= 0
                 ? nbitDatatype(dataset.elementSize, dataset.nbitPrecision) : dataset.datatype;
         List<Message> messages = new ArrayList<>();
-        messages.add(new Message(1, 0x00, dataspaceBody(dataset.shape)));
+        messages.add(new Message(1, 0x00, dataspaceBody(dataset.shape, legacy)));
         messages.add(new Message(3, 0x01, datatype));
-        messages.add(new Message(5, 0x01, fillValueBody(dataset.fillValue)));
+        messages.add(new Message(5, 0x01, fillValueBody(dataset.fillValue, legacy)));
         messages.add(new Message(8, 0x00, layout));
         if (!dataset.filters.isEmpty()) {
             messages.add(new Message(11, 0x00, filterPipelineBody(dataset)));
@@ -775,7 +964,7 @@ public final class Hdf5Writer implements AutoCloseable {
             messages.add(new Message(21, 0x00, attributeInfo));
         } else {
             for (AttributeSpec attribute : dataset.attributes) {
-                messages.add(new Message(12, 0x00, attributeBody(attribute)));
+                messages.add(new Message(12, 0x00, attributeBody(attribute, legacy)));
             }
         }
         writeObjectHeader(buf, messages, 1);
@@ -802,6 +991,10 @@ public final class Hdf5Writer implements AutoCloseable {
      */
     private static byte[] writeChunkedStorage(GrowBuffer buf, DatasetSpec dataset) {
         List<byte[]> chunks = splitChunks(dataset);
+        if (chunks.isEmpty()) {
+            // An empty dataset has no chunks, so no index is allocated (libhdf5's own form).
+            return chunkedLayoutBody(dataset.chunkShape, dataset.elementSize, UNDEFINED);
+        }
         boolean filtered = !dataset.filters.isEmpty();
         int chunkBytes = Math.toIntExact(elementCount(dataset.chunkShape) * dataset.elementSize);
         long[] chunkAddresses = new long[chunks.size()];
@@ -1167,7 +1360,7 @@ public final class Hdf5Writer implements AutoCloseable {
             messages.add(new Message(21, 0x00, attributeInfo));
         } else {
             for (AttributeSpec attribute : attributes) {
-                messages.add(new Message(12, 0x00, attributeBody(attribute)));
+                messages.add(new Message(12, 0x00, attributeBody(attribute, false)));
             }
         }
         writeObjectHeader(buf, messages, 1);
@@ -1189,6 +1382,7 @@ public final class Hdf5Writer implements AutoCloseable {
     private static void writeObjectHeaderV2(GrowBuffer buf, List<Message> messages) {
         GrowBuffer framed = new GrowBuffer();
         for (Message message : messages) {
+            checkMessageSize(message);
             framed.u8(message.type());
             framed.u16(message.body().length);
             framed.u8(message.flags());
@@ -1205,10 +1399,19 @@ public final class Hdf5Writer implements AutoCloseable {
         buf.u32(buf.checksum(start, buf.position()));
     }
 
+    /** A message body that would overflow its header's 16-bit size field would be silently truncated. */
+    private static void checkMessageSize(Message message) {
+        if (message.body().length > MAX_MESSAGE_BODY) {
+            throw new HdfUnsupportedException("object-header message (type " + message.type() + ") of "
+                    + message.body().length + " bytes exceeds the " + MAX_MESSAGE_BODY + "-byte limit");
+        }
+    }
+
     /** Version-1 object header: a 12-byte prefix padded to 16, then 8-byte-aligned messages. */
     private static void writeObjectHeaderV1(GrowBuffer buf, List<Message> messages, int referenceCount) {
         int chunk0 = 0;
         for (Message message : messages) {
+            checkMessageSize(message);
             chunk0 += 8 + align8(message.body().length); // 8-byte message header + padded body
         }
         buf.u8(1);                 // version
@@ -1233,9 +1436,51 @@ public final class Hdf5Writer implements AutoCloseable {
     }
 
     private static final int GLOBAL_HEAP_MIN_SIZE = 4096; // HDF5 requires collections to be at least this large
+    private static final int GLOBAL_HEAP_MAX_OBJECTS = 0xFFFF; // object indices are 16-bit; 0 is free space
+    private static final int GLOBAL_HEAP_TARGET_SIZE = 1 << 20; // start a new collection beyond this
 
-    /** Writes a global-heap collection holding {@code objects}; returns their 1-based indices. */
-    private static int[] writeGlobalHeap(GrowBuffer buf, List<byte[]> objects) {
+    /** Where a variable-length element's data lives: a collection (by number) and its 1-based index. */
+    private record HeapSlot(int collection, int index) {
+    }
+
+    /** A vlen id whose collection address (8 bytes at {@code offset}) is patched once collections are placed. */
+    private record HeapIdPatch(int offset, int collection) {
+    }
+
+    /**
+     * Places one variable-length element in the current global-heap collection, starting a new one when
+     * it holds 65,535 objects (indices are 16-bit) or would grow past {@link #GLOBAL_HEAP_TARGET_SIZE}.
+     * Collections are shared by every dataset in the file, as libhdf5 shares them.
+     */
+    private HeapSlot addHeapObject(byte[] object) {
+        int footprint = 16 + align8(object.length);
+        List<byte[]> current = heapCollections.isEmpty() ? null : heapCollections.getLast();
+        if (current == null || current.size() == GLOBAL_HEAP_MAX_OBJECTS
+                || (!current.isEmpty() && (long) lastCollectionBytes + footprint > GLOBAL_HEAP_TARGET_SIZE)) {
+            current = new ArrayList<>();
+            heapCollections.add(current);
+            lastCollectionBytes = 0;
+        }
+        current.add(object);
+        lastCollectionBytes += footprint;
+        return new HeapSlot(heapCollections.size() - 1, current.size());
+    }
+
+    /** Writes every global-heap collection and patches the vlen ids that point into them. */
+    private void writeGlobalHeaps(GrowBuffer buf) {
+        long[] addresses = new long[heapCollections.size()];
+        for (int c = 0; c < addresses.length; c++) {
+            buf.align(8);
+            addresses[c] = buf.position();
+            writeGlobalHeap(buf, heapCollections.get(c));
+        }
+        for (HeapIdPatch patch : heapIdPatches) {
+            buf.patchU64(patch.offset(), addresses[patch.collection()]);
+        }
+    }
+
+    /** Writes a global-heap collection holding {@code objects} at indices 1, 2, ... */
+    private static void writeGlobalHeap(GrowBuffer buf, List<byte[]> objects) {
         int start = buf.position();
         int usedExtents = 0;
         for (byte[] object : objects) {
@@ -1250,9 +1495,7 @@ public final class Hdf5Writer implements AutoCloseable {
         buf.u8(0);
         buf.u8(0);
         buf.u64(total);
-        int[] indices = new int[objects.size()];
         for (int i = 0; i < objects.size(); i++) {
-            indices[i] = i + 1;
             buf.u16(i + 1);   // object index (1-based; 0 marks free space)
             buf.u16(1);       // reference count
             buf.u32(0);       // reserved
@@ -1269,7 +1512,6 @@ public final class Hdf5Writer implements AutoCloseable {
         while (buf.position() - start < total) {
             buf.u8(0);        // materialize the free space
         }
-        return indices;
     }
 
     /** A written fractal heap: its header address and the fixed-width heap id of each stored object. */
@@ -1284,8 +1526,10 @@ public final class Hdf5Writer implements AutoCloseable {
     private static FractalHeapResult writeFractalHeap(GrowBuffer buf, List<byte[]> objects, HeapParams params) {
         int directHeader = 4 + 1 + 8 + params.offsetSize() + 4; // FHDB: sig, version, heap header, block offset, checksum
         int objectBytes = 0;
+        int maxManaged = HEAP_MAX_MANAGED_OBJECT;
         for (byte[] object : objects) {
             objectBytes += object.length;
+            maxManaged = Math.max(maxManaged, object.length); // a larger object stays managed, not "huge"
         }
         int used = directHeader + objectBytes;
         int blockSize = Math.max(512, Integer.highestOneBit(used - 1) << 1); // smallest power of two >= used
@@ -1323,7 +1567,7 @@ public final class Hdf5Writer implements AutoCloseable {
         buf.u16(params.idLength());
         buf.u16(0);                       // I/O filter length
         buf.u8(0x02);                     // flags: direct blocks are checksummed
-        buf.u32(HEAP_MAX_MANAGED_OBJECT);
+        buf.u32(maxManaged);
         buf.u64(0);                       // next huge object id
         buf.u64(UNDEFINED);               // huge-object v2 B-tree address
         buf.u64((long) blockSize - used); // free space in managed blocks
@@ -1409,7 +1653,7 @@ public final class Hdf5Writer implements AutoCloseable {
     private static byte[] writeDenseAttributes(GrowBuffer buf, List<AttributeSpec> attributes) {
         List<byte[]> objects = new ArrayList<>();
         for (AttributeSpec attribute : attributes) {
-            objects.add(attributeBody(attribute));
+            objects.add(attributeBody(attribute, false));
         }
         FractalHeapResult heap = writeFractalHeap(buf, objects, ATTR_HEAP);
 
@@ -1478,48 +1722,100 @@ public final class Hdf5Writer implements AutoCloseable {
         return b.toByteArray();
     }
 
-    private static byte[] vlenIds(List<byte[]> payloads, int[] elementCounts, long collection, int[] indices) {
+    private static byte[] vlenIds(List<byte[]> payloads, int[] elementCounts, HeapSlot[] slots) {
         GrowBuffer b = new GrowBuffer();
         for (int i = 0; i < payloads.size(); i++) {
             // A vlen ID's length field is the string's byte length or the sequence's element count.
             b.u32(elementCounts != null ? elementCounts[i] : payloads.get(i).length);
-            b.u64(collection);
-            b.u32(indices[i]);
+            b.u64(0);                     // collection address, patched when the collections are written
+            b.u32(slots[i].index());
         }
         return b.toByteArray();
     }
 
-    private static byte[] attributeBody(AttributeSpec attribute) {
+    /**
+     * The Attribute message: version 3 (with a character-set field, UTF-8 for a non-ASCII name), or for
+     * the earliest format version 1, whose name, datatype, and dataspace are each padded to 8 bytes.
+     */
+    private static byte[] attributeBody(AttributeSpec attribute, boolean legacy) {
         byte[] name = (attribute.name + "\0").getBytes(StandardCharsets.UTF_8);
-        byte[] dataspace = dataspaceBody(attribute.shape);
+        byte[] dataspace = dataspaceBody(attribute.shape, legacy);
         GrowBuffer b = new GrowBuffer();
-        b.u8(3);
+        b.u8(legacy ? 1 : 3);
         b.u8(0x00);
         b.u16(name.length);
         b.u16(attribute.datatype.length);
         b.u16(dataspace.length);
-        b.u8(0);
-        b.bytes(name);
-        b.bytes(attribute.datatype);
-        b.bytes(dataspace);
+        if (legacy) {
+            padded(b, name);
+            padded(b, attribute.datatype);
+            padded(b, dataspace);
+        } else {
+            b.u8(isAscii(name) ? 0 : 1);
+            b.bytes(name);
+            b.bytes(attribute.datatype);
+            b.bytes(dataspace);
+        }
         b.bytes(attribute.data);
         return b.toByteArray();
     }
 
-    private static byte[] dataspaceBody(long[] shape) {
+    /** Appends {@code bytes} zero-padded to a multiple of 8. */
+    private static void padded(GrowBuffer b, byte[] bytes) {
+        b.bytes(bytes);
+        for (int i = bytes.length; i < align8(bytes.length); i++) {
+            b.u8(0);
+        }
+    }
+
+    private static boolean isAscii(byte[] bytes) {
+        for (byte x : bytes) {
+            if (x < 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** The Dataspace message: version 2, or version 1 (with its reserved bytes) for the earliest format. */
+    private static byte[] dataspaceBody(long[] shape, boolean legacy) {
         GrowBuffer b = new GrowBuffer();
-        b.u8(2);
-        b.u8(shape.length);
-        b.u8(0x00);
-        b.u8(shape.length == 0 ? 0 : 1);
+        if (legacy) {
+            b.u8(1);
+            b.u8(shape.length);
+            b.u8(0x00);   // flags: no maximum dimensions (they equal the current ones)
+            b.u8(0);      // reserved
+            b.u32(0);     // reserved
+        } else {
+            b.u8(2);
+            b.u8(shape.length);
+            b.u8(0x00);
+            b.u8(shape.length == 0 ? 0 : 1);
+        }
         for (long dimension : shape) {
             b.u64(dimension);
         }
         return b.toByteArray();
     }
 
-    /** The Fill Value message body: the default (version 3, undefined) or a defined custom value. */
-    private static byte[] fillValueBody(byte[] fill) {
+    /**
+     * The Fill Value message body: the default (reads back as zero) or a defined custom value. Version 3,
+     * or for the earliest format version 2, written as libhdf5 writes it (late allocation, fill written
+     * if set; the default fill is "defined" with no value).
+     */
+    private static byte[] fillValueBody(byte[] fill, boolean legacy) {
+        if (legacy) {
+            GrowBuffer b = new GrowBuffer();
+            b.u8(2);        // version
+            b.u8(2);        // space allocation time: late
+            b.u8(2);        // fill value write time: if set
+            b.u8(1);        // fill value defined
+            b.u32(fill == null ? 0 : fill.length);
+            if (fill != null) {
+                b.bytes(fill);
+            }
+            return b.toByteArray();
+        }
         if (fill == null) {
             return new byte[] {0x03, 0x0a}; // version 3; fill value not defined -> reads back as zero
         }
@@ -1559,15 +1855,21 @@ public final class Hdf5Writer implements AutoCloseable {
         return b.toByteArray();
     }
 
+    /**
+     * A hard-link message. The name's length field is 1, 2, or 4 bytes as its length needs (flag bits
+     * 0-1), and a non-ASCII name carries the UTF-8 character set (flag bit 4).
+     */
     private static byte[] linkBody(String name, long targetHeaderAddress) {
         byte[] nameBytes = name.getBytes(StandardCharsets.UTF_8);
-        if (nameBytes.length > 0xFF) {
-            throw new IllegalArgumentException("link name too long: " + name);
-        }
+        int widthCode = nameBytes.length <= 0xFF ? 0 : nameBytes.length <= 0xFFFF ? 1 : 2;
+        boolean utf8 = !isAscii(nameBytes);
         GrowBuffer b = new GrowBuffer();
         b.u8(1);
-        b.u8(0x00);
-        b.u8(nameBytes.length);
+        b.u8(widthCode | (utf8 ? 0x10 : 0));
+        if (utf8) {
+            b.u8(1);  // character set: UTF-8
+        }
+        b.uvar(nameBytes.length, 1 << widthCode);
         b.bytes(nameBytes);
         b.u64(targetHeaderAddress);
         return b.toByteArray();
@@ -1679,7 +1981,7 @@ public final class Hdf5Writer implements AutoCloseable {
         List<Message> messages = new ArrayList<>();
         messages.add(new Message(17, 0x00, symbolTable.toByteArray()));
         for (AttributeSpec attribute : attributes) {
-            messages.add(new Message(12, 0x00, attributeBody(attribute)));
+            messages.add(new Message(12, 0x00, attributeBody(attribute, true)));
         }
         writeObjectHeader(buf, messages, 1);
         return new GroupResult(headerAddress, btreeAddress, heapHeaderAddress);
@@ -1749,18 +2051,37 @@ public final class Hdf5Writer implements AutoCloseable {
         return Math.max(1, (bits + 7) / 8);
     }
 
-    /** Builds a compound (class 6, version 3) datatype message: members packed at the given offsets. */
-    private static byte[] compoundDatatype(CompoundField[] fields, int[] offsets, int recordSize) {
+    /**
+     * Builds a compound (class 6) datatype message: members packed at the given offsets, names UTF-8.
+     * Version 3 (HDF5 1.8+), or for the earliest format version 1 (padded names and the legacy member
+     * dimension block).
+     */
+    private static byte[] compoundDatatype(CompoundField[] fields, int[] offsets, int recordSize, boolean legacy) {
         GrowBuffer b = new GrowBuffer();
-        b.u8(0x36); // version 3, class 6 (compound): readable by HDF5 1.8+
+        b.u8(legacy ? 0x16 : 0x36);
         b.u8(fields.length & 0xFF);
         b.u8((fields.length >>> 8) & 0xFF);
         b.u8(0);
         b.u32(recordSize);
         int offsetWidth = byteWidthFor(recordSize);
         for (int i = 0; i < fields.length; i++) {
-            b.bytes((fields[i].name + "\0").getBytes(StandardCharsets.US_ASCII)); // null-terminated name
-            b.uvar(offsets[i], offsetWidth);
+            byte[] name = (fields[i].name + "\0").getBytes(StandardCharsets.UTF_8); // null-terminated name
+            if (legacy) {
+                padded(b, name);
+                b.u32(offsets[i]);
+                b.u8(0);      // dimensionality (a scalar member)
+                b.u8(0);
+                b.u8(0);
+                b.u8(0);      // reserved (3)
+                b.u32(0);     // dimension permutation
+                b.u32(0);     // reserved
+                for (int d = 0; d < 4; d++) {
+                    b.u32(0); // dimension sizes
+                }
+            } else {
+                b.bytes(name);
+                b.uvar(offsets[i], offsetWidth);
+            }
             b.bytes(fields[i].datatype);
         }
         return b.toByteArray();
@@ -1778,17 +2099,30 @@ public final class Hdf5Writer implements AutoCloseable {
         return b.toByteArray();
     }
 
-    /** Builds an array (class 10, version 3) datatype message with the given element shape and base. */
-    private static byte[] arrayDatatype(int[] arrayDims, int baseSize, byte[] base) {
+    /**
+     * Builds an array (class 10) datatype message with the given element shape and base: version 3
+     * (HDF5 1.8+), or for the earliest format version 2, the first that has the array class.
+     */
+    private static byte[] arrayDatatype(int[] arrayDims, int baseSize, byte[] base, boolean legacy) {
         GrowBuffer b = new GrowBuffer();
-        b.u8(0x3A); // version 3, class 10 (array): readable by HDF5 1.8+
+        b.u8(legacy ? 0x2A : 0x3A);
         b.u8(0);
         b.u8(0);
         b.u8(0);
         b.u32(product(arrayDims) * baseSize);
         b.u8(arrayDims.length); // rank
+        if (legacy) {
+            b.u8(0);
+            b.u8(0);
+            b.u8(0);            // reserved (3)
+        }
         for (int dimension : arrayDims) {
             b.u32(dimension);
+        }
+        if (legacy) {
+            for (int d = 0; d < arrayDims.length; d++) {
+                b.u32(d);       // permutation index (the identity)
+            }
         }
         b.bytes(base);
         return b.toByteArray();
@@ -1841,18 +2175,26 @@ public final class Hdf5Writer implements AutoCloseable {
         return out;
     }
 
-    /** Builds an enumerated (class 8, version 3) datatype message over a 32-bit base type. */
-    private static byte[] enumDatatype(EnumType type) {
+    /**
+     * Builds an enumerated (class 8) datatype message over a 32-bit base type, member names UTF-8:
+     * version 3 (HDF5 1.8+), or for the earliest format version 1 (names padded to 8 bytes).
+     */
+    private static byte[] enumDatatype(EnumType type, boolean legacy) {
         GrowBuffer b = new GrowBuffer();
         int members = type.names.size();
-        b.u8(0x38); // version 3, class 8 (enumerated): readable by HDF5 1.8+
+        b.u8(legacy ? 0x18 : 0x38);
         b.u8(members & 0xFF);
         b.u8((members >>> 8) & 0xFF);
         b.u8(0);
         b.u32(4); // size = base type size
         b.bytes(DATATYPE_INT32);
         for (String name : type.names) {
-            b.bytes((name + "\0").getBytes(StandardCharsets.US_ASCII));
+            byte[] bytes = (name + "\0").getBytes(StandardCharsets.UTF_8);
+            if (legacy) {
+                padded(b, bytes);
+            } else {
+                b.bytes(bytes);
+            }
         }
         for (int value : type.values) {
             b.u32(value);
@@ -1895,11 +2237,11 @@ public final class Hdf5Writer implements AutoCloseable {
         return out;
     }
 
-    /** A fixed-length string (class 3) datatype message: null-padded, ASCII, of the given byte size. */
-    private static byte[] fixedStringDatatype(int size) {
+    /** A fixed-length string (class 3) datatype message: null-padded, ASCII or UTF-8, of the given byte size. */
+    private static byte[] fixedStringDatatype(int size, boolean utf8) {
         GrowBuffer b = new GrowBuffer();
         b.u8(0x13); // version 1, class 3 (string)
-        b.u8(0x01); // bit field: null-pad, ASCII
+        b.u8(utf8 ? 0x11 : 0x01); // bit field: null-pad; character set ASCII or UTF-8 (bits 4-7)
         b.u8(0);
         b.u8(0);
         b.u32(size);
@@ -1924,6 +2266,8 @@ public final class Hdf5Writer implements AutoCloseable {
         final List<GroupSpec> groups = new ArrayList<>();
         final List<DatasetSpec> datasets = new ArrayList<>();
         final List<AttributeSpec> attributes = new ArrayList<>();
+        final Set<String> linkNames = new HashSet<>();      // groups and datasets share one namespace
+        final Set<String> attributeNames = new HashSet<>();
     }
 
     private static final class DatasetSpec {
@@ -1939,6 +2283,7 @@ public final class Hdf5Writer implements AutoCloseable {
         byte[] fillValue;                // custom fill value (datatype-order bytes), or null for the default 0
         boolean compact;                 // store the element data inline in the object header
         final List<AttributeSpec> attributes = new ArrayList<>();
+        final Set<String> attributeNames = new HashSet<>();
         final List<FilterSpec> filters = new ArrayList<>(); // the chunk filter pipeline, in write order
         int nbitPrecision = -1;         // -1 = no n-bit filter
 

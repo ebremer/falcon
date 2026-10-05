@@ -172,7 +172,88 @@ class WriterInteropExport {
             writeTypes(w);
         }
 
+        // --- edge cases libhdf5 once rejected or misread (both formats)
+        for (Hdf5Writer.Format format : Hdf5Writer.Format.values()) {
+            String name = format == Hdf5Writer.Format.LATEST ? "edges.h5" : "edges_earliest.h5";
+            try (Hdf5Writer w = Hdf5Writer.create(begin(dir, name, format.name().toLowerCase()), format)) {
+                writeEdges(w, format);
+            }
+        }
+
         Files.writeString(dir.resolve("manifest.json"), json(Map.of("files", files)), StandardCharsets.UTF_8);
+    }
+
+    private void writeEdges(Hdf5Writer w, Hdf5Writer.Format format) {
+        // Empty datasets: no storage is allocated.
+        w.intDataset("empty", new int[0], new long[] {0});
+        dataset("/empty", new int[0]).put("shape", new long[] {0});
+        w.intDataset("empty_rows", new int[0], new long[] {3, 0});
+        dataset("/empty_rows", new int[0]).put("shape", new long[] {3, 0});
+        w.stringDataset("empty_strings", new String[0], new long[] {0});
+        dataset("/empty_strings", new String[0]).put("shape", new long[] {0});
+        w.intDataset("empty_compact", new int[0], new long[] {0}).compact();
+        dataset("/empty_compact", new int[0]).put("shape", new long[] {0});
+        // Variable-length data beyond one heap collection (65,535 objects), and one object over 1 MiB.
+        String[] many = new String[70_000];
+        for (int i = 0; i < many.length; i++) {
+            many[i] = "s" + i;
+        }
+        w.stringDataset("many_strings", many, new long[] {many.length});
+        dataset("/many_strings", many);
+        String big = "x".repeat(1_500_000);
+        w.stringDataset("big_string", new String[] {"a", big, ""}, new long[] {3});
+        dataset("/big_string", new String[] {"a", big, ""});
+        // Messages near the 64 KiB limit.
+        int[] compactMax = new int[16381]; // 65524 bytes
+        for (int i = 0; i < compactMax.length; i++) {
+            compactMax[i] = i * 3;
+        }
+        w.intDataset("compact_max", compactMax, new long[] {compactMax.length}).compact();
+        dataset("/compact_max", compactMax);
+        double[] wide = new double[8000];
+        for (int i = 0; i < wide.length; i++) {
+            wide[i] = i * 0.25;
+        }
+        w.intDataset("big_attr", new int[] {1}, new long[] {1}).doubleAttribute("wide", wide, new long[] {wide.length});
+        dataset("/big_attr", new int[] {1}).put("attrs", Map.of("wide", wide));
+        // Long and non-ASCII names.
+        String longName = "n".repeat(300);
+        w.intDataset(longName, new int[] {4}, new long[] {1});
+        dataset("/" + longName, new int[] {4});
+        w.group("café").intAttribute("été", new int[] {5}, new long[] {});
+        group("/café").put("attrs", Map.of("été", new int[] {5}));
+        // Fill values converted to the dataset's type.
+        w.doubleDataset("fill_f64", new double[] {1}, new long[] {1}).fillValue(5);
+        dataset("/fill_f64", new double[] {1}).put("fill", 5.0);
+        w.floatDataset("fill_f32", new float[] {1}, new long[] {1}).fillValue(2.5);
+        dataset("/fill_f32", new double[] {1}).put("fill", 2.5);
+        w.intDataset("fill_i32", new int[] {1}, new long[] {1}).fillValue(-7.0);
+        dataset("/fill_i32", new int[] {1}).put("fill", -7);
+        // Non-ASCII fixed-length strings and datatype member names.
+        w.fixedStringDataset("fixed_utf8", new String[] {"café", "日本", ""}, new long[] {3});
+        dataset("/fixed_utf8", new String[] {"café", "日本", ""});
+        w.compoundDataset("rec_utf8", new long[] {2}, Hdf5Writer.CompoundField.int32("é", new int[] {1, 2}));
+        dataset("/rec_utf8", null).put("fields", Map.of("é", new int[] {1, 2}));
+        w.enumDataset("enum_utf8", new long[] {2}, Hdf5Writer.enumType().add("ÉTÉ", 1).add("HIVER", 2), new int[] {2, 1});
+        dataset("/enum_utf8", new int[] {2, 1}).put("enum", Map.of("ÉTÉ", 1, "HIVER", 2));
+        if (format == Hdf5Writer.Format.LATEST) {
+            // Chunked storage (not written in the earliest format): empty, and n-bit at its limit.
+            w.intChunkedDataset("empty_chunked", new int[0], new long[] {0}, new long[] {4});
+            dataset("/empty_chunked", new int[0]).put("shape", new long[] {0});
+            w.intChunkedDataset("nbit_max", new int[] {0, 255, 128, 1}, new long[] {4}, new long[] {4}).nbit(8).fillValue(255);
+            dataset("/nbit_max", new int[] {0, 255, 128, 1}).put("fill", 255);
+            // A dense attribute larger than libhdf5's default 4 KiB managed-object size.
+            Hdf5Writer.DatasetWriter dense = w.intDataset("dense_wide", new int[] {1}, new long[] {1});
+            Map<String, Object> attrs = new LinkedHashMap<>();
+            for (int i = 0; i < 8; i++) {
+                dense.intAttribute("small" + i, new int[] {i}, new long[] {});
+                attrs.put("small" + i, new int[] {i});
+            }
+            double[] mid = java.util.Arrays.copyOf(wide, 1000);
+            dense.doubleAttribute("wide", mid, new long[] {mid.length});
+            attrs.put("wide", mid);
+            dataset("/dense_wide", new int[] {1}).put("attrs", attrs);
+        }
     }
 
     private void writeTypes(Hdf5Writer w) {

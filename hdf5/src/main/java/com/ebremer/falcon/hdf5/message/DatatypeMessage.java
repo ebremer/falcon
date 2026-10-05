@@ -1,6 +1,7 @@
 package com.ebremer.falcon.hdf5.message;
 
 import com.ebremer.falcon.hdf5.HdfFormatException;
+import com.ebremer.falcon.hdf5.HdfUnsupportedException;
 import com.ebremer.falcon.hdf5.datatype.Datatype;
 import com.ebremer.falcon.hdf5.header.HeaderMessage;
 import com.ebremer.falcon.hdf5.header.MessageType;
@@ -97,7 +98,13 @@ public final class DatatypeMessage {
                 return new Result(new Datatype.FixedPoint(size, order, signed, bitOffset, bitPrecision), p + 4);
             }
             case 1: { // floating-point
+                if ((bits0 & 0x41) == 0x41) {
+                    throw new HdfUnsupportedException("VAX-order floating-point data is not supported (at " + off + ")");
+                }
                 ByteOrder order = order(bits0);
+                Datatype.MantissaNormalization normalization =
+                        Datatype.MantissaNormalization.values()[(bits0 >> 4) & 0x03];
+                int signLocation = bits1;
                 int bitOffset = buf.getUnsignedShort(p);
                 int bitPrecision = buf.getUnsignedShort(p + 2);
                 int expLoc = buf.getUnsignedByte(p + 4);
@@ -106,7 +113,7 @@ public final class DatatypeMessage {
                 int mantSize = buf.getUnsignedByte(p + 7);
                 long bias = buf.getUnsignedInt(p + 8);
                 return new Result(new Datatype.FloatingPoint(size, order, bitOffset, bitPrecision,
-                        expLoc, expSize, mantLoc, mantSize, bias), p + 12);
+                        expLoc, expSize, mantLoc, mantSize, bias, signLocation, normalization), p + 12);
             }
             case 2: { // time
                 ByteOrder order = order(bits0);

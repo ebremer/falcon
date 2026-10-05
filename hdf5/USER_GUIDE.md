@@ -36,19 +36,34 @@ strategy, page size, and total free space).
 ### Read a dataset
 
 ```java
-int[]    a = ds.readInts();        // fixed-point up to 4 bytes
-long[]   b = ds.readLongs();       // fixed-point up to 8 bytes
+int[]    a = ds.readInts();        // integers, each of which must fit in an int
+long[]   b = ds.readLongs();       // integers, each of which must fit in a long
 float[]  c = ds.readFloats();      // floating point
 double[] d = ds.readDoubles();
 String[] s = ds.readStrings();     // fixed- or variable-length strings
 Object natural = ds.read();        // most natural Java array for the datatype
-byte[]  raw    = ds.readRawBytes(); // undecoded element bytes
+byte[]  raw    = ds.readRawBytes(); // element bytes as stored (after the filters are undone)
 
 int    scalar = ds.readInt();      // single-element datasets: readInt/readLong/readDouble/readString
 ```
 
 Multidimensional data is returned flattened row-major; `ds.dataspace().dimensions()` gives the shape and
 `ds.datatype()` the element type.
+
+**Integers are exact.** `readInts()` and `readLongs()` never wrap a value: one that does not fit throws
+`HdfUnsupportedException`. A `uint32` above 2³¹−1 does not fit an `int`, and a `uint64` of 2⁶³ or more
+does not fit a `long`. `read()` picks an array every value of the type fits in:
+
+| Datatype | `read()` returns |
+|---|---|
+| `int8`–`int32`, `uint8`, `uint16` | `int[]` |
+| `uint32`, `int64` | `long[]` |
+| `uint64` | `java.math.BigInteger[]` |
+
+**Non-native layouts.** Integers are read from their bit offset and precision (a 12-bit value packed in 16
+bits, a 24-bit integer in 3 bytes). Floats are decoded from their sign, exponent, and mantissa fields as
+libhdf5 decodes them, so bfloat16 and x87 80-bit extended precision read correctly. VAX-order floats are
+not supported.
 
 ### Hyperslabs and streaming
 
@@ -84,6 +99,8 @@ double[] slice = regions[0].readDoubles();
 
 Virtual datasets are read transparently: `ds.readDoubles()` assembles the data from the source files
 (resolved relative to the virtual dataset's own file), filling unmapped regions with the fill value.
+A source in the other byte order is converted. A source of any other type, such as a `uint32` source
+under an `int32` virtual dataset, throws `HdfUnsupportedException`; libhdf5 would convert it.
 
 ### Datatypes
 
@@ -116,7 +133,19 @@ run.group("nested").intDataset("inner", new int[]{7}, new long[]{1});
 
 Atomic datatypes: `byteDataset` (int8), `shortDataset` (int16), `intDataset` (int32), `longDataset`
 (int64), `floatDataset` (float32), `doubleDataset` (float64), `stringDataset` (variable-length UTF-8),
-and `fixedStringDataset` (fixed-length).
+and `fixedStringDataset` (fixed-length, UTF-8).
+
+**Names and limits.** Each rule is checked when the object is added, so a bad name or size throws at
+that call rather than at `close()`.
+- **Link names** (groups and datasets): must be non-empty, unique within their group, not `"."`, and
+  free of `'/'` and NUL.
+- **Attribute names**: must be non-empty and unique on their object.
+- **Compound field names and enum members**: must be unique.
+- **Empty datasets** (a zero in the shape) are written with no storage, as libhdf5 writes them.
+- **Size limits**: each object-header message stays under 64 KiB. A compact dataset holds at most
+  65,524 bytes, and an attribute message at most 65,514 bytes; store larger values in a dataset.
+- **Fixed-length strings**: stored as UTF-8. The datatype is marked UTF-8 when any string is non-ASCII,
+  and a string too long for an explicit length is cut at a character boundary.
 
 ### Chunking and filters
 
@@ -128,7 +157,8 @@ w.intChunkedDataset("big", data, new long[]{100_000}, new long[]{4096})
 ```
 
 Filters form a pipeline applied to each chunk in the order they are added, exactly as libhdf5 does, and
-each may be added once. `scaleOffset()` and `nbit(precision)` work on integer data and must come first;
+each may be added once. `scaleOffset()` and `nbit(precision)` work on integer data and must come first.
+`nbit(precision)` stores unsigned `precision`-bit values, so a negative or too-wide value is rejected.
 `szip()` works on integer or floating-point data and may only follow `shuffle()`. Every filter writes
 the on-disk form libhdf5 reads: scale-offset chunks are byte-identical to libhdf5's, and szip chunks use
 libhdf5's framing (a chunk szip cannot shrink is stored unfiltered, as libhdf5 does).
@@ -156,6 +186,10 @@ w.intDataset("small", data, shape).compact();               // store inline in t
 w.intDataset("grid",  data, shape).fillValue(7);            // custom fill for unwritten elements
 ```
 
+The fill value is converted to the dataset's type: `fillValue(5)` on a `float64` dataset stores 5.0, and
+an integer dataset accepts only a whole number in range. String, reference, compound, array, and complex
+datasets take no fill value.
+
 Groups with more than 8 links, and objects with more than 8 attributes, switch to dense storage
 (fractal heap + version-2 B-tree) automatically.
 
@@ -165,6 +199,12 @@ Groups with more than 8 links, and objects with more than 8 attributes, switch t
 Hdf5Writer.create(path, Hdf5Writer.Format.LATEST);    // modern: v3 superblock, v2 headers (default)
 Hdf5Writer.create(path, Hdf5Writer.Format.EARLIEST);  // original: v0 superblock, symbol-table groups
 ```
+
+`EARLIEST` uses the message versions libhdf5 writes for its own earliest setting:
+- dataspace v1;
+- compound and enum datatypes v1, array datatype v2;
+- fill value v2;
+- attribute v1.
 
 Files Falcon writes are readable by HDF5 1.10 and later (native complex datasets, a type introduced by
 HDF5 2.0, need HDF5 2.0). `tools/fixtures/check_hdf5_writer.py` verifies this against h5py's HDF5 2.0
