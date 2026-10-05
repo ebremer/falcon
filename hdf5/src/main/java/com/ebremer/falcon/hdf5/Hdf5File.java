@@ -76,7 +76,8 @@ public final class Hdf5File implements AutoCloseable {
                 data = data.slice(base, data.size() - base);
             }
             FileContext ctx = new FileContext(data, superblock.sizeOfOffsets(), superblock.sizeOfLengths(),
-                    path, superblock.rootObjectHeaderAddress(), externalFileAccess);
+                    path, superblock.rootObjectHeaderAddress(), externalFileAccess,
+                    superblock.superblockExtensionAddress());
             Group root = Group.root(ctx, superblock.rootObjectHeaderAddress());
             return new Hdf5File(mapped, superblock, ctx, root);
         } catch (RuntimeException e) {
@@ -107,7 +108,7 @@ public final class Hdf5File implements AutoCloseable {
      */
     public Optional<FileSpaceInfo> fileSpaceInfo() {
         ctx.checkOpen();
-        long extension = superblock.superblockExtensionAddress();
+        long extension = ctx.superblockExtensionAddress();
         if (extension == HdfBuffer.UNDEFINED_ADDRESS) {
             return Optional.empty();
         }

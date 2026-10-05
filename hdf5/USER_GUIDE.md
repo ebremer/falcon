@@ -71,6 +71,16 @@ Hdf5File.open(path, ExternalFileAccess.unrestricted());                      // 
 Hdf5File.open(path, ExternalFileAccess.none());                              // never open another file
 ```
 
+A virtual-dataset source is looked for where libhdf5 looks, among the places the policy allows:
+- **An absolute name** is tried as written. If that fails, its file name alone is tried, as libhdf5 does
+  for a file moved together with its sources.
+- **A relative name** is tried in the HDF5 file's directory.
+- **Then, for both,** each allowed directory, and under `unrestricted()` the working directory.
+
+A source found nowhere is missing and reads as the fill value. There is one exception: when the
+policy refuses the name's own location and no allowed candidate exists, the read fails, because the
+refused file may be the real source.
+
 ### Read a dataset
 
 ```java
@@ -133,7 +143,10 @@ int scale = ds.attribute("scale").orElseThrow().readInt();
 Hdf5Object[] targets = ds.readObjectReferences();      // object references -> the objects they name
 Selection[]  regions = ds.readRegionReferences();      // region references -> dataset selections
 double[] slice = regions[0].readDoubles();
+Attribute[]  attrs   = ds.readAttributeReferences();   // revised attribute references -> attributes
 ```
+
+Attributes holding references have the same three methods.
 
 A region reference may select one block, points, several blocks, everything, or nothing; every
 encoding libhdf5 writes is read. A selection that is not one block (`isRectangular()` is false) reads
@@ -141,12 +154,35 @@ as a flat array of its elements, in the order libhdf5 visits them (points as lis
 order). A null reference reads as `null`. An element that cannot be resolved, such as a reference to a
 deleted dataset, throws only when that selection is used.
 
+**Revised references** (`H5R_ref_t`, written by HDF5 1.12 and later) are read by the same methods.
+libhdf5 gives every revised-reference datatype the same code, so each element carries its own kind
+(object, region, or attribute):
+- `readObjectReferences()` returns, for each element, the object it points at or into. For a region
+  reference that is its dataset; for an attribute reference, the attribute's object.
+- `readRegionReferences()` gives an element that is not a region a selection that throws when used.
+- `readAttributeReferences()` fails if an element is not an attribute reference.
+- `read()` returns the objects, as `readObjectReferences()` does.
+- A reference into another file names that file, but Falcon does not follow it:
+  - `readObjectReferences()` and `readAttributeReferences()` throw `HdfUnsupportedException`.
+  - `readRegionReferences()` gives that element a selection that throws when used.
+
 Virtual datasets are read transparently: `ds.readDoubles()` assembles the data from the source files
 (resolved relative to the virtual dataset's own file), filling unmapped regions with the fill value.
 Same-file sources (`"."`) and every mapping encoding libhdf5 writes are read. A source file the
 `ExternalFileAccess` policy refuses fails the read; a missing one leaves the fill value, as in libhdf5.
 A source in the other byte order is converted. A source of any other type, such as a `uint32` source
-under an `int32` virtual dataset, throws `HdfUnsupportedException`; libhdf5 would convert it.
+under an `int32` virtual dataset, throws `HdfUnsupportedException`; libhdf5 would convert it. A
+missing source dataset in an existing file also reads as the fill value, as in libhdf5.
+
+A mapping may be **unlimited**, so that the virtual dataset grows with its sources. `dataspace()` then
+takes the extent from the sources, as libhdf5 does when it opens the dataset, so it may open the source
+files. Two kinds of unlimited mapping are read:
+- **Both selections unlimited:** the mapping covers as much as its source currently holds.
+- **printf-style:** `%b` in the source file or dataset name stands for 0, 1, 2, and so on. Source *b*
+  fills block *b* of the virtual selection. The sources found before the first missing one set the
+  extent. `%%` in a name stands for `%`.
+
+This matches libhdf5's defaults: the "last available" view, and a printf gap of 0.
 
 ### Datatypes
 
@@ -319,13 +355,11 @@ Catch `HdfException` to handle any Falcon read/write failure.
 ## Not supported (reads throw `HdfUnsupportedException`)
 
 The following are not supported:
-- **SOHM shared-message deduplication.** An object whose messages live in the shared-message heap is
-  reported, not misread.
-- **The revised `H5R_ref_t` reference encoding.** The datatype is recognised; the values are not
-  decoded.
 - **Filtered fractal heaps.**
-- **Unlimited-pattern virtual datasets.**
+- **Virtual-dataset views other than libhdf5's defaults:** the "first missing" view, and a printf gap
+  other than 0.
 - **Multi-file drivers** (family, multi, split).
-- **Following external links.** On the write side, the bitfield/opaque/time
-datatype classes and indirect-block dense storage are not yet emitted. See
-[`PLAN.md`](PLAN.md) for the full roadmap.
+- **Following external links, and references into other files.**
+
+On the write side, the bitfield/opaque/time datatype classes and indirect-block dense storage are not
+yet emitted. See [`PLAN.md`](PLAN.md) for the full roadmap.

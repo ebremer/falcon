@@ -2,6 +2,7 @@ package com.ebremer.falcon.hdf5.message;
 
 import com.ebremer.falcon.hdf5.Attribute;
 import com.ebremer.falcon.hdf5.Dataspace;
+import com.ebremer.falcon.hdf5.HdfFormatException;
 import com.ebremer.falcon.hdf5.datatype.Datatype;
 import com.ebremer.falcon.hdf5.header.HeaderMessage;
 import com.ebremer.falcon.hdf5.header.MessageType;
@@ -22,6 +23,10 @@ public final class AttributeMessage {
     }
 
     public static Attribute parse(FileContext ctx, HeaderMessage message) {
+        if (message.buffer() != ctx.buffer()) {
+            // Only a shared message of at most 7 bytes lives outside the file; no attribute is that small.
+            throw new HdfFormatException("attribute message of " + message.bodySize() + " bytes is too small");
+        }
         return parse(ctx, message.bodyOffset(), message.bodySize());
     }
 
@@ -52,8 +57,9 @@ public final class AttributeMessage {
         long dataOffset = p;
 
         Datatype datatype = DatatypeMessage.resolve(ctx, datatypeOffset, datatypeShared);
-        Dataspace dataspace = DataspaceMessage.parse(ctx, dataspaceShared
-                ? SharedMessage.target(ctx, dataspaceOffset, MessageType.DATASPACE).bodyOffset() : dataspaceOffset);
+        Dataspace dataspace = dataspaceShared
+                ? DataspaceMessage.parse(ctx, SharedMessage.target(ctx, dataspaceOffset, MessageType.DATASPACE))
+                : DataspaceMessage.parse(ctx, dataspaceOffset);
         int dataSize = (int) (base + bodySize - dataOffset);
         return new Attribute(ctx, name, datatype, dataspace, dataOffset, dataSize);
     }

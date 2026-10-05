@@ -178,9 +178,14 @@ public final class FractalHeap {
         };
     }
 
+    /** True if {@code heapId} names a tiny object, which lives in the ID rather than in the file. */
+    public static boolean isTiny(byte[] heapId) {
+        return heapId.length >= 1 && ((heapId[0] >> 4) & 0x03) == TINY && (heapId[0] & 0xC0) == 0;
+    }
+
     /** Reads the bytes of the object named by {@code heapId} (managed, huge, or tiny). */
     public byte[] readObject(byte[] heapId) {
-        if (heapId.length >= 1 && ((heapId[0] >> 4) & 0x03) == TINY && (heapId[0] & 0xC0) == 0) {
+        if (isTiny(heapId)) {
             // Tiny: the length (minus one) is in the low 4 bits, or 12 bits across two bytes when the ID
             // is longer than 18 bytes ("extended"); the object's bytes follow.
             boolean extended = idLength > 18;

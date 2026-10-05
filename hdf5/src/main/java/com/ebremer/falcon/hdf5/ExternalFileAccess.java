@@ -27,6 +27,14 @@ import java.util.List;
  * silently substitute its fill value). Paths are compared after normalization; symbolic links inside an
  * allowed directory are not resolved.
  *
+ * <p>A virtual dataset's source is looked for where libhdf5 looks ({@code H5F_prefix_open_file}), among
+ * the places the policy allows: an absolute name as written, and then, as when a file was moved with its
+ * sources, by its file name alone; a relative name in the HDF5 file's directory. Both then try each
+ * allowed directory and, under {@link #unrestricted()}, the working directory. A source found nowhere is
+ * missing, and libhdf5 and Falcon read its region as the fill value. But when the name's own location is
+ * refused and no allowed candidate exists, the read fails rather than filling: the refused file may be
+ * the real source.
+ *
  * <pre>{@code
  * Hdf5File.open(path, ExternalFileAccess.sameDirectory().allowDirectory(Path.of("/data/raw")));
  * }</pre>
@@ -71,51 +79,115 @@ public final class ExternalFileAccess {
     /**
      * Resolves {@code name}, as written in an HDF5 file in {@code baseDirectory} ({@code null} for the
      * working directory), to the file to open: the first allowed candidate that exists, else the first
-     * allowed one.
+     * allowed one. An absolute name is its own only candidate; a relative one is tried in
+     * {@code baseDirectory} and then each allowed directory.
      *
      * @param what what the name is for, for error messages (e.g. "external raw data file")
      * @throws HdfUnsupportedException if the policy refuses the name
      * @throws HdfFormatException if the name is not a valid path
      */
     Path resolve(String name, Path baseDirectory, String what) {
+        Path base = base(baseDirectory, name, what);
+        Path named = parse(name, what);
+        List<Path> candidates = isRooted(named) ? List.of(named.toAbsolutePath().normalize())
+                : relativeCandidates(base, named, false);
+        List<Path> allowed = allowed(candidates, base);
+        if (allowed.isEmpty()) {
+            throw refused(what, name, base);
+        }
+        Path found = firstExisting(allowed);
+        return found != null ? found : allowed.getFirst();
+    }
+
+    /**
+     * Resolves a virtual dataset's source file {@code name}, as written in an HDF5 file in
+     * {@code baseDirectory}, in libhdf5's order (see the class description). Returns the first allowed
+     * candidate that exists, or null if the source is missing.
+     *
+     * @throws HdfUnsupportedException if the policy refuses every candidate, or refuses the name's own
+     *         location and no allowed candidate exists
+     * @throws HdfFormatException if the name is not a valid path
+     */
+    Path resolveVirtualSource(String name, Path baseDirectory) {
+        String what = "virtual dataset source file";
+        Path base = base(baseDirectory, name, what);
+        Path named = parse(name, what);
+        List<Path> candidates = new ArrayList<>();
+        if (isRooted(named)) {
+            candidates.add(named.toAbsolutePath().normalize());
+            if (named.getFileName() != null) {
+                candidates.addAll(relativeCandidates(base, named.getFileName(), true));
+            }
+        } else {
+            candidates.addAll(relativeCandidates(base, named, true));
+        }
+        List<Path> allowed = allowed(candidates, base);
+        Path found = firstExisting(allowed);
+        if (allowed.isEmpty() || (found == null && !allowed.contains(candidates.getFirst()))) {
+            throw refused(what, name, base);
+        }
+        return found;
+    }
+
+    private Path base(Path baseDirectory, String name, String what) {
         if (!enabled) {
             throw new HdfUnsupportedException(what + " '" + name + "' is not opened: external file access is disabled");
         }
-        Path base = (baseDirectory == null ? Path.of("") : baseDirectory).toAbsolutePath().normalize();
-        List<Path> candidates = new ArrayList<>();
+        return (baseDirectory == null ? Path.of("") : baseDirectory).toAbsolutePath().normalize();
+    }
+
+    private static Path parse(String name, String what) {
         try {
             if (name.isEmpty() || name.indexOf('\0') >= 0) {
                 throw new InvalidPathException(name, "empty or contains NUL");
             }
-            Path named = Path.of(name);
-            if (named.isAbsolute() || named.getRoot() != null) {
-                candidates.add(named.toAbsolutePath().normalize());
-            } else {
-                candidates.add(base.resolve(named).normalize());
-                for (Path directory : directories) {
-                    candidates.add(directory.resolve(named).normalize());
-                }
-            }
+            return Path.of(name);
         } catch (InvalidPathException e) {
             throw new HdfFormatException(what + " name is not a valid path: '" + name + "'", e);
         }
+    }
+
+    /** True for an absolute name, or one with a root (on Windows, {@code \\dir} or {@code C:dir}). */
+    private static boolean isRooted(Path named) {
+        return named.isAbsolute() || named.getRoot() != null;
+    }
+
+    /** {@code named} in the base directory, then each allowed directory, then perhaps the working directory. */
+    private List<Path> relativeCandidates(Path base, Path named, boolean workingDirectory) {
+        List<Path> candidates = new ArrayList<>();
+        candidates.add(base.resolve(named).normalize());
+        for (Path directory : directories) {
+            candidates.add(directory.resolve(named).normalize());
+        }
+        if (workingDirectory && unrestricted) {
+            candidates.add(Path.of("").toAbsolutePath().resolve(named).normalize());
+        }
+        return candidates;
+    }
+
+    private List<Path> allowed(List<Path> candidates, Path base) {
         List<Path> allowed = new ArrayList<>();
         for (Path candidate : candidates) {
             if (unrestricted || isInside(candidate, base) || directories.stream().anyMatch(d -> isInside(candidate, d))) {
                 allowed.add(candidate);
             }
         }
-        if (allowed.isEmpty()) {
-            throw new HdfUnsupportedException(what + " '" + name + "' lies outside " + base
-                    + (directories.isEmpty() ? "" : " and " + directories)
-                    + "; open the file with ExternalFileAccess.unrestricted() or allowDirectory(...) to read it");
-        }
-        for (Path candidate : allowed) {
+        return allowed;
+    }
+
+    private static Path firstExisting(List<Path> candidates) {
+        for (Path candidate : candidates) {
             if (Files.exists(candidate)) {
                 return candidate;
             }
         }
-        return allowed.getFirst();
+        return null;
+    }
+
+    private HdfUnsupportedException refused(String what, String name, Path base) {
+        return new HdfUnsupportedException(what + " '" + name + "' lies outside " + base
+                + (directories.isEmpty() ? "" : " and " + directories)
+                + "; open the file with ExternalFileAccess.unrestricted() or allowDirectory(...) to read it");
     }
 
     private static boolean isInside(Path candidate, Path directory) {

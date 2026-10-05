@@ -2,16 +2,18 @@ package com.ebremer.falcon.hdf5.io;
 
 import com.ebremer.falcon.hdf5.ExternalFileAccess;
 import com.ebremer.falcon.hdf5.HdfClosedException;
+import com.ebremer.falcon.hdf5.header.SharedMessageTable;
 import java.nio.file.Path;
 
 /**
  * Per-file addressing context threaded through the format parsers: the mapped bytes plus the
  * superblock's "size of offsets" (file address width) and "size of lengths" (object size width). The
  * file's own path, root group, and {@link ExternalFileAccess} policy are carried too, so soft links can
- * resolve absolute paths and external raw data and virtual-dataset sources can be located.
+ * resolve absolute paths and external raw data and virtual-dataset sources can be located, and so is the
+ * superblock extension, which locates the shared-message table.
  *
  * <p>Shared by every object of one open file, including across threads: it is immutable apart from the
- * (thread-safe) decoded-chunk cache and the closed flag.
+ * (thread-safe) decoded-chunk cache, the lazily read shared-message table, and the closed flag.
  *
  * <p>Internal type &mdash; lives in a non-exported package.
  */
@@ -23,21 +25,25 @@ public final class FileContext {
     private final Path path;
     private final long rootAddress;
     private final ExternalFileAccess externalFileAccess;
+    private final long superblockExtensionAddress;
     private final ChunkCache chunkCache = new ChunkCache(); // per-file decoded-chunk cache
+    private volatile SharedMessageTable sharedMessageTable; // read on first use, then cached
     private volatile boolean closed;
 
     public FileContext(HdfBuffer buffer, int sizeOfOffsets, int sizeOfLengths) {
-        this(buffer, sizeOfOffsets, sizeOfLengths, null, HdfBuffer.UNDEFINED_ADDRESS, ExternalFileAccess.sameDirectory());
+        this(buffer, sizeOfOffsets, sizeOfLengths, null, HdfBuffer.UNDEFINED_ADDRESS, ExternalFileAccess.sameDirectory(),
+                HdfBuffer.UNDEFINED_ADDRESS);
     }
 
     public FileContext(HdfBuffer buffer, int sizeOfOffsets, int sizeOfLengths, Path path, long rootAddress,
-                       ExternalFileAccess externalFileAccess) {
+                       ExternalFileAccess externalFileAccess, long superblockExtensionAddress) {
         this.buffer = buffer;
         this.sizeOfOffsets = sizeOfOffsets;
         this.sizeOfLengths = sizeOfLengths;
         this.path = path;
         this.rootAddress = rootAddress;
         this.externalFileAccess = externalFileAccess;
+        this.superblockExtensionAddress = superblockExtensionAddress;
     }
 
     /** The file's bytes; fails with {@link HdfClosedException} once the file is closed. */
@@ -64,6 +70,21 @@ public final class FileContext {
     /** Which other files this file may make Falcon open. */
     public ExternalFileAccess externalFileAccess() {
         return externalFileAccess;
+    }
+
+    /** The superblock extension's object-header address, or undefined if the file has none. */
+    public long superblockExtensionAddress() {
+        return superblockExtensionAddress;
+    }
+
+    /** The file's shared-message (SOHM) table, read on first use. */
+    public SharedMessageTable sharedMessageTable() {
+        SharedMessageTable result = sharedMessageTable;
+        if (result == null) {
+            result = SharedMessageTable.parse(this);
+            sharedMessageTable = result;
+        }
+        return result;
     }
 
     public int sizeOfOffsets() {

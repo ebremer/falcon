@@ -1,8 +1,8 @@
 # Falcon HDF5 — remaining work (prioritized)
 
-**Status (2026-10-05, after the P1 pass):** build green, **228 HDF5 tests** (144 at the review, 187
-after the top 10, 206 after P0). The review's top 10, **every P0 item, and every P1 item** are done (see
-*Done* at the end). Falcon now:
+**Status (2026-10-05, after P2 S1–S3):** build green, **243 HDF5 tests** (144 at the review, 187 after
+the top 10, 206 after P0, 228 after P1). The review's top 10, **every P0 item, every P1 item, and P2
+S1–S3** are done (see *Done* at the end). Falcon now:
 
 - reads the files the review showed it misreading:
   - real libhdf5 szip and scale-offset data;
@@ -15,7 +15,9 @@ after the top 10, 206 after P0). The review's top 10, **every P0 item, and every
   - soft and external links (old- and new-style groups);
   - fractal-heap huge and tiny objects and nested indirect blocks;
   - every VDS mapping and region-reference selection encoding;
-  - shared messages (SOHM is reported, not misread).
+  - shared messages, including SOHM (the shared-message heap);
+  - revised references (`H5R_ref_t`);
+  - unlimited and printf-style VDS mappings, with libhdf5's source search order.
 - writes files that **HDF5 2.0 and 1.14 read**, checked by `tools/fixtures/check_hdf5_writer.py`. The
   final run read 83/83 objects with HDF5 2.0 and 78/78 with 1.14.6. The P0 edge-case files written by
   the previous writer fail 19 objects under each version.
@@ -25,6 +27,20 @@ after the top 10, 206 after P0). The review's top 10, **every P0 item, and every
   default, and supports concurrent reads of one open file.
 
 P0 and P1 are empty. What remains is features and API (P2) and docs and build (P3).
+
+**API changes in P2 S1–S3** (pre-1.0):
+- References:
+  - new `readAttributeReferences()` on `Dataset` and `Attribute`, and `Attribute.readRegionReferences()`;
+  - `readObjectReferences()` and `readRegionReferences()` also read revised references;
+  - `read()` returns `Hdf5Object[]` for revised references;
+  - `Attribute.read()` returns `Selection[]` for region references.
+- Virtual datasets:
+  - `Dataset.dataspace()` of a virtual dataset with unlimited mappings takes the extent from its sources.
+    It may open them, and fails under a policy that refuses them.
+  - A missing source dataset in an existing file reads as the fill value, as in libhdf5. It used to
+    throw `HdfFormatException`.
+  - Sources are looked for in libhdf5's order: an absolute name falls back to its file name, and
+    `unrestricted()` also tries the working directory.
 
 **API changes in the P0 pass** (pre-1.0):
 - `read()` returns `long[]` for `uint32` and `BigInteger[]` for `uint64`.
@@ -78,15 +94,16 @@ review baseline. Abbreviations: `W` = `Hdf5Writer.java`; other paths are under
    - string attributes;
    - unsigned integers;
    - chunking for every type.
-4. **S1 — SOHM.** Objects whose messages live in the shared-message heap are reported as unsupported.
-5. **S4 — third-party filters:** LZF, blosc, zstd, lz4, and bitshuffle. This needs the `falcon.core`
+4. **S4 — third-party filters:** LZF, blosc, zstd, lz4, and bitshuffle. This needs the `falcon.core`
    decision first.
-6. **A4/A5 — selections and paths:**
+5. **A4/A5 — selections and paths:**
    - strided and point selections in `select`;
    - vlen readers on `Selection`;
    - `child("a/b")` path lookup.
-7. **PF1/PF3 — lookups:** cache each dataset's chunk index; look attributes up by name.
-8. **S2/S3 — unlimited-pattern VDS mappings and revised `H5R_ref_t` references.**
+6. **PF1/PF3 — lookups:** cache each dataset's chunk index; look attributes up by name.
+7. **A8 — internal types out of the public API.** `Attribute`'s public constructor exposes `FileContext`;
+   pre-1.0 is the time to fix it.
+8. **A2/A3 — numeric widening reads and storage metadata** (chunk shape, filters, layout, size).
 9. **D1/D3 — docs that overclaim, and a stale PLAN.md.**
 10. **B1/B2 — CI and release plumbing:** a Windows CI leg, source and Javadoc jars, and the enforcer.
     New plugins need Erich's approval.
@@ -106,13 +123,10 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
 
 ### Read features
 
-- [ ] **S1 — SOHM shared-message deduplication** (message 15 + its fractal heap). (carried over)
-  - Now producible: the review generated a SOHM file with h5py via `H5Pset_shared_mesg_index`.
-- [ ] **S2 — unlimited-pattern (printf) VDS mappings.** (carried over)
-  - **Also:** `%%` unescaping, and libhdf5's source search order: `HDF5_VDS_PREFIX`, then the CWD, then
-    the basename in the VDS directory (`VirtualDataset.java:217-223`). Today a VDS moved with its
-    sources reads as fill.
-- [ ] **S3 — the revised `H5R_ref_t` reference encoding** (HDF5 1.12+). (carried over; see V11)
+- S1–S3 are done (see *Done — 2026-10-05 (P2: S1–S3)*). Still open around them:
+  - [ ] **S7 — VDS views:** libhdf5's "first missing" view and printf gaps other than 0
+    (`H5Pset_virtual_view`, `H5Pset_virtual_printf_gap`) as open options. Falcon reads with the
+    defaults.
 - [ ] **S4 — third-party filters common in the wild:**
   - LZF (32000, built into h5py);
   - bitshuffle (32008);
@@ -177,7 +191,8 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
 - [ ] **PF1 — cache the chunk index per dataset and look up by coordinate.** Every `Selection` read
   re-walks the whole index, so `blocks()` costs O(blocks × chunks). (`ChunkedReader.java:72`)
 - [ ] **PF2 — read VDS selections lazily.** Today they re-assemble the whole VDS and re-map every source
-  file per call (`Dataset.java:348`).
+  file per call (`Dataset.java:348`). With unlimited mappings, `dataspace()` maps the sources once more
+  to find the extent.
 - [ ] **PF3 — use name indexes for lookup.**
   - `attribute(name)` reparses every attribute on each call.
   - A dense group's `link(name)` scans the link list; the name-hash B-tree could find it directly.
@@ -200,6 +215,8 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
     limits, typed fill values, and the EARLIEST message versions.
   - **Also done (P1 pass):** links, the external-file policy, closed files, region-reference selections,
     and the writer's lifecycle (atomic close, `abort()`, retry).
+  - **Also done (P2 S1–S3):** revised references, unlimited and printf-style VDS, and where VDS sources
+    are looked for.
   - **Still to document:** the writer's memory use (WF1).
 - [ ] **D3 — PLAN.md is stale.**
   - §6 lists the non-existent `dataspace` and `util` packages, omits `data`, `index`, and `group`, and
@@ -221,6 +238,66 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
   - The root `pom.xml` description says "a zarr module is planned".
 
   Editing CLAUDE.md is Erich's call.
+
+## Done — 2026-10-05 (P2: S1–S3)
+
+Each fixture comes from libhdf5 2.0 via `gen_fixtures.py`, through h5py's bundled library (ctypes)
+where h5py has no API: `sohm` (`sohm.h5`, `sohm_latest.h5`), `revised_refs`, and `vds_unlimited`. HDF5
+1.14.6 writes the same revised-reference bytes and reads every VDS case to the same shape and values.
+
+- [x] **S1 — SOHM.**
+  - New `header/SharedMessageTable` reads the master table (`SMTB`), found from the superblock
+    extension's message 15. It is verified by checksum, and libhdf5's type flags (`1 << message type`,
+    confirmed against libhdf5) pick each message type's index.
+  - A version-3 shared message of type 1 is read from that index's fractal heap: managed, huge, or tiny.
+    A tiny object lives in its heap ID, so `HeaderMessage.buffer()` may be its own; every message parser
+    now reads from the message's buffer.
+  - Dense attribute records flagged as shared name the SOHM heap, not the object's own heap (P1 looked in
+    the wrong heap).
+  - Shared datatypes and the dataspaces of attributes go through the same path.
+  - **Found on the way:** with creation order tracked, a v2 object-header message header is 6 bytes. A
+    4–5 byte gap at a chunk's end was misparsed as a message (`ObjectHeader.java`), which made the root
+    group of `sohm_latest.h5` unreadable.
+  - Tested by `P2ReadTest.sharedObjectHeaderMessages` (both formats: shared datasets, a tiny scalar
+    dataspace, a huge 8000-byte attribute, 13 dense shared attributes, a shared compound type).
+- [x] **S2 — unlimited and printf-style VDS mappings.**
+  - `Dataset.dataspace()` takes the extent from the sources, as `H5D__virtual_set_extent_unlim` does with
+    libhdf5's defaults (last-available view, printf gap 0):
+    - unlimited mappings clip the source selection to the source's extent and the virtual one to match;
+    - printf mappings (`%b`; `%%` is `%`) map source *b* to block *b* until the first missing source;
+    - fixed mappings floor the extent.
+  - New `DataspaceSelection` operations: `unlimitedDimension`, `selectedBelow`, `extentSelecting`,
+    `clippedOffsets`, `blockOffsets`, `blockEnd`, `highCorner`.
+  - Source search, measured against libhdf5 2.0 and 1.14.6:
+    - an absolute name is tried, then its file name alone;
+    - a relative name is tried beside the VDS, then in the working directory;
+    - a relative name with a directory gets no file-name fallback.
+
+    Falcon follows this order within the `ExternalFileAccess` policy, trying the working directory only
+    under `unrestricted()`. The TODO's earlier order (CWD before the VDS directory) was wrong.
+  - A refused name with no allowed candidate on disk fails rather than filling. Exception: past a printf
+    mapping's first source, a refusal ends the search as a missing source does.
+  - A missing source dataset fills, as in libhdf5, rather than throwing.
+  - Tested by `P2ReadTest.virtualDatasetsReadAsLibhdf5ReadsThem`: ten datasets checked against libhdf5's
+    own reading (rows, interleaved columns, printf in file and dataset names, `%%`, a gap, none found,
+    floored, moved, and relative with a directory). Also `virtualSourcesThePolicyRefuses` and
+    `printfSourceNames`.
+- [x] **S3 — revised references.**
+  - New `RevisedReference` decodes the disk form (`H5T__ref_disk_*`):
+    - a local object reference is stored in the element;
+    - everything else is `size · global heap ID` of the encoded reference (token, an optional external
+      file name, then a region's `size · rank · selection` or an attribute name);
+    - an all-zero element is null.
+  - libhdf5 writes every `H5T_STD_REF` datatype as `REVISED_OBJECT`, so elements carry their own kind.
+    `readObjectReferences` resolves any kind to its object, and `readRegionReferences` makes a
+    non-region element an unresolved selection. New `readAttributeReferences`, and
+    `Attribute.readRegionReferences` (which also reads original region references in attributes).
+  - A reference into another file names it; Falcon does not follow it.
+  - Tested by `P2ReadTest.revisedReferences`: objects, regions (block, points, all, two blocks), and
+    attributes; nulls, a mix, an external reference, and an attribute holding references.
+- **T3:** the fuzz set adds `sohm_latest.h5`, `refs_revised.h5`, and `vds_unlimited.h5`. It also reads
+  the regions and attributes of revised references. Each fuzz pass takes about 80 s against a 300 s
+  limit.
 
 ## Done — 2026-10-05 (P1)
 

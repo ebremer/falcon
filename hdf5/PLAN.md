@@ -23,9 +23,9 @@ See the root [`../PLAN.md`](../PLAN.md) for the umbrella roadmap.
 > **attributes**, switching groups and objects to **dense storage** (fractal heap + v2 B-tree) past 8
 > links/attributes, and optionally the **earliest on-disk format** (v0 superblock, symbol-table groups,
 > v1 headers) — read back identically by Falcon *and h5py* (szip verified via libaec, since h5py's szip
-> is disabled here). Remaining: a couple of niche write datatypes (bitfield / opaque / time); and a few
-> read edge cases that this environment can't produce (SOHM shared messages, unlimited-pattern VDS, the
-> revised reference encoding).
+> is disabled here). Remaining: a couple of niche write datatypes (bitfield / opaque / time). The read
+> edge cases once deferred (SOHM shared messages, unlimited-pattern VDS, the revised reference encoding)
+> are done, from fixtures made through h5py's bundled libhdf5 (see [`TODO.md`](TODO.md)).
 
 This document is the **HDF5 module roadmap**, organized as stages **H0–H9** (§8). The sibling Zarr
 module has its own [`../zarr/PLAN.md`](../zarr/PLAN.md); the umbrella phase table lives in the root
@@ -111,11 +111,10 @@ round-trip conformance** against h5py. Every non-goal falls out of that boundary
   test is semantic round-trip — h5py reads what Falcon writes and vice versa — which Falcon does across
   the whole fixture matrix.
 
-**Not a non-goal — deferred.** Distinct from the above (which are out of scope *by design*), a handful of
-in-scope features are simply not done yet or can't be produced/validated by the local h5py build (which
-ships szip disabled and won't emit SOHM): SOHM shared-message deduplication, the revised `H5R_ref_t`
-reference encoding, unlimited-pattern (printf) VDS mappings, and the bitfield/opaque/time datatype
-classes on write. See the stage roadmap (§8) and [`TODO.md`](TODO.md). **Zarr** is Falcon Phase 2 (§12).
+**Not a non-goal — deferred.** Distinct from the above (which are out of scope *by design*), a few
+in-scope features are simply not done yet: the bitfield/opaque/time datatype classes on write. (SOHM
+shared-message deduplication, the revised `H5R_ref_t` reference encoding, and unlimited-pattern (printf)
+VDS mappings are read since P2, from fixtures made through h5py's bundled libhdf5.) See the stage roadmap (§8) and [`TODO.md`](TODO.md). **Zarr** is Falcon Phase 2 (§12).
 
 > **szip is IN scope** (changed from the draft): implemented from scratch in pure Java (§9).
 
@@ -271,8 +270,9 @@ Each stage ends with a **milestone** and concrete **acceptance criteria**. "Refe
   locating the committed type's object header; `DatatypeMessage.resolve` follows it (and any chain) for
   both datasets and attributes. Committed-type objects are a first-class `CommittedDatatype` in the
   object hierarchy (navigable via `group.committedType(name)`), across old- and new-style files.
-  Deferred: the **SOHM heap** form (arbitrary messages deduplicated via the Shared Message Table 15 /
-  a fractal heap) throws unsupported; v2 B-tree type 7.
+  The **SOHM heap** form (messages deduplicated through the Shared Message Table, message 15, and the
+  fractal heap of each index) is read since P2; its index (a list or v2 B-tree type 7) is not needed to
+  read.
 - **Milestone:** full read of modern HDF5 (dense links/attrs, vlen, committed types).
 - **Acceptance:** listings + attribute values + vlen data match h5py for dense-storage, large-group,
   and shared-datatype fixtures.
@@ -282,11 +282,12 @@ Each stage ends with a **milestone** and concrete **acceptance criteria**. "Refe
   source file (relative to the VDS), reads its selection, and scatters it into the virtual layout,
   honouring the fill value. Selections resolve via a general gather-scatter over enumerated element
   offsets, so **regular hyperslabs incl. strided / multi-block** patterns work (ALL + single-block are a
-  special case); unlimited-extent selection patterns still throw a clear unsupported error.
+  special case). Unlimited mappings, both unlimited and printf-style (`%b`), are read since P2, with the
+  extent set from the sources as libhdf5 sets it.
 - **References ✓**: **object references** (8-byte object-header address → navigable `Hdf5Object` via
   `readObjectReferences()`) and **region references** (global-heap ID → dataset + serialized selection
-  → `Selection` via `readRegionReferences()`), on datasets and attributes. Revised (`H5R_ref_t`)
-  encoding later.
+  → `Selection` via `readRegionReferences()`), on datasets and attributes. The revised (`H5R_ref_t`)
+  encoding is read since P2, including attribute references (`readAttributeReferences()`).
 - **Object metadata ✓**: **Object Comment (13)**, **Modification Time (18)** + version-2 header-prefix
   time, **Object Reference Count (22)** + version-1 prefix count — via `comment()` /
   `modificationTime()` / `referenceCount()` on every object.
@@ -303,9 +304,9 @@ Each stage ends with a **milestone** and concrete **acceptance criteria**. "Refe
   and **signed AEC/szip** decode (sign-extended reference/raw samples + signed unmap bounds, validated
   against libaec signed vectors). Threading the datatype's signedness into the szip *filter* to reach
   the signed AEC path on a real file remains (untestable here — szip is disabled in this h5py).
-- **Deferred read edge cases** (each isolated, none block real files, and none producible by this
-  environment): SOHM shared-message dedup (msg 15); unlimited-pattern (printf-style) VDS mappings; the
-  revised `H5R_ref_t` reference encoding; multi-file drivers (family/multi/split, a non-goal).
+- **Deferred read edge cases:** multi-file drivers (family/multi/split, a non-goal). SOHM shared-message
+  dedup (msg 15), unlimited-pattern (printf-style) VDS mappings, and the revised `H5R_ref_t` reference
+  encoding, once deferred here, are done (P2).
 
 ### H7 — Write path foundations
 - **File-space allocation**: end-of-file bump allocator ✓ (`write.GrowBuffer`, append + patch +

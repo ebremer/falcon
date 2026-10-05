@@ -86,7 +86,7 @@ class P1ReadTest {
             Dataset refs = h5.root().dataset("refs");
             byte[] raw = refs.readRawBytes();
             ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN).putInt(12 + 8, 999); // ref 1 -> a missing heap object
-            Selection[] regions = Hdf5Object.resolveRegionReferences(refs.ctx, MemorySegment.ofArray(raw), 7, 12);
+            Selection[] regions = Hdf5Object.resolveRegionReferences(refs.ctx, MemorySegment.ofArray(raw), 7, 12, false);
             assertArrayEquals(new int[] {1, 2, 5, 6}, regions[0].readInts());
             assertThrows(HdfFormatException.class, regions[1]::readInts);
             assertThrows(HdfFormatException.class, regions[1]::dataset);
@@ -144,21 +144,5 @@ class P1ReadTest {
         assertThrows(HdfClosedException.class, x::attributes);
         assertInstanceOf(HdfException.class, assertThrows(HdfClosedException.class, () -> root.group("data")));
         assertThrows(HdfClosedException.class, x::datatype);
-    }
-
-    @Test
-    void sharedObjectHeaderMessagesAreReportedNotMisread() throws IOException {
-        // Under SOHM every dataspace, datatype, fill value, pipeline and attribute message is a reference
-        // into the shared-message heap. Falcon does not read that heap yet (P2 S1): it must say so.
-        try (Hdf5File h5 = Hdf5File.open(Fixtures.path("sohm.h5"))) {
-            assertEquals(java.util.List.of("a", "b", "group"), h5.root().childNames().stream().sorted().toList());
-            // The first dataset keeps its own copies of the messages; the second refers to the shared heap.
-            Dataset a = h5.root().dataset("a");
-            assertArrayEquals(new int[] {0, 1, 2, 3, 4, 5}, a.readInts());
-            Dataset b = h5.root().dataset("b");
-            assertThrows(HdfUnsupportedException.class, b::dataspace);
-            assertThrows(HdfUnsupportedException.class, b::readInts);
-            assertThrows(HdfUnsupportedException.class, a::attributes); // its attribute's dataspace is shared
-        }
     }
 }

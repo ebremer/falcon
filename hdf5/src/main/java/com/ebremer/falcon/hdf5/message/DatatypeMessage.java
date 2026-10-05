@@ -5,7 +5,6 @@ import com.ebremer.falcon.hdf5.HdfUnsupportedException;
 import com.ebremer.falcon.hdf5.datatype.Datatype;
 import com.ebremer.falcon.hdf5.header.HeaderMessage;
 import com.ebremer.falcon.hdf5.header.MessageType;
-import com.ebremer.falcon.hdf5.header.ObjectHeader;
 import com.ebremer.falcon.hdf5.header.SharedMessage;
 import com.ebremer.falcon.hdf5.io.FileContext;
 import com.ebremer.falcon.hdf5.io.HdfBuffer;
@@ -36,31 +35,18 @@ public final class DatatypeMessage {
     /** Deepest nesting of compound / enum / vlen / array / complex base types accepted. */
     private static final int MAX_NESTING = 64;
 
-    private static final int MAX_COMMITTED_DEPTH = 16;
-
     /**
-     * Resolves a datatype that may be <b>committed</b> (shared): if {@code shared}, {@code bodyOffset}
-     * points at a {@link SharedMessage} locating the committed datatype's object header, whose own
-     * Datatype message is read (following a chain of committed references if necessary). Otherwise the
-     * datatype is parsed inline from {@code bodyOffset}.
+     * Resolves a datatype that may be <b>shared</b>: if {@code shared}, {@code bodyOffset} points at a
+     * {@link SharedMessage} locating a committed datatype's object header (following a chain of committed
+     * references if necessary) or a copy in the shared-message heap, whose Datatype message is read.
+     * Otherwise the datatype is parsed inline from {@code bodyOffset}.
      */
     public static Datatype resolve(FileContext ctx, long bodyOffset, boolean shared) {
-        return resolve(ctx, bodyOffset, shared, 0);
-    }
-
-    private static Datatype resolve(FileContext ctx, long bodyOffset, boolean shared, int depth) {
         if (!shared) {
             return parse(ctx.buffer(), bodyOffset);
         }
-        if (depth > MAX_COMMITTED_DEPTH) {
-            throw new HdfFormatException("committed datatype reference chain too deep (possible cycle)");
-        }
-        long typeHeader = SharedMessage.objectHeaderAddress(ctx, bodyOffset);
-        HeaderMessage datatype = ObjectHeader.parse(ctx, typeHeader).find(MessageType.DATATYPE);
-        if (datatype == null) {
-            throw new HdfFormatException("committed datatype object at " + typeHeader + " has no datatype message");
-        }
-        return resolve(ctx, datatype.bodyOffset(), SharedMessage.isShared(datatype), depth + 1);
+        HeaderMessage datatype = SharedMessage.target(ctx, bodyOffset, MessageType.DATATYPE);
+        return parse(datatype.buffer(), datatype.bodyOffset());
     }
 
     private static final class Result {

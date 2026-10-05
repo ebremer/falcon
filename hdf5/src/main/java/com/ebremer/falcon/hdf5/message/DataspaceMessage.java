@@ -2,6 +2,7 @@ package com.ebremer.falcon.hdf5.message;
 
 import com.ebremer.falcon.hdf5.Dataspace;
 import com.ebremer.falcon.hdf5.HdfFormatException;
+import com.ebremer.falcon.hdf5.header.HeaderMessage;
 import com.ebremer.falcon.hdf5.io.FileContext;
 import com.ebremer.falcon.hdf5.io.HdfBuffer;
 
@@ -22,7 +23,16 @@ public final class DataspaceMessage {
     }
 
     public static Dataspace parse(FileContext ctx, long off) {
-        HdfBuffer buf = ctx.buffer();
+        return parse(ctx.buffer(), off, ctx.sizeOfLengths());
+    }
+
+    /** Parses a dataspace message, which may be a shared one held in its own buffer. */
+    public static Dataspace parse(FileContext ctx, HeaderMessage message) {
+        return parse(message.buffer(), message.bodyOffset(), ctx.sizeOfLengths());
+    }
+
+    /** Parses the dataspace message body at {@code off} of {@code buf}. */
+    public static Dataspace parse(HdfBuffer buf, long off, int lengths) {
         int version = buf.getUnsignedByte(off);
         int rank = buf.getUnsignedByte(off + 1);
         int flags = buf.getUnsignedByte(off + 2);
@@ -44,7 +54,6 @@ public final class DataspaceMessage {
             throw new HdfFormatException("unsupported dataspace message version " + version);
         }
 
-        int lengths = ctx.sizeOfLengths();
         long[] dims = new long[rank];
         for (int i = 0; i < rank; i++) {
             dims[i] = buf.getUnsignedValue(p, lengths);

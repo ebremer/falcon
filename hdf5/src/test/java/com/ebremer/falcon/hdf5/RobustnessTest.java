@@ -28,6 +28,7 @@ class RobustnessTest {
         "unwritten_latest.h5", "scaleoffset.h5", "szip.h5", "userblock_v3.h5", "filter_edge.h5",
         "links.h5", "links_old.h5", "heap_limits.h5", "vds_default.h5", "vds_latest.h5",
         "regionrefs_default.h5", "regionrefs_latest.h5", "sohm.h5", "external_paths.h5", "ea_paged.h5",
+        "sohm_latest.h5", "refs_revised.h5", "vds_unlimited.h5",
     };
 
     @Test
@@ -104,11 +105,11 @@ class RobustnessTest {
         try {
             attributes = object.attributes();
         } catch (HdfUnsupportedException unsupported) {
-            attributes = List.of(); // e.g. shared (SOHM) attribute messages
+            attributes = List.of(); // e.g. an attribute of a datatype Falcon does not parse
         }
         for (Attribute attribute : attributes) {
             try {
-                attribute.read();
+                readSelections(attribute.read());
             } catch (HdfUnsupportedException unsupported) {
                 // fine: keep reading the rest of the file
             }
@@ -130,16 +131,29 @@ class RobustnessTest {
                     return;
                 }
                 dataset.readRawBytes();
-                Object value = dataset.read();
-                if (value instanceof Selection[] regions) {
-                    for (Selection region : regions) {
-                        if (region != null) {
-                            region.readDoubles();
-                        }
-                    }
+                readSelections(dataset.read());
+                if (Hdf5Object.isRevisedReference(dataset.datatype())) {
+                    // A revised reference may hold any kind: read its regions and attributes too.
+                    readSelections(dataset.readRegionReferences());
+                    dataset.readAttributeReferences();
                 }
             } catch (HdfUnsupportedException unsupported) {
                 // fine: keep reading the rest of the file
+            }
+        }
+    }
+
+    /** Reads every region a read returned, if it returned regions. */
+    private static void readSelections(Object value) {
+        if (value instanceof Selection[] regions) {
+            for (Selection region : regions) {
+                try {
+                    if (region != null) {
+                        region.readDoubles();
+                    }
+                } catch (HdfUnsupportedException unsupported) {
+                    // e.g. a revised reference that is not a region: keep reading the others
+                }
             }
         }
     }

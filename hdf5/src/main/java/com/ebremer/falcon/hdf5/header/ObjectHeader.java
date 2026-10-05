@@ -177,6 +177,9 @@ public final class ObjectHeader {
         // The checksum of chunk 0 follows its messages and covers the header from the signature on.
         MetadataChecksum.verify(buf, addr, p + chunk0Size - addr, "object header");
         boolean creationOrder = (flags & 0x04) != 0;
+        // type(1), size(2), flags(1), then a creation-order index(2) if tracked. Fewer bytes than this
+        // left at the end of a chunk are a gap, not a message.
+        int messageHeaderSize = creationOrder ? 6 : 4;
         List<HeaderMessage> out = new ArrayList<>();
         ArrayDeque<Chunk> chunks = new ArrayDeque<>();
         chunks.add(new Chunk(p, chunk0Size));
@@ -185,11 +188,11 @@ public final class ObjectHeader {
             Chunk chunk = chunks.poll();
             long q = chunk.start();
             long end = chunk.start() + chunk.size();
-            while (q + 4 <= end) {
+            while (q + messageHeaderSize <= end) {
                 int type = buf.getUnsignedByte(q);
                 int msgSize = buf.getUnsignedShort(q + 1);
                 int msgFlags = buf.getUnsignedByte(q + 3);
-                long body = q + 4 + (creationOrder ? 2 : 0);
+                long body = q + messageHeaderSize;
                 checkFits(body, msgSize, end);
                 if (type == MessageType.OBJECT_HEADER_CONTINUATION) {
                     long contAddr = buf.getAddress(body, ctx.sizeOfOffsets());

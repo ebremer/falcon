@@ -2,6 +2,7 @@ package com.ebremer.falcon.hdf5;
 
 import com.ebremer.falcon.hdf5.btree.BTreeV2;
 import com.ebremer.falcon.hdf5.data.DataspaceSelection;
+import com.ebremer.falcon.hdf5.datatype.Datatype;
 import com.ebremer.falcon.hdf5.header.HeaderMessage;
 import com.ebremer.falcon.hdf5.header.MessageType;
 import com.ebremer.falcon.hdf5.header.ObjectHeader;
@@ -80,12 +81,13 @@ public abstract sealed class Hdf5Object permits Group, Dataset, CommittedDatatyp
             if (fractalHeap != HdfBuffer.UNDEFINED_ADDRESS) {
                 FractalHeap heap = FractalHeap.parse(ctx, fractalHeap);
                 for (byte[] record : BTreeV2.readRecords(ctx, AttributeInfoMessage.nameBTreeAddress(ctx, attributeInfo))) {
-                    // attribute-name-index record (type 8): heap ID, then the message flags.
-                    FractalHeap.HeapObject object = heap.locate(Arrays.copyOfRange(record, 0, heap.idLength()));
+                    // attribute-name-index record (type 8): heap ID, then the message flags. A shared
+                    // attribute's ID names its copy in the shared-message heap, not in this object's heap.
+                    byte[] heapId = Arrays.copyOfRange(record, 0, heap.idLength());
                     if ((record[heap.idLength()] & SharedMessage.SHARED_FLAG) != 0) {
-                        HeaderMessage shared = SharedMessage.target(ctx, object.address(), MessageType.ATTRIBUTE);
-                        out.add(AttributeMessage.parse(ctx, shared));
+                        out.add(AttributeMessage.parse(ctx, SharedMessage.heapMessage(ctx, heapId, MessageType.ATTRIBUTE)));
                     } else {
+                        FractalHeap.HeapObject object = heap.locate(heapId);
                         out.add(AttributeMessage.parse(ctx, object.address(), object.length()));
                     }
                 }
@@ -151,16 +153,41 @@ public abstract sealed class Hdf5Object permits Group, Dataset, CommittedDatatyp
         return Dataset.child(ctx, name, parentPath, objectHeaderAddress);
     }
 
+    /** True for a revised reference datatype ({@code H5R_ref_t}, HDF5 1.12+). */
+    static boolean isRevisedReference(Datatype type) {
+        return type instanceof Datatype.Reference reference && switch (reference.kind()) {
+            case REVISED_OBJECT, REVISED_DATASET_REGION, REVISED_ATTRIBUTE -> true;
+            default -> false;
+        };
+    }
+
+    /** True for an original reference datatype of the given kind. */
+    static boolean isReference(Datatype type, Datatype.ReferenceKind kind) {
+        return type instanceof Datatype.Reference reference && reference.kind() == kind;
+    }
+
     /**
      * Resolves an object-reference buffer: each {@code stride}-byte element is a target object-header
-     * address, resolved to the object it points at (or {@code null} for a null reference). Resolved
-     * objects carry no reconstructed name/path; identify them via {@link #objectHeaderAddress()}.
+     * address (or, if {@code revised}, a {@link RevisedReference} of any kind), resolved to the object it
+     * points at or into (or {@code null} for a null reference). Resolved objects carry no reconstructed
+     * name/path; identify them via {@link #objectHeaderAddress()}.
+     *
+     * @throws HdfUnsupportedException for a revised reference into another file
      */
-    static Hdf5Object[] resolveObjectReferences(FileContext ctx, MemorySegment data, int count, int stride) {
+    static Hdf5Object[] resolveObjectReferences(FileContext ctx, MemorySegment data, int count, int stride,
+                                                boolean revised) {
         HdfBuffer buffer = new HdfBuffer(data);
         int offsets = ctx.sizeOfOffsets();
         Hdf5Object[] out = new Hdf5Object[count];
         for (int i = 0; i < count; i++) {
+            if (revised) {
+                RevisedReference reference = RevisedReference.decode(ctx, buffer, (long) i * stride, stride);
+                if (reference != null) {
+                    reference.requireLocal();
+                    out[i] = classify(ctx, "", "", reference.address());
+                }
+                continue;
+            }
             long address = buffer.getAddress((long) i * stride, offsets);
             // A null object reference is stored as an all-zero (address 0, where the superblock lives,
             // never an object) or all-ones (undefined) address.
@@ -171,18 +198,66 @@ public abstract sealed class Hdf5Object permits Group, Dataset, CommittedDatatyp
     }
 
     /**
-     * Resolves a region-reference buffer: each {@code stride}-byte element is a global-heap ID whose
-     * object holds a target dataset's address followed by a serialized dataspace selection. Returns a
-     * {@link Selection} of the referenced dataset per element, or {@code null} for a null reference (an
-     * all-zero or undefined heap address). An element that cannot be resolved becomes a selection that
-     * throws when used, so it does not fail the others.
+     * Resolves revised attribute references ({@code H5R_ATTR}) to the attributes they name, or
+     * {@code null} for a null reference.
+     *
+     * @throws HdfUnsupportedException for an element that is not an attribute reference, or one into
+     *         another file
+     * @throws HdfFormatException if the object has no attribute of the referenced name
      */
-    static Selection[] resolveRegionReferences(FileContext ctx, MemorySegment data, int count, int stride) {
+    static Attribute[] resolveAttributeReferences(FileContext ctx, MemorySegment data, int count, int stride) {
+        HdfBuffer buffer = new HdfBuffer(data);
+        Attribute[] out = new Attribute[count];
+        for (int i = 0; i < count; i++) {
+            RevisedReference reference = RevisedReference.decode(ctx, buffer, (long) i * stride, stride);
+            if (reference == null) {
+                continue;
+            }
+            if (reference.type() != RevisedReference.ATTRIBUTE) {
+                throw new HdfUnsupportedException("element " + i + " is " + reference.kind()
+                        + ", not an attribute reference (read it with readObjectReferences)");
+            }
+            reference.requireLocal();
+            Hdf5Object object = classify(ctx, "", "", reference.address());
+            out[i] = object.attribute(reference.attributeName()).orElseThrow(() -> new HdfFormatException(
+                    "attribute reference names '" + reference.attributeName() + "', which the object at "
+                    + reference.address() + " does not have"));
+        }
+        return out;
+    }
+
+    /**
+     * Resolves a region-reference buffer: each {@code stride}-byte element is a global-heap ID whose
+     * object holds a target dataset's address followed by a serialized dataspace selection (or, if
+     * {@code revised}, a {@link RevisedReference}). Returns a {@link Selection} of the referenced dataset
+     * per element, or {@code null} for a null reference (an all-zero or undefined heap address). An
+     * element that cannot be resolved, or a revised reference that is not a region in this file, becomes
+     * a selection that throws when used, so it does not fail the others.
+     */
+    static Selection[] resolveRegionReferences(FileContext ctx, MemorySegment data, int count, int stride,
+                                               boolean revised) {
         HdfBuffer buffer = new HdfBuffer(data);
         int offsets = ctx.sizeOfOffsets();
         Selection[] out = new Selection[count];
         for (int i = 0; i < count; i++) {
             long base = (long) i * stride;
+            if (revised) {
+                try {
+                    RevisedReference reference = RevisedReference.decode(ctx, buffer, base, stride);
+                    if (reference == null) {
+                        continue;
+                    }
+                    if (reference.type() != RevisedReference.REGION) {
+                        throw new HdfUnsupportedException("element " + i + " is " + reference.kind()
+                                + ", not a region reference");
+                    }
+                    reference.requireLocal();
+                    out[i] = region(ctx, reference.address(), reference.region(), reference.rank());
+                } catch (HdfException e) {
+                    out[i] = Selection.unresolved(e);
+                }
+                continue;
+            }
             long collection = buffer.getAddress(base, offsets);
             if (collection == HdfBuffer.UNDEFINED_ADDRESS || collection == 0) {
                 continue; // null reference
@@ -200,13 +275,19 @@ public abstract sealed class Hdf5Object permits Group, Dataset, CommittedDatatyp
     /** Parses a serialized region reference (dataset address + dataspace selection) into a selection. */
     private static Selection parseRegion(FileContext ctx, byte[] object, int offsets) {
         HdfBuffer body = HdfBuffer.of(object);
-        long datasetHeader = body.getAddress(0, offsets);
+        return region(ctx, body.getAddress(0, offsets), DataspaceSelection.parse(body, offsets), -1);
+    }
+
+    /** The {@code selection} of the dataset at {@code datasetHeader}; {@code rank} is checked unless -1. */
+    private static Selection region(FileContext ctx, long datasetHeader, DataspaceSelection selection, int rank) {
         if (!(classify(ctx, "", "", datasetHeader) instanceof Dataset dataset)) {
             throw new HdfFormatException("region reference does not point at a dataset");
         }
         long[] dims = dataset.dataspace().dimensions();
+        if (rank >= 0 && rank != dims.length) {
+            throw new HdfFormatException("region reference of rank " + rank + " into a dataset of rank " + dims.length);
+        }
         // The selection comes from the file, so an out-of-range one is corrupt data, not a caller error.
-        DataspaceSelection selection = DataspaceSelection.parse(body, offsets);
         long[][] block = selection.singleBlock(dims);
         return block != null ? dataset.select(block[0], block[1])
                 : Selection.ofCoordinates(dataset, selection.coordinates(dims));

@@ -64,13 +64,24 @@ public final class Dataset extends Hdf5Object {
         return result;
     }
 
-    /** This dataset's shape. */
+    /**
+     * This dataset's shape. A virtual dataset with unlimited mappings takes its extent from its sources,
+     * as libhdf5 does when it opens one: so finding it may open the source files (as the file's
+     * {@link ExternalFileAccess} policy allows).
+     */
     public Dataspace dataspace() {
         ctx.checkOpen();
         Dataspace result = dataspace;
         if (result == null) {
-            result = DataspaceMessage.parse(ctx,
-                    SharedMessage.resolve(ctx, require(MessageType.DATASPACE, "dataspace")).bodyOffset());
+            result = DataspaceMessage.parse(ctx, SharedMessage.resolve(ctx, require(MessageType.DATASPACE, "dataspace")));
+            // Only an unlimited dimension can hold an unlimited mapping.
+            boolean unlimited = java.util.stream.IntStream.range(0, result.rank()).anyMatch(result::isUnlimited);
+            if (unlimited && layout() instanceof DataLayout.Virtual virtual) {
+                long[] dims = VirtualDataset.extent(ctx, virtual, result.dimensions());
+                if (!java.util.Arrays.equals(dims, result.dimensions())) {
+                    result = new Dataspace(result.version(), result.kind(), dims, result.maxDimensions());
+                }
+            }
             dataspace = result;
         }
         return result;
@@ -160,25 +171,53 @@ public final class Dataset extends Hdf5Object {
     /**
      * Reads an object-reference dataset, resolving each element to the object it points at (a group,
      * dataset, or committed datatype), or {@code null} for a null reference.
+     *
+     * <p>Revised references (HDF5 1.12's {@code H5R_ref_t}) are read too, whatever each element holds: an
+     * object reference resolves to its object, a region reference to its dataset, and an attribute
+     * reference to the object the attribute is on.
+     *
+     * @throws HdfUnsupportedException for a revised reference into another file, which Falcon does not
+     *         follow
      */
     public Hdf5Object[] readObjectReferences() {
         Datatype type = datatype();
-        if (!(type instanceof Datatype.Reference ref) || ref.kind() != Datatype.ReferenceKind.OBJECT) {
+        boolean revised = isRevisedReference(type);
+        if (!revised && !isReference(type, Datatype.ReferenceKind.OBJECT)) {
             throw new HdfUnsupportedException("readObjectReferences requires an object-reference datatype: " + path());
         }
-        return resolveObjectReferences(ctx, rawData(), elementCount(), type.size());
+        return resolveObjectReferences(ctx, rawData(), elementCount(), type.size(), revised);
     }
 
     /**
      * Reads a region-reference dataset, resolving each element to a {@link Selection} of the dataset it
      * points into (or {@code null} for a null reference). Read the selection to get the referenced data.
+     *
+     * <p>Revised references (HDF5 1.12's {@code H5R_ref_t}) are read too. An element that is an object or
+     * attribute reference, or points into another file, becomes a selection that throws when used.
      */
     public Selection[] readRegionReferences() {
         Datatype type = datatype();
-        if (!(type instanceof Datatype.Reference ref) || ref.kind() != Datatype.ReferenceKind.DATASET_REGION) {
+        boolean revised = isRevisedReference(type);
+        if (!revised && !isReference(type, Datatype.ReferenceKind.DATASET_REGION)) {
             throw new HdfUnsupportedException("readRegionReferences requires a region-reference datatype: " + path());
         }
-        return resolveRegionReferences(ctx, rawData(), elementCount(), type.size());
+        return resolveRegionReferences(ctx, rawData(), elementCount(), type.size(), revised);
+    }
+
+    /**
+     * Reads a dataset of revised attribute references (HDF5 1.12's {@code H5R_ATTR}), resolving each
+     * element to the attribute it names, or {@code null} for a null reference.
+     *
+     * @throws HdfUnsupportedException if the datatype is not a revised reference, or an element is not an
+     *         attribute reference or points into another file
+     * @throws HdfFormatException if a referenced attribute does not exist
+     */
+    public Attribute[] readAttributeReferences() {
+        Datatype type = datatype();
+        if (!isRevisedReference(type)) {
+            throw new HdfUnsupportedException("readAttributeReferences requires a revised reference datatype: " + path());
+        }
+        return resolveAttributeReferences(ctx, rawData(), elementCount(), type.size());
     }
 
     /** The dataset's element bytes as stored, in the datatype's byte order (chunk filters already undone). */
@@ -199,7 +238,9 @@ public final class Dataset extends Hdf5Object {
      * Reads the whole dataset into the most natural Java array: for integers, {@code int[]} when every
      * value of the type fits in an {@code int}, {@code long[]} when it fits in a {@code long} (so
      * {@code uint32} reads as {@code long[]}), and {@code BigInteger[]} for {@code uint64};
-     * {@code double[]} for floats; {@code String[]} for strings.
+     * {@code double[]} for floats; {@code String[]} for strings; {@code Selection[]} for region references,
+     * and {@code Hdf5Object[]} for object references and revised references (see
+     * {@link #readObjectReferences()}).
      */
     public Object read() {
         Datatype type = datatype();
@@ -209,8 +250,8 @@ public final class Dataset extends Hdf5Object {
             case Datatype.StringType st -> readStrings();
             case Datatype.VariableLength v when v.kind() == Datatype.VlenKind.STRING -> readStrings();
             case Datatype.VariableLength v -> readVlenSequence(v);
-            case Datatype.Reference r when r.kind() == Datatype.ReferenceKind.OBJECT -> readObjectReferences();
             case Datatype.Reference r when r.kind() == Datatype.ReferenceKind.DATASET_REGION -> readRegionReferences();
+            case Datatype.Reference r when r.kind() != Datatype.ReferenceKind.OTHER -> readObjectReferences();
             default -> throw new HdfUnsupportedException(
                     "reading datatype class " + type.typeClass() + " is not yet supported: " + path());
         };
@@ -315,7 +356,7 @@ public final class Dataset extends Hdf5Object {
             }
             message = message == null ? null : SharedMessage.resolve(ctx, message);
             result = java.util.Optional.ofNullable(message == null ? null
-                    : FillValueMessage.parse(ctx.buffer(), message.bodyOffset(), message.type()));
+                    : FillValueMessage.parse(message.buffer(), message.bodyOffset(), message.type()));
             fillValue = result;
         }
         return result.orElse(null);
@@ -327,7 +368,7 @@ public final class Dataset extends Hdf5Object {
             HeaderMessage message = header().find(MessageType.FILTER_PIPELINE);
             message = message == null ? null : SharedMessage.resolve(ctx, message);
             result = java.util.Optional.ofNullable(message == null ? null
-                    : FilterPipelineMessage.parse(ctx.buffer(), message.bodyOffset()));
+                    : FilterPipelineMessage.parse(message.buffer(), message.bodyOffset()));
             filterPipeline = result;
         }
         return result.orElse(null);

@@ -66,7 +66,10 @@ public final class Attribute {
                         + vlen.base().typeClass() + " is not yet supported: " + name);
             };
         }
-        if (datatype instanceof Datatype.Reference ref && ref.kind() == Datatype.ReferenceKind.OBJECT) {
+        if (Hdf5Object.isReference(datatype, Datatype.ReferenceKind.DATASET_REGION)) {
+            return readRegionReferences();
+        }
+        if (datatype instanceof Datatype.Reference ref && ref.kind() != Datatype.ReferenceKind.OTHER) {
             return readObjectReferences();
         }
         throw new HdfUnsupportedException(
@@ -156,12 +159,39 @@ public final class Attribute {
         throw new HdfUnsupportedException("readVlen* requires a variable-length sequence attribute: " + name);
     }
 
-    /** Resolves an object-reference attribute to the object(s) it points at (null for a null reference). */
+    /**
+     * Resolves an object-reference attribute to the object(s) it points at (null for a null reference);
+     * revised references as {@link Dataset#readObjectReferences()} reads them.
+     */
     public Hdf5Object[] readObjectReferences() {
-        if (!(datatype instanceof Datatype.Reference ref) || ref.kind() != Datatype.ReferenceKind.OBJECT) {
+        boolean revised = Hdf5Object.isRevisedReference(datatype);
+        if (!revised && !Hdf5Object.isReference(datatype, Datatype.ReferenceKind.OBJECT)) {
             throw new HdfUnsupportedException("readObjectReferences requires an object-reference attribute: " + name);
         }
-        return Hdf5Object.resolveObjectReferences(ctx, data(), count(), datatype.size());
+        return Hdf5Object.resolveObjectReferences(ctx, data(), count(), datatype.size(), revised);
+    }
+
+    /**
+     * Resolves a region-reference attribute to selections of the datasets it points into (null for a
+     * null reference), original or revised, as {@link Dataset#readRegionReferences()} does.
+     */
+    public Selection[] readRegionReferences() {
+        boolean revised = Hdf5Object.isRevisedReference(datatype);
+        if (!revised && !Hdf5Object.isReference(datatype, Datatype.ReferenceKind.DATASET_REGION)) {
+            throw new HdfUnsupportedException("readRegionReferences requires a region-reference attribute: " + name);
+        }
+        return Hdf5Object.resolveRegionReferences(ctx, data(), count(), datatype.size(), revised);
+    }
+
+    /**
+     * Resolves an attribute of revised attribute references to the attributes they name (null for a null
+     * reference), as {@link Dataset#readAttributeReferences()} does.
+     */
+    public Attribute[] readAttributeReferences() {
+        if (!Hdf5Object.isRevisedReference(datatype)) {
+            throw new HdfUnsupportedException("readAttributeReferences requires a revised reference attribute: " + name);
+        }
+        return Hdf5Object.resolveAttributeReferences(ctx, data(), count(), datatype.size());
     }
 
     private String[] readVariableLengthStrings(Datatype.VariableLength vlen) {

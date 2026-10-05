@@ -25,6 +25,10 @@ import java.util.List;
  *
  * Elements are visited as libhdf5 visits them: a hyperslab in row-major order, points in the order
  * listed.
+ *
+ * <p>A virtual dataset's mapping may be <b>unlimited</b>: a regular hyperslab whose count (or block) is
+ * unlimited in one dimension. Such a selection is used {@linkplain #clippedOffsets clipped} to an extent
+ * there, or {@linkplain #blockOffsets one block at a time} (a printf-style mapping, one source per block).
  */
 public final class DataspaceSelection {
 
@@ -73,15 +77,171 @@ public final class DataspaceSelection {
 
     /** True for a regular hyperslab with an unlimited count or block. */
     public boolean isUnlimited() {
-        if (count == null) {
-            return false;
-        }
-        for (int d = 0; d < count.length; d++) {
-            if (count[d] == UNLIMITED || block[d] == UNLIMITED) {
-                return true;
+        return unlimitedDimension() >= 0;
+    }
+
+    /** The dimension in which this regular hyperslab's count or block is unlimited, or -1 (libhdf5 allows one). */
+    public int unlimitedDimension() {
+        if (count != null) {
+            for (int d = 0; d < count.length; d++) {
+                if (count[d] == UNLIMITED || block[d] == UNLIMITED) {
+                    return d;
+                }
             }
         }
-        return false;
+        return -1;
+    }
+
+    /**
+     * How many indices the unlimited dimension selects below {@code limit}: the "slices" of libhdf5's
+     * {@code H5S_hyper_get_clip_extent_match}.
+     */
+    public long selectedBelow(long limit) {
+        int d = requireUnlimited();
+        if (block[d] == 0 || limit <= start[d]) {
+            return 0;
+        }
+        long span = limit - start[d];
+        if (block[d] == UNLIMITED || block[d] == stride[d]) {
+            return span; // one run of indices
+        }
+        return span / stride[d] * block[d] + Math.min(span % stride[d], block[d]);
+    }
+
+    /**
+     * The extent the unlimited dimension needs for this selection to select {@code slices} indices there:
+     * one past the last of them (libhdf5's {@code H5S_hyper_get_clip_extent_match}), or 0 for none.
+     */
+    public long extentSelecting(long slices) {
+        int d = requireUnlimited();
+        if (slices <= 0 || block[d] == 0) {
+            return 0;
+        }
+        try {
+            if (block[d] == UNLIMITED || block[d] == stride[d]) {
+                return Math.addExact(start[d], slices);
+            }
+            long blocks = slices / block[d];
+            long rest = slices % block[d];
+            return rest > 0
+                    ? Math.addExact(Math.addExact(start[d], Math.multiplyExact(blocks, stride[d])), rest)
+                    : Math.addExact(Math.addExact(start[d], Math.multiplyExact(blocks - 1, stride[d])), block[d]);
+        } catch (ArithmeticException e) {
+            throw new HdfFormatException("dataspace selection size overflows (corrupt?)", e);
+        }
+    }
+
+    /**
+     * Flat offsets, as {@link #offsets(long[])}, of this unlimited selection clipped to {@code limit} in
+     * its unlimited dimension (libhdf5's {@code H5S_hyper_clip_unlim}): the selected elements whose index
+     * there is below {@code limit}.
+     */
+    public long[] clippedOffsets(long[] dims, long limit) {
+        int d = requireUnlimited();
+        long n = selectedBelow(limit);
+        long[] indices = new long[Elements.checkedInt(n)];
+        int k = 0;
+        for (long j = 0; k < n; j++) {
+            long first = start[d] + j * stride[d];
+            long length = block[d] == UNLIMITED ? limit - start[d] : block[d];
+            for (long b = 0; b < length && k < n; b++) {
+                indices[k++] = first + b;
+            }
+        }
+        return offsetsWith(dims, d, indices);
+    }
+
+    /** Where block {@code blockIndex} of the unlimited dimension ends (exclusive) in a printf-style mapping. */
+    public long blockEnd(long blockIndex) {
+        int d = requirePrintf();
+        try {
+            return Math.addExact(Math.addExact(start[d], Math.multiplyExact(blockIndex, stride[d])), block[d]);
+        } catch (ArithmeticException e) {
+            throw new HdfFormatException("dataspace selection size overflows (corrupt?)", e);
+        }
+    }
+
+    /**
+     * Flat offsets of block {@code blockIndex} of this selection's unlimited dimension (libhdf5's
+     * {@code H5S_hyper_get_unlim_block}): what a printf-style virtual mapping maps its
+     * {@code blockIndex}th source to.
+     */
+    public long[] blockOffsets(long[] dims, long blockIndex) {
+        int d = requirePrintf();
+        long[] indices = new long[Elements.checkedInt(block[d])];
+        try {
+            long first = Math.addExact(start[d], Math.multiplyExact(blockIndex, stride[d]));
+            for (int b = 0; b < indices.length; b++) {
+                indices[b] = first + b;
+            }
+        } catch (ArithmeticException e) {
+            throw new HdfFormatException("dataspace selection size overflows (corrupt?)", e);
+        }
+        return offsetsWith(dims, d, indices);
+    }
+
+    /**
+     * The inclusive upper corner of the selection's bounding box, with -1 in an unlimited dimension; null
+     * for an "all" or "none" selection, whose bounds are those of its dataspace.
+     */
+    public long[] highCorner() {
+        if (type == NONE || type == ALL) {
+            return null;
+        }
+        if (count != null) {
+            long[] high = new long[count.length];
+            try {
+                for (int d = 0; d < high.length; d++) {
+                    boolean empty = count[d] == 0 || block[d] == 0;
+                    high[d] = count[d] == UNLIMITED || block[d] == UNLIMITED || empty ? -1
+                            : Math.addExact(start[d], Math.addExact(Math.multiplyExact(count[d] - 1, stride[d]), block[d] - 1));
+                }
+            } catch (ArithmeticException e) {
+                throw new HdfFormatException("dataspace selection size overflows (corrupt?)", e);
+            }
+            return high;
+        }
+        long[] high = null;
+        for (long[] corner : type == POINTS ? lows : highs) {
+            if (high == null) {
+                high = corner.clone();
+            }
+            for (int d = 0; d < high.length; d++) {
+                high[d] = Math.max(high[d], corner[d]);
+            }
+        }
+        return high;
+    }
+
+    /** The unlimited dimension of a selection made of unlimited many blocks, as printf-style mappings need. */
+    private int requirePrintf() {
+        int d = requireUnlimited();
+        if (count[d] != UNLIMITED) {
+            throw new HdfFormatException("a printf-style virtual mapping needs an unlimited block count");
+        }
+        return d;
+    }
+
+    private int requireUnlimited() {
+        int d = unlimitedDimension();
+        if (d < 0) {
+            throw new IllegalStateException("not an unlimited selection");
+        }
+        // libhdf5 refuses overlapping blocks, and an unlimited block with more than one of them.
+        if ((block[d] == UNLIMITED && count[d] != 1)
+                || (count[d] == UNLIMITED && block[d] != UNLIMITED && stride[d] < Math.max(1, block[d]))) {
+            throw new HdfFormatException("invalid unlimited selection (start " + start[d] + ", stride "
+                    + stride[d] + ", count " + count[d] + ", block " + block[d] + ")");
+        }
+        return d;
+    }
+
+    private long[] offsetsWith(long[] dims, int dimension, long[] indices) {
+        try {
+            return flatten(regularCoordinates(dims, dimension, indices), dims);
+        } catch (ArithmeticException e) {
+            throw new HdfFormatException("dataspace selection size overflows (corrupt?)", e);
+        }
     }
 
     /** Parses the selection serialized at {@code offset}. */
@@ -255,7 +415,7 @@ public final class DataspaceSelection {
             }
             default -> {
                 if (count != null) {
-                    yield regularCoordinates(dims);
+                    yield regularCoordinates(dims, -1, null);
                 }
                 List<long[]> all = new ArrayList<>();
                 long total = 0;
@@ -364,11 +524,25 @@ public final class DataspaceSelection {
         return new long[][] {lows[0].clone(), shape};
     }
 
-    private long[][] regularCoordinates(long[] dims) {
+    /**
+     * The coordinates of a regular hyperslab in row-major order; in dimension {@code given} (unless -1)
+     * the selected indices are {@code givenIndices} instead (for an unlimited dimension).
+     */
+    private long[][] regularCoordinates(long[] dims, int given, long[] givenIndices) {
         int rank = dims.length;
         checkRank(start.length, dims);
         long[][] indices = new long[rank][];
         for (int d = 0; d < rank; d++) {
+            if (d == given) {
+                for (long coordinate : givenIndices) {
+                    if (coordinate < 0 || coordinate >= dims[d]) {
+                        throw new HdfFormatException("selection reaches index " + coordinate
+                                + " in dimension " + d + " of extent " + dims[d]);
+                    }
+                }
+                indices[d] = givenIndices;
+                continue;
+            }
             if (count[d] == UNLIMITED || block[d] == UNLIMITED) {
                 throw new HdfUnsupportedException("unlimited selections are not supported here");
             }

@@ -816,23 +816,213 @@ def build_region_refs(out):
             _region_refs(f)
 
 
-def build_sohm(path):
-    """Shared object header messages (SOHM): every dataspace, datatype, fill value, filter pipeline and
-    attribute message is stored once in the shared-message heap and referenced from object headers."""
+def _virtual(f, name, shape, maxshape, mappings, fill=-1):
+    """A virtual dataset through the low-level API: mappings are (vselect, file, dataset, sshape, smax,
+    sselect), where the select functions set a selection on a dataspace (or None for all)."""
+    U = h5py.h5s.UNLIMITED
+    vspace = h5py.h5s.create_simple(shape, maxshape)
+    dcpl = h5py.h5p.create(h5py.h5p.DATASET_CREATE)
+    dcpl.set_fill_value(np.array(fill, dtype="i4"))
+    for vselect, file, dataset, sshape, smax, sselect in mappings:
+        v = h5py.h5s.create_simple(shape, maxshape)
+        vselect(v)
+        src = h5py.h5s.create_simple(sshape, smax)
+        if sselect:
+            sselect(src)
+        dcpl.set_virtual(v, file.encode(), dataset.encode(), src)
+    h5py.h5d.create(f.id, name.encode(), h5py.h5t.NATIVE_INT32, vspace, dcpl=dcpl)
+
+
+def build_vds_unlimited(out):
+    """Virtual datasets whose extent their sources set (libhdf5's defaults: the last available view and
+    printf gap 0): unlimited mappings along rows and interleaved along columns, printf-style ones (%b in the
+    file or dataset name, %% for a literal %, sources missing after the second), one floored by a fixed
+    mapping, and sources found as libhdf5 finds them (an absolute name by its file name alone; a relative
+    name with a directory is not; one found nowhere is filled). libhdf5's own reading is stored as
+    'expected' and 'expected_shape'."""
+    U = h5py.h5s.UNLIMITED
+    with h5py.File(os.path.join(out, "vds_unlim_src.h5"), "w", libver="latest") as f:
+        f.create_dataset("data", data=np.arange(15, dtype="i4").reshape(5, 3), maxshape=(None, 3), chunks=(2, 3))
+        f.create_dataset("empty", shape=(0,), maxshape=(None,), dtype="i4")
+    for i in range(3):
+        with h5py.File(os.path.join(out, "vds_printf_%d.h5" % i), "w") as f:
+            f.create_dataset("data", data=np.full((2, 3), 10 * (i + 1), dtype="i4"))
+    for i in (0, 1, 3):
+        with h5py.File(os.path.join(out, "vds_pct%%_%d.h5" % i), "w") as f:
+            f.create_dataset("data", data=np.full((2,), 10 + i, dtype="i4"))
+    path = os.path.join(out, "vds_unlimited.h5")
+    with h5py.File(path, "w", libver="latest") as f:
+        rows = lambda s: s.select_hyperslab((0, 0), (U, 1), (1, 1), (1, 3))
+        _virtual(f, "rows", (2, 3), (U, 3), [(rows, "vds_unlim_src.h5", "data", (5, 3), (U, 3), rows)])
+        f.create_dataset("a", data=np.arange(6, dtype="i4").reshape(2, 3), maxshape=(2, None))
+        f.create_dataset("b", data=100 + np.arange(4, dtype="i4").reshape(2, 2), maxshape=(2, None))
+        cols = lambda start: lambda s: s.select_hyperslab((0, start), (1, U), (1, 2), (2, 1))
+        whole = lambda s: s.select_hyperslab((0, 0), (1, U), (1, 1), (2, 1))
+        _virtual(f, "cols", (2, 0), (2, U), [(cols(0), ".", "a", (2, 0), (2, U), whole),
+                                            (cols(1), ".", "b", (2, 0), (2, U), whole)])
+        blocks = lambda s: s.select_hyperslab((0, 0), (U, 1), (2, 1), (2, 3))
+        _virtual(f, "printf", (0, 3), (U, 3), [(blocks, "vds_printf_%b.h5", "data", (2, 3), None, None)])
+        _virtual(f, "printf_moved", (0, 3), (U, 3),
+                 [(blocks, "/nonexistent/elsewhere/vds_printf_%b.h5", "data", (2, 3), None, None)])
+        pairs = lambda s: s.select_hyperslab((0,), (U,), (2,), (2,))
+        _virtual(f, "printf_gap", (0,), (U,), [(pairs, "vds_pct%%_%b.h5", "data", (2,), None, None)])
+        for i in range(2):
+            f.create_dataset("part%d" % i, data=np.full((3,), 20 + i, dtype="i4"))
+        spaced = lambda s: s.select_hyperslab((1,), (U,), (4,), (3,))
+        _virtual(f, "printf_names", (0,), (U,), [(spaced, ".", "part%b", (3,), None, None)])
+        _virtual(f, "printf_none", (0,), (U,), [(pairs, "vds_absent_%b.h5", "data", (2,), None, None)])
+        first4 = lambda s: s.select_hyperslab((0,), (1,), (1,), (4,))
+        rest = lambda s: s.select_hyperslab((4,), (1,), (1,), (U,))
+        all_of = lambda s: s.select_hyperslab((0,), (1,), (1,), (U,))
+        f.create_dataset("four", data=np.arange(4, dtype="i4"))
+        _virtual(f, "floored", (4,), (U,), [(first4, ".", "four", (4,), None, None),
+                                           (rest, "vds_unlim_src.h5", "empty", (0,), (U,), all_of)])
+        _virtual(f, "moved", (2,), None, [(lambda s: s.select_all(), "/nonexistent/elsewhere/vds_printf_0.h5",
+                                           "data", (2, 3), None, lambda s: s.select_hyperslab((0, 0), (1, 2)))])
+        _virtual(f, "reldir", (2,), None, [(lambda s: s.select_all(), "sub/vds_printf_0.h5", "data", (2, 3), None,
+                                            lambda s: s.select_hyperslab((0, 0), (1, 2)))])
+        _virtual(f, "lost", (2,), None, [(lambda s: s.select_all(), "/nonexistent/elsewhere/vds_lost.h5", "data",
+                                          (2,), None, None)])
+    with h5py.File(path, "a") as f:
+        for name in ("rows", "cols", "printf", "printf_moved", "printf_gap", "printf_names", "printf_none",
+                     "floored", "moved", "reldir", "lost"):
+            d = f[name]
+            d.attrs["expected_shape"] = np.array(d.shape, dtype="i8")
+            d.attrs["expected"] = d[...].reshape(-1) if d.size else np.zeros(0, dtype="i4")
+
+
+class _RefT(ctypes.Structure):
+    """H5R_ref_t: the opaque 64-byte revised reference (H5R_REF_BUF_SIZE)."""
+    _fields_ = [("data", ctypes.c_uint8 * 64)]
+
+
+def _revised_refs(lib, f, ext):
+    """Builds the revised references; returns (name -> list of H5R_ref_t or None) to write."""
+    fid = ctypes.c_int64(f.id.id)
+    space = lambda: h5py.h5s.create_simple((4, 5))
+
+    def obj(loc, name):
+        ref = _RefT()
+        if lib.H5Rcreate_object(ctypes.c_int64(loc), name.encode(), ctypes.c_int64(0), ctypes.byref(ref)) < 0:
+            raise RuntimeError("H5Rcreate_object failed")
+        return ref
+
+    def region(sel):
+        ref = _RefT()
+        if lib.H5Rcreate_region(fid, b"data", ctypes.c_int64(sel.id), ctypes.c_int64(0), ctypes.byref(ref)) < 0:
+            raise RuntimeError("H5Rcreate_region failed")
+        return ref
+
+    def attr(name, attr_name):
+        ref = _RefT()
+        if lib.H5Rcreate_attr(fid, name.encode(), attr_name.encode(), ctypes.c_int64(0), ctypes.byref(ref)) < 0:
+            raise RuntimeError("H5Rcreate_attr failed")
+        return ref
+
+    block = space()
+    block.select_hyperslab((1, 1), (2, 3))
+    points = space()
+    points.select_elements(np.array([(0, 0), (3, 4), (2, 2)], dtype="u8"))
+    every = space()
+    every.select_all()
+    blocks = space()
+    blocks.select_hyperslab((0, 0), (1, 2))
+    blocks.select_hyperslab((2, 3), (2, 2), op=h5py.h5s.SELECT_OR)
+    return {
+        "objects": [obj(f.id.id, "data"), obj(f.id.id, "grp"), None, obj(f.id.id, "/")],
+        "regions": [region(block), region(points), None, region(every), region(blocks)],
+        "attributes": [attr("data", "note"), attr("grp", "title"), None],
+        "mixed": [obj(f.id.id, "grp"), region(block), attr("data", "note"), None],
+        "external": [obj(ext.id.id, "data")],
+    }
+
+
+def build_revised_refs(out):
+    """Revised references (H5R_ref_t, HDF5 1.12+) through h5py's bundled libhdf5, which h5py does not
+    wrap: datasets of H5T_STD_REF holding object, region (block, points, all, several blocks) and attribute
+    references, null ones, a mix, one into another file, and an attribute of them. libhdf5 stores the
+    datatype as an object reference whatever an element holds, so each element carries its own kind."""
+    lib = _hdf5_library()
+    lib.H5open()
+    std_ref = ctypes.c_int64.in_dll(lib, "H5T_STD_REF_g").value
+    for fn in ("H5Dcreate2", "H5Acreate2", "H5Screate_simple"):
+        getattr(lib, fn).restype = ctypes.c_int64
+    cwd = os.getcwd()
+    os.chdir(out)  # an external reference stores the other file's name as it was opened
+    try:
+        with h5py.File("refs_revised_ext.h5", "w", libver="latest") as ext:
+            ext.create_dataset("data", data=np.arange(3, dtype="i4"))
+            with h5py.File("refs_revised.h5", "w", libver="latest") as f:
+                data = f.create_dataset("data", data=np.arange(20, dtype="i4").reshape(4, 5))
+                data.attrs["note"] = np.int32(42)
+                f.create_group("grp").attrs["title"] = "group"
+                f.attrs["old_regions"] = np.array([data.regionref[1:3, 1:4], data.regionref[0, :]],
+                                                  dtype=h5py.regionref_dtype)
+                refs = _revised_refs(lib, f, ext)
+                refs["on_root"] = [refs["regions"][0], refs["objects"][1]]
+                for name, values in refs.items():
+                    buf = (_RefT * len(values))(*[v if v is not None else _RefT() for v in values])
+                    dims = (ctypes.c_uint64 * 1)(len(values))
+                    sid = lib.H5Screate_simple(1, dims, None)
+                    if name == "on_root":
+                        aid = lib.H5Acreate2(ctypes.c_int64(f.id.id), b"refs", ctypes.c_int64(std_ref),
+                                             ctypes.c_int64(sid), ctypes.c_int64(0), ctypes.c_int64(0))
+                        ok = aid >= 0 and lib.H5Awrite(ctypes.c_int64(aid), ctypes.c_int64(std_ref), buf) >= 0
+                        lib.H5Aclose(ctypes.c_int64(aid))
+                    else:
+                        did = lib.H5Dcreate2(ctypes.c_int64(f.id.id), name.encode(), ctypes.c_int64(std_ref),
+                                             ctypes.c_int64(sid), ctypes.c_int64(0), ctypes.c_int64(0),
+                                             ctypes.c_int64(0))
+                        ok = did >= 0 and lib.H5Dwrite(ctypes.c_int64(did), ctypes.c_int64(std_ref),
+                                                       ctypes.c_int64(0), ctypes.c_int64(0), ctypes.c_int64(0),
+                                                       buf) >= 0
+                        lib.H5Dclose(ctypes.c_int64(did))
+                    lib.H5Sclose(ctypes.c_int64(sid))
+                    if not ok:
+                        raise RuntimeError("writing revised references to " + name + " failed")
+                for name, values in refs.items():
+                    for v in values if name != "on_root" else ():  # on_root shares the others' refs
+                        if v is not None:
+                            lib.H5Rdestroy(ctypes.byref(v))
+    finally:
+        os.chdir(cwd)
+
+
+# H5O_SHMESG_*_FLAG: bit (1 << message type) of a shared-message index's type flags.
+SHMESG_SDSPACE, SHMESG_DTYPE, SHMESG_FILL, SHMESG_PLINE, SHMESG_ATTR = 1 << 1, 1 << 3, 1 << 5, 1 << 11, 1 << 12
+
+
+def build_sohm(path, libver):
+    """Shared object header messages (SOHM), in two indexes: dataspace, datatype and fill value in one,
+    filter pipeline and attribute in the other, with no minimum size. libhdf5 keeps the first copy of a
+    message in its object header and moves it to the shared-message heap once a second object shares it,
+    so "b" and "s2" reference the heap; attributes always go to the heap. The latest format's 4-byte scalar
+    dataspace and 2-byte fill value are tiny heap objects, held in their heap IDs; "big" is a huge one."""
     lib = _hdf5_library()
     fcpl = h5py.h5p.create(h5py.h5p.FILE_CREATE)
-    if lib.H5Pset_shared_mesg_nindexes(ctypes.c_int64(fcpl.id), ctypes.c_uint(1)) < 0:
+    if lib.H5Pset_shared_mesg_nindexes(ctypes.c_int64(fcpl.id), ctypes.c_uint(2)) < 0:
         raise RuntimeError("H5Pset_shared_mesg_nindexes failed")
-    all_types = 0x01 | 0x02 | 0x04 | 0x08 | 0x10              # H5O_SHMESG_ALL_FLAG
-    if lib.H5Pset_shared_mesg_index(ctypes.c_int64(fcpl.id), ctypes.c_uint(0), ctypes.c_uint(all_types),
-                                    ctypes.c_uint(0)) < 0:
-        raise RuntimeError("H5Pset_shared_mesg_index failed")
-    fid = h5py.h5f.create(path.encode(), h5py.h5f.ACC_TRUNC, fcpl=fcpl)
+    for index, flags in enumerate((SHMESG_SDSPACE | SHMESG_DTYPE | SHMESG_FILL, SHMESG_PLINE | SHMESG_ATTR)):
+        if lib.H5Pset_shared_mesg_index(ctypes.c_int64(fcpl.id), ctypes.c_uint(index), ctypes.c_uint(flags),
+                                        ctypes.c_uint(0)) < 0:
+            raise RuntimeError("H5Pset_shared_mesg_index failed")
+    fapl = h5py.h5p.create(h5py.h5p.FILE_ACCESS)
+    fapl.set_libver_bounds(*libver)
+    fid = h5py.h5f.create(path.encode(), h5py.h5f.ACC_TRUNC, fcpl=fcpl, fapl=fapl)
     with h5py.File(fid) as f:
-        f.create_group("group")
+        f.create_group("group").attrs["title"] = "shared"
         for name in ("a", "b"):
-            d = f.create_dataset(name, data=np.arange(6, dtype="i4"), chunks=(3,), compression="gzip")
+            d = f.create_dataset(name, data=np.arange(6, dtype="i4"), chunks=(3,), compression="gzip",
+                                 fillvalue=-7)
             d.attrs["units"] = np.int32(7)
+        for name in ("s1", "s2"):
+            f.create_dataset(name, data=np.int32(42))
+        for name in ("pair1", "pair2"):
+            f.create_dataset(name, data=np.array([(1, 1.5), (2, 2.5)], dtype=[("x", "<i4"), ("y", "<f8")]))
+        many = f.create_dataset("many", data=np.arange(4, dtype="f8"))
+        for i in range(12):                                        # dense attribute storage
+            many.attrs["attr%02d" % i] = np.int32(i)
+        many.attrs["big"] = np.arange(1000, dtype="f8")            # 8000 bytes: a huge heap object
 
 
 def build_external_paths(out):
@@ -858,7 +1048,10 @@ FIXTURES = {
     "heap_limits": lambda: _with_file("heap_limits.h5", build_heap_limits, libver="latest"),
     "vds_encodings": lambda: build_vds_encodings(OUT),
     "region_refs": lambda: build_region_refs(OUT),
-    "sohm": lambda: build_sohm(os.path.join(OUT, "sohm.h5")),
+    "revised_refs": lambda: build_revised_refs(OUT),
+    "vds_unlimited": lambda: build_vds_unlimited(OUT),
+    "sohm": lambda: (build_sohm(os.path.join(OUT, "sohm.h5"), (h5py.h5f.LIBVER_EARLIEST, h5py.h5f.LIBVER_LATEST)),
+                     build_sohm(os.path.join(OUT, "sohm_latest.h5"), (h5py.h5f.LIBVER_LATEST, h5py.h5f.LIBVER_LATEST))),
     "external_paths": lambda: build_external_paths(OUT),
     "numeric": lambda: _with_file("numeric.h5", build_numeric, libver="latest"),
     "vds_byteorder": lambda: build_vds_byteorder(OUT),

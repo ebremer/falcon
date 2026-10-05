@@ -30,7 +30,15 @@ public final class HeaderMessage {
         return flags;
     }
 
-    /** Absolute offset of the message body within the file buffer. */
+    /**
+     * The buffer holding the body: the file's, except for a shared message small enough to live inside
+     * its shared-message heap ID (see {@link SharedMessage#resolve}).
+     */
+    public HdfBuffer buffer() {
+        return buffer;
+    }
+
+    /** Offset of the message body within {@link #buffer()} (an absolute file offset for the file's buffer). */
     public long bodyOffset() {
         return bodyOffset;
     }
