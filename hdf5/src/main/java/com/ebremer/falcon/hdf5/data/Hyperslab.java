@@ -20,6 +20,9 @@ public final class Hyperslab {
             total *= c;
         }
         byte[] out = new byte[Elements.checkedByteCount(total, elementSize)];
+        if (total == 0) {
+            return out; // an empty selection in any dimension selects nothing
+        }
         if (rank == 0) {
             MemorySegment.copy(source, ValueLayout.JAVA_BYTE, 0, out, 0, elementSize);
             return out;

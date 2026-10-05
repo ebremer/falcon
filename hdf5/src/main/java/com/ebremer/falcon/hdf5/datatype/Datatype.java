@@ -113,11 +113,15 @@ public sealed interface Datatype {
             return DatatypeClass.ARRAY;
         }
 
-        /** The number of array elements (product of the dimensions). */
+        /**
+         * The number of array elements (product of the dimensions).
+         *
+         * @throws ArithmeticException if the product does not fit in an {@code int}
+         */
         public int elementCount() {
             int n = 1;
             for (int d : dimensions) {
-                n *= d;
+                n = Math.multiplyExact(n, d);
             }
             return n;
         }

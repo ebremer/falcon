@@ -614,8 +614,19 @@ def build_filter_edge(f):
         d.close()
 
 
+def build_vds_loop(out):
+    """A virtual dataset whose only source is itself (by file name): reading it must fail cleanly rather
+    than recurse until the stack overflows."""
+    path = os.path.join(out, "vds_loop.h5")
+    with h5py.File(path, "w", libver="latest") as f:
+        layout = h5py.VirtualLayout(shape=(4,), dtype="i4")
+        layout[:] = h5py.VirtualSource("vds_loop.h5", "v", shape=(4,))
+        f.create_virtual_dataset("v", layout, fillvalue=-1)
+
+
 # name -> builder; `python gen_fixtures.py NAME ...` regenerates just those fixtures.
 FIXTURES = {
+    "vds_loop": lambda: build_vds_loop(OUT),
     "userblock": lambda: build_userblock(OUT),
     "chunk_maxshape": lambda: _with_file("chunk_maxshape.h5", build_chunk_maxshape, libver="latest"),
     "layout_v4": lambda: _with_file("layout_v4.h5", build_layout_v4, libver=("v110", "v110")),

@@ -237,7 +237,7 @@ public final class Dataset extends Hdf5Object {
                     "selection rank " + offset.length + " does not match dataset rank " + dims.length);
         }
         for (int d = 0; d < dims.length; d++) {
-            if (offset[d] < 0 || count[d] < 0 || offset[d] + count[d] > dims[d]) {
+            if (offset[d] < 0 || count[d] < 0 || offset[d] > dims[d] || count[d] > dims[d] - offset[d]) {
                 throw new IllegalArgumentException("selection out of bounds in dimension " + d
                         + ": offset=" + offset[d] + " count=" + count[d] + " dim=" + dims[d]);
             }
@@ -255,12 +255,15 @@ public final class Dataset extends Hdf5Object {
         if (blockRows <= 0) {
             throw new IllegalArgumentException("blockRows must be positive: " + blockRows);
         }
+        if (dataspace().kind() == Dataspace.Kind.NULL) {
+            return java.util.stream.Stream.empty(); // a null dataspace holds no elements
+        }
         long[] dims = dataspace().dimensions();
         if (dims.length == 0) {
             return java.util.stream.Stream.of(select(new long[0], new long[0]));
         }
         long dim0 = dims[0];
-        long blockCount = (dim0 + blockRows - 1) / blockRows;
+        long blockCount = dim0 == 0 ? 0 : (dim0 - 1) / blockRows + 1;
         return java.util.stream.LongStream.range(0, blockCount).mapToObj(b -> {
             long start = b * blockRows;
             long[] offset = new long[dims.length];

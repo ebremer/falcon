@@ -6,7 +6,9 @@ import com.ebremer.falcon.hdf5.group.SymbolTableNode;
 import com.ebremer.falcon.hdf5.io.FileContext;
 import com.ebremer.falcon.hdf5.io.HdfBuffer;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Version-1 B-tree of type 0 (spec section III.A.1): the "group node" index that orders an old-style
@@ -22,7 +24,6 @@ public final class GroupBTreeV1 {
 
     private static final byte[] TREE = {'T', 'R', 'E', 'E'};
     private static final int NODE_TYPE_GROUP = 0;
-    private static final int MAX_DEPTH = 4096;
 
     private GroupBTreeV1() {
         // Static walker only.
@@ -31,13 +32,15 @@ public final class GroupBTreeV1 {
     /** Enumerates every symbol-table entry reachable from the B-tree rooted at {@code btreeAddress}. */
     public static List<SymbolTableEntry> readEntries(FileContext ctx, long btreeAddress) {
         List<SymbolTableEntry> out = new ArrayList<>();
-        walk(ctx, btreeAddress, out, 0);
+        walk(ctx, btreeAddress, out, -1, new HashSet<>());
         return out;
     }
 
-    private static void walk(FileContext ctx, long addr, List<SymbolTableEntry> out, int depth) {
-        if (depth > MAX_DEPTH) {
-            throw new HdfFormatException("group B-tree nested too deeply at " + addr);
+    /** Walks one node; each child must be one level lower and visited once (a corrupt tree may loop). */
+    private static void walk(FileContext ctx, long addr, List<SymbolTableEntry> out, int expectedLevel,
+                             Set<Long> visited) {
+        if (!visited.add(addr)) {
+            throw new HdfFormatException("group B-tree node at " + addr + " is reached twice (a cycle)");
         }
         HdfBuffer buf = ctx.buffer();
         if (!buf.hasSignature(addr, TREE)) {
@@ -49,6 +52,10 @@ public final class GroupBTreeV1 {
         }
         int level = buf.getUnsignedByte(addr + 5);
         int entriesUsed = buf.getUnsignedShort(addr + 6);
+        if (expectedLevel >= 0 && level != expectedLevel) {
+            throw new HdfFormatException("group B-tree node at " + addr + " has level " + level
+                    + ", expected " + expectedLevel);
+        }
 
         int offsets = ctx.sizeOfOffsets();
         int lengths = ctx.sizeOfLengths();
@@ -60,7 +67,7 @@ public final class GroupBTreeV1 {
             if (level == 0) {
                 out.addAll(SymbolTableNode.parse(ctx, child));
             } else {
-                walk(ctx, child, out, depth + 1);
+                walk(ctx, child, out, level - 1, visited);
             }
         }
     }

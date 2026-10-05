@@ -1,10 +1,14 @@
 package com.ebremer.falcon.hdf5.header;
 
 import com.ebremer.falcon.hdf5.HdfFormatException;
+import com.ebremer.falcon.hdf5.checksum.MetadataChecksum;
 import com.ebremer.falcon.hdf5.io.FileContext;
 import com.ebremer.falcon.hdf5.io.HdfBuffer;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * A parsed object header (the metadata record for a group, dataset, or committed datatype), holding
@@ -19,15 +23,20 @@ import java.util.List;
  *       field), with checksummed {@code "OCHK"} continuation blocks.</li>
  * </ul>
  *
- * <p>{@link MessageType#NIL} padding messages are dropped; continuation messages are followed and
- * their contents inlined in order.
+ * <p>{@link MessageType#NIL} padding messages are dropped. Continuation messages queue further chunks,
+ * which are read after the current one, so messages appear in chunk order as libhdf5 lists them. Each
+ * continuation chunk is read at most once (a corrupt header that loops back is rejected), and version-2
+ * chunks are checksum-verified.
  */
 public final class ObjectHeader {
 
     private static final byte[] OHDR = {'O', 'H', 'D', 'R'};
     private static final byte[] OCHK = {'O', 'C', 'H', 'K'};
     private static final int MAX_MESSAGES = 1_000_000;
-    private static final int MAX_CONTINUATION_DEPTH = 4096;
+
+    /** A header chunk still to be read: where its messages start, and how many bytes they span. */
+    private record Chunk(long start, long size) {
+    }
 
     private final int version;
     private final List<HeaderMessage> messages;
@@ -114,35 +123,33 @@ public final class ObjectHeader {
         long chunk0Size = buf.getUnsignedInt(addr + 8);
         long messageStart = addr + 16; // 12-byte prefix padded to an 8-byte boundary
         List<HeaderMessage> out = new ArrayList<>();
-        readVersion1Messages(ctx, messageStart, chunk0Size, out, 0);
-        return new ObjectHeader(version, out, referenceCount, -1);
-    }
-
-    private static void readVersion1Messages(FileContext ctx, long start, long size,
-                                             List<HeaderMessage> out, int depth) {
-        if (depth > MAX_CONTINUATION_DEPTH) {
-            throw new HdfFormatException("object header continuation nested too deeply");
-        }
-        HdfBuffer buf = ctx.buffer();
-        long p = start;
-        long end = start + size;
-        while (p + 8 <= end) {
-            int type = buf.getUnsignedShort(p);
-            int msgSize = buf.getUnsignedShort(p + 2);
-            int flags = buf.getUnsignedByte(p + 4);
-            long body = p + 8;
-            if (type == MessageType.OBJECT_HEADER_CONTINUATION) {
-                long contAddr = buf.getAddress(body, ctx.sizeOfOffsets());
-                long contLen = buf.getUnsignedValue(body + ctx.sizeOfOffsets(), ctx.sizeOfLengths());
-                if (contAddr != HdfBuffer.UNDEFINED_ADDRESS) {
-                    readVersion1Messages(ctx, contAddr, contLen, out, depth + 1);
+        ArrayDeque<Chunk> chunks = new ArrayDeque<>();
+        chunks.add(new Chunk(messageStart, chunk0Size));
+        Set<Long> seen = new HashSet<>();
+        while (!chunks.isEmpty()) {
+            Chunk chunk = chunks.poll();
+            long p = chunk.start();
+            long end = chunk.start() + chunk.size();
+            while (p + 8 <= end) {
+                int type = buf.getUnsignedShort(p);
+                int msgSize = buf.getUnsignedShort(p + 2);
+                int flags = buf.getUnsignedByte(p + 4);
+                long body = p + 8;
+                checkFits(body, msgSize, end);
+                if (type == MessageType.OBJECT_HEADER_CONTINUATION) {
+                    long contAddr = buf.getAddress(body, ctx.sizeOfOffsets());
+                    long contLen = buf.getUnsignedValue(body + ctx.sizeOfOffsets(), ctx.sizeOfLengths());
+                    if (contAddr != HdfBuffer.UNDEFINED_ADDRESS) {
+                        queue(chunks, seen, contAddr, contAddr, contLen, buf.size());
+                    }
+                } else if (type != MessageType.NIL) {
+                    out.add(new HeaderMessage(type, flags, buf, body, msgSize));
+                    guardCount(out);
                 }
-            } else if (type != MessageType.NIL) {
-                out.add(new HeaderMessage(type, flags, buf, body, msgSize));
-                guardCount(out);
+                p = body + msgSize;
             }
-            p = body + msgSize;
         }
+        return new ObjectHeader(version, out, referenceCount, -1);
     }
 
     // ---------------------------------------------------------------- version 2
@@ -164,40 +171,67 @@ public final class ObjectHeader {
         int sizeFieldWidth = 1 << (flags & 0x03);
         long chunk0Size = buf.getUnsignedValue(p, sizeFieldWidth);
         p += sizeFieldWidth;
+        if (chunk0Size < 0 || chunk0Size > buf.size()) {
+            throw new HdfFormatException("object header chunk size " + chunk0Size + " exceeds the file at " + addr);
+        }
+        // The checksum of chunk 0 follows its messages and covers the header from the signature on.
+        MetadataChecksum.verify(buf, addr, p + chunk0Size - addr, "object header");
         boolean creationOrder = (flags & 0x04) != 0;
         List<HeaderMessage> out = new ArrayList<>();
-        readVersion2Messages(ctx, p, chunk0Size, creationOrder, out, 0);
+        ArrayDeque<Chunk> chunks = new ArrayDeque<>();
+        chunks.add(new Chunk(p, chunk0Size));
+        Set<Long> seen = new HashSet<>();
+        while (!chunks.isEmpty()) {
+            Chunk chunk = chunks.poll();
+            long q = chunk.start();
+            long end = chunk.start() + chunk.size();
+            while (q + 4 <= end) {
+                int type = buf.getUnsignedByte(q);
+                int msgSize = buf.getUnsignedShort(q + 1);
+                int msgFlags = buf.getUnsignedByte(q + 3);
+                long body = q + 4 + (creationOrder ? 2 : 0);
+                checkFits(body, msgSize, end);
+                if (type == MessageType.OBJECT_HEADER_CONTINUATION) {
+                    long contAddr = buf.getAddress(body, ctx.sizeOfOffsets());
+                    long contLen = buf.getUnsignedValue(body + ctx.sizeOfOffsets(), ctx.sizeOfLengths());
+                    if (contAddr != HdfBuffer.UNDEFINED_ADDRESS) {
+                        // A v2 continuation block is "OCHK" + messages + a 4-byte checksum over both.
+                        if (!buf.hasSignature(contAddr, OCHK)) {
+                            throw new HdfFormatException("expected OCHK continuation block at " + contAddr);
+                        }
+                        if (contLen < 8 || contLen > buf.size()) {
+                            throw new HdfFormatException("invalid OCHK continuation length " + contLen + " at " + contAddr);
+                        }
+                        MetadataChecksum.verify(buf, contAddr, contLen - 4, "object header continuation");
+                        queue(chunks, seen, contAddr, contAddr + 4, contLen - 8, buf.size());
+                    }
+                } else if (type != MessageType.NIL) {
+                    out.add(new HeaderMessage(type, msgFlags, buf, body, msgSize));
+                    guardCount(out);
+                }
+                q = body + msgSize;
+            }
+        }
         return new ObjectHeader(version, out, -1, modificationTime);
     }
 
-    private static void readVersion2Messages(FileContext ctx, long start, long size,
-                                             boolean creationOrder, List<HeaderMessage> out, int depth) {
-        if (depth > MAX_CONTINUATION_DEPTH) {
-            throw new HdfFormatException("object header continuation nested too deeply");
+    /** Queues a continuation chunk, refusing one already read (a corrupt header that loops). */
+    private static void queue(ArrayDeque<Chunk> chunks, Set<Long> seen, long address, long start, long size,
+                              long fileSize) {
+        if (!seen.add(address)) {
+            throw new HdfFormatException("object header continuation at " + address + " is referenced twice (a cycle)");
         }
-        HdfBuffer buf = ctx.buffer();
-        long p = start;
-        long end = start + size;
-        while (p + 4 <= end) {
-            int type = buf.getUnsignedByte(p);
-            int msgSize = buf.getUnsignedShort(p + 1);
-            int flags = buf.getUnsignedByte(p + 3);
-            long body = p + 4 + (creationOrder ? 2 : 0);
-            if (type == MessageType.OBJECT_HEADER_CONTINUATION) {
-                long contAddr = buf.getAddress(body, ctx.sizeOfOffsets());
-                long contLen = buf.getUnsignedValue(body + ctx.sizeOfOffsets(), ctx.sizeOfLengths());
-                if (contAddr != HdfBuffer.UNDEFINED_ADDRESS) {
-                    // A v2 continuation block is "OCHK" + messages + 4-byte checksum.
-                    if (!buf.hasSignature(contAddr, OCHK)) {
-                        throw new HdfFormatException("expected OCHK continuation block at " + contAddr);
-                    }
-                    readVersion2Messages(ctx, contAddr + 4, contLen - 8, creationOrder, out, depth + 1);
-                }
-            } else if (type != MessageType.NIL) {
-                out.add(new HeaderMessage(type, flags, buf, body, msgSize));
-                guardCount(out);
-            }
-            p = body + msgSize;
+        if (size < 0 || size > fileSize) {
+            throw new HdfFormatException("invalid object header continuation length " + size + " at " + address);
+        }
+        chunks.add(new Chunk(start, size));
+    }
+
+    /** A message body must lie within its chunk. */
+    private static void checkFits(long body, int size, long chunkEnd) {
+        if (body + size > chunkEnd) {
+            throw new HdfFormatException("object header message at " + body + " (" + size
+                    + " bytes) runs past the end of its chunk at " + chunkEnd);
         }
     }
 

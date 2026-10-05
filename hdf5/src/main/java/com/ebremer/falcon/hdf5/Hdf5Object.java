@@ -220,6 +220,16 @@ public abstract sealed class Hdf5Object permits Group, Dataset, CommittedDatatyp
             offset[d] = start;
             shape[d] = block;
         }
+        // The selection comes from the file, so an out-of-range one is corrupt data, not a caller error.
+        if (selectionRank != rank) {
+            throw new HdfFormatException("region reference selection has rank " + selectionRank
+                    + " but its dataset has rank " + rank);
+        }
+        for (int d = 0; d < rank; d++) {
+            if (offset[d] < 0 || shape[d] < 0 || offset[d] > dims[d] || shape[d] > dims[d] - offset[d]) {
+                throw new HdfFormatException("region reference selection lies outside its dataset in dimension " + d);
+            }
+        }
         return dataset.select(offset, shape);
     }
 

@@ -96,24 +96,35 @@ public final class Attribute {
         return Elements.toStrings(data(), count(), datatype);
     }
 
-    /** Convenience for a scalar string attribute. */
+    /** Convenience for a scalar (single-element) string attribute. */
     public String readString() {
+        requireSingleElement("readString");
         return readStrings()[0];
     }
 
-    /** Convenience for a scalar integer attribute. */
+    /** Convenience for a scalar (single-element) integer attribute. */
     public int readInt() {
+        requireSingleElement("readInt");
         return readInts()[0];
     }
 
-    /** Convenience for a scalar integer attribute (up to 8 bytes). */
+    /** Convenience for a scalar (single-element) integer attribute (up to 8 bytes). */
     public long readLong() {
+        requireSingleElement("readLong");
         return readLongs()[0];
     }
 
-    /** Convenience for a scalar floating-point attribute. */
+    /** Convenience for a scalar (single-element) floating-point attribute. */
     public double readDouble() {
+        requireSingleElement("readDouble");
         return readDoubles()[0];
+    }
+
+    private void requireSingleElement(String op) {
+        long n = dataspace.elementCount();
+        if (n != 1) {
+            throw new HdfUnsupportedException(op + " requires a single-element attribute, but '" + name + "' has " + n);
+        }
     }
 
     /** Reads a variable-length sequence attribute, one {@code int[]} row per element. */

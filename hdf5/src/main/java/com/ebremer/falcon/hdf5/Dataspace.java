@@ -61,14 +61,25 @@ public final class Dataspace {
         return maxDimensions != null && maxDimensions[i] == UNLIMITED;
     }
 
-    /** The number of elements: 1 for scalar, 0 for null, otherwise the product of the dimensions. */
+    /**
+     * The number of elements: 1 for scalar, 0 for null, otherwise the product of the dimensions.
+     *
+     * @throws HdfFormatException if the dimensions are negative or their product overflows a {@code long}
+     */
     public long elementCount() {
         if (kind == Kind.NULL) {
             return 0;
         }
         long n = 1;
         for (long d : dimensions) {
-            n *= d;
+            if (d < 0) {
+                throw new HdfFormatException("dataspace dimension " + Long.toUnsignedString(d) + " is too large");
+            }
+            try {
+                n = Math.multiplyExact(n, d);
+            } catch (ArithmeticException e) {
+                throw new HdfFormatException("dataspace element count overflows: " + this);
+            }
         }
         return n;
     }

@@ -33,8 +33,27 @@ final class VirtualDataset {
     private VirtualDataset() {
     }
 
+    /** Source datasets may themselves be virtual; this bounds that nesting (a VDS can name itself). */
+    private static final int MAX_NESTING = 32;
+    private static final ThreadLocal<int[]> NESTING = ThreadLocal.withInitial(() -> new int[1]);
+
     static byte[] assemble(FileContext ctx, DataLayout.Virtual layout, long[] virtualDims,
                            int elementSize, byte[] fill) {
+        int[] nesting = NESTING.get();
+        if (nesting[0] >= MAX_NESTING) {
+            throw new HdfFormatException("virtual dataset sources nest more than " + MAX_NESTING
+                    + " levels deep (a virtual dataset that maps itself?)");
+        }
+        nesting[0]++;
+        try {
+            return assembleSources(ctx, layout, virtualDims, elementSize, fill);
+        } finally {
+            nesting[0]--;
+        }
+    }
+
+    private static byte[] assembleSources(FileContext ctx, DataLayout.Virtual layout, long[] virtualDims,
+                                          int elementSize, byte[] fill) {
         long elements = 1;
         for (long d : virtualDims) {
             elements *= d;
@@ -73,6 +92,11 @@ final class VirtualDataset {
                 }
                 Dataset sourceDataset2 = navigate(source.root(), sourceDataset);
                 long[] sourceDims = sourceDataset2.dataspace().dimensions();
+                if (sourceDataset2.datatype().size() != elementSize) {
+                    throw new HdfUnsupportedException("virtual dataset source " + sourceDataset + " has "
+                            + sourceDataset2.datatype().size() + "-byte elements, the virtual dataset "
+                            + elementSize + "-byte ones (type conversion is not supported)");
+                }
 
                 long[] sourceOffsets = sourceSelection.selectedOffsets(sourceDims);
                 long[] virtualOffsets = virtualSelection.selectedOffsets(virtualDims);

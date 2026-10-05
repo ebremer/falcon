@@ -20,6 +20,8 @@ class RobustnessTest {
         "references.h5", "attributes.h5", "vlen_data.h5", "chunk_indexes.h5", "datatypes.h5",
         "dense_links.h5", "dense_attrs.h5", "committed_types.h5", "metadata.h5", "nbit_data.h5",
         "compound_nbit.h5", "external.h5", "free_space.h5", "implicit.h5", "committed_types_old.h5",
+        "vds.h5", "dense_links_big.h5", "chunk_maxshape.h5", "layout_v4.h5", "filtered_single.h5",
+        "unwritten_latest.h5", "scaleoffset.h5", "szip.h5", "userblock_v3.h5", "filter_edge.h5",
     };
 
     @Test
@@ -76,10 +78,18 @@ class RobustnessTest {
         }
     }
 
-    /** Forces reads of every attribute and dataset reachable from {@code object}. */
+    /**
+     * Forces reads of every attribute and dataset reachable from {@code object}: the raw bytes, and the
+     * typed read (which also resolves variable-length data and references through the heaps). A datatype
+     * the typed read does not support is skipped for that object only.
+     */
     private static void readEverything(Hdf5Object object) {
         for (Attribute attribute : object.attributes()) {
-            attribute.read();
+            try {
+                attribute.read();
+            } catch (HdfUnsupportedException unsupported) {
+                // fine: keep reading the rest of the file
+            }
         }
         if (object instanceof Group group) {
             for (Hdf5Object child : group.children()) {
@@ -87,6 +97,11 @@ class RobustnessTest {
             }
         } else if (object instanceof Dataset dataset) {
             dataset.readRawBytes();
+            try {
+                dataset.read();
+            } catch (HdfUnsupportedException unsupported) {
+                // fine: keep reading the rest of the file
+            }
         }
     }
 }

@@ -38,6 +38,10 @@ public final class LocalHeap {
     /** Reads the null-terminated name at {@code offset} bytes into the heap's data segment. */
     public String name(FileContext ctx, long offset) {
         HdfBuffer buf = ctx.buffer();
+        if (offset < 0 || offset >= dataSegmentSize) {
+            throw new HdfFormatException("local heap name offset " + offset + " is outside the "
+                    + dataSegmentSize + "-byte data segment");
+        }
         long start = dataSegmentAddress + offset;
         long limit = dataSegmentAddress + dataSegmentSize;
         long p = start;

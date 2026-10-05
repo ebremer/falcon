@@ -27,6 +27,9 @@ public final class GlobalHeap {
         }
         int lengths = ctx.sizeOfLengths();
         long collectionSize = buf.getUnsignedValue(address + 8, lengths);
+        if (collectionSize < 8 + lengths || collectionSize > buf.size() - address) {
+            throw new HdfFormatException("invalid global heap collection size " + collectionSize + " at " + address);
+        }
         long p = address + 8 + lengths;
         long end = address + collectionSize;
         while (p + 8 + lengths <= end) {
@@ -35,10 +38,15 @@ public final class GlobalHeap {
             if (objectIndex == 0) {
                 break; // free space
             }
-            if (objectIndex == index) {
-                return buf.getBytes(p + 8 + lengths, (int) objectSize);
+            long data = p + 8 + lengths;
+            if (objectSize < 0 || objectSize > end - data) {
+                throw new HdfFormatException("global heap object " + objectIndex + " at " + p
+                        + " has invalid size " + objectSize);
             }
-            p += 8 + lengths + ((objectSize + 7) & ~7L);
+            if (objectIndex == index) {
+                return buf.getBytes(data, (int) objectSize);
+            }
+            p = data + ((objectSize + 7) & ~7L);
         }
         throw new HdfFormatException("global heap object " + index + " not found at " + address);
     }

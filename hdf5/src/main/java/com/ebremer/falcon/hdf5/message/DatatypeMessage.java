@@ -29,8 +29,11 @@ public final class DatatypeMessage {
 
     /** Parses the datatype whose message body starts at {@code offset}. */
     public static Datatype parse(HdfBuffer buf, long offset) {
-        return read(buf, offset).type;
+        return read(buf, offset, 0).type;
     }
+
+    /** Deepest nesting of compound / enum / vlen / array / complex base types accepted. */
+    private static final int MAX_NESTING = 64;
 
     private static final int MAX_COMMITTED_DEPTH = 16;
 
@@ -69,13 +72,20 @@ public final class DatatypeMessage {
         }
     }
 
-    private static Result read(HdfBuffer buf, long off) {
+    private static Result read(HdfBuffer buf, long off, int depth) {
+        if (depth > MAX_NESTING) {
+            throw new HdfFormatException("datatype nested more than " + MAX_NESTING + " levels deep at " + off);
+        }
         int classAndVersion = buf.getUnsignedByte(off);
         int version = (classAndVersion >> 4) & 0x0F;
         int typeClass = classAndVersion & 0x0F;
         int bits0 = buf.getUnsignedByte(off + 1);
         int bits1 = buf.getUnsignedByte(off + 2);
-        int size = (int) buf.getUnsignedInt(off + 4);
+        long storedSize = buf.getUnsignedInt(off + 4);
+        if (storedSize > Integer.MAX_VALUE) {
+            throw new HdfFormatException("datatype size " + storedSize + " is too large at " + off);
+        }
+        int size = (int) storedSize;
         long p = off + 8;
 
         switch (typeClass) {
@@ -142,7 +152,7 @@ public final class DatatypeMessage {
                         memberOffset = buf.getUnsignedValue(p, width);
                         p += width;
                     }
-                    Result member = read(buf, p);
+                    Result member = read(buf, p, depth + 1);
                     p = member.next;
                     list.add(new Datatype.Compound.Member(name.value, (int) memberOffset, member.type));
                 }
@@ -153,7 +163,7 @@ public final class DatatypeMessage {
             }
             case 8: { // enumerated
                 int members = bits0 | (bits1 << 8);
-                Result base = read(buf, p);
+                Result base = read(buf, p, depth + 1);
                 p = base.next;
                 List<String> names = new ArrayList<>(members);
                 for (int i = 0; i < members; i++) {
@@ -179,7 +189,7 @@ public final class DatatypeMessage {
                     padding = stringPadding((bits0 >> 4) & 0x0F);
                     charset = characterSet(bits1 & 0x0F);
                 }
-                Result base = read(buf, p);
+                Result base = read(buf, p, depth + 1);
                 return new Result(new Datatype.VariableLength(size, kind, base.type, padding, charset), base.next);
             }
             case 10: { // array
@@ -189,18 +199,24 @@ public final class DatatypeMessage {
                     p += 3; // reserved
                 }
                 int[] dims = new int[rank];
+                long elements = 1;
                 for (int i = 0; i < rank; i++) {
-                    dims[i] = (int) buf.getUnsignedInt(p);
+                    long dim = buf.getUnsignedInt(p);
+                    elements *= dim;
+                    if (elements > Integer.MAX_VALUE) {
+                        throw new HdfFormatException("array datatype has too many elements at " + off);
+                    }
+                    dims[i] = (int) dim;
                     p += 4;
                 }
                 if (version == 2) {
                     p += 4L * rank; // permutation indices (unused)
                 }
-                Result base = read(buf, p);
+                Result base = read(buf, p, depth + 1);
                 return new Result(new Datatype.Array(size, dims, base.type), base.next);
             }
             case 11: { // complex (v5+)
-                Result base = read(buf, p);
+                Result base = read(buf, p, depth + 1);
                 return new Result(new Datatype.Complex(size, base.type), base.next);
             }
             default:

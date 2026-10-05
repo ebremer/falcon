@@ -1,10 +1,13 @@
 package com.ebremer.falcon.hdf5.btree;
 
 import com.ebremer.falcon.hdf5.HdfFormatException;
+import com.ebremer.falcon.hdf5.checksum.MetadataChecksum;
 import com.ebremer.falcon.hdf5.io.FileContext;
 import com.ebremer.falcon.hdf5.io.HdfBuffer;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Version-2 B-tree (spec section III.A.2): the index for dense link and attribute storage, chunk
@@ -17,6 +20,10 @@ import java.util.List;
  * child address, the child's record count, and — when the child is itself internal — its subtree
  * record count. The widths of those two counts are derived from the node size and record size exactly
  * as the library computes them.
+ *
+ * <p>The header and every node are checksum-verified; each node is visited once, one level below its
+ * parent, and the walk stops at the header's total record count, so corrupt pointers cannot make it
+ * loop or explode.
  */
 public final class BTreeV2 {
 
@@ -35,49 +42,87 @@ public final class BTreeV2 {
             throw new HdfFormatException("expected v2 B-tree signature 'BTHD' at " + headerAddress);
         }
         int offsets = ctx.sizeOfOffsets();
-        int nodeSize = (int) buf.getUnsignedInt(headerAddress + 6);
+        int lengths = ctx.sizeOfLengths();
+        MetadataChecksum.verify(buf, headerAddress, 16L + offsets + 2 + lengths, "v2 B-tree header");
+        long nodeSize = buf.getUnsignedInt(headerAddress + 6);
         int recordSize = buf.getUnsignedShort(headerAddress + 10);
         int depth = buf.getUnsignedShort(headerAddress + 12);
         long rootNode = buf.getAddress(headerAddress + 16, offsets);
         int rootRecords = buf.getUnsignedShort(headerAddress + 16 + offsets);
+        long totalRecords = buf.getUnsignedValue(headerAddress + 18 + offsets, lengths);
+        if (recordSize == 0 || nodeSize < PREFIX + recordSize || nodeSize > buf.size() || depth > 64) {
+            throw new HdfFormatException("invalid v2 B-tree parameters at " + headerAddress + " (node size "
+                    + nodeSize + ", record size " + recordSize + ", depth " + depth + ")");
+        }
         if (rootNode == HdfBuffer.UNDEFINED_ADDRESS || rootRecords == 0) {
             return List.of();
         }
+        if (totalRecords < 0 || totalRecords > buf.size() / recordSize) {
+            throw new HdfFormatException("v2 B-tree at " + headerAddress + " claims " + totalRecords + " records");
+        }
 
-        Widths widths = Widths.compute(nodeSize, recordSize, depth, offsets);
-        List<byte[]> records = new ArrayList<>(rootRecords);
-        collect(ctx, rootNode, depth, rootRecords, recordSize, widths, records);
-        return records;
+        Widths widths = Widths.compute((int) nodeSize, recordSize, depth, offsets);
+        Walk walk = new Walk(ctx.buffer(), recordSize, widths, totalRecords);
+        walk.collect(rootNode, depth, rootRecords);
+        return walk.records;
     }
 
-    private static void collect(FileContext ctx, long node, int nodeDepth, int records, int recordSize,
-                                Widths widths, List<byte[]> out) {
-        HdfBuffer buf = ctx.buffer();
-        long p = node + 6; // signature, version, type
-        if (nodeDepth == 0) {
-            if (!buf.hasSignature(node, BTLF)) {
-                throw new HdfFormatException("expected v2 B-tree leaf 'BTLF' at " + node);
+    /** One traversal: the records found so far, the nodes visited, and the record budget. */
+    private static final class Walk {
+        final HdfBuffer buf;
+        final int recordSize;
+        final Widths widths;
+        final long budget;
+        final List<byte[]> records = new ArrayList<>();
+        final Set<Long> visited = new HashSet<>();
+
+        Walk(HdfBuffer buf, int recordSize, Widths widths, long budget) {
+            this.buf = buf;
+            this.recordSize = recordSize;
+            this.widths = widths;
+            this.budget = budget;
+        }
+
+        void collect(long node, int nodeDepth, int count) {
+            if (!visited.add(node)) {
+                throw new HdfFormatException("v2 B-tree node at " + node + " is reached twice (a cycle)");
             }
-            for (int i = 0; i < records; i++) {
-                out.add(buf.getBytes(p, recordSize));
+            if (records.size() + (long) count > budget) {
+                throw new HdfFormatException("v2 B-tree holds more records than its header's count");
+            }
+            long p = node + 6; // signature, version, type
+            if (nodeDepth == 0) {
+                if (!buf.hasSignature(node, BTLF)) {
+                    throw new HdfFormatException("expected v2 B-tree leaf 'BTLF' at " + node);
+                }
+                MetadataChecksum.verify(buf, node, 6L + (long) count * recordSize, "v2 B-tree leaf");
+                for (int i = 0; i < count; i++) {
+                    records.add(buf.getBytes(p, recordSize));
+                    p += recordSize;
+                }
+                return;
+            }
+            if (!buf.hasSignature(node, BTIN)) {
+                throw new HdfFormatException("expected v2 B-tree internal node 'BTIN' at " + node);
+            }
+            int pointerSize = widths.pointerSize(nodeDepth);
+            MetadataChecksum.verify(buf, node, 6L + (long) count * recordSize + (count + 1L) * pointerSize,
+                    "v2 B-tree internal node");
+            // An internal node stores all its records, then N+1 child pointers.
+            for (int i = 0; i < count; i++) {
+                records.add(buf.getBytes(p, recordSize));
                 p += recordSize;
             }
-            return;
-        }
-        if (!buf.hasSignature(node, BTIN)) {
-            throw new HdfFormatException("expected v2 B-tree internal node 'BTIN' at " + node);
-        }
-        // An internal node stores all its records, then N+1 child pointers.
-        for (int i = 0; i < records; i++) {
-            out.add(buf.getBytes(p, recordSize));
-            p += recordSize;
-        }
-        int pointerSize = widths.pointerSize(nodeDepth);
-        for (int i = 0; i <= records; i++) {
-            long childAddress = buf.getAddress(p, widths.offsets);
-            int childRecords = (int) buf.getUnsignedValue(p + widths.offsets, widths.maxRecordCountSize);
-            p += pointerSize;
-            collect(ctx, childAddress, nodeDepth - 1, childRecords, recordSize, widths, out);
+            for (int i = 0; i <= count; i++) {
+                long childAddress = buf.getAddress(p, widths.offsets);
+                long childRecords = buf.getUnsignedValue(p + widths.offsets, widths.maxRecordCountSize);
+                p += pointerSize;
+                if (childRecords > 0xFFFF) {
+                    throw new HdfFormatException("v2 B-tree node at " + node + " points at a child of "
+                            + childRecords + " records");
+                }
+                collect(childAddress, nodeDepth - 1, (int) childRecords);
+            }
         }
     }
 
