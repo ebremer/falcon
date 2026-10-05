@@ -42,13 +42,16 @@ import com.ebremer.falcon.hdf5.*;
 try (Hdf5File h5 = Hdf5File.open(Path.of("data.h5"))) {
     for (String name : h5.root().childNames()) { /* ... */ }
 
-    Dataset temps = h5.root().group("run").dataset("temperature");
+    Dataset temps = h5.root().dataset("run/temperature");            // by name or path
     double[] all  = temps.readDoubles();                              // whole dataset, de-filtered
     double[] slab = temps.select(new long[]{0}, new long[]{100})      // a hyperslab
                          .readDoubles();
     temps.attribute("units").ifPresent(a -> System.out.println(a.readStrings()[0]));
 }
 ```
+
+Files open from a path (memory-mapped), from a `byte[]`, or through a `RangeReader` (an object store,
+HTTP byte ranges, any channel), which Falcon reads on demand: the metadata and only the data asked for.
 
 **Write** — create a file, add groups, datasets (contiguous or chunked + filters), and attributes:
 
@@ -103,7 +106,8 @@ Stores: in-memory, filesystem, ZIP, and read-only HTTP (byte-range). Full walkth
   crc32c / fletcher32 checksums, and the shuffle/nbit/scale-offset filters. Every codec is validated
   against its reference implementation (h5py/libaec/hdf5plugin, libzstd, c-blosc).
 - **JPMS modules** exporting only their public API.
-- **Foreign Function & Memory API** (`MemorySegment`) for memory-mapped access to files beyond 2 GB.
+- **Foreign Function & Memory API** (`MemorySegment`) for memory-mapped access to files beyond 2 GB; HDF5
+  files elsewhere are read on demand through a `RangeReader`.
 - **Typed exceptions** carrying byte offsets; corrupt input never crashes the JVM or returns wrong data.
 
 ## License

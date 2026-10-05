@@ -1,9 +1,9 @@
 # Falcon HDF5 — remaining work (prioritized)
 
-**Status (2026-10-05, after P2 S1–S7):** build green, **256 HDF5 tests** (144 at the review, 187
-after the top 10, 206 after P0, 228 after P1, 243 after S1–S3), plus 33 in the new `core` module. The
-review's top 10, every P1 item, and **P2 S1–S7** are done (see *Done* at the end). P0 has one new item,
-inherited with the shared zstd decoder. Falcon now:
+**Status (2026-10-05, after P2 S1–S7 and A2, A3, A5, A6):** build green, **439 HDF5 tests** (144 at
+the review, 187 after the top 10, 206 after P0, 228 after P1, 243 after S1–S3, 256 after S4–S7), plus 33
+in the `core` module. The review's top 10, every P1 item, **P2 S1–S7**, and **P2 A2, A3, A5, and A6**
+are done (see *Done* at the end). P0 has one item, inherited with the shared zstd decoder. Falcon now:
 
 - reads the files the review showed it misreading:
   - real libhdf5 szip and scale-offset data;
@@ -22,6 +22,10 @@ inherited with the shared zstd decoder. Falcon now:
   - the third-party filters LZF, Blosc, LZ4, bitshuffle, and Zstandard, through Falcon Core's codecs;
   - HDF5 1.6.2-era chunked layouts (layout message versions 1 and 2), VAX floats, and File Space Info
     version 0.
+- opens files from a path (mapped), from bytes, or through a `RangeReader` (an object store, HTTP
+  ranges, any channel) that it reads on demand;
+- looks objects up by path, reads integers as floating point as libhdf5 converts them, and reports each
+  dataset's layout, chunk shape, filters, and storage size as libhdf5 does;
 - writes files that **HDF5 2.0 and 1.14 read**, checked by `tools/fixtures/check_hdf5_writer.py`. The
   final run read 83/83 objects with HDF5 2.0 and 78/78 with 1.14.6. The P0 edge-case files written by
   the previous writer fail 19 objects under each version.
@@ -32,6 +36,21 @@ inherited with the shared zstd decoder. Falcon now:
 
 P1 is empty, and P0 holds only Z6/Z7, the zstd decoder's defects. What remains is features and API (P2)
 and docs and build (P3).
+
+**API changes in P2 A2, A3, A5, A6** (pre-1.0):
+- **Numeric reads:** `readDoubles()` and `readFloats()` (on `Dataset`, `Attribute`, `Selection`, and
+  vlen sequences) accept integer data, converted as libhdf5 converts it. They used to throw.
+- **Storage:** `Dataset.layout()` (the new `Dataset.Layout` enum), `chunkShape()`, `filters()` (the new
+  `Filter` record), and `storageSize()`.
+- **Paths:** `Group.child`, `link`, `group`, `dataset`, and `committedType` take paths. A plain name works
+  as before; a failed lookup's message names the component that failed.
+- **Opening:**
+  - `Hdf5File.open(byte[])` and `open(RangeReader)`, each with an `OpenOptions` overload;
+  - the new `RangeReader` interface, with `RangeReader.of(SeekableByteChannel)`;
+  - `Hdf5File.path()` is `null` for those. Without a directory of its own, such a file opens no other
+    file unless `allowDirectory(...)` or `unrestricted()` lets it.
+- **Behaviour:** a selection of contiguous data reads only the selected runs, so it also works on
+  datasets of more than 2³¹ elements.
 
 **API changes in P2 S4–S7** (pre-1.0):
 - **Opening:** `Hdf5File.open(path, OpenOptions)`. `OpenOptions` holds the `ExternalFileAccess` policy,
@@ -96,7 +115,9 @@ review baseline. Abbreviations: `W` = `Hdf5Writer.java`; other paths are under
 `src/main/java/com/ebremer/falcon/hdf5/`.
 
 **Tooling.**
-- Regenerate fixtures with `tools/fixtures/gen_fixtures.py`. Pass names to regenerate only those.
+- Regenerate fixtures with `tools/fixtures/gen_fixtures.py`. Pass names to regenerate only those. Then
+  rerun `tools/fixtures/gen_storage_metadata.py`, which records libhdf5's storage report for every
+  dataset (the oracle for `Dataset.layout()`, `chunkShape()`, `filters()`, and `storageSize()`).
 - Check writer interop with `tools/fixtures/check_hdf5_writer.py [--python114 PATH]`.
 - The Python environment is pinned in `tools/fixtures/requirements.txt`.
 
@@ -112,17 +133,17 @@ review baseline. Abbreviations: `W` = `Hdf5Writer.java`; other paths are under
    - string attributes;
    - unsigned integers;
    - chunking for every type.
-5. **A4/A5 — selections and paths:**
+5. **A4 — selections:**
    - strided and point selections in `select`;
-   - vlen readers on `Selection`;
-   - `child("a/b")` path lookup.
+   - vlen readers on `Selection`.
 6. **PF1/PF3 — lookups:** cache each dataset's chunk index; look attributes up by name.
 7. **A8 — internal types out of the public API.** `Attribute`'s public constructor exposes `FileContext`;
    pre-1.0 is the time to fix it.
-8. **A2/A3 — numeric widening reads and storage metadata** (chunk shape, filters, layout, size).
-9. **D1/D3 — docs that overclaim, and a stale PLAN.md.**
-10. **B1/B2 — CI and release plumbing:** a Windows CI leg, source and Javadoc jars, and the enforcer.
+8. **D1/D3 — docs that overclaim, and a stale PLAN.md.**
+9. **B1/B2 — CI and release plumbing:** a Windows CI leg, source and Javadoc jars, and the enforcer.
     New plugins need Erich's approval.
+10. **A9/A10 — remote files, continued:** other files of a remote file (external raw data, VDS sources)
+    through the reader, and paths that cannot be mapped.
 
 ---
 
@@ -162,18 +183,23 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
   - **Gap:** `read()` throws Unsupported for all of these, although the writer produces compound, enum,
     array, and complex. USER_GUIDE implies all atomic types map to Java arrays.
   - **Add:** compound field accessors (by member name), enum names, complex pairs, and raw opaque bytes.
-- [ ] **A2 — numeric conversion.** `readDoubles` on integer data throws; offer widening conversions.
-- [ ] **A3 — dataset storage metadata:** chunk shape, filter list, layout class, and storage size.
+- A2, A3, A5, and A6 are done (see *Done — 2026-10-05 (P2: A2, A3, A5, A6)*).
 - [ ] **A4 — selections:**
   - strided and blocked hyperslabs and point selections in `select`;
   - raw, vlen, and reference readers on `Selection` (`readStrings` on vlen throws today).
-- [ ] **A5 — paths:** `Group.child("a/b")` never matches paths. (The USER_GUIDE example that implied it
-  is fixed.) Add path lookup, following soft links as `Group` now does.
-- [ ] **A6 — open from something other than a `Path`:** `byte[]`, `SeekableByteChannel`, or a range
-  reader (remote / object store). PLAN §5 claims a `ByteBuffer` fallback exists; it doesn't.
-- [ ] **A7 — configurable chunk-cache size.** It is fixed at 16 MB (`io/ChunkCache.java:17`).
+- [ ] **A7 — configurable cache sizes.** Each is fixed:
+  - the decoded-chunk cache at 16 MB (`io/ChunkCache.java`);
+  - a `RangeReader`'s page size (64 KiB) and page cache (16 MiB, `io/PagedSource.java`). Larger pages suit
+    high-latency stores.
 - [ ] **A8 — remove internal types from public signatures.** `Attribute`'s public constructor exposes the
   non-exported `io.FileContext`. A dereferenced object reports `path()` as `""` and prints `Dataset[/]`.
+- [ ] **A9 — a `Path` that cannot be mapped.** `Hdf5File.open(Path)` fails on a file system whose channels
+  do not map (a zip file system, an in-memory one) with `UnsupportedOperationException`. Fall back to
+  on-demand reads through `RangeReader.of(Files.newByteChannel(path))`. Until then, callers can do that
+  themselves.
+- [ ] **A10 — other files of a remote file.** External raw data and virtual-dataset sources are opened
+  as local paths only, so a file read through a `RangeReader` reaches them only on local disk. Add an
+  `OpenOptions` resolver from a name to a `RangeReader`, under the same policy ideas.
 
 ### Write features & API
 
@@ -232,13 +258,15 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
     and the writer's lifecycle (atomic close, `abort()`, retry).
   - **Also done (P2 S1–S3):** revised references, unlimited and printf-style VDS, and where VDS sources
     are looked for.
+  - **Also done (P2 A2–A6):** other sources (bytes, `RangeReader`), paths, integers as floating point,
+    and storage metadata.
   - **Still to document:** the writer's memory use (WF1).
 - [ ] **D3 — PLAN.md is stale.**
   - §6 lists the non-existent `dataspace` and `util` packages, omits `data`, `index`, and `group`, and
     says only one package is exported (`datatype` is exported too).
   - §7's API sketch uses the old method names.
   - §2 still anticipates promoting code to `falcon.core`, contradicting the deferral.
-  - §5 claims a ByteBuffer fallback.
+  - ~~§5 claims a ByteBuffer fallback~~ — §5 now describes the `RangeReader` sources (A6).
 - [ ] **D4 — Javadoc lint:** 318 `-Xdoclint:all` warnings, including 78 undocumented public members
   (28 in `Hdf5Writer`). 0 errors.
 - [ ] **B1 — CI: add a `windows-latest` leg** (mmap and file-deletion semantics differ). Repo-wide.
@@ -253,6 +281,58 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
   - The root `pom.xml` description says "a zarr module is planned".
 
   Editing CLAUDE.md is Erich's call.
+
+## Done — 2026-10-05 (P2: A2, A3, A5, A6)
+
+- [x] **A2 — integers read as floating point.**
+  - **What:** `readDoubles()` and `readFloats()` read integer data on `Dataset`, `Attribute`, `Selection`,
+    and vlen sequences. They convert as libhdf5 converts to `H5T_NATIVE_DOUBLE` and `H5T_NATIVE_FLOAT`:
+    exact up to 53 (24) significant bits, otherwise rounded once to nearest, ties to even.
+  - **Unsigned 64-bit values** of 2⁶³ or more are halved with a sticky bit before the one rounding. So
+    `float` results are not rounded twice (through `double`), which would get 2⁶³ + 2³⁹ + 1 wrong.
+  - **Tested:** `conversions.h5` (new) holds every integer width in both byte orders with edge values, and
+    libhdf5's own conversions as attributes; 2.0 and 1.14.6 agree on all of them. Also checked: the bit-offset
+    and reduced-precision integers of `numeric.h5`, attributes, selections, and vlen sequences.
+- [x] **A3 — storage metadata:** `Dataset.layout()`, `chunkShape()`, `filters()`, and `storageSize()`.
+  - **Filters** carry the id, the stored name (from either pipeline message version), libhdf5's name for a
+    built-in filter otherwise, whether the filter is optional, and the client data.
+  - **Storage size** follows `H5Dget_storage_size`:
+    - chunked: the stored size of every chunk in the index, over all six index types;
+    - contiguous: its size once allocated, external data included;
+    - compact: its size;
+    - virtual: 0.
+  - **Tested** against libhdf5's report on every dataset of every fixture (952 datasets, from
+    `tools/fixtures/gen_storage_metadata.py` → `storage_metadata.txt`). The only allowance is for szip:
+    this libhdf5 build lacks it, so it names the filter "Unknown library filter".
+- [x] **A5 — paths.** Every `Group` lookup takes a path, as libhdf5's functions do:
+  - relative, or absolute from the root;
+  - repeated and trailing slashes ignored, `.` for the group itself;
+  - soft links followed along the way, and the object named by the path taken.
+
+  `group`/`dataset`/`committedType` report which component failed and why (missing, not a group,
+  dangling soft link, external link). The VDS source lookup now uses it.
+- [x] **A6 — other sources.**
+  - **Bytes in memory:** `Hdf5File.open(byte[])` reads them in place.
+  - **On demand:** `Hdf5File.open(RangeReader)`, with `RangeReader.of(SeekableByteChannel)` (positional
+    reads for a `FileChannel`, serialized ones otherwise). `HdfBuffer` now reads either a segment or a
+    `PagedSource`:
+    - metadata comes from 64 KiB cached pages;
+    - reads of a page or more go to the reader directly;
+    - reader failures are `UncheckedIOException`, or the `IOException` of `open`.
+  - **Contiguous selections** read only the selected runs (folding trailing whole dimensions into longer
+    runs). That benefits mapped files too, and works past 2³¹ elements.
+  - **Other files:** a file without a path has no directory of its own. `ExternalFileAccess` then allows
+    only `allowDirectory(...)` directories, or, under `unrestricted()`, the working directory (as libhdf5
+    does for a file in memory). Paths are now resolved against the file's absolute directory.
+  - **Tests (`OpenSourcesTest`):**
+    - every fixture reads identically mapped, from bytes, through a `FileChannel`, and through a
+      non-file channel with short reads;
+    - a 2 × 2 selection plus one chunk of a 16 MiB file fetches 258 KiB in 5 calls;
+    - parallel `blocks()` reads through each reader type;
+    - reader failures, short reads, closed files, user blocks, and the external-file policy without a
+      path.
+  - **Fuzzing:** `RobustnessTest` also reads every truncation and every fifth byte flip through a
+    `RangeReader`. It calls the new storage accessors on every dataset, and covers `conversions.h5`.
 
 ## Done — 2026-10-05 (P2: S4–S7)
 

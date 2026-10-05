@@ -25,9 +25,12 @@ import java.nio.file.Path;
 /**
  * A dataset in the HDF5 hierarchy: a typed, shaped array of elements.
  *
- * <p>Stage H3 reads <b>contiguous</b> and <b>compact</b> storage for atomic datatypes (integers,
- * floats, and fixed-length strings), returning flattened row-major arrays. Chunked storage arrives in
- * stage H4. An unallocated contiguous dataset reads back its fill value.
+ * <p>Reads return flattened row-major Java arrays ({@link #readInts()}, {@link #readDoubles()}, and so
+ * on, or {@link #read()} for the most natural one), whatever the storage: compact, contiguous (in this
+ * file or in external files), chunked (through any chunk index, and any filter Falcon decodes), or
+ * virtual. {@link #select} and {@link #blocks} read part of a dataset; {@link #layout()},
+ * {@link #chunkShape()}, {@link #filters()} and {@link #storageSize()} describe its storage. Elements
+ * never written read back as the fill value.
  */
 public final class Dataset extends Hdf5Object {
 
@@ -76,7 +79,7 @@ public final class Dataset extends Hdf5Object {
             result = DataspaceMessage.parse(ctx, SharedMessage.resolve(ctx, require(MessageType.DATASPACE, "dataspace")));
             // Only an unlimited dimension can hold an unlimited mapping.
             boolean unlimited = java.util.stream.IntStream.range(0, result.rank()).anyMatch(result::isUnlimited);
-            if (unlimited && layout() instanceof DataLayout.Virtual virtual) {
+            if (unlimited && dataLayout() instanceof DataLayout.Virtual virtual) {
                 long[] dims = VirtualDataset.extent(ctx, virtual, result.dimensions());
                 if (!java.util.Arrays.equals(dims, result.dimensions())) {
                     result = new Dataspace(result.version(), result.kind(), dims, result.maxDimensions());
@@ -85,6 +88,98 @@ public final class Dataset extends Hdf5Object {
             dataspace = result;
         }
         return result;
+    }
+
+    // ---------------------------------------------------------------- storage
+
+    /** How a dataset's raw data is stored (libhdf5's {@code H5D_layout_t}). */
+    public enum Layout {
+        /** In the object header itself, for small datasets. */
+        COMPACT,
+        /** One block in the file (or in external raw data files), or none yet if never written. */
+        CONTIGUOUS,
+        /** Fixed-shape chunks, each stored (and filtered) separately and found through an index. */
+        CHUNKED,
+        /** Assembled from selections of other datasets, in this file or others. */
+        VIRTUAL
+    }
+
+    /** How this dataset's raw data is stored. */
+    public Layout layout() {
+        ctx.checkOpen();
+        return switch (dataLayout()) {
+            case DataLayout.Compact c -> Layout.COMPACT;
+            case DataLayout.Contiguous c -> Layout.CONTIGUOUS;
+            case DataLayout.Chunked c -> Layout.CHUNKED;
+            case DataLayout.Virtual v -> Layout.VIRTUAL;
+        };
+    }
+
+    /** The shape of each chunk, in elements per dimension, if the dataset is {@linkplain Layout#CHUNKED chunked}. */
+    public java.util.Optional<long[]> chunkShape() {
+        ctx.checkOpen();
+        if (!(dataLayout() instanceof DataLayout.Chunked chunked)) {
+            return java.util.Optional.empty();
+        }
+        return java.util.Optional.of(java.util.Arrays.stream(chunked.chunkDimensions())
+                .mapToLong(Integer::toUnsignedLong).toArray());
+    }
+
+    /**
+     * The filters this dataset's chunks pass through on writing, in that order (Falcon undoes them in
+     * reverse on reading). Empty if there are none. A filter Falcon cannot decode is listed too; reading
+     * the data then throws {@link HdfUnsupportedException}.
+     */
+    public java.util.List<Filter> filters() {
+        ctx.checkOpen();
+        FilterPipeline pipeline = filterPipeline();
+        if (pipeline == null) {
+            return java.util.List.of();
+        }
+        return pipeline.filters().stream()
+                .map(f -> new Filter(f.id(), f.name() != null ? f.name() : builtInFilterName(f.id()),
+                        (f.flags() & FILTER_FLAG_OPTIONAL) != 0, f.clientData()))
+                .toList();
+    }
+
+    /**
+     * The bytes this dataset's raw data takes in the file, as libhdf5's {@code H5Dget_storage_size}
+     * reports: for chunked data, the stored (filtered) size of every chunk written; for contiguous data,
+     * its size once allocated (also when it lives in external files); for compact data, its size; and 0
+     * for a virtual dataset, whose data lives in its sources. For chunked data this reads the whole
+     * chunk index.
+     */
+    public long storageSize() {
+        ctx.checkOpen();
+        return switch (dataLayout()) {
+            case DataLayout.Compact c -> c.data().length;
+            case DataLayout.Contiguous c -> {
+                if (c.address() == HdfBuffer.UNDEFINED_ADDRESS && header().find(MessageType.EXTERNAL_DATA_FILES) == null) {
+                    yield 0; // never written
+                }
+                // Layout messages before version 3 do not record the size; libhdf5 computes it.
+                yield c.size() >= 0 ? c.size() : byteCount();
+            }
+            case DataLayout.Chunked chunked -> ChunkedReader.storedBytes(ctx, chunked, dataspace().dimensions(),
+                    dataspace().maxDimensions(), datatype().size());
+            case DataLayout.Virtual v -> 0;
+        };
+    }
+
+    /** {@code H5Z_FLAG_OPTIONAL}: a chunk may skip the filter. */
+    private static final int FILTER_FLAG_OPTIONAL = 0x0001;
+
+    /** libhdf5's name for one of its built-in filters, or empty. */
+    private static String builtInFilterName(int id) {
+        return switch (id) {
+            case Filter.DEFLATE -> "deflate";
+            case Filter.SHUFFLE -> "shuffle";
+            case Filter.FLETCHER32 -> "fletcher32";
+            case Filter.SZIP -> "szip";
+            case Filter.NBIT -> "nbit";
+            case Filter.SCALEOFFSET -> "scaleoffset";
+            default -> "";
+        };
     }
 
     // ------------------------------------------------------------------ reads
@@ -111,12 +206,24 @@ public final class Dataset extends Hdf5Object {
         return Elements.toLongs(rawData(), elementCount(), datatype());
     }
 
-    /** Reads every element as {@code float} (floating-point datatypes). */
+    /**
+     * Reads every element of a floating-point or integer dataset as a {@code float}, converted as libhdf5
+     * converts to {@code H5T_NATIVE_FLOAT}: a wider float, or an integer with more than 24 significant
+     * bits, is rounded to the nearest {@code float}.
+     *
+     * @throws HdfUnsupportedException if the datatype is neither floating-point nor an integer type
+     */
     public float[] readFloats() {
         return Elements.toFloats(rawData(), elementCount(), datatype());
     }
 
-    /** Reads every element as {@code double} (floating-point datatypes). */
+    /**
+     * Reads every element of a floating-point or integer dataset as a {@code double}, converted as libhdf5
+     * converts to {@code H5T_NATIVE_DOUBLE}: integers are exact up to 53 significant bits, and wider ones
+     * (large {@code int64} and {@code uint64} values) are rounded to the nearest {@code double}.
+     *
+     * @throws HdfUnsupportedException if the datatype is neither floating-point nor an integer type
+     */
     public double[] readDoubles() {
         return Elements.toDoubles(rawData(), elementCount(), datatype());
     }
@@ -269,7 +376,7 @@ public final class Dataset extends Hdf5Object {
         return readLongs()[0];
     }
 
-    /** Reads a single-element floating-point dataset as a {@code double}. */
+    /** Reads a single-element floating-point or integer dataset as a {@code double} (see {@link #readDoubles()}). */
     public double readDouble() {
         requireSingleElement("readDouble");
         return readDoubles()[0];
@@ -338,7 +445,7 @@ public final class Dataset extends Hdf5Object {
 
     // --------------------------------------------------------------- internals
 
-    private DataLayout layout() {
+    private DataLayout dataLayout() {
         DataLayout result = layout;
         if (result == null) {
             result = DataLayoutMessage.parse(ctx, require(MessageType.DATA_LAYOUT, "data layout").bodyOffset());
@@ -375,7 +482,7 @@ public final class Dataset extends Hdf5Object {
     }
 
     MemorySegment rawData() {
-        return switch (layout()) {
+        return switch (dataLayout()) {
             case DataLayout.Compact c -> {
                 requireStoredSize(c.data().length, (long) elementCount() * datatype().size());
                 yield MemorySegment.ofArray(c.data());
@@ -388,7 +495,7 @@ public final class Dataset extends Hdf5Object {
                 if (c.address() == HdfBuffer.UNDEFINED_ADDRESS) {
                     HeaderMessage external = header().find(MessageType.EXTERNAL_DATA_FILES);
                     if (external != null) {
-                        Path directory = ctx.path() == null ? null : ctx.path().getParent();
+                        Path directory = ctx.directory();
                         yield MemorySegment.ofArray(ExternalFileList.parse(ctx, external.bodyOffset())
                                 .readData(name -> ctx.externalFileAccess().resolve(name, directory,
                                         "external raw data file"), byteCount));
@@ -413,15 +520,25 @@ public final class Dataset extends Hdf5Object {
 
     /**
      * The raw bytes of the hyperslab {@code [offset, offset+count)}, flattened row-major. For chunked
-     * datasets only the chunks overlapping the selection are read and de-filtered; other layouts extract
-     * from the (zero-copy or already-assembled) full data.
+     * datasets only the chunks overlapping the selection are read and de-filtered, and for contiguous
+     * data in this file only the selected runs; other layouts extract from the assembled full data.
      */
     MemorySegment selectionData(long[] offset, long[] count) {
         int elementSize = datatype().size();
         long[] dims = dataspace().dimensions();
-        if (layout() instanceof DataLayout.Chunked chunked) {
+        DataLayout layout = dataLayout();
+        if (layout instanceof DataLayout.Chunked chunked) {
             return MemorySegment.ofArray(ChunkedReader.assembleSelection(ctx, chunked, dims,
                     dataspace().maxDimensions(), elementSize, filterPipeline(), fillValue(), offset, count));
+        }
+        if (layout instanceof DataLayout.Contiguous c && c.address() != HdfBuffer.UNDEFINED_ADDRESS
+                && header().find(MessageType.EXTERNAL_DATA_FILES) == null) {
+            long byteCount = byteCount();
+            if (c.size() >= 0) {
+                requireStoredSize(c.size(), byteCount);
+            }
+            HdfBuffer block = ctx.buffer().slice(c.address(), byteCount); // bounds-checked; reads nothing yet
+            return MemorySegment.ofArray(Hyperslab.extract(block, 0, dims, offset, count, elementSize));
         }
         return MemorySegment.ofArray(Hyperslab.extract(rawData(), dims, offset, count, elementSize));
     }
@@ -449,6 +566,16 @@ public final class Dataset extends Hdf5Object {
             }
         }
         return MemorySegment.ofArray(raw);
+    }
+
+    /** The bytes every element takes together, as the dataspace and datatype say. */
+    private long byteCount() {
+        long n = dataspace().elementCount();
+        int size = datatype().size();
+        if (size != 0 && n > Long.MAX_VALUE / size) {
+            throw new HdfFormatException("dataset " + path() + " is too large: " + n + " elements of " + size + " bytes");
+        }
+        return n * size;
     }
 
     private int elementCount() {

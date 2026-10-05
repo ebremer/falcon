@@ -43,7 +43,7 @@ public final class VlenSequences {
         return out;
     }
 
-    /** Each row as a {@code double[]} (floating-point base type). */
+    /** Each row as a {@code double[]} (floating-point or integer base type, as {@link Elements#toDoubles}). */
     public static double[][] toDoubles(FileContext ctx, MemorySegment data, int count, Datatype.VariableLength vlen) {
         Datatype base = vlen.base();
         double[][] out = new double[count][];
@@ -54,7 +54,7 @@ public final class VlenSequences {
         return out;
     }
 
-    /** Each row as a {@code float[]} (floating-point base type). */
+    /** Each row as a {@code float[]} (floating-point or integer base type, as {@link Elements#toFloats}). */
     public static float[][] toFloats(FileContext ctx, MemorySegment data, int count, Datatype.VariableLength vlen) {
         Datatype base = vlen.base();
         float[][] out = new float[count][];

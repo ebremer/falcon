@@ -9,8 +9,9 @@ import com.ebremer.falcon.hdf5.*;
 import java.nio.file.Path;
 ```
 
-All read APIs are backed by a memory mapping (the Foreign Function & Memory API), so files stay on disk
-and files larger than 2 GB are handled without the `MappedByteBuffer` size limit.
+A file opened from a path is memory-mapped (the Foreign Function & Memory API), so it stays on disk and
+files larger than 2 GB are handled without the `MappedByteBuffer` size limit. A file can also be opened
+from bytes in memory, or read on demand through a `RangeReader` (see *Other sources*).
 
 ---
 
@@ -26,9 +27,16 @@ try (Hdf5File h5 = Hdf5File.open(Path.of("data.h5"))) {   // AutoCloseable; unma
 
     Group   run  = root.group("run");                 // navigate by name
     Dataset temp = run.dataset("temperature");
+    Dataset same = root.dataset("run/temperature");   // or by path
     root.child("maybe").ifPresent(o -> { /* Optional lookup */ });
 }
 ```
+
+Every lookup (`child`, `link`, `group`, `dataset`, `committedType`) takes a path, as libhdf5 does: link
+names separated by `/`, relative to the group or, starting with `/`, to the root. Repeated and trailing
+slashes are ignored, `.` is the group itself, and soft links along the way are followed. An object is
+named by the path it was reached through. When a path reaches nothing, `group`, `dataset` and
+`committedType` say which component failed and why.
 
 `Hdf5File` also describes the file itself:
 - `superblockVersion()`;
@@ -50,6 +58,29 @@ Hdf5File.open(path, OpenOptions.defaults()
         .virtualView(OpenOptions.VirtualView.FIRST_MISSING)
         .virtualPrintfGap(2));
 ```
+
+### Other sources
+
+A file need not be a local path:
+
+```java
+Hdf5File.open(bytes);                                    // a byte[] already in memory (read in place)
+Hdf5File.open(RangeReader.of(channel));                  // any SeekableByteChannel
+Hdf5File.open(reader, options);                          // your own RangeReader: an object store, HTTP ranges, ...
+```
+
+A `RangeReader` has two methods, `size()` and `read(position, buffer)`, and must allow calls from
+several threads. Falcon reads through it on demand:
+- **Metadata** is read in 64 KiB pages, which are cached (16 MiB per file).
+- **Data** is read only where a read asks for it: a chunk or contiguous run of 64 KiB or more in one
+  call, a smaller one through the pages. Reading a small selection of a large remote file fetches the
+  metadata and the pages or chunks around that selection, not the file.
+
+A reader failure surfaces from the read that needed the bytes as `java.io.UncheckedIOException`, or as
+the `IOException` of `open` itself while the file is being opened. Falcon does not close the reader:
+close it after the `Hdf5File`. Such a file has no path (`path()` is `null`) and no directory of its
+own, so by default it opens no other file. `allowDirectory(...)` or `unrestricted()` let it open
+external raw data and virtual-dataset sources (see *Files outside the HDF5 file*).
 
 ### Links
 
@@ -103,7 +134,7 @@ refused file may be the real source.
 ```java
 int[]    a = ds.readInts();        // integers, each of which must fit in an int
 long[]   b = ds.readLongs();       // integers, each of which must fit in a long
-float[]  c = ds.readFloats();      // floating point
+float[]  c = ds.readFloats();      // floating point, or integers converted
 double[] d = ds.readDoubles();
 String[] s = ds.readStrings();     // fixed- or variable-length strings
 Object natural = ds.read();        // most natural Java array for the datatype
@@ -125,6 +156,11 @@ does not fit a `long`. `read()` picks an array every value of the type fits in:
 | `uint32`, `int64` | `long[]` |
 | `uint64` | `java.math.BigInteger[]` |
 
+**Integers as floating point.** `readDoubles()` and `readFloats()` also read integer data, converted as
+libhdf5 converts it to `H5T_NATIVE_DOUBLE` or `H5T_NATIVE_FLOAT`. That is exact up to 53 (or 24)
+significant bits; wider values are rounded once to the nearest, ties to even. The same holds for
+attributes, selections, and variable-length sequences (`readVlenDoubles()`).
+
 **Non-native layouts.** Integers are read from their bit offset and precision (a 12-bit value packed in 16
 bits, a 24-bit integer in 3 bytes). Floats are decoded from their sign, exponent, and mantissa fields as
 libhdf5 decodes them, so bfloat16, x87 80-bit extended precision, and VAX floats (in their own byte
@@ -145,6 +181,23 @@ It is also decoded through the third-party filters most common in the wild:
 These are pure-Java codecs that Falcon's Zarr module shares (see `../core`). A chunk that an optional
 filter skipped is read as stored. Any other filter throws `HdfUnsupportedException` naming its id.
 Older storage reads too: the chunked layouts of HDF5 1.6.2 and earlier (layout message versions 1 and 2).
+
+### Storage
+
+A dataset reports how it is stored, as libhdf5's dataset-creation properties and `H5Dget_storage_size`
+do:
+
+```java
+Dataset.Layout layout = ds.layout();          // COMPACT, CONTIGUOUS, CHUNKED, or VIRTUAL
+Optional<long[]> chunk = ds.chunkShape();     // elements per dimension, if chunked
+List<Filter> filters = ds.filters();          // id, name, optional, client data; in the order applied
+long bytes = ds.storageSize();                // bytes stored in the file (compressed chunks summed)
+```
+
+`Filter` has constants for the filters Falcon decodes (`Filter.DEFLATE`, `Filter.ZSTD`, ...). Each
+filter's name is the one the file stores, or libhdf5's name for its built-in filters. `storageSize()`
+reads the whole chunk index of a chunked dataset; it is 0 for a virtual dataset and for contiguous data
+never written.
 
 ### Hyperslabs and streaming
 
@@ -375,7 +428,8 @@ Every failure Falcon raises is an unchecked `HdfException`:
   `ExternalFileAccess` policy refuses.
 - `HdfClosedException` — a closed `Hdf5File` or `Hdf5Writer` was used.
 
-Catch `HdfException` to handle any Falcon read/write failure.
+Catch `HdfException` to handle any Falcon read/write failure. A file read through a `RangeReader` can
+also fail to be read at all: that is `java.io.UncheckedIOException`, wrapping the reader's `IOException`.
 
 ---
 
@@ -384,7 +438,11 @@ Catch `HdfException` to handle any Falcon read/write failure.
 - **Memory-mapped, >2 GB.** Files are mapped through the FFM API with `long` offsets, so multi-gigabyte
   files are read without copying and without the 2 GB `MappedByteBuffer` cap.
 - **Touch only what you read.** A hyperslab or `blocks()` read of a chunked dataset reads and de-filters
-  only the chunks overlapping the selection; contiguous selections are extracted zero-copy from the map.
+  only the chunks overlapping the selection. One of contiguous data reads only the selected runs (zero-copy
+  from a mapping), so a selection of a contiguous dataset can be read even when the dataset has more than
+  2³¹ elements.
+- **Remote files.** Through a `RangeReader`, metadata is read in cached 64 KiB pages and data a chunk or
+  run at a time, so a reader pays for what it reads, not for the file's size.
 - **Decoded-chunk cache.** Repeated or streaming reads reuse the filter-decode result for a chunk
   (~16 MB LRU per file).
 - **Concurrent reads.** An open `Hdf5File` and everything obtained from it may be read from many

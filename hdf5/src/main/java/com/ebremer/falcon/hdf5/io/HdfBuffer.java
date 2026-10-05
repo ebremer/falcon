@@ -7,7 +7,8 @@ import java.lang.foreign.ValueLayout;
 import java.nio.ByteOrder;
 
 /**
- * A random-access, little-endian reader over a {@link MemorySegment}.
+ * A random-access, little-endian reader over a file's bytes: a {@link MemorySegment} (a mapped file, or
+ * bytes in memory), or a {@link PagedSource} that reads them on demand.
  *
  * <p>HDF5 stores all format metadata little-endian, so every multi-byte accessor here reads
  * little-endian (using <em>unaligned</em> layouts, since on-disk fields are not aligned). The class
@@ -34,12 +35,27 @@ public final class HdfBuffer {
     private static final ValueLayout.OfLong LE_LONG =
             ValueLayout.JAVA_LONG_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
 
-    private final MemorySegment segment;
+    private final MemorySegment segment; // the bytes, when all are mapped or in memory; else null
+    private final PagedSource paged;     // otherwise, where they are read from on demand
+    private final long base;             // where this view starts in paged
+    private final long size;
     private long position;
 
     /** Wraps a memory segment; the cursor starts at 0. */
     public HdfBuffer(MemorySegment segment) {
+        this(segment, null, 0, segment.byteSize());
+    }
+
+    /** Reads the bytes of {@code source} as they are needed; the cursor starts at 0. */
+    public HdfBuffer(PagedSource source) {
+        this(null, source, 0, source.size());
+    }
+
+    private HdfBuffer(MemorySegment segment, PagedSource paged, long base, long size) {
         this.segment = segment;
+        this.paged = paged;
+        this.base = base;
+        this.size = size;
     }
 
     /** Wraps a byte array (handy for tests and small in-memory metadata blocks). */
@@ -49,12 +65,7 @@ public final class HdfBuffer {
 
     /** The number of readable bytes. */
     public long size() {
-        return segment.byteSize();
-    }
-
-    /** The backing segment (for zero-copy operations such as checksumming). */
-    public MemorySegment segment() {
-        return segment;
+        return size;
     }
 
     // ------------------------------------------------------------------ cursor
@@ -64,8 +75,8 @@ public final class HdfBuffer {
     }
 
     public HdfBuffer position(long newPosition) {
-        if (newPosition < 0 || newPosition > segment.byteSize()) {
-            throw new HdfFormatException("position out of bounds: " + newPosition + " (size " + segment.byteSize() + ")");
+        if (newPosition < 0 || newPosition > size) {
+            throw new HdfFormatException("position out of bounds: " + newPosition + " (size " + size + ")");
         }
         this.position = newPosition;
         return this;
@@ -79,7 +90,7 @@ public final class HdfBuffer {
 
     public byte getByte(long off) {
         checkRange(off, 1);
-        return segment.get(ValueLayout.JAVA_BYTE, off);
+        return segment != null ? segment.get(ValueLayout.JAVA_BYTE, off) : paged.get(base + off);
     }
 
     public int getUnsignedByte(long off) {
@@ -88,7 +99,7 @@ public final class HdfBuffer {
 
     public short getShort(long off) {
         checkRange(off, 2);
-        return segment.get(LE_SHORT, off);
+        return segment != null ? segment.get(LE_SHORT, off) : paged.read(base + off, 2).get(LE_SHORT, 0);
     }
 
     public int getUnsignedShort(long off) {
@@ -97,7 +108,7 @@ public final class HdfBuffer {
 
     public int getInt(long off) {
         checkRange(off, 4);
-        return segment.get(LE_INT, off);
+        return segment != null ? segment.get(LE_INT, off) : paged.read(base + off, 4).get(LE_INT, 0);
     }
 
     public long getUnsignedInt(long off) {
@@ -106,7 +117,7 @@ public final class HdfBuffer {
 
     public long getLong(long off) {
         checkRange(off, 8);
-        return segment.get(LE_LONG, off);
+        return segment != null ? segment.get(LE_LONG, off) : paged.read(base + off, 8).get(LE_LONG, 0);
     }
 
     /**
@@ -124,10 +135,9 @@ public final class HdfBuffer {
                 if (width < 1 || width > 8) {
                     throw new HdfException("unsupported integer width: " + width);
                 }
-                checkRange(off, width);
                 long v = 0;
                 for (int b = 0; b < width; b++) {
-                    v |= (long) (segment.get(ValueLayout.JAVA_BYTE, off + b) & 0xff) << (8 * b);
+                    v |= (long) (getByte(off + b) & 0xff) << (8 * b);
                 }
                 return v;
         }
@@ -153,19 +163,29 @@ public final class HdfBuffer {
 
     /** Copies {@code len} bytes starting at {@code off} into a fresh array. */
     public byte[] getBytes(long off, int len) {
-        checkRange(off, len);
         byte[] out = new byte[len];
-        MemorySegment.copy(segment, ValueLayout.JAVA_BYTE, off, out, 0, len);
+        copyTo(off, out, 0, len);
         return out;
+    }
+
+    /** Copies {@code len} bytes starting at {@code off} into {@code destination} from {@code destinationOffset}. */
+    public void copyTo(long off, byte[] destination, int destinationOffset, int len) {
+        checkRange(off, len);
+        if (segment != null) {
+            MemorySegment.copy(segment, ValueLayout.JAVA_BYTE, off, destination, destinationOffset, len);
+        } else {
+            paged.copy(base + off, destination, destinationOffset, len);
+        }
     }
 
     /** True if the {@code sig.length} bytes at {@code off} equal {@code sig}. */
     public boolean hasSignature(long off, byte[] sig) {
-        if (off < 0 || off + sig.length > segment.byteSize()) {
+        if (off < 0 || off > size - sig.length) {
             return false;
         }
+        MemorySegment bytes = segmentSlice(off, sig.length);
         for (int k = 0; k < sig.length; k++) {
-            if (segment.get(ValueLayout.JAVA_BYTE, off + k) != sig[k]) {
+            if (bytes.get(ValueLayout.JAVA_BYTE, k) != sig[k]) {
                 return false;
             }
         }
@@ -175,13 +195,17 @@ public final class HdfBuffer {
     /** A view over {@code len} bytes starting at {@code off}; shares storage, has its own cursor. */
     public HdfBuffer slice(long off, long len) {
         checkRange(off, len);
-        return new HdfBuffer(segment.asSlice(off, len));
+        return segment != null ? new HdfBuffer(segment.asSlice(off, len)) : new HdfBuffer(null, paged, base + off, len);
     }
 
-    /** A bounds-checked slice of the backing segment (throws {@link HdfFormatException} if out of range). */
+    /**
+     * The {@code len} bytes at {@code off} as a segment that starts there (throws
+     * {@link HdfFormatException} if out of range): a view of the mapped or in-memory bytes, or the bytes
+     * read from a paged source.
+     */
     public MemorySegment segmentSlice(long off, long len) {
         checkRange(off, len);
-        return segment.asSlice(off, len);
+        return segment != null ? segment.asSlice(off, len) : paged.read(base + off, len);
     }
 
     // ---------------------------------------------------------- cursor reads
@@ -241,7 +265,6 @@ public final class HdfBuffer {
     }
 
     private void checkRange(long off, long len) {
-        long size = segment.byteSize();
         // Overflow-safe: never compute off+len (a corrupt address near Long.MAX would wrap negative).
         if (off < 0 || len < 0 || off > size || len > size - off) {
             throw new HdfFormatException(

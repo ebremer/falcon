@@ -683,6 +683,45 @@ def build_numeric(f):
     f.attrs["u16_attr"] = np.array([65535], dtype="<u2")
 
 
+def build_conversions(f):
+    """Integers read as floating point (readDoubles, readFloats): each dataset holds values of a stored
+    integer type, and libhdf5's own conversions to H5T_NATIVE_DOUBLE and H5T_NATIVE_FLOAT are its
+    'expected_f8' and 'expected_f4' attributes. The values include ones that need rounding (more than 53
+    or 24 significant bits), ties, and ones that converting through double first would round wrongly."""
+    i64 = [0, -1, 2 ** 53 + 1, -(2 ** 53) - 3, 2 ** 63 - 1, -(2 ** 63), 2 ** 62 + 2 ** 38 + 1,
+           2 ** 60 + 2 ** 36 + 1, 16777217, -16777219, 2 ** 24 + 3]
+    u64 = [0, 1, 2 ** 64 - 1, 2 ** 63 + 1025, 2 ** 63 + 1024, 2 ** 53 + 1, 16777217, 2 ** 64 - 2 ** 39 - 1,
+           2 ** 63 + 2 ** 39 + 1]
+    specs = [
+        ("i8", h5py.h5t.STD_I8LE, [-128, 127, 0, -1], "<i1"),
+        ("u8", h5py.h5t.STD_U8LE, [0, 255, 128], "<u1"),
+        ("i16be", h5py.h5t.STD_I16BE, [-32768, 32767, -2], "<i2"),
+        ("u16", h5py.h5t.STD_U16LE, [65535, 0, 40000], "<u2"),
+        ("i32", h5py.h5t.STD_I32LE, [16777217, -16777219, 2 ** 31 - 1, -(2 ** 31)], "<i4"),
+        ("u32be", h5py.h5t.STD_U32BE, [16777217, 2 ** 32 - 1, 2 ** 31 + 129], "<u4"),
+        ("i64", h5py.h5t.STD_I64LE, i64, "<i8"),
+        ("i64be", h5py.h5t.STD_I64BE, i64, "<i8"),
+        ("u64", h5py.h5t.STD_U64LE, u64, "<u8"),
+        ("u64be", h5py.h5t.STD_U64BE, u64, "<u8"),
+    ]
+    for name, tid, values, mem_dtype in specs:
+        d = h5py.h5d.create(f.id, name.encode(), tid, h5py.h5s.create_simple((len(values),)))
+        d.write(h5py.h5s.ALL, h5py.h5s.ALL, np.asarray(values, dtype=mem_dtype))
+        for attr, mtype, dtype in (("expected_f8", h5py.h5t.NATIVE_DOUBLE, "<f8"),
+                                   ("expected_f4", h5py.h5t.NATIVE_FLOAT, "<f4")):
+            back = np.empty(len(values), dtype=dtype)
+            d.read(h5py.h5s.ALL, h5py.h5s.ALL, back, mtype=mtype)
+            f[name].attrs[attr] = back
+        d.close()
+    f.attrs["u64_attr"] = np.array(u64, dtype="<u8")
+    a = h5py.h5a.open(f.id, b"u64_attr")
+    for attr, mtype, dtype in (("u64_attr_f8", h5py.h5t.NATIVE_DOUBLE, "<f8"),
+                               ("u64_attr_f4", h5py.h5t.NATIVE_FLOAT, "<f4")):
+        back = np.empty(len(u64), dtype=dtype)
+        a.read(back, mtype=mtype)
+        f.attrs[attr] = back
+
+
 def build_vds_byteorder(out):
     """Virtual datasets whose sources hold big-endian data under a little-endian virtual type (libhdf5
     converts), and one whose source has a different type of the same size (uint32 under int32)."""
@@ -1377,6 +1416,7 @@ FIXTURES = {
                      build_sohm(os.path.join(OUT, "sohm_latest.h5"), (h5py.h5f.LIBVER_LATEST, h5py.h5f.LIBVER_LATEST))),
     "external_paths": lambda: build_external_paths(OUT),
     "numeric": lambda: _with_file("numeric.h5", build_numeric, libver="latest"),
+    "conversions": lambda: _with_file("conversions.h5", build_conversions),
     "vds_byteorder": lambda: build_vds_byteorder(OUT),
     "userblock": lambda: build_userblock(OUT),
     "chunk_maxshape": lambda: _with_file("chunk_maxshape.h5", build_chunk_maxshape, libver="latest"),

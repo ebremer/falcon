@@ -68,6 +68,20 @@ public final class ChunkedReader {
         return output;
     }
 
+    /**
+     * The bytes the dataset's stored chunks take in the file, filtered sizes summed over the chunk index,
+     * as libhdf5's {@code H5Dget_storage_size} counts them. Zero if no chunk has been written.
+     */
+    public static long storedBytes(FileContext ctx, DataLayout.Chunked layout, long[] datasetDims, long[] maxDims,
+                                   int elementSize) {
+        int chunkBytes = chunkBytes(layout.chunkDimensions(), elementSize);
+        long total = 0;
+        for (ChunkRecord chunk : enumerateChunks(ctx, layout, chunkBytes, datasetDims, maxDims)) {
+            total += chunk.size();
+        }
+        return total;
+    }
+
     private static List<ChunkRecord> enumerateChunks(FileContext ctx, DataLayout.Chunked layout, int chunkBytes,
                                                      long[] datasetDims, long[] maxDims) {
         int rank = datasetDims.length;

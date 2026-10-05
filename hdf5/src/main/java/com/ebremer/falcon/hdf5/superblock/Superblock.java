@@ -165,7 +165,7 @@ public final class Superblock {
         long rootObjectHeader = buf.getAddress(addr + 12 + 3L * sizeOfOffsets, sizeOfOffsets);
         long checksumOffset = addr + 12 + 4L * sizeOfOffsets;
         int stored = buf.getInt(checksumOffset);
-        int computed = Lookup3.hashLittle(buf.segment(), addr, checksumOffset - addr, 0);
+        int computed = Lookup3.hashLittle(buf.segmentSlice(addr, checksumOffset - addr), 0, checksumOffset - addr, 0);
         if (stored != computed) {
             throw new HdfFormatException(String.format(
                     "superblock checksum mismatch: stored=0x%08x computed=0x%08x", stored, computed));

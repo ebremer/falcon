@@ -27,6 +27,11 @@ import java.util.List;
  * silently substitute its fill value). Paths are compared after normalization; symbolic links inside an
  * allowed directory are not resolved.
  *
+ * <p>A file opened from bytes or a {@link RangeReader} has no directory of its own. Then only
+ * {@link #allowDirectory(Path) allowed directories} are searched and allowed, and
+ * {@link #unrestricted()} resolves relative names against the working directory, as libhdf5 does for a
+ * file in memory.
+ *
  * <p>A virtual dataset's source is looked for where libhdf5 looks ({@code H5F_prefix_open_file}), among
  * the places the policy allows: an absolute name as written, and then, as when a file was moved with its
  * sources, by its file name alone; a relative name in the HDF5 file's directory. Both then try each
@@ -77,10 +82,10 @@ public final class ExternalFileAccess {
     }
 
     /**
-     * Resolves {@code name}, as written in an HDF5 file in {@code baseDirectory} ({@code null} for the
-     * working directory), to the file to open: the first allowed candidate that exists, else the first
-     * allowed one. An absolute name is its own only candidate; a relative one is tried in
-     * {@code baseDirectory} and then each allowed directory.
+     * Resolves {@code name}, as written in an HDF5 file in the absolute directory {@code baseDirectory}
+     * ({@code null} for a file with no directory of its own), to the file to open: the first allowed
+     * candidate that exists, else the first allowed one. An absolute name is its own only candidate; a
+     * relative one is tried in {@code baseDirectory} and then each allowed directory.
      *
      * @param what what the name is for, for error messages (e.g. "external raw data file")
      * @throws HdfUnsupportedException if the policy refuses the name
@@ -100,9 +105,9 @@ public final class ExternalFileAccess {
     }
 
     /**
-     * Resolves a virtual dataset's source file {@code name}, as written in an HDF5 file in
-     * {@code baseDirectory}, in libhdf5's order (see the class description). Returns the first allowed
-     * candidate that exists, or null if the source is missing.
+     * Resolves a virtual dataset's source file {@code name}, as written in an HDF5 file in the absolute
+     * directory {@code baseDirectory} ({@code null} for none), in libhdf5's order (see the class
+     * description). Returns the first allowed candidate that exists, or null if the source is missing.
      *
      * @throws HdfUnsupportedException if the policy refuses every candidate, or refuses the name's own
      *         location and no allowed candidate exists
@@ -129,11 +134,18 @@ public final class ExternalFileAccess {
         return found;
     }
 
+    /**
+     * The directory relative names start from: the HDF5 file's own, or, for a file without one, the
+     * working directory under {@link #unrestricted()} and none (null) otherwise.
+     */
     private Path base(Path baseDirectory, String name, String what) {
         if (!enabled) {
             throw new HdfUnsupportedException(what + " '" + name + "' is not opened: external file access is disabled");
         }
-        return (baseDirectory == null ? Path.of("") : baseDirectory).toAbsolutePath().normalize();
+        if (baseDirectory == null) {
+            return unrestricted ? Path.of("").toAbsolutePath() : null;
+        }
+        return baseDirectory.toAbsolutePath().normalize();
     }
 
     private static Path parse(String name, String what) {
@@ -152,10 +164,12 @@ public final class ExternalFileAccess {
         return named.isAbsolute() || named.getRoot() != null;
     }
 
-    /** {@code named} in the base directory, then each allowed directory, then perhaps the working directory. */
+    /** {@code named} in the base directory (if any), then each allowed directory, then perhaps the working directory. */
     private List<Path> relativeCandidates(Path base, Path named, boolean workingDirectory) {
         List<Path> candidates = new ArrayList<>();
-        candidates.add(base.resolve(named).normalize());
+        if (base != null) {
+            candidates.add(base.resolve(named).normalize());
+        }
         for (Path directory : directories) {
             candidates.add(directory.resolve(named).normalize());
         }
@@ -168,7 +182,8 @@ public final class ExternalFileAccess {
     private List<Path> allowed(List<Path> candidates, Path base) {
         List<Path> allowed = new ArrayList<>();
         for (Path candidate : candidates) {
-            if (unrestricted || isInside(candidate, base) || directories.stream().anyMatch(d -> isInside(candidate, d))) {
+            if (unrestricted || (base != null && isInside(candidate, base))
+                    || directories.stream().anyMatch(d -> isInside(candidate, d))) {
                 allowed.add(candidate);
             }
         }
@@ -185,8 +200,10 @@ public final class ExternalFileAccess {
     }
 
     private HdfUnsupportedException refused(String what, String name, Path base) {
-        return new HdfUnsupportedException(what + " '" + name + "' lies outside " + base
-                + (directories.isEmpty() ? "" : " and " + directories)
+        String where = base != null ? "lies outside " + base + (directories.isEmpty() ? "" : " and " + directories)
+                : directories.isEmpty() ? "is not opened: the HDF5 file was not opened from a path, so no directory is allowed"
+                : "lies outside " + directories;
+        return new HdfUnsupportedException(what + " '" + name + "' " + where
                 + "; open the file with ExternalFileAccess.unrestricted() or allowDirectory(...) to read it");
     }
 

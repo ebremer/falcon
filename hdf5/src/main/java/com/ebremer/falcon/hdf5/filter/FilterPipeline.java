@@ -10,8 +10,13 @@ import java.util.List;
  */
 public final class FilterPipeline {
 
-    /** One filter: its numeric id, flags, and client-data parameters. */
-    public record Filter(int id, int flags, int[] clientData) {
+    /** One filter: its numeric id, flags, client-data parameters, and the name the message stores (or null). */
+    public record Filter(int id, int flags, int[] clientData, String name) {
+
+        /** A filter whose message stores no name. */
+        public Filter(int id, int flags, int[] clientData) {
+            this(id, flags, clientData, null);
+        }
     }
 
     private final List<Filter> filters;

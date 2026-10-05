@@ -6,27 +6,36 @@ import com.ebremer.falcon.hdf5.header.ObjectHeader;
 import com.ebremer.falcon.hdf5.io.FileContext;
 import com.ebremer.falcon.hdf5.io.HdfBuffer;
 import com.ebremer.falcon.hdf5.io.MappedHdfFile;
+import com.ebremer.falcon.hdf5.io.PagedSource;
 import com.ebremer.falcon.hdf5.message.BTreeKValuesMessage;
 import com.ebremer.falcon.hdf5.message.DriverInfoMessage;
 import com.ebremer.falcon.hdf5.message.FileSpaceInfoMessage;
 import com.ebremer.falcon.hdf5.superblock.Superblock;
 import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.lang.foreign.MemorySegment;
 import java.nio.file.Path;
+import java.util.Objects;
 import java.util.Optional;
 
 /**
  * An open, read-only HDF5 file &mdash; the entry point of Falcon's read API.
  *
  * <p>Open a file, walk its hierarchy from {@link #root()}, and {@link #close()} to unmap it (or use
- * try-with-resources). Reads are backed by a memory mapping, so the file must remain available for the
- * lifetime of this object. A file that begins with a user block (as MATLAB v7.3 {@code .mat} files do)
- * is read like any other.
+ * try-with-resources). A file that begins with a user block (as MATLAB v7.3 {@code .mat} files do) is
+ * read like any other.
  *
  * <pre>{@code
  * try (Hdf5File h5 = Hdf5File.open(Path.of("data.h5"))) {
  *     for (String name : h5.root().childNames()) { ... }
  * }
  * }</pre>
+ *
+ * <p><b>Sources.</b> A file opened from a {@link Path} is memory-mapped, so it must remain available
+ * while this object is open. One already in memory opens from its bytes ({@link #open(byte[])}), and one
+ * elsewhere (an object store, an HTTP server, a channel) from a {@link RangeReader}, which Falcon reads on
+ * demand: the metadata it parses and the data it is asked for. A read that the reader fails throws
+ * {@link java.io.UncheckedIOException}.
  *
  * <p><b>Other files.</b> External raw data and virtual-dataset sources are opened only as the
  * {@link ExternalFileAccess} policy allows: by default, files in this file's own directory tree.
@@ -43,13 +52,13 @@ import java.util.Optional;
  */
 public final class Hdf5File implements AutoCloseable {
 
-    private final MappedHdfFile mapped;
+    private final Runnable release; // unmaps the file, or drops a paged source's cache
     private final Superblock superblock;
     private final FileContext ctx;
     private final Group root;
 
-    private Hdf5File(MappedHdfFile mapped, Superblock superblock, FileContext ctx, Group root) {
-        this.mapped = mapped;
+    private Hdf5File(Runnable release, Superblock superblock, FileContext ctx, Group root) {
+        this.release = release;
         this.superblock = superblock;
         this.ctx = ctx;
         this.root = root;
@@ -70,15 +79,65 @@ public final class Hdf5File implements AutoCloseable {
 
     /** Opens and memory-maps an HDF5 file for reading, as {@code options} say. */
     public static Hdf5File open(Path path, OpenOptions options) throws IOException {
-        java.util.Objects.requireNonNull(options, "options");
+        Objects.requireNonNull(options, "options");
         MappedHdfFile mapped = MappedHdfFile.openReadOnly(path);
+        return open(mapped.buffer(), path, mapped::close, options);
+    }
+
+    /**
+     * Opens an HDF5 file held in memory, with the {@linkplain OpenOptions#defaults() default options}. The
+     * array is read in place, not copied, so it must not change while the file is open.
+     */
+    public static Hdf5File open(byte[] bytes) {
+        return open(bytes, OpenOptions.defaults());
+    }
+
+    /**
+     * Opens an HDF5 file held in memory, as {@code options} say. The array is read in place, not copied,
+     * so it must not change while the file is open. The file has no directory of its own, so the default
+     * {@link ExternalFileAccess} policy opens no other file (see {@link ExternalFileAccess}).
+     */
+    public static Hdf5File open(byte[] bytes, OpenOptions options) {
+        Objects.requireNonNull(options, "options");
         try {
-            Superblock superblock = Superblock.parse(mapped.buffer());
+            return open(new HdfBuffer(MemorySegment.ofArray(bytes)), null, () -> { }, options);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e); // not reached: bytes in memory are never read through a reader
+        }
+    }
+
+    /**
+     * Opens an HDF5 file read through {@code reader} on demand, with the
+     * {@linkplain OpenOptions#defaults() default options}.
+     *
+     * @throws IOException if the reader cannot report the size or read the file's first metadata
+     */
+    public static Hdf5File open(RangeReader reader) throws IOException {
+        return open(reader, OpenOptions.defaults());
+    }
+
+    /**
+     * Opens an HDF5 file read through {@code reader} on demand, as {@code options} say. The reader must
+     * stay usable while the file is open; Falcon does not close it. The file has no directory of its own,
+     * so the default {@link ExternalFileAccess} policy opens no other file (see {@link ExternalFileAccess}).
+     *
+     * @throws IOException if the reader cannot report the size or read the file's first metadata
+     */
+    public static Hdf5File open(RangeReader reader, OpenOptions options) throws IOException {
+        Objects.requireNonNull(reader, "reader");
+        Objects.requireNonNull(options, "options");
+        PagedSource source = PagedSource.open(reader);
+        return open(new HdfBuffer(source), null, source::close, options);
+    }
+
+    /** Opens the file whose bytes {@code data} reads; {@code release} runs on close, or if opening fails. */
+    private static Hdf5File open(HdfBuffer data, Path path, Runnable release, OpenOptions options) throws IOException {
+        try {
+            Superblock superblock = Superblock.parse(data);
             // Every file address is relative to the base address, which is the superblock's own offset:
             // non-zero when the file starts with a user block (e.g. MATLAB v7.3 .mat files, h5py
             // userblock_size=). Like libhdf5 (H5F__super_read), use where the superblock actually sits
             // rather than the stored base address, then read through a view that starts there.
-            HdfBuffer data = mapped.buffer();
             long base = superblock.location();
             if (base != 0) {
                 data = data.slice(base, data.size() - base);
@@ -86,9 +145,12 @@ public final class Hdf5File implements AutoCloseable {
             FileContext ctx = new FileContext(data, superblock.sizeOfOffsets(), superblock.sizeOfLengths(),
                     path, superblock.rootObjectHeaderAddress(), options, superblock.superblockExtensionAddress());
             Group root = Group.root(ctx, superblock.rootObjectHeaderAddress());
-            return new Hdf5File(mapped, superblock, ctx, root);
+            return new Hdf5File(release, superblock, ctx, root);
+        } catch (UncheckedIOException e) {
+            release.run();
+            throw e.getCause(); // a reader failure while opening is the open's own I/O error
         } catch (RuntimeException e) {
-            mapped.close();
+            release.run();
             throw e;
         }
     }
@@ -98,9 +160,9 @@ public final class Hdf5File implements AutoCloseable {
         return root;
     }
 
-    /** The file's path. */
+    /** The file's path, or {@code null} if it was opened from bytes or a {@link RangeReader}. */
     public Path path() {
-        return mapped.path();
+        return ctx.path();
     }
 
     /** The HDF5 superblock format version (0–3) of this file. */
@@ -168,10 +230,13 @@ public final class Hdf5File implements AutoCloseable {
         return !ctx.isClosed();
     }
 
-    /** Unmaps the file. Calling it again does nothing. */
+    /**
+     * Unmaps the file, or releases what was cached from a {@link RangeReader} (which stays open). Calling
+     * it again does nothing.
+     */
     @Override
     public void close() {
         ctx.markClosed();
-        mapped.close();
+        release.run();
     }
 }

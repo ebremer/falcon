@@ -2,6 +2,7 @@ package com.ebremer.falcon.hdf5.checksum;
 
 import com.ebremer.falcon.hdf5.HdfFormatException;
 import com.ebremer.falcon.hdf5.io.HdfBuffer;
+import java.lang.foreign.MemorySegment;
 
 /**
  * Verifies the Jenkins lookup3 checksum that ends every checksummed HDF5 metadata structure (object
@@ -23,9 +24,9 @@ public final class MetadataChecksum {
      * @throws HdfFormatException if the range is out of bounds or the checksum does not match
      */
     public static void verify(HdfBuffer buf, long start, long length, String structure) {
-        buf.segmentSlice(start, length + 4); // bounds check (throws HdfFormatException)
+        MemorySegment bytes = buf.segmentSlice(start, length + 4); // bounds-checked (throws HdfFormatException)
         int stored = buf.getInt(start + length);
-        int computed = Lookup3.hashLittle(buf.segment(), start, length, 0);
+        int computed = Lookup3.hashLittle(bytes, 0, length, 0);
         if (stored != computed) {
             throw new HdfFormatException(String.format(
                     "%s checksum mismatch at %d: stored=0x%08x computed=0x%08x", structure, start, stored, computed));

@@ -135,7 +135,7 @@ VDS mappings are read since P2, from fixtures made through h5py's bundled libhdf
 | Build | Multi-module Maven reactor; parent `falcon` (pom), module `hdf5` (jar) | Umbrella for HDF5 now, Zarr later. |
 | Dependencies | None at runtime; JUnit 5 test-only | "Pure JDK" mandate. |
 | Module system | JPMS module per format; export public pkg only | Clean encapsulation of format internals. |
-| I/O backend | Foreign Function & Memory API — `MemorySegment` mapped via `FileChannel.map(…, Arena)` | Handles >2 GB files without the 2 GB `MappedByteBuffer` cap; zero-copy reads. A `ByteBuffer` fallback sits behind the same interface. |
+| I/O backend | Foreign Function & Memory API — `MemorySegment` mapped via `FileChannel.map(…, Arena)`; bytes in memory wrap as a heap segment; any other source is read on demand through a public `RangeReader` (paged, cached metadata; direct data reads) behind the same `HdfBuffer` | Handles >2 GB files without the 2 GB `MappedByteBuffer` cap; zero-copy reads. Remote and in-memory files read through the same parsers (P2 A6, 2026-10-05). |
 | Metadata endianness | Little-endian readers/writers | HDF5 metadata is little-endian; datatype *data* order is per-datatype. |
 | Addresses/lengths | Widths from superblock ("size of offsets"/"size of lengths"); undefined = all-1s | Matches the format's parameterized addressing. |
 | Checksums | Hand-written Jenkins lookup3 (+ fletcher32) | Not in the JDK. |
@@ -146,7 +146,7 @@ VDS mappings are read since P2, from fixtures made through h5py's bundled libhdf
 
 ```
 com.ebremer.falcon.hdf5             Public API: Hdf5File, Group, Dataset, Attribute, Datatype, Dataspace, …
-        …hdf5.io                    MemorySegment/ByteBuffer abstraction, little-endian reads,
+        …hdf5.io                    HdfBuffer over a MemorySegment or a paged RangeReader, little-endian reads,
                                     address/length primitives, undefined-address handling
         …hdf5.checksum              Jenkins lookup3 (+ fletcher32 helper)
         …hdf5.superblock            Superblock v0–v3 parse/write; superblock extension; file-space info
@@ -502,7 +502,7 @@ checksums, and chunk indexing are all format-specific); it is deferred — see `
 6. **Priority:** reader before writer. ✅
 7. **Zarr:** Falcon Phase 2, pinned. ✅
 8. **Conformance oracle:** h5py 3.16.0 / HDF5 2.0.0 (installed). ✅
-9. **I/O backend:** FFM `MemorySegment`, `ByteBuffer` fallback. (Default; revisit only if it bites.)
+9. **I/O backend:** FFM `MemorySegment`; bytes in memory and on-demand `RangeReader` sources since P2 A6. ✅
 10. **JUnit 5 test-only:** artifacts stay pure-JDK. (Default; say the word for a hand-rolled harness.)
 
 ## 14. Sequencing at a glance

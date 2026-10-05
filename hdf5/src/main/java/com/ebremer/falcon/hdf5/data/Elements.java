@@ -139,10 +139,24 @@ public final class Elements {
         return fp.bitPrecision() <= (fp.signed() ? 64 : 63);
     }
 
+    /**
+     * Every element as a {@code double}. Floating-point elements are decoded; integer elements are
+     * converted as libhdf5 converts them to {@code H5T_NATIVE_DOUBLE}: exactly when the value has at most
+     * 53 significant bits, otherwise rounded to the nearest {@code double} (ties to even).
+     *
+     * @throws HdfUnsupportedException if the datatype is neither floating-point nor fixed-point
+     */
     public static double[] toDoubles(MemorySegment data, int count, Datatype type) {
-        Datatype.FloatingPoint fp = requireFloat(type, "readDoubles");
-        int size = fp.size();
         double[] out = new double[count];
+        if (type instanceof Datatype.FixedPoint fp) {
+            for (int i = 0; i < count; i++) {
+                long value = integerAt(data, (long) i * fp.size(), fp);
+                out[i] = fp.signed() ? value : unsignedToDouble(value);
+            }
+            return out;
+        }
+        Datatype.FloatingPoint fp = requireNumeric(type, "readDoubles");
+        int size = fp.size();
         boolean ieee = isIeee(fp);
         boolean le = fp.byteOrder() == ByteOrder.LITTLE_ENDIAN;
         for (int i = 0; i < count; i++) {
@@ -152,10 +166,24 @@ public final class Elements {
         return out;
     }
 
+    /**
+     * Every element as a {@code float}: floating-point elements decoded and, if wider, rounded; integer
+     * elements converted as libhdf5 converts them to {@code H5T_NATIVE_FLOAT}, rounded once to the nearest
+     * {@code float} (ties to even) when the value has more than 24 significant bits.
+     *
+     * @throws HdfUnsupportedException if the datatype is neither floating-point nor fixed-point
+     */
     public static float[] toFloats(MemorySegment data, int count, Datatype type) {
-        Datatype.FloatingPoint fp = requireFloat(type, "readFloats");
-        int size = fp.size();
         float[] out = new float[count];
+        if (type instanceof Datatype.FixedPoint fp) {
+            for (int i = 0; i < count; i++) {
+                long value = integerAt(data, (long) i * fp.size(), fp);
+                out[i] = fp.signed() ? value : unsignedToFloat(value);
+            }
+            return out;
+        }
+        Datatype.FloatingPoint fp = requireNumeric(type, "readFloats");
+        int size = fp.size();
         boolean ieee = isIeee(fp);
         boolean le = fp.byteOrder() == ByteOrder.LITTLE_ENDIAN;
         for (int i = 0; i < count; i++) {
@@ -347,8 +375,17 @@ public final class Elements {
         return negative ? -magnitude : magnitude;
     }
 
+    /**
+     * An unsigned 64-bit value as the nearest {@code double}. Above 2<sup>63</sup> the value is halved,
+     * keeping the dropped bit as a sticky bit, so the one rounding is still to nearest.
+     */
     private static double unsignedToDouble(long value) {
         return value >= 0 ? value : ((value >>> 1) | (value & 1)) * 2.0;
+    }
+
+    /** An unsigned 64-bit value as the nearest {@code float}, rounded once (as {@link #unsignedToDouble}). */
+    private static float unsignedToFloat(long value) {
+        return value >= 0 ? value : ((value >>> 1) | (value & 1)) * 2.0f;
     }
 
     private static String describe(Datatype.FixedPoint fp) {
@@ -366,10 +403,10 @@ public final class Elements {
         throw new HdfUnsupportedException(op + " requires a fixed-point datatype, not " + type.typeClass());
     }
 
-    private static Datatype.FloatingPoint requireFloat(Datatype type, String op) {
+    private static Datatype.FloatingPoint requireNumeric(Datatype type, String op) {
         if (type instanceof Datatype.FloatingPoint fp) {
             return fp;
         }
-        throw new HdfUnsupportedException(op + " requires a floating-point datatype, not " + type.typeClass());
+        throw new HdfUnsupportedException(op + " requires a floating-point or integer datatype, not " + type.typeClass());
     }
 }

@@ -1,5 +1,6 @@
 package com.ebremer.falcon.hdf5.data;
 
+import com.ebremer.falcon.hdf5.io.HdfBuffer;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 
@@ -14,6 +15,43 @@ public final class Hyperslab {
 
     public static byte[] extract(MemorySegment source, long[] datasetDims, long[] offset, long[] count,
                                  int elementSize) {
+        return extract(datasetDims, offset, count, elementSize, (from, out, at, length) ->
+                MemorySegment.copy(source, ValueLayout.JAVA_BYTE, from, out, at, length));
+    }
+
+    /**
+     * Extracts the hyperslab from row-major element bytes stored at {@code address} in {@code file},
+     * reading only the selected runs (for a source read on demand, the rest is never fetched).
+     */
+    public static byte[] extract(HdfBuffer file, long address, long[] datasetDims, long[] offset, long[] count,
+                                 int elementSize) {
+        return extract(datasetDims, offset, count, elementSize, (from, out, at, length) ->
+                file.copyTo(address + from, out, at, length));
+    }
+
+    /** Copies {@code length} source bytes from byte offset {@code from} to {@code out[at...]}. */
+    private interface Runs {
+        void copy(long from, byte[] out, int at, int length);
+    }
+
+    private static byte[] extract(long[] datasetDims, long[] offset, long[] count, int elementSize, Runs source) {
+        // Fold trailing dimensions selected whole into the one before them: the same bytes, in longer runs.
+        int whole = datasetDims.length;
+        while (whole > 1 && count[whole - 1] == datasetDims[whole - 1]) {
+            whole--;
+        }
+        if (whole < datasetDims.length) {
+            long inner = 1;
+            for (int d = whole; d < datasetDims.length; d++) {
+                inner *= datasetDims[d];
+            }
+            datasetDims = java.util.Arrays.copyOf(datasetDims, whole);
+            offset = java.util.Arrays.copyOf(offset, whole);
+            count = java.util.Arrays.copyOf(count, whole);
+            datasetDims[whole - 1] *= inner;
+            offset[whole - 1] *= inner;
+            count[whole - 1] *= inner;
+        }
         int rank = datasetDims.length;
         long total = 1;
         for (long c : count) {
@@ -24,7 +62,7 @@ public final class Hyperslab {
             return out; // an empty selection in any dimension selects nothing
         }
         if (rank == 0) {
-            MemorySegment.copy(source, ValueLayout.JAVA_BYTE, 0, out, 0, elementSize);
+            source.copy(0, out, 0, elementSize);
             return out;
         }
 
@@ -44,8 +82,7 @@ public final class Hyperslab {
                 sourceFlat += (offset[d] + local[d]) * sourceStride[d];
                 outFlat += local[d] * outStride[d];
             }
-            MemorySegment.copy(source, ValueLayout.JAVA_BYTE, sourceFlat * elementSize,
-                    out, (int) (outFlat * elementSize), run * elementSize);
+            source.copy(sourceFlat * elementSize, out, (int) (outFlat * elementSize), run * elementSize);
             int d = last - 1;
             while (d >= 0) {
                 if (++local[d] < count[d]) {

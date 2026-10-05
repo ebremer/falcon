@@ -86,10 +86,12 @@ public final class Attribute {
         return Elements.toLongs(data(), count(), datatype);
     }
 
+    /** Reads a floating-point or integer attribute as {@code float} values, as {@link Dataset#readFloats()}. */
     public float[] readFloats() {
         return Elements.toFloats(data(), count(), datatype);
     }
 
+    /** Reads a floating-point or integer attribute as {@code double} values, as {@link Dataset#readDoubles()}. */
     public double[] readDoubles() {
         return Elements.toDoubles(data(), count(), datatype);
     }

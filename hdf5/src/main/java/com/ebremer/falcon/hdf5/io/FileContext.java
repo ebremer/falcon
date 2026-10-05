@@ -63,6 +63,14 @@ public final class FileContext {
         return path;
     }
 
+    /**
+     * The directory the file is in, as an absolute path, against which the names of external raw data
+     * and virtual-dataset source files are resolved; {@code null} if the file was not opened from a path.
+     */
+    public Path directory() {
+        return path == null ? null : path.toAbsolutePath().getParent();
+    }
+
     /** The root group's object-header address. */
     public long rootAddress() {
         return rootAddress;

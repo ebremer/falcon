@@ -452,7 +452,7 @@ final class VirtualDataset {
 
         Sources(FileContext ctx) {
             this.ctx = ctx;
-            this.directory = ctx.path() == null ? null : ctx.path().getParent();
+            this.directory = ctx.directory();
         }
 
         /**
@@ -496,21 +496,7 @@ final class VirtualDataset {
 
     /** The dataset at {@code path} from {@code root}, or null if there is none (libhdf5 then fills). */
     private static Dataset navigate(Group root, String path) {
-        Hdf5Object current = root;
-        for (String part : path.split("/")) {
-            if (part.isEmpty()) {
-                continue;
-            }
-            if (!(current instanceof Group group)) {
-                return null;
-            }
-            Optional<Hdf5Object> child = group.child(part);
-            if (child.isEmpty()) {
-                return null;
-            }
-            current = child.get();
-        }
-        return current instanceof Dataset dataset ? dataset : null;
+        return root.child(path).orElse(null) instanceof Dataset dataset ? dataset : null;
     }
 
     private static Hdf5File openOrNull(Path path, OpenOptions options) {
