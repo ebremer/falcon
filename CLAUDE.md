@@ -9,7 +9,7 @@ writers of scientific-data formats:
 - **`zarr`** module (`com.ebremer.falcon.zarr`) — a Zarr reader/writer: reads v2 and v3, writes v3.
   **Built** (Falcon Phase 2).
 - **`core`** module (`com.ebremer.falcon.core`) — the pure-Java compression codecs both formats use
-  (zstd, Blosc, LZ4, LZF, bitshuffle), exported only to Falcon's own modules.
+  (zstd, Blosc, LZ4, LZF, bitshuffle, bzip2, ZFP, SZ), exported only to Falcon's own modules.
 
 The full roadmap is in [`PLAN.md`](PLAN.md); each module has its own `PLAN.md`, `TODO.md`, and
 `USER_GUIDE.md`.

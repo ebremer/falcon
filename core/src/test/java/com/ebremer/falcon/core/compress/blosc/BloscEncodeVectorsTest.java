@@ -60,6 +60,41 @@ class BloscEncodeVectorsTest {
         assertEquals(List.of(), mismatches);
     }
 
+    /**
+     * With a destination of the data's own size (hdf5-blosc's), each buffer either fits &mdash; compressed,
+     * never stored whole, which takes 16 bytes more &mdash; and decodes, or is refused (null) where c-blosc
+     * returns 0; with the data's size plus 16 it is numcodecs' buffer.
+     */
+    @Test
+    void aDestinationOfTheDataSizeRefusesWhatDoesNotShrink() {
+        int fitted = 0;
+        int refused = 0;
+        for (String[] v : Vectors.read("blosc_encode_vectors.txt")) {
+            if (!v[0].equals("blosc")) {
+                continue;
+            }
+            byte[] data = input(v[1], Integer.parseInt(v[2]));
+            int compressor = BloscEncoder.compressor(v[3]);
+            int clevel = Integer.parseInt(v[4]);
+            int shuffle = Integer.parseInt(v[5]);
+            int typeSize = Integer.parseInt(v[6]);
+            int blockSize = Integer.parseInt(v[7]);
+            String what = String.join(" ", List.of(v).subList(0, 8));
+            assertArrayEquals(BloscEncoder.compress(data, typeSize, shuffle, blockSize, clevel, compressor),
+                    BloscEncoder.compress(data, typeSize, shuffle, blockSize, clevel, compressor, data.length + 16), what);
+            byte[] buffer = BloscEncoder.compress(data, typeSize, shuffle, blockSize, clevel, compressor, data.length);
+            if (buffer == null) {
+                refused++;
+                continue;
+            }
+            assertTrue(buffer.length <= data.length && (buffer[2] & 0x02) == 0, what);
+            assertArrayEquals(data, BloscDecoder.decompress(buffer), what);
+            fitted++;
+        }
+        assertTrue(fitted > 500 && refused > 100, fitted + " fitted, " + refused + " refused");
+        assertEquals(null, BloscEncoder.compress(new byte[15], 1, 0, 0, 5, BloscEncoder.LZ4, 15));
+    }
+
     @Test
     void lz4BlocksAreLiblz4s() {
         List<String> mismatches = new ArrayList<>();

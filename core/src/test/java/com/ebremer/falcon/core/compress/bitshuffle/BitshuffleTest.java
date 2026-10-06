@@ -7,6 +7,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.ebremer.falcon.core.compress.CompressionFormatException;
 import com.ebremer.falcon.core.compress.Vectors;
+import java.util.Arrays;
+import java.util.Random;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -19,7 +21,7 @@ class BitshuffleTest {
     @Test
     void decodesTheLibraryOutput() {
         var vectors = Vectors.read("bitshuffle_vectors.txt");
-        assertEquals(20, vectors.size());
+        assertEquals(34, vectors.size());
         for (String[] v : vectors) {
             int elementSize = Integer.parseInt(v[1]);
             int elements = Integer.parseInt(v[2]);
@@ -81,6 +83,64 @@ class BitshuffleTest {
                 assertArrayEquals(data, back, elementSize + " x " + elements);
             }
         }
+    }
+
+    /**
+     * The encoders reproduce the library's streams byte for byte: bit-shuffled alone, and with LZ4 (zstd's
+     * frames are Falcon's own, so those round-trip instead), for element sizes of 1 to 16 bytes, blocks of 8
+     * to 8192 elements, and counts that leave a partial block and a tail of fewer than 8 elements.
+     */
+    @Test
+    void encodesAsTheLibrary() {
+        int exact = 0;
+        for (String[] v : Vectors.read("bitshuffle_vectors.txt")) {
+            int elementSize = Integer.parseInt(v[1]);
+            int elements = Integer.parseInt(v[2]);
+            int blockSize = Integer.parseInt(v[3]);
+            byte[] original = Vectors.hex(v[5]);
+            byte[] stream = Vectors.hex(v[6]);
+            switch (v[4]) {
+                case "none" -> assertArrayEquals(stream, Bitshuffle.shuffle(original, 0, elements, elementSize, blockSize),
+                        v[0]);
+                case "lz4" -> assertArrayEquals(stream, Bitshuffle.compress(original, 0, elements, elementSize, blockSize,
+                        Bitshuffle.BlockCodec.LZ4, 0), v[0]);
+                default -> {
+                    byte[] ours = Bitshuffle.compress(original, 0, elements, elementSize, blockSize,
+                            Bitshuffle.BlockCodec.ZSTD, 3);
+                    assertArrayEquals(original, Bitshuffle.decompress(ours, 0, ours.length, elements, elementSize,
+                            blockSize, Bitshuffle.BlockCodec.ZSTD), v[0]);
+                    continue;
+                }
+            }
+            exact++;
+        }
+        assertEquals(29, exact);
+    }
+
+    @Test
+    void encodersRoundTripAndCheckTheirArguments() {
+        Random random = new Random(3);
+        for (int elementSize : new int[] {1, 2, 5, 8, 24}) {
+            for (int elements : new int[] {0, 7, 8, 9, 130, 1000}) {
+                for (int blockSize : new int[] {0, 8, 64}) {
+                    byte[] data = new byte[elements * elementSize + 3];
+                    random.nextBytes(data);
+                    byte[] part = Arrays.copyOfRange(data, 3, data.length);
+                    byte[] shuffled = Bitshuffle.shuffle(data, 3, elements, elementSize, blockSize);
+                    assertArrayEquals(part, Bitshuffle.unshuffle(shuffled, 0, elements, elementSize, blockSize));
+                    for (Bitshuffle.BlockCodec codec : Bitshuffle.BlockCodec.values()) {
+                        byte[] packed = Bitshuffle.compress(data, 3, elements, elementSize, blockSize, codec, 1);
+                        assertArrayEquals(part, Bitshuffle.decompress(packed, 0, packed.length, elements, elementSize,
+                                blockSize, codec), codec + " " + elementSize + " x " + elements + " / " + blockSize);
+                    }
+                }
+            }
+        }
+        assertThrows(IllegalArgumentException.class, () -> Bitshuffle.shuffle(new byte[32], 0, 8, 4, 12));
+        assertThrows(IllegalArgumentException.class,
+                () -> Bitshuffle.compress(new byte[32], 0, 8, 4, 4, Bitshuffle.BlockCodec.LZ4, 0));
+        assertThrows(IllegalArgumentException.class, () -> Bitshuffle.shuffle(new byte[31], 0, 8, 4, 0));
+        assertThrows(IllegalArgumentException.class, () -> Bitshuffle.shuffle(new byte[32], 0, 8, 0, 0));
     }
 
     @Test

@@ -32,9 +32,13 @@ class RobustnessTest {
         "links.h5", "links_old.h5", "heap_limits.h5", "vds_default.h5", "vds_latest.h5",
         "regionrefs_default.h5", "regionrefs_latest.h5", "sohm.h5", "external_paths.h5", "ea_paged.h5",
         "sohm_latest.h5", "refs_revised.h5", "vds_unlimited.h5",
-        "plugin_filters.h5", "legacy_layouts.h5", "vax.h5", "fsinfo_v0_persist.h5", "btree_k_earliest.h5",
+        "plugin_filters.h5", "plugin_filters_write.h5", "sz.h5", "legacy_layouts.h5", "vax.h5",
+        "fsinfo_v0_persist.h5", "btree_k_earliest.h5",
         "family_latest_0.h5", "vds_views.h5", "conversions.h5", "oldstyle_big.h5", "typed.h5", "paths_latest.h5",
         "elinks.h5",
+        "bzip2.h5",
+        "zfp.h5",
+        "blosc2.h5",
     };
 
     @Test

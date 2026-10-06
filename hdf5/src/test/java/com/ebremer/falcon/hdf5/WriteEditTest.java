@@ -156,25 +156,36 @@ class WriteEditTest {
     }
 
     /**
-     * Writing a dataset whose filter Falcon cannot apply (a third-party one: S8) is refused before anything
-     * is written.
+     * Writing a dataset whose filter Falcon cannot apply (a third-party one other than the five of S8) is
+     * refused before anything is written. The file: Falcon's own, in the original format (no checksums), its
+     * bitshuffle filter renumbered to 32010, which no plugin registers.
      */
     @Test
     void refusesDataItCannotFilter() throws IOException {
-        Path file = copy("plugin_filters.h5");
-        int[] before;
-        try (Hdf5File h5 = Hdf5File.open(file)) {
-            before = h5.root().dataset("lzf_i4").readInts();
+        Path file = dir.resolve("unknown_filter.h5");
+        try (Hdf5Writer w = Hdf5Writer.create(file, Hdf5Writer.Format.EARLIEST)) {
+            w.intChunkedDataset("d", range(10), new long[] {10}, new long[] {5}).bitshuffle();
         }
+        byte[] bytes = Files.readAllBytes(file);
+        byte[] name = "bitshuffle; see".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+        int at = 0;
+        while (!Arrays.equals(bytes, at, at + name.length, name, 0, name.length)) {
+            at++;
+        }
+        assertEquals(0x7D08, (bytes[at - 8] & 0xff) | (bytes[at - 7] & 0xff) << 8); // version 1: id, name length, flags, count
+        bytes[at - 8] = 0x0A; // 32008 -> 32010
+        Files.write(file, bytes);
         try (Hdf5Writer w = Hdf5Writer.open(file)) {
-            Hdf5Writer.DatasetWriter lzf = w.dataset("lzf_i4");
-            assertThrows(HdfUnsupportedException.class, () -> lzf.write(new long[] {0}, new long[] {1}, new int[] {5}));
-            lzf.stringAttribute("note", "attributes still change");
+            Hdf5Writer.DatasetWriter d = w.dataset("d");
+            HdfUnsupportedException e = assertThrows(HdfUnsupportedException.class,
+                    () -> d.write(new long[] {0}, new long[] {1}, new int[] {5}));
+            assertTrue(e.getMessage().contains("filter 32010"), e.getMessage());
+            d.stringAttribute("note", "attributes still change");
         }
         try (Hdf5File h5 = Hdf5File.open(file)) {
-            Dataset lzf = h5.root().dataset("lzf_i4");
-            assertArrayEquals(before, lzf.readInts());
-            assertEquals("attributes still change", lzf.attribute("note").orElseThrow().readString());
+            Dataset d = h5.root().dataset("d");
+            assertEquals(32010, d.filters().getFirst().id());
+            assertEquals("attributes still change", d.attribute("note").orElseThrow().readString());
         }
     }
 

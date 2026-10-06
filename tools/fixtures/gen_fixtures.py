@@ -1118,6 +1118,365 @@ def build_plugin_filters(f):
         f.create_dataset("expected/" + name, data=data)
 
 
+
+def build_plugin_filters_write(f):
+    """The oracle for Falcon's third-party filter encoders (P2 S8): the five filters of plugin_filters.h5 over
+    more data and settings, so that every chunk, decoded and encoded again with its dataset's client data, can
+    be checked against the plugin's own bytes (zstd's frames, which Falcon's encoder does not reproduce, are
+    only read back). Each dataset's "source" attribute names its data: every dataset of a source reads the
+    same.
+
+    - LZF (h5py's) on every kind of data, after shuffle, before fletcher32;
+    - Blosc with each internal compressor and shuffle, clevels 0 (every chunk stored unfiltered), 1, 5, 7 and
+      9, multi-block chunks, chunks it cannot shrink or that are under 128 bytes (stored unfiltered), and
+      type sizes of 12 (compound), an array's base type, and above 255 bytes (taken as 1);
+    - LZ4 with one block per chunk and with blocks of 300 to 4096 bytes, incompressible blocks stored raw;
+    - bitshuffle alone and with LZ4 (and zstd) for element sizes 1 to 300 and blocks of 8 to 1024 elements;
+    - Zstandard at levels -5 to 22;
+    - and one dataset per filter that can grow.
+    Partial edge chunks throughout."""
+    import hdf5plugin
+    rng = np.random.default_rng(29)
+    walk = (np.cumsum(rng.integers(-3, 4, size=16384)) / 4).astype("<f4")
+    compound = np.zeros(800, dtype=[("a", "<i4"), ("b", "<f8")])
+    compound["a"] = np.arange(800) // 7
+    compound["b"] = np.round(np.cumsum(rng.normal(size=800)) * 4) / 4
+    words = [b"falcon", b"writes", b"plugin", b"filters", b"as", b"h5py", b"does", b"."]
+    data = {
+        "walk_f4": walk[:3000],
+        "walk_f4_long": walk,
+        "smooth_f8": (np.round(np.cumsum(rng.normal(size=(30, 40)), axis=1) * 8) / 8).astype("<f8"),
+        "rough_f4": np.cumsum(rng.normal(size=2048)).astype("<f4"),  # barely compressible: either side of fitting
+        "ramp_i4": np.arange(3000, dtype="<i4"),
+        "image_u2": (np.add.outer(np.arange(48), np.arange(64)) * 40 + rng.integers(0, 4, (48, 64))).astype("<u2"),
+        "noise_u1": rng.integers(0, 256, 5000, dtype="u1"),
+        "text_u1": np.frombuffer(b" ".join(words[i] for i in rng.integers(0, len(words), 900))[:5000], dtype="u1"),
+        "zeros_i2": np.zeros(4000, dtype="<i2"),
+        "compound": compound,
+        "vectors_f4x3": (np.round(np.cumsum(rng.normal(size=(1000, 3)), axis=0) * 4) / 4).astype("<f4"),
+        "strings": np.array([(b"label %d " % (i % 9)) * 30 for i in range(30)], dtype="S300"),
+        "tiny_u1": np.arange(10, dtype="u1"),
+    }
+    chunking = {"walk_f4": (512,), "walk_f4_long": (12000,), "smooth_f8": (16, 30), "rough_f4": (256,),
+                "ramp_i4": (700,), "image_u2": (20, 25), "noise_u1": (1000,), "text_u1": (1200,),
+                "zeros_i2": (1500,), "compound": (300,), "vectors_f4x3": (300,), "strings": (8,), "tiny_u1": (10,)}
+
+    def put(name, source, **filters):
+        values = data[source]
+        if source == "vectors_f4x3":  # an array datatype (numpy would expand it into a last dimension)
+            d = f.create_dataset(name, shape=values.shape[:1], dtype=np.dtype(("<f4", (3,))),
+                                 chunks=chunking[source], **filters)
+            d[...] = values
+        else:
+            d = f.create_dataset(name, data=values, chunks=chunking[source], **filters)
+        d.attrs["source"] = source
+
+    for source in data:
+        if source not in ("walk_f4_long", "vectors_f4x3"):
+            put(f"lzf_{source}", source, compression="lzf")
+    put("lzf_shuffle_walk_f4", "walk_f4", compression="lzf", shuffle=True)
+    put("lzf_fletcher_smooth_f8", "smooth_f8", compression="lzf", fletcher32=True)
+
+    cnames = ("blosclz", "lz4", "lz4hc", "zlib", "snappy")
+    shuffles = {"noshuffle": hdf5plugin.Blosc.NOSHUFFLE, "shuffle": hdf5plugin.Blosc.SHUFFLE,
+                "bitshuffle": hdf5plugin.Blosc.BITSHUFFLE}
+    for cname in cnames:
+        for sname, shuffle in shuffles.items():
+            put(f"blosc_{cname}_{sname}", "walk_f4", **hdf5plugin.Blosc(cname, 5, shuffle))
+        for clevel in (1, 9):
+            put(f"blosc_{cname}_c{clevel}", "smooth_f8", **hdf5plugin.Blosc(cname, clevel))
+        put(f"blosc_rough_{cname}", "rough_f4", **hdf5plugin.Blosc(cname, 7, hdf5plugin.Blosc.NOSHUFFLE))
+    put("blosc_c0", "ramp_i4", **hdf5plugin.Blosc("lz4", 0))
+    put("blosc_long_blosclz_c1", "walk_f4_long", **hdf5plugin.Blosc("blosclz", 1))
+    put("blosc_long_lz4_c3", "walk_f4_long", **hdf5plugin.Blosc("lz4", 3, hdf5plugin.Blosc.BITSHUFFLE))
+    put("blosc_noise", "noise_u1", **hdf5plugin.Blosc("lz4", 9))
+    put("blosc_tiny", "tiny_u1", **hdf5plugin.Blosc("lz4", 5))
+    put("blosc_text", "text_u1", **hdf5plugin.Blosc("blosclz", 9, hdf5plugin.Blosc.NOSHUFFLE))
+    put("blosc_image_u2", "image_u2", **hdf5plugin.Blosc())
+    put("blosc_compound", "compound", **hdf5plugin.Blosc("lz4hc", 6))
+    put("blosc_vectors_f4x3", "vectors_f4x3", **hdf5plugin.Blosc("lz4", 5))
+    put("blosc_strings", "strings", **hdf5plugin.Blosc("zlib", 4))
+    put("blosc_fletcher_smooth_f8", "smooth_f8", fletcher32=True, **hdf5plugin.Blosc("lz4", 5))
+    for sname, shuffle in shuffles.items():  # zstd inside: read back only
+        put(f"blosc_zstd_{sname}", "walk_f4", **hdf5plugin.Blosc("zstd", 5, shuffle))
+
+    put("lz4_ramp_i4", "ramp_i4", **hdf5plugin.LZ4())
+    put("lz4_text_u1", "text_u1", **hdf5plugin.LZ4())
+    put("lz4_noise_u1_300", "noise_u1", **hdf5plugin.LZ4(nbytes=300))
+    put("lz4_walk_f4_512", "walk_f4", **hdf5plugin.LZ4(nbytes=512))
+    put("lz4_smooth_f8_1000", "smooth_f8", **hdf5plugin.LZ4(nbytes=1000))
+    put("lz4_image_u2_4096", "image_u2", **hdf5plugin.LZ4(nbytes=4096))
+    put("lz4_shuffle_compound", "compound", shuffle=True, **hdf5plugin.LZ4())
+
+    for source in ("walk_f4", "smooth_f8", "rough_f4", "ramp_i4", "image_u2", "text_u1", "compound", "strings",
+                   "vectors_f4x3", "tiny_u1"):
+        put(f"bitshuffle_{source}", source, **hdf5plugin.Bitshuffle(cname="none"))
+        put(f"bitshuffle_lz4_{source}", source, **hdf5plugin.Bitshuffle(cname="lz4"))
+    put("bitshuffle_lz4_walk_f4_8", "walk_f4", **hdf5plugin.Bitshuffle(nelems=8, cname="lz4"))
+    put("bitshuffle_walk_f4_64", "walk_f4", **hdf5plugin.Bitshuffle(nelems=64, cname="none"))
+    put("bitshuffle_lz4_ramp_i4_1024", "ramp_i4", **hdf5plugin.Bitshuffle(nelems=1024, cname="lz4"))
+    for clevel in (0, 1, 9):  # zstd: read back only
+        put(f"bitshuffle_zstd_smooth_f8_{clevel}", "smooth_f8", **hdf5plugin.Bitshuffle(cname="zstd", clevel=clevel))
+
+    for level in (-5, 1, 3, 19, 22):  # read back only
+        put(f"zstd_smooth_f8_{level}", "smooth_f8", **hdf5plugin.Zstd(clevel=level))
+
+    # Datasets that can grow, one per filter, for writing into (and appending to) a file the plugins wrote.
+    for name, filters in (("lzf", dict(compression="lzf")), ("blosc", hdf5plugin.Blosc("blosclz", 5)),
+                          ("lz4", hdf5plugin.LZ4()), ("bitshuffle", hdf5plugin.Bitshuffle()),
+                          ("zstd", hdf5plugin.Zstd())):
+        d = f.create_dataset(f"grow_{name}", data=data["ramp_i4"][:700], chunks=(256,), maxshape=(None,), **filters)
+        d.attrs["source"] = "ramp_i4_700"
+
+
+def _sz_opts(mode, absolute=0.0, relative=0.0, pointwise=0.0, psnr=0.0):
+    """H5Z-SZ's nine client-data values: the error-bound mode, then four doubles as (high, low) words."""
+    import struct
+    words = []
+    for value in (absolute, relative, pointwise, psnr):
+        words += struct.unpack(">II", struct.pack(">d", value))
+    return (mode, *words)
+
+
+def build_sz(path):
+    """SZ 2 (filter 32017, hdf5plugin's H5Z-SZ / SZ 2.1.12), lossy: each dataset beside /expected, libSZ's own
+    decoding of it -- read back after the file is closed and reopened (libhdf5 serves a session's own
+    chunks from its cache, unfiltered). Floats and doubles in 1 to 4 dimensions, with partial edge chunks:
+    absolute, relative (value-range), both combined, PSNR, and point-wise relative bounds (accelerated, and
+    below 1e-5 its logarithmic form), with SZ 2.1's regression predictor in 2-D and up; smooth, noisy,
+    constant, signed-with-zeros, and mostly-zero data (the "_3d_mean" datasets: the regression format's
+    mean predictor); integers of every width. Chunks of fewer than 20 values are stored as they are;
+    "f4_twenty" holds chunks of exactly 20, which SZ keeps as they are but libSZ cannot read back (its
+    version check exits), so its /expected is the data itself. "f4_lead1" has a length-1 leading chunk
+    dimension, which H5Z-SZ's client data records as one value (so stores the chunks as they are)."""
+    import hdf5plugin  # noqa: F401  (registers the filter)
+    rng = np.random.default_rng(32017)
+
+    def smooth(shape, scale=3.0):
+        idx = np.indices(shape).astype("f8")
+        v = np.zeros(shape)
+        for k, ax in enumerate(idx):
+            v = v + np.sin(ax * (0.11 + 0.07 * k) + k)
+        return v * scale + 0.5
+
+    def mixed(shape):  # signs, zeros, and magnitudes over six decades, for point-wise relative bounds
+        v = smooth(shape) * 10.0 ** rng.integers(-3, 3, shape)
+        v[rng.random(shape) < 0.1] = 0
+        return v
+
+    def integers(dt, shape):
+        info = np.iinfo(dt)
+        lo, hi = float(info.min), float(info.max)
+        span = min(hi - lo, 2e9)
+        mid = (lo + hi) / 2 if dt[0] == "u" else 0.0
+        v = smooth(shape)
+        v = (v - v.min()) / np.ptp(v)
+        return np.clip(np.round((v - 0.5) * span * 0.6 + mid), lo, hi).astype(dt)
+
+    cases = {}
+    for dt in ("<f4", "<f8"):
+        t = "f" + dt[2]
+        cases[f"{t}_1d_abs"] = (smooth((500,)).astype(dt), (128,), _sz_opts(0, absolute=1e-3))
+        cases[f"{t}_1d_rel"] = (smooth((500,)).astype(dt), (128,), _sz_opts(1, relative=1e-4))
+        cases[f"{t}_1d_noisy"] = (rng.normal(0, 1, 500).astype(dt), (128,), _sz_opts(0, absolute=1e-2))
+        cases[f"{t}_1d_tight"] = (rng.normal(0, 1, 300).astype(dt), (100,), _sz_opts(0, absolute=1e-7))
+        cases[f"{t}_1d_pwr"] = (mixed((500,)).astype(dt), (128,), _sz_opts(10, pointwise=1e-2))
+        cases[f"{t}_1d_pwr_log"] = (mixed((500,)).astype(dt), (128,), _sz_opts(10, pointwise=1e-6))
+        cases[f"{t}_2d_abs"] = (smooth((36, 33)).astype(dt), (20, 16), _sz_opts(0, absolute=1e-3))
+        cases[f"{t}_2d_absrel"] = (smooth((36, 33)).astype(dt), (20, 16), _sz_opts(2, absolute=1e-2, relative=1e-3))
+        cases[f"{t}_2d_psnr"] = (smooth((36, 33)).astype(dt), (20, 16), _sz_opts(4, psnr=80.0))
+        cases[f"{t}_2d_pwr"] = (mixed((36, 33)).astype(dt), (20, 16), _sz_opts(10, pointwise=1e-3))
+        cases[f"{t}_2d_pwr_log"] = (np.exp(smooth((30, 30))).astype(dt), (16, 16), _sz_opts(10, pointwise=5e-6))
+        cases[f"{t}_2d_abs_pwr"] = (mixed((30, 30)).astype(dt), (16, 16), _sz_opts(11, absolute=1e-3, pointwise=1e-2))
+        cases[f"{t}_3d_abs"] = (smooth((12, 10, 17)).astype(dt), (6, 5, 17), _sz_opts(0, absolute=1e-3))
+        cases[f"{t}_3d_rel"] = (smooth((12, 10, 17)).astype(dt), (6, 5, 17), _sz_opts(1, relative=1e-2))
+        cases[f"{t}_3d_pwr"] = (mixed((12, 12, 12)).astype(dt), (8, 8, 8), _sz_opts(10, pointwise=1e-2))
+        cases[f"{t}_3d_pwr_log"] = (np.exp(smooth((8, 8, 8))).astype(dt), (8, 8, 8), _sz_opts(10, pointwise=1e-6))
+        sparse = smooth((18, 10, 11)) * 0.01  # mostly zeros: the regression format's mean predictor
+        sparse[rng.random((18, 10, 11)) < 0.8] = 0
+        cases[f"{t}_3d_mean"] = (sparse.astype(dt), (9, 10, 11), _sz_opts(0, absolute=1e-3))
+        cases[f"{t}_4d_abs"] = (smooth((3, 4, 8, 10)).astype(dt), (2, 4, 8, 10), _sz_opts(0, absolute=1e-3))
+        cases[f"{t}_4d_pwr"] = (mixed((2, 3, 8, 9)).astype(dt), (2, 3, 8, 9), _sz_opts(10, pointwise=1e-2))
+        cases[f"{t}_constant"] = (np.full((40, 30), 2.75, dt), (16, 16), _sz_opts(0, absolute=1e-3))
+        cases[f"{t}_short"] = (smooth((50,)).astype(dt), (12,), _sz_opts(0, absolute=1e-3))
+        cases[f"{t}_squeezed"] = (smooth((6, 1, 40)).astype(dt), (6, 1, 40), _sz_opts(0, absolute=1e-3))
+    for dt in ("<i1", "<u1", "<i2", "<u2", "<i4", "<u4", "<i8", "<u8"):
+        t = dt[1:]
+        cases[f"{t}_2d_abs"] = (integers(dt, (40, 30)), (16, 16), _sz_opts(0, absolute=3))
+        cases[f"{t}_1d_rel"] = (integers(dt, (300,)), (128,), _sz_opts(1, relative=1e-3))
+        cases[f"{t}_3d_abs"] = (integers(dt, (10, 9, 8)), (5, 9, 8), _sz_opts(0, absolute=0.4))
+    cases["i4_4d_abs"] = (integers("<i4", (3, 4, 6, 7)), (3, 4, 6, 7), _sz_opts(0, absolute=2))
+    cases["i2_constant"] = (np.full((40,), -7, "<i2"), (40,), _sz_opts(0, absolute=1))
+    twenty = smooth((60,)).astype("<f4")
+    lead1 = smooth((3, 100)).astype("<f4")
+    with h5py.File(path, "w", libver="latest") as f:
+        for name, (data, chunks, opts) in cases.items():
+            f.create_dataset(name, data=data, chunks=chunks, compression=32017, compression_opts=opts)
+        f.create_dataset("f4_twenty", data=twenty, chunks=(20,), compression=32017,
+                         compression_opts=_sz_opts(0, absolute=1e-3))
+        f.create_dataset("f4_lead1", data=lead1, chunks=(1, 100), compression=32017,
+                         compression_opts=_sz_opts(0, absolute=1e-3))
+    with h5py.File(path, "r") as f:  # libSZ's decoding, from a session that wrote nothing
+        expected = {name: f[name][()] for name in cases}
+        expected["f4_lead1"] = f["f4_lead1"][()]
+    expected["f4_twenty"] = twenty  # SZ_skip_compress_float: stored as it is
+    with h5py.File(path, "a") as f:
+        for name, values in expected.items():
+            f.create_dataset("expected/" + name, data=values)
+
+
+def build_blosc2(f):
+    """The Blosc2 filter (32026, hdf5plugin's hdf5-blosc2 with c-blosc2 3.3.2), each dataset beside an
+    unfiltered copy under /expected. Rank-1 chunks are plain Blosc2 frames; chunks of rank 2 and up are b2nd
+    frames, cut into blocks whose shape comes from the block size (client data slot 1, set here to force
+    shapes that do not divide the chunk), so padded. Every internal codec, clevel 0, 1, 5 and 9, no filter,
+    shuffle, bitshuffle and delta, partial edge chunks, chunks of zeros, NaNs and one repeated value, data
+    too random to compress, a compound type, and an array type (a plain frame despite its rank). The crafted_
+    datasets hold frames written with write_direct_chunk (gen_blosc2_frame_vectors.py): b2nd arrays of
+    several chunks, special chunks in the index, the "caterva" metalayer, and more metalayers; the filter
+    reads each as /expected holds it, but for uninitialised chunks, which c-blosc2 leaves undefined and
+    Falcon reads as zeros."""
+    import hdf5plugin
+    import gen_blosc2_frame_vectors as frames
+    rng = np.random.default_rng(32026)
+    options = frames.blosc2_options
+    smooth = np.cumsum(rng.normal(size=(40, 30)), axis=1)
+    special = np.arange(256, dtype="<f4").reshape(16, 16)
+    special[:8, :8] = 0
+    special[:8, 8:] = np.nan
+    special[8:, :8] = 3.5
+    compound = np.zeros((9, 7), dtype=[("a", "<i2"), ("b", "<f8")])
+    compound["a"] = np.arange(63).reshape(9, 7)
+    compound["b"] = smooth[:9, :7]
+    cases = {
+        "r1_blosclz_u1": (np.frombuffer((b"falcon reads blosc2 frames " * 40)[:1003], dtype="u1"), (250,), options()),
+        "r1_zstd_bitshuffle_f8": (smooth.ravel()[:500], (128,), options("zstd", 9, 2)),
+        "r2_default_f8": (smooth[:20, :20], (8, 8), hdf5plugin.Blosc2()),
+        "r2_lz4_padded_f4": (smooth[:20, :13].astype("<f4"), (7, 5), options("lz4", 5, 1, 32)),
+        "r2_lz4hc_noshuffle_i2": (rng.integers(-500, 500, size=(31, 17)).astype("<i2"), (16, 16),
+                                  options("lz4hc", 9, 0)),
+        "r2_zlib_exact_f8": (smooth[:16, :24], (8, 8), options("zlib", 1, 1, 128)),
+        "r2_clevel0_f8": (smooth[:9, :9], (4, 4), options("blosclz", 0, 1, 32)),
+        "r2_delta_i4": (np.arange(600, dtype="<i4").reshape(20, 30) * 7, (8, 16), options("zstd", 5, 3, 64)),
+        "r2_noise_u1": (rng.integers(0, 256, size=(40, 50)).astype("u1"), (16, 16), options("lz4", 9, 1, 128)),
+        "r2_compound": (compound, (4, 4), options("zstd", 5, 1, 40)),
+        "r2_special_f4": (special, (8, 8), options("lz4", 5, 1, 64)),
+        "r3_zstd_noshuffle_i2": (rng.integers(0, 9, size=(5, 9, 11)).astype("<i2"), (3, 4, 5),
+                                 options("zstd", 1, 0, 64)),
+        "r4_blosclz_bitshuffle_f4": (rng.normal(size=(4, 5, 6, 7)).astype("<f4"), (2, 3, 4, 5),
+                                     options("blosclz", 9, 2, 48)),
+    }
+    for name, (data, chunks, filters) in cases.items():
+        f.create_dataset(name, data=data, chunks=chunks, **filters)
+        f.create_dataset("expected/" + name, data=data)
+    # An array type: client data slot 2 is its base type's size, so the chunk is not the b2nd array the
+    # filter would make of it, and it writes a plain frame.
+    vectors = smooth[:6, :15].astype("<f4").reshape(6, 5, 3)
+    array_type = np.dtype(("<f4", (3,)))
+    for path, filters in (("r2_array_f4x3", options("zstd")), ("expected/r2_array_f4x3", {})):
+        f.create_dataset(path, shape=(6, 5), dtype=array_type, chunks=(3, 5) if filters else None, **filters)
+        f[path][()] = vectors
+    assert np.array_equal(f["r2_array_f4x3"][()], vectors)
+    for name, cd_shape, dtype, frame, expected, defined in frames.crafted_frames():
+        shape = tuple(cd_shape) if cd_shape else (len(expected) // np.dtype(dtype).itemsize,)
+        ds = f.create_dataset("crafted_" + name, shape=shape, dtype=dtype, chunks=shape, **options())
+        ds.id.write_direct_chunk((0,) * len(shape), frame)
+        read = np.frombuffer(ds[()].tobytes(), dtype="u1")
+        assert np.array_equal(read[defined], np.frombuffer(expected, dtype="u1")[defined]), name
+        f.create_dataset("expected/crafted_" + name, data=np.frombuffer(expected, dtype=dtype).reshape(shape))
+    for name, (data, _, _) in cases.items():
+        assert np.array_equal(f[name][()], data, equal_nan=data.dtype.kind == "f"), name
+
+
+def build_bzip2(f):
+    """The bzip2 filter (307, PyTables' H5Zbzip2.c through hdf5plugin), each dataset beside an unfiltered
+    copy under /expected (deflated where it is big): block sizes 1, 3, 5 and 9 and none given (the filter's
+    default, 9); 1 to 3 dimensions with partial edge chunks; after shuffle, and before fletcher32; a
+    big-endian type; noise that bzip2 cannot shrink (it stores it anyway: the filter never declines);
+    chunks of zeros and chunks never written; and a 260000-byte chunk, three bzip2 blocks at block size 1."""
+    import hdf5plugin
+    rng = np.random.default_rng(307)
+    ramp = np.arange(1000, dtype="<i4")
+    smooth = np.cumsum(rng.normal(size=(40, 30)), axis=1)
+    noise = rng.integers(0, 2**64, size=100, dtype="<u8")
+    text = np.frombuffer((b"falcon reads bzip2 chunks " * 80)[:2006], dtype="u1")
+    words = [b"falcon", b"bzip2", b"hdf5", b"chunk", b"block", b"filter", b"the", b"of", b"burrows", b"wheeler"]
+    picks = rng.integers(0, len(words), size=60000)
+    big = np.frombuffer(b" ".join(words[i] for i in picks)[:260000], dtype="u1")
+    assert big.size == 260000
+    cases = {
+        "bzip2_i4": (ramp, (250,), hdf5plugin.BZip2()),
+        "bzip2_f8_2d": (smooth.astype("<f8"), (16, 16), hdf5plugin.BZip2(blocksize=1)),
+        "bzip2_i2_3d": (np.arange(10 * 12 * 14, dtype="<i2").reshape(10, 12, 14) % 97, (4, 5, 6),
+                        hdf5plugin.BZip2(blocksize=5)),
+        "bzip2_shuffle_f4": (smooth.astype("<f4"), (32, 16), dict(hdf5plugin.BZip2(), shuffle=True)),
+        "bzip2_shuffle_fletcher_i8": (np.repeat(np.arange(125, dtype="<i8"), 4), (128,),
+                                      dict(hdf5plugin.BZip2(blocksize=3), shuffle=True, fletcher32=True)),
+        "bzip2_be_f8": (smooth.astype(">f8"), (40, 7), hdf5plugin.BZip2(blocksize=9)),
+        "bzip2_noise_u8": (noise, (50,), hdf5plugin.BZip2()),
+        "bzip2_text_u1": (text, (1003,), hdf5plugin.BZip2(blocksize=1)),
+        "bzip2_no_options_i4": (ramp, (300,), dict(compression=307)),
+    }
+    for name, (data, chunks, filters) in cases.items():
+        f.create_dataset(name, data=data, chunks=chunks, **filters)
+        f.create_dataset("expected/" + name, data=data)
+    f.create_dataset("bzip2_blocks_u1", data=big, chunks=(260000,), **hdf5plugin.BZip2(blocksize=1))
+    f.create_dataset("expected/bzip2_blocks_u1", data=big, chunks=(65000,), compression="gzip")
+    # Chunks of zeros, a chunk partly written (the rest is fill), and chunks never written at all.
+    sparse = f.create_dataset("bzip2_sparse_i4", shape=(1000,), dtype="<i4", chunks=(100,), fillvalue=-7,
+                              **hdf5plugin.BZip2(blocksize=2))
+    sparse[0:300] = 0
+    sparse[520:580] = np.arange(60)
+    expected = np.full(1000, -7, dtype="<i4")
+    expected[0:300] = 0
+    expected[520:580] = np.arange(60)
+    f.create_dataset("expected/bzip2_sparse_i4", data=expected)
+def build_zfp(f):
+    """The ZFP filter (32013, hdf5plugin's H5Z-ZFP 1.1.1 with zfp 1.0.1): every scalar type, 1 to 4 used
+    dimensions (and dimensions of size 1, which H5Z-ZFP drops), chunks and blocks cut at the edges, and
+    every mode: fixed rate (short and 64-bit mode encodings), precision, accuracy, expert, reversible (with
+    NaN, infinities, -0 and subnormals), and H5Z-ZFP's defaults. ZFP is lossy, so /expected holds what
+    libzfp decodes, read back through the filter."""
+    import io
+    import hdf5plugin
+    rng = np.random.default_rng(17)
+
+    def smooth(shape, dtype, scale=1000.0):
+        grids = np.meshgrid(*[np.linspace(0, 4, n) for n in shape], indexing="ij")
+        values = sum(np.cos(g * (i + 1.5)) for i, g in enumerate(grids)) * scale
+        return (values + rng.normal(scale=scale / 50, size=shape)).astype(dtype)
+
+    info = np.finfo(np.float32)
+    specials = rng.choice(np.array([np.nan, np.inf, -np.inf, -0.0, 0.0, info.tiny, info.tiny / 8,
+                                    -info.smallest_subnormal, info.max, 1.0, -2.5, 7e-3], dtype="<f4"), 300)
+    cases = {
+        "f4_1d_rate": (smooth((250,), "<f4"), (64,), hdf5plugin.Zfp(rate=6.0)),
+        "f8_2d_precision": (smooth((40, 30), "<f8"), (16, 16), hdf5plugin.Zfp(precision=24)),
+        "f4_3d_accuracy": (smooth((10, 9, 8), "<f4"), (5, 9, 8), hdf5plugin.Zfp(accuracy=1e-2)),
+        "f8_4d_rate": (smooth((6, 5, 4, 7), "<f8"), (3, 5, 4, 7), hdf5plugin.Zfp(rate=20.0)),
+        "i4_2d_precision": ((smooth((33, 20), "<f8") * 1000).astype("<i4"), (11, 20), hdf5plugin.Zfp(precision=20)),
+        "i8_3d_reversible": ((smooth((8, 8, 8), "<f8") * 2**30).astype("<i8"), (4, 8, 8), hdf5plugin.Zfp(reversible=True)),
+        "i4_4d_rate": ((smooth((4, 4, 4, 9), "<f8") * 100).astype("<i4"), (4, 4, 4, 9), hdf5plugin.Zfp(rate=8.0)),
+        "i8_1d_accuracy": ((smooth((100,), "<f8") * 2**20).astype("<i8"), (100,), hdf5plugin.Zfp(accuracy=1.0)),
+        "f4_reversible_specials": (specials, (300,), hdf5plugin.Zfp(reversible=True)),
+        "f8_2d_reversible": (smooth((20, 20), "<f8"), (20, 20), hdf5plugin.Zfp(reversible=True)),
+        "f8_unit_dims_expert": (smooth((3, 1, 16, 1, 20), "<f8"), (1, 1, 16, 1, 20),
+                                hdf5plugin.Zfp(minbits=200, maxbits=1200, maxprec=48, minexp=-40)),
+        "f4_zeros_rate": (np.zeros((12, 12), "<f4"), (8, 8), hdf5plugin.Zfp(rate=10.0)),
+        "f8_1d_coarse_accuracy": (smooth((64,), "<f8"), (64,), hdf5plugin.Zfp(accuracy=1e4)),
+        "f8_3d_defaults": (smooth((9, 6, 5), "<f8"), (9, 6, 5), hdf5plugin.Zfp()),
+    }
+    for name, (data, chunks, filters) in cases.items():
+        f.create_dataset(name, data=data, chunks=chunks, **filters)
+        # What libzfp decodes, from a file written alike and reopened: read back at once, a dataset's chunks
+        # would come from libhdf5's chunk cache, still unfiltered.
+        buf = io.BytesIO()
+        with h5py.File(buf, "w", libver="latest") as g:
+            g.create_dataset("d", data=data, chunks=chunks, **filters)
+        with h5py.File(buf, "r") as g:
+            f.create_dataset("expected/" + name, data=g["d"][()])
+
+
 def _lookup3(data, initval=0):
     """Bob Jenkins' lookup3 hashlittle, as libhdf5's H5_checksum_lookup3 computes metadata checksums."""
     m = 0xFFFFFFFF
@@ -1711,6 +2070,11 @@ FIXTURES = {
     "region_refs": lambda: build_region_refs(OUT),
     "revised_refs": lambda: build_revised_refs(OUT),
     "plugin_filters": lambda: _with_file("plugin_filters.h5", build_plugin_filters, libver="latest"),
+    "plugin_filters_write": lambda: _with_file("plugin_filters_write.h5", build_plugin_filters_write, libver="latest"),
+    "bzip2": lambda: _with_file("bzip2.h5", build_bzip2, libver="latest"),
+    "zfp": lambda: _with_file("zfp.h5", build_zfp, libver="latest"),
+    "blosc2": lambda: _with_file("blosc2.h5", build_blosc2, libver="latest"),
+    "sz": lambda: build_sz(os.path.join(OUT, "sz.h5")),
     "vds_unlimited": lambda: build_vds_unlimited(OUT),
     "vds_views": lambda: build_vds_views(OUT),
     "legacy_layouts": lambda: build_legacy_layouts(OUT),

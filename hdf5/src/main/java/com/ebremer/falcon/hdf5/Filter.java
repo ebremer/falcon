@@ -29,6 +29,8 @@ public record Filter(int id, String name, boolean optional, int[] clientData) {
     public static final int NBIT = 5;
     /** Scale-offset compression (built in). */
     public static final int SCALEOFFSET = 6;
+    /** bzip2 compression. */
+    public static final int BZIP2 = 307;
     /** LZF compression (h5py's filter). */
     public static final int LZF = 32000;
     /** Blosc compression. */
@@ -37,8 +39,14 @@ public record Filter(int id, String name, boolean optional, int[] clientData) {
     public static final int LZ4 = 32004;
     /** Bitshuffle, alone or with LZ4 or zstd. */
     public static final int BITSHUFFLE = 32008;
+    /** ZFP compression of floating-point and integer arrays (LLNL's H5Z-ZFP). */
+    public static final int ZFP = 32013;
     /** Zstandard compression. */
     public static final int ZSTD = 32015;
+    /** SZ, error-bounded lossy compression (SZ 2's H5Z-SZ). */
+    public static final int SZ = 32017;
+    /** Blosc2 compression (hdf5-blosc2: Blosc2 frames, and b2nd arrays for chunks of rank 2 and up). */
+    public static final int BLOSC2 = 32026;
 
     /**
      * A filter, copying {@code clientData}.

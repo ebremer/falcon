@@ -5,16 +5,19 @@ Falcon's own round-trip tests (WriteTest) only prove the writer and reader agree
 script exports the writer's feature matrix (WriterInteropExport: one file per area, among them files
 Falcon changed in place, plus a manifest of expected values) and reads every object back with h5py --
 HDF5 2.0, and optionally an HDF5 1.14 build in a second interpreter -- decoding szip chunks with libaec
-(h5py ships szip disabled). Each library then changes a copy of every file (an attribute on every object,
-a dataset in every group, a row on every dataset that can grow, and the attributes a file's manifest names
-deleted) and reads it all back.
+(h5py ships szip disabled), and reading the third-party filters (Blosc, LZ4, bitshuffle, Zstandard, bzip2)
+through hdf5plugin, checking each dataset's filters (id, flags, client data, name) as libhdf5 reports them. Each
+library then changes a copy of every file (an attribute on every object, a dataset in every group, a row on
+every dataset that can grow -- written, through the plugins, for the third-party filters -- and the
+attributes a file's manifest names deleted) and reads it all back.
 
     python tools/fixtures/check_hdf5_writer.py                      # export via Maven, check with this python
     python tools/fixtures/check_hdf5_writer.py --python114 PATH     # ...and also with an HDF5 1.14 h5py
     python tools/fixtures/check_hdf5_writer.py --dir DIR            # check an existing export
 
-Requirements: tools/fixtures/requirements.txt (h5py, numpy, imagecodecs). Dev-time only, like the
-fixture generators; exits non-zero if anything fails.
+Requirements: tools/fixtures/requirements.txt (h5py, numpy, imagecodecs, hdf5plugin). Dev-time only, like
+the fixture generators; exits non-zero if anything fails. Without imagecodecs the szip datasets are skipped,
+and without hdf5plugin the third-party ones.
 """
 import argparse
 import json
@@ -34,6 +37,20 @@ try:
     import imagecodecs  # libaec, for szip chunks
 except ImportError:  # pragma: no cover - the 1.14 environment may lack it
     imagecodecs = None
+
+try:
+    import hdf5plugin  # noqa: F401 - importing it registers the Blosc, LZ4, bitshuffle, Zstandard and bzip2 filters
+except ImportError:  # pragma: no cover - the 1.14 environment may lack it
+    hdf5plugin = None
+
+
+def skipped(obj):
+    """Why an object cannot be checked with the libraries this interpreter has, or None."""
+    if obj.get("szip") and imagecodecs is None:
+        return "imagecodecs (libaec) not installed"
+    if obj.get("plugin") and hdf5plugin is None:
+        return "hdf5plugin not installed"
+    return None
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -187,6 +204,13 @@ def check_object(f, obj, changed=False):
             assert list(item.chunks) == obj["chunks"], f"chunks {item.chunks} != {obj['chunks']}"
         if "dtype" in obj:
             assert item.dtype.str == obj["dtype"], f"dtype {item.dtype.str} != {obj['dtype']}"
+        if "filters" in obj:  # as libhdf5 reads the pipeline message: [id, flags, client data, name]
+            plist = item.id.get_create_plist()
+            got = []
+            for i in range(plist.get_nfilters()):
+                code, flags, values, name = plist.get_filter(i)
+                got.append([code, flags, [v - 2**32 if v >= 2**31 else v for v in values], name.decode("ascii")])
+            assert got == obj["filters"], f"filters {got} != {obj['filters']}"
         if "opaque_hex" in obj or "time" in obj:
             # h5py has no numpy type for a tagged opaque or a time type: read the bytes as stored.
             ftype = item.id.get_type()
@@ -287,8 +311,8 @@ def check(directory):
                 need = obj.get("min_hdf5")
                 if need and hdf5_version() < tuple(int(p) for p in need.split(".")):
                     continue
-                if obj.get("szip") and imagecodecs is None:
-                    print(f"skip  {entry['file']}:{obj['path']}: imagecodecs (libaec) not installed")
+                if skipped(obj):
+                    print(f"skip  {entry['file']}:{obj['path']}: {skipped(obj)}")
                     continue
                 try:
                     check_object(f, obj)
@@ -314,7 +338,7 @@ def change(directory, manifest):
             continue
         objects = [o for o in entry["objects"]
                    if not (o.get("min_hdf5") and hdf5_version() < tuple(int(p) for p in o["min_hdf5"].split(".")))
-                   and not (o.get("szip") and imagecodecs is None)]
+                   and not skipped(o)]
         path = os.path.join(scratch, entry["file"])
         shutil.copy(os.path.join(directory, entry["file"]), path)
         for companion in entry.get("companions", []):  # its external raw data files
@@ -337,6 +361,8 @@ def change(directory, manifest):
                           and not next(o for o in objects if o["path"] == name).get("libhdf5_no_grow")):
                         grown[name] = item.shape[0]
                         item.resize(item.shape[0] + 1, axis=0)
+                        if next(o for o in objects if o["path"] == name).get("write_row"):
+                            item[grown[name]] = item[grown[name] - 1]  # re-encoded through the plugin
             with h5py.File(path, "r") as f:
                 for obj in objects:
                     item = f[obj["path"]]
@@ -348,6 +374,8 @@ def change(directory, manifest):
                     if obj["path"] in grown:
                         rows = grown[obj["path"]]
                         assert item.shape[0] == rows + 1, f"grown to {item.shape[0]} rows, not {rows + 1}"
+                        if obj.get("write_row"):
+                            assert np.array_equal(item[rows], item[rows - 1]), "libhdf5's row differs"
                         if "values" in obj and not obj.get("szip") and item.dtype.kind in "iuf":
                             got = np.asarray(item[:rows]).ravel()
                             assert np.array_equal(got.astype(np.float64) if got.dtype.kind == "f" else got,

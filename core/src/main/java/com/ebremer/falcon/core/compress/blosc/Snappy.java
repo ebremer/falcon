@@ -12,15 +12,17 @@ import com.ebremer.falcon.core.compress.CompressionFormatException;
  * trailing bytes for large runs), or a copy of an earlier run selected by a 1-, 2-, or 4-byte
  * back-reference offset. Copies may overlap the output written so far.
  *
- * <p>The compressor follows Google's snappy 1.1.10 ({@code CompressFragment}, with its portable
- * multiplicative hash): 64 KiB fragments, each with a fresh hash table sized to it, a scan that skips
- * faster the longer it finds no match, and copies of at most 64 bytes.
+ * <p>The compressor follows Google's snappy 1.2.2 ({@code CompressFragment}, its default level 1, with its
+ * portable multiplicative hash, as x86 builds without SSE 4.2 hash): 64 KiB fragments, each with a fresh
+ * hash table sized to it (up to 2^15 entries), a scan that skips faster the longer it finds no match, and
+ * copies of at most 64 bytes. Its output is byte for byte that of the c-blosc in hdf5plugin 7.1, which
+ * builds snappy 1.2.2 (snappy 1.1 hashed into at most 2^14 entries, so its streams differ).
  */
 final class Snappy {
 
     private static final int BLOCK_SIZE = 1 << 16;
     private static final int MIN_HASH_TABLE_SIZE = 1 << 8;
-    private static final int MAX_HASH_TABLE_BITS = 14;
+    private static final int MAX_HASH_TABLE_BITS = 15; // kMaxHashTableBits: 15 since snappy 1.2
     private static final int INPUT_MARGIN = 15;
 
     private Snappy() {

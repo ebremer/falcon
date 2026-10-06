@@ -1,11 +1,12 @@
 # Falcon HDF5 — remaining work (prioritized)
 
-**Status (2026-10-05, after P2 S1–S7, A1–A12, PF1–PF8, WF1–WF11, and all of P3):** build green, **855
+**Status (2026-10-06, after P2 S1–S9, A1–A12, PF1–PF8, WF1–WF11, and all of P3):** build green, **1117
 HDF5 tests** (144 at the review, 187 after the top 10, 206 after P0, 228 after P1, 243 after S1–S3, 256
 after S4–S7, 439 after A2–A6, 610 after PF1–PF4, 677 after A1–A10, 692 after A11–A12, 707 after WF1–WF4,
-743 after WF5–WF9, 782 after WF7 and WF10, 850 after WF11 and PF5–PF7), plus 38 in the `core` module. The
-review's top 10, every P1 item, **P2 S1–S7**, **A1–A12**, **PF1–PF8**, **WF1–WF11**, **every P3 item**, and
-the P0 zstd fix (Z6/Z7, in `core`) are done (see *Done* at the end). Falcon now:
+743 after WF5–WF9, 782 after WF7 and WF10, 850 after WF11 and PF5–PF7, 855 after P3), plus 112 in the
+`core` module. The review's top 10, every P1 item, **P2 S1–S9**, **A1–A12**, **PF1–PF8**, **WF1–WF11**,
+**every P3 item**, the P0 zstd fix (Z6/Z7, in `core`), and the P0 found with S8 (types libhdf5 refuses in
+version-1 object headers) are done (see *Done* at the end). Falcon now:
 
 - reads the files the review showed it misreading:
   - real libhdf5 szip and scale-offset data;
@@ -21,7 +22,9 @@ the P0 zstd fix (Z6/Z7, in `core`) are done (see *Done* at the end). Falcon now:
   - shared messages, including SOHM (the shared-message heap);
   - revised references (`H5R_ref_t`);
   - unlimited and printf-style VDS mappings, with libhdf5's source search order, views, and printf gap;
-  - the third-party filters LZF, Blosc, LZ4, bitshuffle, and Zstandard, through Falcon Core's codecs;
+  - the third-party filters LZF, Blosc, LZ4, bitshuffle, Zstandard, bzip2, Blosc2 (b2nd frames
+    included), ZFP, and SZ, through Falcon Core's codecs (ZFP's and SZ's lossy values bit for bit libzfp's
+    and libSZ's, but for SZ's doubles under a point-wise relative bound);
   - HDF5 1.6.2-era chunked layouts (layout message versions 1 and 2), VAX floats, and File Space Info
     version 0.
 - opens files from a path (mapped), from bytes, or through a `RangeReader` (an object store, HTTP
@@ -46,16 +49,20 @@ the P0 zstd fix (Z6/Z7, in `core`) are done (see *Done* at the end). Falcon now:
   - every handle of an object shares what any of them read of it, in a bounded per-file cache;
   - selected elements come out of each chunk a run at a time;
 - writes files that **HDF5 2.0 and 1.14 read, and change**, checked by `tools/fixtures/check_hdf5_writer.py`.
-  The final run read 348/348 objects with HDF5 2.0 and 298/298 with 1.14.6. Each library then changed every
-  file (an attribute on every object, a dataset in every group, a row on every growable dataset, the
-  shared attributes a file names deleted) and read it all back; each refused a change left interrupted.
+  The last run (2026-10-06) read 480/480 objects with HDF5 2.0 and hdf5plugin 7.1.0; HDF5 1.14.6 last read
+  298/298, before S8. Each library then changed every file (an attribute on every object, a dataset in every
+  group, a row on every growable dataset, the shared attributes a file names deleted) and read it all back;
+  each refused a change left interrupted.
   The P0 edge-case files written by the previous writer fail 19 objects under each version.
 - changes existing files in place (`Hdf5Writer.open`), its own and libhdf5's, in either format: adds
-  objects, writes into datasets through every built-in filter as libhdf5 encodes it (and through virtual
-  datasets into their sources), hard-links, moves and deletes links, changes attributes (in the
+  objects, writes into datasets through every built-in filter as libhdf5 encodes it, and through LZF,
+  Blosc, LZ4, bitshuffle, Zstandard, and bzip2 as their plugins do (and through virtual datasets into their
+  sources), hard-links, moves and deletes links, changes attributes (in the
   shared-message table too), through a journal that redoes an interrupted change;
 - writes szip's nearest-neighbour coding, its encoder a port of libaec's (byte for byte its output), and
   user blocks;
+- writes the third-party filters LZF, Blosc, LZ4, bitshuffle, Zstandard, and bzip2 as h5py and hdf5plugin
+  do: the same client data and names, and each chunk the plugin's own bytes, but for zstd;
 - streams what it writes: raw data goes to the file as it is written, so files may pass 2 GB and memory;
   datasets grow (`maxShape`, `append`), and any datatype is written (`createDataset`), with soft and
   external links, and object and region references anywhere (chunks, attributes);
@@ -66,8 +73,20 @@ the P0 zstd fix (Z6/Z7, in `core`) are done (see *Done* at the end). Falcon now:
   fuzzing under a 128 MB heap and 256 KB stack, confines external files to the HDF5 file's directory by
   default, and supports concurrent reads of one open file.
 
-P0, P1, and P3 are empty. What remains is two P2 features: writing the third-party filters (S8) and
-more registered filters (S9).
+P0, P1, and P3 are empty. What remains in P2 is writing the three filters Falcon reads but has no
+encoder for: Blosc2, ZFP, and SZ (S10).
+
+**P2 S8, S9** add API and change behaviour:
+- `Hdf5Writer.DatasetWriter` gains `lzf()`, `blosc()`, `blosc(cname, clevel, shuffle)`, `lz4()`,
+  `lz4(blockBytes)`, `bitshuffle()`, `bitshuffle(compression, blockElements, zstdLevel)`, `zstd()`,
+  `zstd(level)`, `bzip2()`, and `bzip2(blockSize)`; `Filter` gains `BZIP2`, `ZFP`, `SZ`, and `BLOSC2`.
+- Writing into datasets filtered with LZF, Blosc, LZ4, bitshuffle, Zstandard, or bzip2 works; it threw
+  `HdfUnsupportedException`.
+- In the earliest format (version-1 object headers), `createDataset`, `attribute`, and `nbit` refuse a
+  numeric type of two or more bytes with more than half its bits unused, nested ones too, with
+  `IllegalArgumentException`: libhdf5 refuses to create or read them there.
+- Falcon Core's Snappy follows snappy 1.2.2, so Blosc+snappy chunks (Zarr's too) are 1.2.2's bytes; the
+  values are unchanged.
 
 **P3 D2, D6, B1–B3** change no behaviour or API. The build changed (repo-wide): each module also
 builds a sources jar and a Javadoc jar; the enforcer fails a build on JDK below 25, Maven below 3.9, or a
@@ -322,16 +341,16 @@ review baseline. Abbreviations: `W` = `Hdf5Writer.java`; other paths are under
 
 ## Next up — top 10
 
-1. **S8 — writing the third-party filters,** whose encoders core partly has. It would also let `open()`
-   write into datasets so filtered, the last filters it refuses.
-2. **S9 — more registered filters:** Blosc2, bzip2, ZFP, SZ.
+1. **S10 — writing Blosc2, ZFP, and SZ,** the filters Falcon reads but has no encoder for. It would also
+   let `open()` write into datasets so filtered, the last filters it reads but refuses to write.
 
 ---
 
 ## P0 — silent wrong data / files libhdf5 rejects
 
-Empty: every item is done (see *Done — 2026-10-05*, and *(P0: Z6/Z7)* for the zstd decoder). A new P0
-is any silent wrong value, or any written file that libhdf5 rejects or misreads.
+Empty: every item is done (see *Done — 2026-10-05*, *(P0: Z6/Z7)* for the zstd decoder, and *Done —
+2026-10-06 (P2: S8, S9)* for types libhdf5 refuses in version-1 object headers). A new P0 is any silent
+wrong value, or any written file that libhdf5 rejects or misreads.
 
 ## P1 — valid files that fail; hardening; concurrency; test gaps
 
@@ -341,14 +360,16 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
 
 ### Read features
 
-- S1–S7 are done (see *Done — 2026-10-05 (P2: S1–S3)* and *(P2: S4–S7)*). Still open around them:
-  - [ ] **S8 — writing the third-party filters.** Falcon reads LZF, Blosc, LZ4, bitshuffle, and zstd. The
-    writer cannot apply them yet, though core has zstd, Blosc (every internal compressor, since Zarr's F3,
-    2026-10-06), and LZ4 encoders.
-  - [ ] **S9 — more registered filters:** Blosc2 (32026), bzip2 (307), ZFP (32013), and SZ (32017).
-    Each needs a pure-Java codec. For Blosc2, core now decodes c-blosc2 *chunks* (Zarr's F14, 2026-10-06;
-    the Blosc filter 32001 reads them too), but filter 32026 may store b2nd frames, a container around
-    them, which is not read.
+- S1–S9 are done (see *Done — 2026-10-06 (P2: S8, S9)*, *Done — 2026-10-05 (P2: S1–S3)*, and
+  *(P2: S4–S7)*). Still open around them:
+  - [ ] **S10 — writing Blosc2 (32026), ZFP (32013), and SZ (32017).** Falcon reads them (S9) but has no
+    encoder for them, so the writer cannot apply them, and `open()` refuses to write into datasets so
+    filtered. Each needs a pure-Java encoder: c-blosc2 chunks in b2nd frames, zfp (whose decoder core now
+    has), and SZ 2.
+  - **Known limit, not planned:** SZ's doubles under a point-wise relative bound can differ from libSZ's in
+    their last bits. libSZ computes them with its C runtime's `pow`, whose last bit differs between
+    platforms (a Linux build of libSZ differs from hdf5plugin's Windows one the same way); Falcon uses
+    `Math.pow`.
 
 ### Read API
 
@@ -359,7 +380,8 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
 
 - WF1–WF11 are done (see *Done — 2026-10-05 (P2: WF11, PF5–PF7)*, *(P2: WF7, WF10)*,
   *(P2: WF5, WF6, WF8, WF9)* and *(P2: WF1–WF4)*). Still open around them:
-  - Third-party filters, for writing into datasets so filtered: S8.
+  - Third-party filters: S8 writes LZF, Blosc, LZ4, bitshuffle, Zstandard, and bzip2; Blosc2, ZFP, and SZ
+    are S10.
   - **Not planned: writing through a virtual dataset of variable-length or reference data** (Falcon reads
     none either: its elements point into each source's own heaps and objects), **or converting types** on
     the way (other than the byte order), which libhdf5 does.
@@ -382,6 +404,97 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
 
 - D1, D2, D3, D4, D6, B1, B2, and B3 are done (see *Done — 2026-10-05 (P3: D2, D6, B1–B3)* and
   *(P3: D1, D3, D4)*). P3 is empty.
+
+## Done — 2026-10-06 (P2: S8, S9)
+
+The fixtures come from libhdf5 2.0 through h5py and hdf5plugin 7.1.0, whose plugins are the oracle. The
+plugins' C sources (hdf5plugin's source distribution, and h5py's for LZF) are the reference for each port.
+ZFP and SZ are lossy, so their fixtures hold what libzfp and libSZ decode, read from the file reopened: in
+the session that wrote it, libhdf5 returns its cached chunks unfiltered.
+
+- [x] **S8 — writing the third-party filters.**
+  - **API** (`Hdf5Writer.DatasetWriter`, chunked datasets, each an optional filter with hdf5plugin's
+    defaults):
+    - `lzf()`;
+    - `blosc()` (LZ4, clevel 5, byte shuffle) and `blosc(cname, clevel, shuffle)`, with Zarr's names;
+    - `lz4()` (a block per chunk) and `lz4(blockBytes)`;
+    - `bitshuffle()` (with LZ4) and `bitshuffle(compression, blockElements, zstdLevel)`;
+    - `zstd()` (level 3) and `zstd(level)`;
+    - `bzip2()` (900,000-byte blocks) and `bzip2(blockSize)`.
+  - **On disk,** as each plugin's `set_local` leaves it:
+    - the client data: LZF `[4, 0x0105, chunk bytes]`; Blosc `[2, 2, type size, chunk bytes, clevel,
+      shuffle, compressor]` (an array's base type size, and 1 above 255); bitshuffle `[0, 4, element size,
+      block, compression]` and zstd's level; LZ4, Zstandard, and bzip2 their one value;
+    - the name the plugin registers, which libhdf5 stores for ids of 256 and up (padded to 8 bytes in a
+      version-1 pipeline message);
+    - a chunk LZF or Blosc cannot shrink into the chunk's own size (the destination the plugins give) is
+      stored unfiltered, its filter-mask bit set.
+  - **Writing into datasets** so filtered (`Hdf5Writer.open`) works, with the client data the file holds.
+    `open()` now refuses only Blosc2, ZFP, SZ, and filters Falcon does not know.
+  - **Core encoders**, each the plugin's bytes:
+    - `Lzf.compress`, h5py's liblzf (HLOG 17, ULTRA_FAST). Of h5py's 81 chunks, 58 match and 22 are skipped
+      where h5py skipped them. One differs because h5py builds liblzf with an uninitialised hash table: its
+      match there reaches a position the chunk never hashed. Falcon's stream decodes to the same bytes.
+    - Bitshuffle's blocked transpose, alone and with LZ4 or zstd: 29 vectors and 130 chunks match (zstd
+      aside).
+    - `BloscEncoder.compress` with a destination size, hdf5-blosc's: 190 chunks match, and 53 are skipped
+      where hdf5-blosc skipped them. **Snappy** now follows snappy 1.2.2, as hdf5plugin builds it (hash
+      tables of up to 2^15 entries; Falcon had followed 1.1.10), which changes Zarr's Blosc+snappy bytes
+      too.
+    - LZ4 in H5Zlz4.c's blocks (`LZ4_compress_default`): 55 chunks match.
+    - Zstandard, and zstd inside Blosc and bitshuffle: Falcon's own frames, which libzstd reads.
+    - bzip2 (from S9): all 63 chunks of `bzip2.h5` match.
+  - **End to end:** the 100 datasets of `plugin_filters_write.h5`, written again by Falcon from their
+    values, have the plugins' filters and, zstd aside, their chunks and filter masks.
+  - **Interop:** `check_hdf5_writer.py` read 480/480 objects with libhdf5 2.0 and hdf5plugin. They cover
+    every API form in both formats, with built-in filters, over compound, array, and long string types,
+    with skipped chunks, and the plugins' own fixtures changed by Falcon. libhdf5 then wrote a row through
+    each plugin into every growable dataset, and read all 479 changed objects back.
+- [x] **S9 — more registered filters,** read through new pure-Java codecs in `core`:
+  - **bzip2 (307,** PyTables' `H5Zbzip2.c`): `compress.bzip2` decodes a stream, verifying its block and
+    stream CRCs (randomised blocks included). It also encodes, byte for byte as libbzip2 1.0.8: the block
+    sort is ported step for step, since a repetitive block's tie order decides the output. It reproduces 53
+    libbzip2 vectors, and `bzip2.h5`'s 11 datasets read as their unfiltered copies.
+  - **Blosc2 (32026,** hdf5-blosc2 with c-blosc2 3.3.2): `Blosc2Frame` reads a contiguous frame (header,
+    metalayers, offsets index, special chunks, trailer), and `B2ndArray` its b2nd (or caterva) array, its
+    blocks scattered into C order and their padding dropped. A rank-1 chunk is a plain one-chunk frame.
+    Tested on 24 frame vectors (11 crafted from c-blosc2's writers: several chunks, special offsets, more
+    metalayers) and `blosc2.h5`'s 25 datasets: every compressor, clevel, shuffle, and delta, ranks 1 to 4,
+    padded blocks. Uninitialised chunks, which c-blosc2 leaves undefined, read as zeros.
+  - **ZFP (32013,** LLNL's H5Z-ZFP 1.1.1, zfp 1.0.1): `compress.zfp` ports zfp's decoder: every mode
+    (fixed rate, precision, accuracy, expert, reversible), int32, int64, float, and double, in 1 to 4
+    dimensions. The header comes from the client data, byte-swapped for a big-endian writer. Every value is
+    libzfp's bit for bit: 190 vectors, and `zfp.h5`'s 14 datasets.
+  - **SZ (32017,** SZ 2.1.12's H5Z-SZ): `compress.sz` ports SZ's decompression for floats, doubles, and the
+    eight integer types in 1 to 4 dimensions: every error-bound mode (point-wise relative in both its
+    forms), the regression predictor, constant data, stored copies, and the zstd and zlib stages. Every
+    value is libSZ's bit for bit (124 vectors, `sz.h5`'s 72 datasets, 1,879 of 1,912 swept chunks), but for
+    **doubles under a point-wise relative bound**: libSZ's `pow` there is its C runtime's, which no Java
+    method reproduces. 33 swept chunks differ, most by 1 ulp in one or two values (at most 71 ulps); the
+    tests allow 128 ulps for them. Falcon also reads what libSZ cannot: exactly 20 values, which libSZ
+    stores raw and then fails to read (it calls `exit`).
+  - **Hardening:** each decoder throws only typed exceptions and bounds its output by the chunk.
+    `CompressionRobustnessTest` fuzzes each, and the four fixtures join `RobustnessTest`'s set.
+  - `Filter` gains `BZIP2`, `ZFP`, `SZ`, and `BLOSC2`.
+- [x] **P0, found with S8: types libhdf5 refuses in version-1 object headers.**
+  - libhdf5 1.14.4 and later (2.0 included) take some numeric types for corruption in an object header
+    without a checksum, the earliest format's: an integer, float, or bit field of two or more bytes whose
+    precision and offset reach less than half its bits (`H5T_is_numeric_with_unusual_unused_bits`).
+  - It creates no such dataset there, and reads no such datatype back (an attribute's included) unless
+    `H5Pset_relax_file_integrity_checks` allows it.
+  - Falcon wrote them, `nbit(12)` of an `int32` in `Format.EARLIEST` for one, so libhdf5 2.0 refused the
+    file.
+  - Now `createDataset`, `attribute`, and `nbit` refuse them there with `IllegalArgumentException`, nested
+    ones too. The latest format's checksummed headers take any
+    (`WriterEdgeCaseTest.refusesWhatLibhdf5RefusesInVersion1Headers`).
+- **Tests:** core 83 → 112; hdf5 843 → 1105, plus the 12 under a small heap. New: `WritePluginFiltersTest`,
+  `ThirdPartyFiltersEncodeTest`, `Bzip2FilterTest`, `Blosc2FilterTest`, `ZfpFilterTest`, `SzFilterTest`, a
+  third-party case in `WriteFilterConformanceTest`, and the new fixtures' rows in `storage_metadata.txt`.
+- **Tools:**
+  - `gen_fixtures.py` builds `plugin_filters_write`, `bzip2`, `blosc2`, `zfp`, and `sz`.
+  - `gen_core_vectors.py` makes more LZF and bitshuffle vectors.
+  - New: `gen_bzip2_vectors.py`, `gen_blosc2_frame_vectors.py`, `gen_zfp_vectors.py`, and
+    `gen_sz_vectors.py`.
 
 ## Done — 2026-10-05 (P3: D2, D6, B1–B3)
 

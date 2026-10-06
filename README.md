@@ -7,7 +7,7 @@ formats — no native libraries, no third-party dependencies.
 |---|---|---|---|
 | [`hdf5`](hdf5) | `com.ebremer.falcon.hdf5` | HDF5 reader/writer implementing the [HDF5 File Format Specification v4.0](https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html) (HDF5 2.0) | Read-complete, write-broad; pre-1.0 |
 | [`zarr`](zarr) | `com.ebremer.falcon.zarr` | [Zarr](https://zarr.dev/) reader/writer (v3 core; v2 read) | Built |
-| [`core`](core) | `com.ebremer.falcon.core` | Pure-Java compression codecs both formats share (zstd, Blosc, LZ4, LZF, bitshuffle); exported only to Falcon's modules | Built |
+| [`core`](core) | `com.ebremer.falcon.core` | Pure-Java compression codecs both formats share (zstd, Blosc and Blosc2, LZ4, LZF, bitshuffle, bzip2, ZFP, SZ); exported only to Falcon's modules | Built |
 
 See **[PLAN.md](PLAN.md)** for the umbrella roadmap and **[CLAUDE.md](CLAUDE.md)** for conventions. Each
 module has its own plan, remaining-work list, and user guide:
@@ -87,13 +87,14 @@ try (Hdf5Writer w = Hdf5Writer.create(Path.of("out.h5"))) {
 
 The reader handles every superblock, object-header, and group form, every chunk index, the built-in and
 the common third-party filters, vlen data, references, virtual datasets, and external links (not files
-split across several by the family, multi, or split drivers). The writer covers every datatype, all six filters
-(szip in both codings, byte for byte libaec's), compact, contiguous and chunked storage (growing ones
-included), dense groups and attributes of any size, hard, soft and external links, object and region
-references (in datasets and attributes), user blocks, files past 2 GB, and both the modern and earliest
-on-disk formats; it changes existing files in place, its own and libhdf5's (writing into their datasets
-through their filters, and through virtual datasets into their sources; moving and deleting links;
-changing shared attributes), through a journal that redoes an interrupted change. Full walkthrough in
+split across several by the family, multi, or split drivers). The writer covers every datatype, all six
+built-in filters (szip in both codings, byte for byte libaec's) and the third-party LZF, Blosc, LZ4,
+bitshuffle, Zstandard, and bzip2 (as hdf5plugin writes them), compact, contiguous and chunked storage
+(growing ones included), dense groups and attributes of any size, hard, soft and external links, object and
+region references (in datasets and attributes), user blocks, files past 2 GB, and both the modern and
+earliest on-disk formats; it changes existing files in place, its own and libhdf5's (writing into their
+datasets through their filters, and through virtual datasets into their sources; moving and deleting
+links; changing shared attributes), through a journal that redoes an interrupted change. Full walkthrough in
 the **[HDF5 User Guide](hdf5/USER_GUIDE.md)**.
 
 ## Zarr
@@ -132,10 +133,12 @@ storage (Amazon S3, Google Cloud Storage, MinIO, R2; requests signed with SigV4)
 
 - **Zero runtime dependencies** — only `java.base` (the format modules depend on Falcon's own `core`,
   which itself needs only `java.base`). `deflate`/`gzip` use `java.util.zip`; everything else is
-  hand-written in pure Java: HDF5 `szip` (CCSDS 121.0 extended-Rice), the `zstd` (RFC 8878), `blosc`,
-  LZ4, LZF, and bitshuffle codecs in `core` (Zarr codecs and HDF5 filters alike), the Jenkins lookup3 /
+  hand-written in pure Java: HDF5 `szip` (CCSDS 121.0 extended-Rice), the `zstd` (RFC 8878), `blosc`
+  and Blosc2, LZ4, LZF, bitshuffle, bzip2, ZFP, and SZ codecs in `core` (Zarr codecs and HDF5 filters
+  alike), the Jenkins lookup3 /
   crc32c / fletcher32 checksums, and the shuffle/nbit/scale-offset filters. Every codec is validated
-  against its reference implementation (h5py/libaec/hdf5plugin, libzstd, c-blosc, c-blosc2).
+  against its reference implementation (h5py/libaec/hdf5plugin, libzstd, c-blosc, c-blosc2, libbzip2,
+  libzfp, libSZ).
 - **JPMS modules** exporting only their public API.
 - **Foreign Function & Memory API** (`MemorySegment`) for memory-mapped access to files beyond 2 GB; HDF5
   files elsewhere are read on demand through a `RangeReader`.

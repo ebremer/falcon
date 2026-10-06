@@ -36,7 +36,8 @@ class SelectionTest {
                 "unwritten_earliest.h5", "unwritten_latest.h5", "external.h5", "vds.h5", "vds_default.h5",
                 "vds_latest.h5", "typed.h5", "numeric.h5", "nbit_data.h5", "scaleoffset.h5", "szip.h5",
                 "plugin_filters.h5", "legacy_layouts.h5", "userblock_v0.h5", "compound_nbit.h5",
-                "vlen_data.h5", "datatypes.h5", "filter_edge.h5", "ea_paged.h5", "vds_unlimited.h5");
+                "vlen_data.h5", "datatypes.h5", "filter_edge.h5", "ea_paged.h5", "vds_unlimited.h5",
+                "blosc2.h5");
     }
 
     /**

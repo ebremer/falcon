@@ -30,6 +30,57 @@ class WriterEdgeCaseTest {
     @TempDir
     Path dir;
 
+    /**
+     * libhdf5 (1.14.4 and later, 2.0 included) takes a numeric type of two or more bytes with more than half its
+     * bits unused for corruption in a version-1 object header, which has no checksum: it creates no such
+     * dataset and reads no such datatype back, attributes' included (H5T_is_numeric_with_unusual_unused_bits).
+     * So in the earliest format Falcon refuses them, nested ones too, and n-bit precisions that make one; at
+     * half its bits, a type is usual, and the latest format's checksummed headers take any.
+     */
+    @Test
+    void refusesWhatLibhdf5RefusesInVersion1Headers() throws IOException {
+        Datatype twelveOfThirtyTwo = new Datatype.FixedPoint(4, ByteOrder.LITTLE_ENDIAN, false, 0, 12);
+        Datatype sixteenOfThirtyTwo = new Datatype.FixedPoint(4, ByteOrder.LITTLE_ENDIAN, false, 0, 16);
+        Datatype shifted = new Datatype.FixedPoint(4, ByteOrder.LITTLE_ENDIAN, false, 4, 12);
+        Datatype halfFloat = new Datatype.FloatingPoint(8, ByteOrder.LITTLE_ENDIAN, 0, 16, 10, 5, 0, 10, 15, 15,
+                Datatype.MantissaNormalization.IMPLIED); // binary16 in 8 bytes
+        Datatype compound = new Datatype.Compound(8, List.of(new Datatype.Compound.Member("a", 0, Datatype.int32()),
+                new Datatype.Compound.Member("b", 4, twelveOfThirtyTwo)));
+        Path earliest = dir.resolve("earliest.h5");
+        try (Hdf5Writer w = Hdf5Writer.create(earliest, Hdf5Writer.Format.EARLIEST)) {
+            for (Datatype type : List.of(twelveOfThirtyTwo, halfFloat, compound,
+                    new Datatype.Array(12, new int[] {3}, twelveOfThirtyTwo),
+                    new Datatype.FixedPoint(2, ByteOrder.BIG_ENDIAN, true, 0, 7))) {
+                IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                        () -> w.createDataset("d", type, 4), type.toString());
+                assertTrue(e.getMessage().contains("H5Pset_relax_file_integrity_checks"), e.getMessage());
+                assertThrows(IllegalArgumentException.class,
+                        () -> w.root().attribute("a", type, new long[0], new int[] {1}), type.toString());
+            }
+            Hdf5Writer.DatasetWriter ints = w.createDataset("ints", Datatype.int32(), 8).chunked(4);
+            assertThrows(IllegalArgumentException.class, () -> ints.nbit(15));
+            ints.nbit(16).write(new int[] {1, 2, 3, 4, 5, 6, 7, 8}); // half the bits: usual
+            w.createDataset("sixteen", sixteenOfThirtyTwo, 2).write(new int[] {1, 2});
+            w.createDataset("shifted", shifted, 2).attribute("bits", shifted, new long[0], new int[] {3}); // 12 + 4
+            w.createDataset("byte", new Datatype.FixedPoint(1, ByteOrder.LITTLE_ENDIAN, false, 0, 3), 1)
+                    .write(new byte[] {5}); // a single byte is never unusual
+        }
+        try (Hdf5File h5 = Hdf5File.open(earliest)) {
+            assertArrayEquals(new int[] {1, 2, 3, 4, 5, 6, 7, 8}, h5.root().dataset("ints").readInts());
+        }
+        // a file of the earliest format, changed: its objects' headers are version 1 too
+        try (Hdf5Writer w = Hdf5Writer.open(earliest)) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> w.dataset("ints").attribute("a", twelveOfThirtyTwo, new long[0], new int[] {1}));
+            assertThrows(IllegalArgumentException.class,
+                    () -> w.root().attribute("a", compound, new long[0], new java.util.Map[] {java.util.Map.of("a", 1, "b", 2)}));
+        }
+        try (Hdf5Writer w = Hdf5Writer.create(dir.resolve("latest.h5"))) {
+            w.createDataset("d", compound, 1).attribute("a", twelveOfThirtyTwo, new long[0], new int[] {1});
+            w.intChunkedDataset("n", new int[] {1, 2, 3, 4}, new long[] {4}, new long[] {4}).nbit(3);
+        }
+    }
+
     @Test
     void emptyDatasetsHaveNoStorage() throws IOException {
         Path file = dir.resolve("empty.h5");

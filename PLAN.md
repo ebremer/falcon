@@ -11,7 +11,7 @@ work list:
 |---|---|---|---|---|---|---|
 | **1** | `hdf5` | `com.ebremer.falcon.hdf5` | Read + write HDF5 File Format Spec **v4.0** (HDF5 2.0) | **Pre-1.0** — read-complete (H0–H6), write-broad (H7–H8), hardened (H9); the API may still change | [`hdf5/PLAN.md`](hdf5/PLAN.md) | [`hdf5/TODO.md`](hdf5/TODO.md) |
 | **2** | `zarr` | `com.ebremer.falcon.zarr` | Read Zarr **v2 + v3**, write **v3** | **Built** — v3 core, every common codec, verified vs zarr-python / libzstd / c-blosc | [`zarr/PLAN.md`](zarr/PLAN.md) | [`zarr/TODO.md`](zarr/TODO.md) |
-| — | `core` | `com.ebremer.falcon.core` | Compression codecs both formats share: zstd, Blosc (BloscLZ, Snappy, shuffles), LZ4, LZF, bitshuffle | **Built** (2026-10-05) — exported only to `hdf5` and `zarr` | [`zarr/PLAN.md`](zarr/PLAN.md) §10 | the module TODOs |
+| — | `core` | `com.ebremer.falcon.core` | Compression codecs both formats share: zstd, Blosc (BloscLZ, Snappy, shuffles) and Blosc2 frames, LZ4, LZF, bitshuffle, bzip2, ZFP, SZ | **Built** (2026-10-05) — exported only to `hdf5` and `zarr` | [`zarr/PLAN.md`](zarr/PLAN.md) §10 | the module TODOs |
 
 ## Repository & module structure
 
@@ -42,7 +42,7 @@ Locked at review and applied uniformly across the reactor:
 1. **Pure JDK, zero runtime dependencies.** Every shipped artifact depends on nothing beyond `java.base`
    (and Falcon's own `core`, which depends on nothing else). Compression the JDK lacks is implemented
    from scratch (HDF5 szip as CCSDS 121.0 extended-Rice; zstd per RFC 8878, the blosc container, LZ4,
-   LZF, and bitshuffle in `core`), never by wrapping native code. JUnit 5 is test-scope only.
+   LZF, bitshuffle, bzip2, ZFP, and SZ in `core`), never by wrapping native code. JUnit 5 is test-scope only.
 2. **Approval gate for dependencies.** Adding any library outside `java.base` — any module, any scope —
    requires explicit approval first (see `CLAUDE.md`).
 3. **JDK 25**, `--release 25`; **JPMS module per format**, exporting only the public API package.

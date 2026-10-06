@@ -3,8 +3,14 @@ package com.ebremer.falcon.core.compress;
 import static org.junit.jupiter.api.Assertions.fail;
 
 import com.ebremer.falcon.core.compress.bitshuffle.Bitshuffle;
+import com.ebremer.falcon.core.compress.blosc.B2ndArray;
+import com.ebremer.falcon.core.compress.blosc.Blosc2Frame;
 import com.ebremer.falcon.core.compress.blosc.BloscDecoder;
+import com.ebremer.falcon.core.compress.bzip2.Bzip2Decoder;
 import com.ebremer.falcon.core.compress.lzf.Lzf;
+import com.ebremer.falcon.core.compress.sz.SzDecoder;
+import com.ebremer.falcon.core.compress.zfp.ZfpDecoder;
+import com.ebremer.falcon.core.compress.zfp.ZfpHeader;
 import com.ebremer.falcon.core.compress.zstd.ZstdDecoder;
 import java.util.Arrays;
 import java.util.List;
@@ -96,8 +102,92 @@ class CompressionRobustnessTest {
     }
 
     @Test
+    void bzip2SurvivesCorruption() {
+        // A flipped bit mostly fails a CRC; the rest must fail on structure, never past the bound.
+        List<byte[]> streams = Vectors.read("bzip2_vectors.txt").stream().filter(v -> !v[7].equals("-"))
+                .map(v -> Vectors.hex(v[7])).toList();
+        fuzz("bzip2", streams, stream -> Bzip2Decoder.decompress(stream, 0, stream.length, 1 << 20));
+    }
+
+    @Test
+    void bzip2SurvivesRandomBytes() {
+        Random random = new Random(307);
+        for (int trial = 0; trial < 2000; trial++) {
+            byte[] junk = new byte[4 + random.nextInt(200)];
+            random.nextBytes(junk);
+            junk[0] = 'B'; // past the header, so the block structure is what gets tested
+            junk[1] = 'Z';
+            junk[2] = 'h';
+            junk[3] = (byte) ('1' + random.nextInt(9));
+            if (trial % 2 == 0 && junk.length >= 10) { // and often past the block magic too
+                byte[] magic = {0x31, 0x41, 0x59, 0x26, 0x53, 0x59};
+                System.arraycopy(magic, 0, junk, 4, magic.length);
+            }
+            assertHandled("random bzip2-header input", () -> Bzip2Decoder.decompress(junk, 0, junk.length, 1 << 20));
+        }
+    }
+
+    @Test
+    void blosc2FramesSurviveCorruption() {
+        // Each frame read as the HDF5 filter reads it: its b2nd array, or its first chunk.
+        fuzz("blosc2 frame", vectors("blosc2_frame_vectors.txt", 2), stream -> {
+            Blosc2Frame frame = Blosc2Frame.read(stream, 16 << 20);
+            B2ndArray array = B2ndArray.of(frame);
+            if (array != null) {
+                array.read();
+            } else {
+                frame.chunk(0);
+            }
+        });
+    }
+
+    @Test
     void lzfSurvivesCorruption() {
         fuzz("lzf", vectors("lzf_vectors.txt", 3), stream -> Lzf.decompress(stream, 0, stream.length, 0));
+    }
+
+    @Test
+    void zfpSurvivesCorruption() {
+        // Each stream is [header length][header][compressed field], so the header is corrupted too.
+        List<byte[]> streams = Vectors.read("zfp_vectors.txt").stream().map(v -> {
+            byte[] header = Vectors.hex(v[1]);
+            byte[] data = Vectors.hex(v[2]);
+            byte[] stream = new byte[1 + header.length + data.length];
+            stream[0] = (byte) header.length;
+            System.arraycopy(header, 0, stream, 1, header.length);
+            System.arraycopy(data, 0, stream, 1 + header.length, data.length);
+            return stream;
+        }).toList();
+        fuzz("zfp", streams, stream -> {
+            if (stream.length == 0) {
+                return;
+            }
+            int headerLength = Math.min(stream[0] & 0xff, stream.length - 1);
+            ZfpHeader header = ZfpHeader.read(stream, 1, headerLength);
+            ZfpDecoder.decompress(header, stream, 1 + headerLength, stream.length - 1 - headerLength, 1 << 20);
+            ZfpDecoder.decompress(stream, 1, stream.length - 1, 1 << 20); // as one stream, header first
+        });
+    }
+
+    @Test
+    void szSurvivesCorruption() {
+        // Both the streams as stored (mostly zstd) and their SZ bytes beneath, which the decoder also reads
+        // uncompressed: corrupting those drives the SZ parser, Huffman trees, and predictors themselves.
+        for (String[] v : Vectors.read("sz_vectors.txt")) {
+            if (!v[0].contains("_2d_") && !v[0].contains("_3d_")) {
+                continue;
+            }
+            byte[] stream = Vectors.hex(v[7]);
+            List<byte[]> streams = new java.util.ArrayList<>(List.of(stream));
+            if (stream.length > 4 && stream[0] == 0x28 && stream[1] == (byte) 0xb5) {
+                streams.add(ZstdDecoder.decompress(stream));
+            }
+            int type = Integer.parseInt(v[1]);
+            long[] r = {Long.parseLong(v[2]), Long.parseLong(v[3]), Long.parseLong(v[4]), Long.parseLong(v[5]),
+                Long.parseLong(v[6])};
+            fuzz("sz " + v[0], streams, s -> SzDecoder.decompress(type, s, 0, s.length, r[0], r[1], r[2], r[3], r[4],
+                    1 << 20));
+        }
     }
 
     @Test

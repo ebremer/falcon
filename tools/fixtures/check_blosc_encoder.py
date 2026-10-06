@@ -22,7 +22,8 @@ blocks are written in order; liblz4 1.10.0):
     liblz4.
 
   * snappy, which numcodecs' c-blosc is built without: when imagecodecs is installed (its c-blosc 1.21.6
-    has snappy), Falcon's snappy buffers are decoded with it; there is no reference to compare bytes with.
+    has snappy), Falcon's snappy buffers are decoded with it. (Their bytes are compared with hdf5plugin's
+    c-blosc, which builds snappy 1.2.2, through HDF5 chunks: hdf5's WriteFilterConformanceTest.)
 
 Every Falcon buffer must decode with c-blosc to its input. One difference is by design: Falcon byte-shuffles
 data whose length is not a whole number of elements when bit-shuffling was asked for (c-blosc before 1.18

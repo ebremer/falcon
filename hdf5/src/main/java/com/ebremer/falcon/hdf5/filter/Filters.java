@@ -12,7 +12,8 @@ import java.util.zip.Inflater;
  * Decoders for HDF5's six built-in filters: {@code deflate} (via {@code java.util.zip}),
  * {@code shuffle}, {@code fletcher32} (verified), {@code szip} ({@link Szip}), {@code nbit} ({@link Nbit}),
  * and {@code scaleoffset} ({@link ScaleOffset}); and for the common third-party filters LZF, Blosc, LZ4,
- * bitshuffle, and Zstandard ({@link ThirdPartyFilters}).
+ * bitshuffle, Zstandard, bzip2, and Blosc2 ({@link ThirdPartyFilters}), ZFP ({@link ZfpFilter}), and SZ
+ * ({@link SzFilter}).
  */
 public final class Filters {
 
@@ -41,8 +42,11 @@ public final class Filters {
             case SCALEOFFSET -> ScaleOffset.decode(data, filter.clientData(), maxBytes);
             case NBIT -> Nbit.decode(data, filter.clientData(), uncompressedSize);
             case ThirdPartyFilters.LZF, ThirdPartyFilters.BLOSC, ThirdPartyFilters.LZ4, ThirdPartyFilters.BITSHUFFLE,
-                 ThirdPartyFilters.ZSTD -> ThirdPartyFilters.decode(filter.id(), filter.clientData(), data, elementSize,
-                    uncompressedSize, maxBytes);
+                 ThirdPartyFilters.ZSTD, ThirdPartyFilters.BZIP2, ThirdPartyFilters.BLOSC2 ->
+                    ThirdPartyFilters.decode(filter.id(), filter.clientData(), data, elementSize, uncompressedSize,
+                            maxBytes);
+            case ZfpFilter.ID -> ZfpFilter.decode(filter.clientData(), data, maxBytes);
+            case SzFilter.ID -> SzFilter.decode(filter.clientData(), data, maxBytes);
             default -> throw new HdfUnsupportedException("HDF5 filter id " + filter.id() + " is not supported");
         };
     }

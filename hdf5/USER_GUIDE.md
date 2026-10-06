@@ -230,10 +230,19 @@ It is also decoded through the third-party filters most common in the wild:
   and chunks in c-blosc2's format (versions 3 to 6) as well as c-blosc's;
 - LZ4 (32004);
 - bitshuffle (32008), alone or with LZ4 or zstd;
-- Zstandard (32015), verifying each frame's content checksum when it has one.
+- Zstandard (32015), verifying each frame's content checksum when it has one;
+- bzip2 (307), verifying its block and stream CRCs;
+- Blosc2 (32026, hdf5-blosc2): each chunk a Blosc2 frame, which holds a b2nd array for chunks of rank 2
+  and up (cut into blocks that may overhang the chunk);
+- ZFP (32013, LLNL's H5Z-ZFP): every mode (fixed rate, precision, accuracy, expert, reversible), for 32-
+  and 64-bit integers and floats in 1 to 4 dimensions;
+- SZ (32017, SZ 2's H5Z-SZ): floats, doubles, and integers in 1 to 4 dimensions, under every error bound.
 
-These are pure-Java codecs that Falcon's Zarr module shares (see `../core`). A chunk that an optional
-filter skipped is read as stored. Any other filter throws `HdfUnsupportedException` naming its id.
+These are pure-Java codecs that Falcon's Zarr module shares (see `../core`). ZFP and SZ are lossy: each
+value is what libzfp and libSZ decode, bit for bit. The exception is SZ's doubles under a point-wise
+relative bound, which can differ in their last bits: libSZ computes them with its C runtime's `pow`,
+whose last bit differs between platforms. A chunk that an optional filter skipped is read as stored. Any
+other filter throws `HdfUnsupportedException` naming its id.
 Older storage reads too: the chunked layouts of HDF5 1.6.2 and earlier (layout message versions 1 and 2).
 
 ### Storage
@@ -463,6 +472,12 @@ grid.write(everything);                                     // or every element 
   and `regionReference()`. `withByteOrder(ByteOrder.BIG_ENDIAN)` gives an integer, float, bit field or
   time type in the other byte order, and any `Datatype` record (such as an enumeration's) can be built
   directly.
+- **Unused bits in the earliest format.** libhdf5 (1.14.4 and later) treats some types as a sign of a
+  corrupt file in the earliest format's object headers, which have no checksum: an integer, float, or bit
+  field of two or more bytes that uses less than half its bits, alone or inside another type. It neither
+  creates nor reads such a type there. So in `Format.EARLIEST`, `createDataset`, `attribute`, and
+  `nbit(precision)` refuse one with `IllegalArgumentException`. Use the latest format, or at least half the
+  bits.
 - **Values** are converted to the datatype exactly, and refused if they do not fit: integers in range,
   whole numbers for an integer type, strings that fit a fixed-length type, enumeration names that are
   members. A number written to a floating-point type is rounded to the nearest, as libhdf5 converts it.
@@ -551,6 +566,7 @@ w.intChunkedDataset("big", data, new long[]{100_000}, new long[]{4096})
 // the chunk shape needs the dataset's rank, dimensions >= 1, and at most 2 GiB per chunk
 
 // also: .fletcher32(), .scaleOffset(), .nbit(precision), .szip(), .szip(SzipCoding.NEAREST_NEIGHBOUR, 16)
+// third-party: .lzf(), .blosc(), .blosc("zstd", 5, "bitshuffle"), .lz4(), .bitshuffle(), .zstd(9), .bzip2()
 ```
 
 Filters form a pipeline applied to each chunk in the order they are added, exactly as libhdf5 does, and
@@ -563,6 +579,22 @@ is entropy coding with blocks of 8. Every filter writes the on-disk form libhdf5
 libhdf5 itself would write: scale-offset and n-bit chunks are libhdf5's byte for byte, and szip chunks
 libaec's (Falcon ports libaec's encoder: zero-block runs, the second extension, its choice of each block's
 coding). A chunk szip cannot shrink is stored unfiltered, as libhdf5 does.
+
+Six third-party filters are written as h5py and hdf5plugin write them: the same filter id, client data,
+and name, so libhdf5 reads them through hdf5plugin's plugins (or h5py's, for LZF).
+- `lzf()`;
+- `blosc(cname, clevel, shuffle)`: `blosclz`, `lz4`, `lz4hc`, `zlib`, `zstd`, or `snappy`, at clevel 0
+  to 9, after `noshuffle`, `shuffle`, or `bitshuffle`;
+- `lz4(blockBytes)`;
+- `bitshuffle(compression, blockElements, zstdLevel)`: `none`, `lz4`, or `zstd`;
+- `zstd(level)`;
+- `bzip2(blockSize)`, in units of 100,000 bytes.
+
+Without arguments they take hdf5plugin's defaults: Blosc's LZ4 at clevel 5 after a byte shuffle, one
+block per chunk for LZ4, LZ4 for bitshuffle, zstd's level 3, and bzip2's 900,000-byte blocks. Each chunk
+is the plugin's own, byte for byte (h5py's liblzf, c-blosc 1.21, liblz4, bitshuffle, libbzip2), except
+zstd, whose frames come from Falcon's own encoder, which libzstd reads. A chunk LZF or Blosc cannot
+shrink is stored unfiltered, as the plugins leave it. Blosc2, ZFP, and SZ are read, not written.
 
 ### Links and references
 
@@ -714,7 +746,8 @@ try (Hdf5Writer w = Hdf5Writer.open(Path.of("data.h5"))) {
 - **Refused** (`HdfUnsupportedException`):
   - files with 4-byte addresses, of a non-default driver (family, multi), that track their free space
     persistently or in pages, or that are marked as open by a writer (with no journal of Falcon's to redo);
-  - writing into datasets filtered by a third-party filter (see S8 in `TODO.md`);
+  - writing into datasets filtered by Blosc2, ZFP, SZ, or a filter Falcon does not know (it writes into
+    LZF, Blosc, LZ4, bitshuffle, Zstandard, and bzip2 datasets, with their client data);
   - writing through a virtual dataset of variable-length or reference data (as reading one is), into a
     source of another type (other than the other byte order), or into a source file read through a
     resolver;
@@ -797,9 +830,9 @@ also fail to be read at all: that is `java.io.UncheckedIOException`, wrapping th
 
 The following are not supported:
 - **Filtered fractal heaps.**
-- **Filters other than the built-in six and the five third-party ones above.**
+- **Filters other than the built-in six and the nine third-party ones above.**
 - **Multi-file drivers** (family, multi, split). `driverInfo()` reports them, and Falcon reads only the
   file it opened.
 
-On the write side, the third-party filters are not written yet, and changing a file refuses what
-*Changing an existing file* lists. See [`TODO.md`](TODO.md).
+On the write side, Blosc2, ZFP, and SZ are not written (Falcon has no encoders for them), and changing a
+file refuses what *Changing an existing file* lists. See [`TODO.md`](TODO.md).

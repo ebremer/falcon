@@ -158,6 +158,31 @@ public final class BloscEncoder {
      */
     public static byte[] compress(byte[] data, int typeSize, int shuffle, int blockSize, int clevel,
                                   int compressor) {
+        return compress(data, typeSize, shuffle, blockSize, clevel, compressor, data.length + HEADER);
+    }
+
+    /**
+     * Compresses {@code data} into a Blosc buffer as c-blosc 1.21's {@code blosc_compress} does with a
+     * destination of {@code destSize} bytes, or answers null where c-blosc returns 0 for want of room: each
+     * stream is cut off at the destination's end (a stream that then does not fit, or whose raw copy would
+     * not, fails the buffer), and the whole buffer is stored as it is (the {@code memcpy} flag: at clevel 0,
+     * under 128 bytes, or when a stream failed) only if its size plus 16 fits. hdf5-blosc
+     * ({@code blosc_filter.c}) passes the data's own size, so a buffer that would not shrink is refused, and
+     * libhdf5 stores the chunk unfiltered. With {@code destSize} the data's size plus 16 this is
+     * {@link #compress(byte[], int, int, int, int, int)}.
+     *
+     * @param data       the bytes to compress
+     * @param typeSize   the element size in bytes (a value below 1 is taken as 1; above 255, as 1)
+     * @param shuffle    {@link #NOSHUFFLE}, {@link #SHUFFLE}, or {@link #BITSHUFFLE}
+     * @param blockSize  the block size in bytes, or 0 for c-blosc's automatic size
+     * @param clevel     the compression level, 0 (store) to 9
+     * @param compressor the internal compressor, {@link #BLOSCLZ} to {@link #ZSTD} (see {@link #compressor})
+     * @param destSize   the bytes the buffer may take
+     * @return the Blosc buffer, or null if it does not fit in {@code destSize} bytes
+     * @throws IllegalArgumentException if an argument is out of range, or the data is too large for one buffer
+     */
+    public static byte[] compress(byte[] data, int typeSize, int shuffle, int blockSize, int clevel,
+                                  int compressor, int destSize) {
         if (shuffle < NOSHUFFLE || shuffle > BITSHUFFLE) {
             throw new IllegalArgumentException("Blosc shuffle must be 0, 1, or 2, not " + shuffle);
         }
@@ -183,16 +208,19 @@ public final class BloscEncoder {
         int blocksize = blockSize(compressor, clevel, ts, nbytes, blockSize);
         boolean split = splitBlock(compressor, ts, blocksize);
         int flags = filterFlag(filter) | (split ? 0 : FLAG_DONT_SPLIT) | (FORMATS[compressor] << 5);
+        if (destSize < HEADER) {
+            return null; // initialize_context_compression: no room for the header
+        }
         if (clevel == 0 || nbytes < MIN_BUFFERSIZE) {
-            return memcpy(data, flags, ts, blocksize);
+            return memcpy(data, flags, ts, blocksize, destSize);
         }
 
-        int maxbytes = nbytes + HEADER; // numcodecs' destination size
+        int maxbytes = destSize;
         int leftover = nbytes % blocksize;
         int nblocks = nbytes / blocksize + (leftover > 0 ? 1 : 0);
         long tableEnd = HEADER + 4L * nblocks;
         if (tableEnd > maxbytes) {
-            return memcpy(data, flags, ts, blocksize);
+            return memcpy(data, flags, ts, blocksize, destSize);
         }
         byte[] out = new byte[maxbytes];
         int ntbytes = (int) tableEnd;
@@ -213,14 +241,14 @@ public final class BloscEncoder {
                     if ((long) ntbytes + maxout > maxbytes) {
                         maxout = maxbytes - ntbytes; // never past the destination
                         if (maxout <= 0) {
-                            return memcpy(data, flags, ts, blocksize);
+                            return memcpy(data, flags, ts, blocksize, destSize);
                         }
                     }
                     int cbytes = compressStream(compressor, clevel, filtered, j * neblock, neblock, out, ntbytes,
                             maxout, split, deflater);
                     if (cbytes == 0 || cbytes == neblock) { // it did not shrink: stored raw
                         if ((long) ntbytes + neblock > maxbytes) {
-                            return memcpy(data, flags, ts, blocksize);
+                            return memcpy(data, flags, ts, blocksize, destSize);
                         }
                         System.arraycopy(filtered, j * neblock, out, ntbytes, neblock);
                         cbytes = neblock;
@@ -357,10 +385,13 @@ public final class BloscEncoder {
 
     /**
      * Stores {@code data} verbatim (the c-blosc memcpy path): the header, with the memcpy flag added to
-     * everything else it says, then the bytes.
+     * everything else it says, then the bytes; or null if they do not fit in {@code destSize} bytes.
      */
-    private static byte[] memcpy(byte[] data, int flags, int typeSize, int blocksize) {
+    private static byte[] memcpy(byte[] data, int flags, int typeSize, int blocksize, int destSize) {
         int nbytes = data.length;
+        if ((long) nbytes + HEADER > destSize) {
+            return null;
+        }
         byte[] out = new byte[HEADER + nbytes];
         writeHeader(out, flags | FLAG_MEMCPYED, typeSize, nbytes, blocksize, HEADER + nbytes);
         System.arraycopy(data, 0, out, HEADER, nbytes);

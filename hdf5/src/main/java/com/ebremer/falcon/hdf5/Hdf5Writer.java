@@ -10,6 +10,7 @@ import com.ebremer.falcon.hdf5.filter.Filters;
 import com.ebremer.falcon.hdf5.filter.Nbit;
 import com.ebremer.falcon.hdf5.filter.ScaleOffset;
 import com.ebremer.falcon.hdf5.filter.Szip;
+import com.ebremer.falcon.hdf5.filter.ThirdPartyFilters;
 import com.ebremer.falcon.hdf5.io.HdfBuffer;
 import com.ebremer.falcon.hdf5.write.ChunkIndexWriter;
 import com.ebremer.falcon.hdf5.write.BTreeV2Writer;
@@ -1358,6 +1359,9 @@ public final class Hdf5Writer implements AutoCloseable {
                     throw new IllegalArgumentException("dimensions must not be negative: " + java.util.Arrays.toString(shape));
                 }
             }
+            if (legacy) {
+                requireUsualUnusedBits(type, "dataset '" + name + "'");
+            }
             byte[] datatype = DatatypeEncoder.encode(type, legacy);
             requireMessageSize(datatype.length, "the datatype of '" + name + "'");
             DatasetSpec dataset = new DatasetSpec(name, datatype, type.size(), shape.clone(), null, null, null);
@@ -1544,6 +1548,7 @@ public final class Hdf5Writer implements AutoCloseable {
          */
         public GroupWriter attribute(String name, Datatype type, long[] shape, Object values) {
             lifecycle.check();
+            writer.requireUsualAttributeType(spec, name, type);
             addAttribute(spec, writer.typedAttribute(name, type, shape, values), legacy);
             return this;
         }
@@ -1969,7 +1974,8 @@ public final class Hdf5Writer implements AutoCloseable {
          * {@link DatasetWriter#append}, ...) and set or delete its attributes. A dataset of the file keeps its
          * datatype, shape limits, layout, and filters: it grows only within its maximum shape, and its chunks
          * are written with its filters, as libhdf5 would encode them (deflate, shuffle, fletcher32, szip,
-         * n-bit, scale-offset; not the third-party ones), its partial edge chunks unfiltered if it keeps them
+         * n-bit, scale-offset, and with their plugins LZF, Blosc, LZ4, bitshuffle and Zstandard; no other
+         * third-party filter), its partial edge chunks unfiltered if it keeps them
          * so. Data in external raw files is written there. A virtual dataset's elements are written into its
          * sources (P2 WF11), as libhdf5's {@code H5Dwrite} writes them: each into the source element its
          * mapping pairs it with, in this file or another (changed in a session of its own, completed when
@@ -2496,6 +2502,7 @@ public final class Hdf5Writer implements AutoCloseable {
          */
         public DatasetWriter attribute(String name, Datatype type, long[] shape, Object values) {
             lifecycle.check();
+            writer.requireUsualAttributeType(spec, name, type);
             addAttribute(spec, writer.typedAttribute(name, type, shape, values), legacy);
             return this;
         }
@@ -2590,6 +2597,10 @@ public final class Hdf5Writer implements AutoCloseable {
             if (precision < 1 || precision > spec.elementSize * 8) {
                 throw new IllegalArgumentException("n-bit precision must be 1-" + spec.elementSize * 8 + ", not " + precision);
             }
+            if (legacy) {
+                requireUsualUnusedBits(new Datatype.FixedPoint(spec.elementSize, java.nio.ByteOrder.LITTLE_ENDIAN, false, 0,
+                        precision), "n-bit(" + precision + ") dataset '" + spec.name + "'");
+            }
             int size = spec.elementSize;
             for (int i = 0; spec.data != null && i < spec.data.length / size; i++) {
                 long value = littleEndianSigned(spec.data, i * size, size);
@@ -2651,6 +2662,183 @@ public final class Hdf5Writer implements AutoCloseable {
             return this;
         }
 
+        /**
+         * Compresses chunks with LZF, h5py's own filter (32000; {@code compression="lzf"}), byte for byte as
+         * h5py's liblzf does. A chunk LZF cannot shrink is stored unfiltered, as h5py's filter leaves it.
+         * Chunked datasets only. libhdf5 reads it through h5py, which registers the filter, or an LZF plugin.
+         *
+         * @return this dataset's writer
+         */
+        public DatasetWriter lzf() {
+            return thirdParty(Filter.LZF);
+        }
+
+        /**
+         * Compresses chunks with Blosc as {@code hdf5plugin.Blosc()} sets it up: LZ4 at clevel 5, after a byte
+         * shuffle. The same as {@code blosc("lz4", 5, "shuffle")}.
+         *
+         * @return this dataset's writer
+         */
+        public DatasetWriter blosc() {
+            return blosc("lz4", 5, "shuffle");
+        }
+
+        /**
+         * Compresses chunks with Blosc (filter 32001, {@code hdf5-blosc} with c-blosc 1.21): byte for byte
+         * c-blosc's buffer for every compressor but zstd (whose frames are Falcon's own, which c-blosc reads). A
+         * chunk Blosc cannot shrink is stored unfiltered, as hdf5-blosc leaves it. The element size Blosc
+         * shuffles by is the datatype's (an array's base type; one above 255 bytes as single bytes). Chunked
+         * datasets only.
+         *
+         * @param cname   the internal compressor: {@code blosclz}, {@code lz4}, {@code lz4hc}, {@code zlib},
+         *                {@code zstd}, or {@code snappy}
+         * @param clevel  the compression level, 0 (none: every chunk stored unfiltered) to 9
+         * @param shuffle {@code noshuffle}, {@code shuffle} (bytes), or {@code bitshuffle}
+         * @return this dataset's writer
+         */
+        public DatasetWriter blosc(String cname, int clevel, String shuffle) {
+            java.util.Objects.requireNonNull(cname, "cname");
+            java.util.Objects.requireNonNull(shuffle, "shuffle");
+            int compressor = switch (cname) {
+                case "blosclz", "lz4", "lz4hc", "snappy", "zlib", "zstd" ->
+                        com.ebremer.falcon.core.compress.blosc.BloscEncoder.compressor(cname);
+                default -> throw new IllegalArgumentException(
+                        "blosc cname must be blosclz, lz4, lz4hc, zlib, zstd, or snappy, not " + cname);
+            };
+            if (clevel < 0 || clevel > 9) {
+                throw new IllegalArgumentException("blosc clevel must be 0-9, not " + clevel);
+            }
+            int mode = switch (shuffle) {
+                case "noshuffle" -> 0;
+                case "shuffle" -> 1;
+                case "bitshuffle" -> 2;
+                default -> throw new IllegalArgumentException(
+                        "blosc shuffle must be noshuffle, shuffle, or bitshuffle, not " + shuffle);
+            };
+            return thirdParty(Filter.BLOSC, clevel, mode, compressor);
+        }
+
+        /**
+         * Compresses chunks with LZ4 as {@code hdf5plugin.LZ4()} sets it up: each chunk one block.
+         *
+         * @return this dataset's writer
+         */
+        public DatasetWriter lz4() {
+            return lz4(0);
+        }
+
+        /**
+         * Compresses chunks with LZ4 (filter 32004, the HDF Group's {@code H5Zlz4.c}), byte for byte as the
+         * plugin does: in blocks of {@code blockBytes}, each LZ4-compressed, or stored raw if that does not
+         * shrink it. Chunked datasets only.
+         *
+         * @param blockBytes the bytes of each block, 1 to 2,113,929,216 (larger chunks are cut into blocks), or
+         *                   0 for 1 GiB, so a chunk is one block
+         * @return this dataset's writer
+         */
+        public DatasetWriter lz4(int blockBytes) {
+            if (blockBytes < 0 || blockBytes > 0x7E000000) {
+                throw new IllegalArgumentException("lz4 block size must be 0-2113929216 bytes, not " + blockBytes);
+            }
+            return thirdParty(Filter.LZ4, blockBytes);
+        }
+
+        /**
+         * Bit-shuffles chunks, then compresses them with LZ4, as {@code hdf5plugin.Bitshuffle()} sets it up:
+         * {@code bitshuffle("lz4", 0, 3)}.
+         *
+         * @return this dataset's writer
+         */
+        public DatasetWriter bitshuffle() {
+            return bitshuffle("lz4", 0, 3);
+        }
+
+        /**
+         * Bit-shuffles chunks (filter 32008, Kiyoshi Masui's {@code bitshuffle}): bit <i>k</i> of every element
+         * of a block stored together, which suits numeric data; then, optionally, compresses each block with LZ4
+         * or zstd. Byte for byte the plugin's output, but for zstd (Falcon's own frames, which libzstd reads).
+         * Chunked datasets only.
+         *
+         * @param compression    {@code none}, {@code lz4}, or {@code zstd}
+         * @param blockElements  the elements in a block: a multiple of 8, or 0 for bitshuffle's default
+         *                       (8 KiB of elements, at least 128)
+         * @param zstdLevel      zstd's level, 0 (its default, 3) to 22; recorded for {@code zstd} only
+         * @return this dataset's writer
+         */
+        public DatasetWriter bitshuffle(String compression, int blockElements, int zstdLevel) {
+            java.util.Objects.requireNonNull(compression, "compression");
+            if (blockElements < 0 || blockElements % 8 != 0) {
+                throw new IllegalArgumentException("bitshuffle block size must be a multiple of 8 elements, not "
+                        + blockElements);
+            }
+            if (zstdLevel < 0 || zstdLevel > 22) {
+                throw new IllegalArgumentException("bitshuffle zstd level must be 0-22, not " + zstdLevel);
+            }
+            return switch (compression) {
+                case "none" -> thirdParty(Filter.BITSHUFFLE, blockElements, 0);
+                case "lz4" -> thirdParty(Filter.BITSHUFFLE, blockElements, BITSHUFFLE_LZ4);
+                case "zstd" -> thirdParty(Filter.BITSHUFFLE, blockElements, BITSHUFFLE_ZSTD, zstdLevel);
+                default -> throw new IllegalArgumentException(
+                        "bitshuffle compression must be none, lz4, or zstd, not " + compression);
+            };
+        }
+
+        /**
+         * Compresses chunks with Zstandard at level 3, as {@code hdf5plugin.Zstd()} sets it up.
+         *
+         * @return this dataset's writer
+         */
+        public DatasetWriter zstd() {
+            return zstd(3);
+        }
+
+        /**
+         * Compresses each chunk into one Zstandard frame (filter 32015, the HDF Group's {@code H5Zzstd.c}), by
+         * Falcon's pure-Java encoder, which libzstd reads (its frames are not libzstd's byte for byte). Chunked
+         * datasets only.
+         *
+         * @param level the compression level: -131072 (fastest) to 22 (smallest); 0 is zstd's default, 3
+         * @return this dataset's writer
+         */
+        public DatasetWriter zstd(int level) {
+            if (level < -131072 || level > 22) {
+                throw new IllegalArgumentException("zstd level must be -131072 to 22, not " + level);
+            }
+            return thirdParty(Filter.ZSTD, level);
+        }
+
+        /**
+         * Compresses chunks with bzip2 in blocks of 900,000 bytes, as {@code hdf5plugin.BZip2()} sets it up.
+         *
+         * @return this dataset's writer
+         */
+        public DatasetWriter bzip2() {
+            return bzip2(9);
+        }
+
+        /**
+         * Compresses each chunk into one bzip2 stream (filter 307, PyTables' {@code H5Zbzip2.c}), byte for byte
+         * libbzip2 1.0.8's: the plugin stores it even where it is larger than the chunk. Chunked datasets only.
+         *
+         * @param blockSize the block size in units of 100,000 bytes: 1 to 9 (bzip2's {@code -1} to {@code -9})
+         * @return this dataset's writer
+         */
+        public DatasetWriter bzip2(int blockSize) {
+            if (blockSize < 1 || blockSize > 9) {
+                throw new IllegalArgumentException("bzip2 block size must be 1-9, not " + blockSize);
+            }
+            return thirdParty(Filter.BZIP2, blockSize);
+        }
+
+        /** Adds third-party filter {@code id} with the values hdf5plugin passes to {@code H5Pset_filter}. */
+        private DatasetWriter thirdParty(int id, int... options) {
+            lifecycle.check();
+            requireConfigurable();
+            requireChunked();
+            addFilter(new FilterSpec(id, 0, null, options));
+            return this;
+        }
+
         private void requireChunked() {
             if (spec.chunkShape == null) {
                 throw new IllegalStateException("filters require a chunked dataset");
@@ -2673,15 +2861,19 @@ public final class Hdf5Writer implements AutoCloseable {
         }
 
         private void addFilter(int id, int parameter) {
+            addFilter(new FilterSpec(id, parameter));
+        }
+
+        private void addFilter(FilterSpec added) {
             for (FilterSpec filter : spec.filters) {
-                if (filter.id() == id) {
-                    throw new IllegalStateException("filter " + id + " is already in the pipeline");
+                if (filter.id() == added.id()) {
+                    throw new IllegalStateException("filter " + added.id() + " is already in the pipeline");
                 }
             }
-            if (spec.nbitPrecision >= 0 && id == Filters.SCALEOFFSET) {
+            if (spec.nbitPrecision >= 0 && added.id() == Filters.SCALEOFFSET) {
                 throw new IllegalStateException("scaleOffset cannot follow nbit");
             }
-            spec.filters.add(new FilterSpec(id, parameter));
+            spec.filters.add(added);
         }
 
         /**
@@ -3114,6 +3306,73 @@ public final class Hdf5Writer implements AutoCloseable {
         return new AttributeSpec(name, datatype, shape.clone(), encoded.bytes(), encoded.ids(), encoded.refs());
     }
 
+    /**
+     * Refuses an attribute's type that libhdf5 would refuse to read in its object's header: one of the file
+     * (version 1, without a checksum) or a new object's in the earliest format (see
+     * {@link #requireUsualUnusedBits}).
+     */
+    private void requireUsualAttributeType(ObjectSpec spec, String name, Datatype type) {
+        boolean unchecksummed = spec.inFile() && spec.object != null ? spec.object.header().version() == 1 : legacy;
+        if (unchecksummed) {
+            requireUsualUnusedBits(type, "attribute '" + name + "'");
+        }
+    }
+
+    /**
+     * Refuses, for an object header without a checksum (version 1, the earliest format's), a datatype with a
+     * numeric part libhdf5 1.14.4 and later take for corruption there: an integer, float, or bitfield of two
+     * or more bytes whose precision and offset reach less than half its bits ({@code
+     * H5T_is_numeric_with_unusual_unused_bits}), alone or in a compound, array, enumeration, variable-length,
+     * or complex type. libhdf5 creates no such dataset ("creating dataset with unusual datatype") and reads
+     * no such datatype, an attribute's included, unless {@code H5Pset_relax_file_integrity_checks} allows it.
+     *
+     * @throws IllegalArgumentException for such a type
+     */
+    private static void requireUsualUnusedBits(Datatype type, String what) {
+        Datatype unusual = unusualUnusedBits(type);
+        if (unusual != null) {
+            int[] bits = switch (unusual) {
+                case Datatype.FixedPoint t -> new int[] {t.bitPrecision(), t.bitOffset()};
+                case Datatype.FloatingPoint t -> new int[] {t.bitPrecision(), t.bitOffset()};
+                case Datatype.BitField t -> new int[] {t.bitPrecision(), t.bitOffset()};
+                default -> throw new IllegalStateException();
+            };
+            throw new IllegalArgumentException(what + " has a " + unusual.size() + "-byte type of precision "
+                    + bits[0] + (bits[1] != 0 ? " at bit offset " + bits[1] : "") + ", which leaves more than half its bits"
+                    + " unused: libhdf5 refuses that in the earliest format's version-1 object headers (they have"
+                    + " no checksum) unless relaxed by H5Pset_relax_file_integrity_checks; use Format.LATEST, or"
+                    + " use at least " + (unusual.size() * 4 - bits[1]) + " bits");
+        }
+    }
+
+    /** The first numeric part of {@code type} with more than half its bits unused, or null (libhdf5's rule). */
+    private static Datatype unusualUnusedBits(Datatype type) {
+        return switch (type) {
+            case Datatype.FixedPoint t -> unusual(t, t.bitPrecision(), t.bitOffset());
+            case Datatype.FloatingPoint t -> unusual(t, t.bitPrecision(), t.bitOffset());
+            case Datatype.BitField t -> unusual(t, t.bitPrecision(), t.bitOffset());
+            case Datatype.Compound t -> {
+                for (Datatype.Compound.Member member : t.members()) {
+                    Datatype found = unusualUnusedBits(member.type());
+                    if (found != null) {
+                        yield found;
+                    }
+                }
+                yield null;
+            }
+            case Datatype.Array t -> unusualUnusedBits(t.base());
+            case Datatype.Enumeration t -> unusualUnusedBits(t.base());
+            case Datatype.VariableLength t -> t.base() != null ? unusualUnusedBits(t.base()) : null;
+            case Datatype.Complex t -> unusualUnusedBits(t.base());
+            default -> null;
+        };
+    }
+
+    private static Datatype unusual(Datatype type, int precision, int offset) {
+        int bits = type.size() * 8;
+        return type.size() > 1 && precision < bits && bits > 2 * (precision + offset) ? type : null;
+    }
+
     // --------------------------------------------------------------- changing a file in place (P2 WF6)
 
     /**
@@ -3347,7 +3606,8 @@ public final class Hdf5Writer implements AutoCloseable {
      * The storage of a dataset of the file, made when data is first written to it: its block, inline data,
      * or chunks (which a rewritten chunk replaces, its index written anew), with its filters.
      *
-     * @throws HdfUnsupportedException for a virtual dataset, or a filter Falcon does not write (a third-party one)
+     * @throws HdfUnsupportedException for a virtual dataset, or a filter Falcon does not write (a third-party one
+     *         other than LZF, Blosc, LZ4, bitshuffle, and Zstandard)
      */
     private Storage existingStorage(DatasetSpec spec, String path) {
         Dataset dataset = (Dataset) spec.object;
@@ -3396,7 +3656,8 @@ public final class Hdf5Writer implements AutoCloseable {
 
     /**
      * The writer's form of a dataset's filters, as the file applies them: the built-in ones, each with the
-     * client data libhdf5 stored for it (P2 WF10: n-bit, scale-offset and szip of either coding included).
+     * client data libhdf5 stored for it (P2 WF10: n-bit, scale-offset and szip of either coding included), and
+     * LZF, Blosc, LZ4, bitshuffle, Zstandard and bzip2 with the client data their plugins stored (P2 S8).
      */
     private static List<FilterSpec> encoders(FilterPipeline pipeline, DatasetSpec spec, String path) {
         List<FilterSpec> filters = new ArrayList<>();
@@ -3412,6 +3673,21 @@ public final class Hdf5Writer implements AutoCloseable {
                     if (data.length < needed) {
                         throw new HdfFormatException("dataset " + path + " has " + data.length + " client-data values for filter "
                                 + filter.id());
+                    }
+                    filters.add(new FilterSpec(filter.id(), 0, data));
+                }
+                case Filter.LZF, Filter.LZ4, Filter.ZSTD, Filter.BZIP2 -> filters.add(new FilterSpec(filter.id(), 0, data));
+                case Filter.BLOSC, Filter.BITSHUFFLE -> {
+                    // set_local stores Blosc's type and chunk size (4 values), bitshuffle's element size (3)
+                    int needed = filter.id() == Filter.BLOSC ? 4 : 3;
+                    if (data.length < needed) {
+                        throw new HdfFormatException("dataset " + path + " has " + data.length + " client-data values for filter "
+                                + filter.id());
+                    }
+                    if (filter.id() == Filter.BITSHUFFLE && data.length > 4 && data[4] != 0 && data[4] != BITSHUFFLE_LZ4
+                            && data[4] != BITSHUFFLE_ZSTD) {
+                        throw new HdfUnsupportedException("dataset " + path + " is bitshuffled with compression " + data[4]
+                                + ", which Falcon does not write");
                     }
                     filters.add(new FilterSpec(filter.id(), 0, data));
                 }
@@ -4665,6 +4941,9 @@ public final class Hdf5Writer implements AutoCloseable {
                 case Filters.NBIT -> Nbit.encode(block, nbitClientData(dataset, filter));
                 case Filters.SCALEOFFSET -> ScaleOffset.encode(block, scaleOffsetClientData(dataset, filter));
                 case Filters.SZIP -> Szip.encode(block, szipClientData(dataset));
+                // optional filters that return 0 for a chunk (LZF, Blosc that cannot shrink it) skip it
+                case Filter.LZF, Filter.BLOSC, Filter.LZ4, Filter.BITSHUFFLE, Filter.ZSTD, Filter.BZIP2 ->
+                        ThirdPartyFilters.encode(filter.id(), thirdPartyClientData(dataset, filter), block);
                 default -> throw new IllegalStateException("unknown filter " + filter.id());
             };
             if (next == null) {
@@ -4757,10 +5036,61 @@ public final class Hdf5Writer implements AutoCloseable {
                 case Filters.SCALEOFFSET -> writeFilter(b, legacy, Filters.SCALEOFFSET, FILTER_OPTIONAL,
                         scaleOffsetClientData(dataset, filter));
                 case Filters.SZIP -> writeFilter(b, legacy, Filters.SZIP, FILTER_OPTIONAL, szipClientData(dataset));
+                case Filter.LZF, Filter.BLOSC, Filter.LZ4, Filter.BITSHUFFLE, Filter.ZSTD, Filter.BZIP2 ->
+                        writeFilter(b, legacy, filter.id(), FILTER_OPTIONAL, ThirdPartyFilters.pluginName(filter.id()),
+                        thirdPartyClientData(dataset, filter));
                 default -> throw new IllegalStateException("unknown filter " + filter.id());
             }
         }
         return b.toByteArray();
+    }
+
+    /** bitshuffle's {@code BSHUF_H5_COMPRESS_LZ4} and {@code BSHUF_H5_COMPRESS_ZSTD}. */
+    private static final int BITSHUFFLE_LZ4 = 2;
+    private static final int BITSHUFFLE_ZSTD = 3;
+
+    /**
+     * A third-party filter's client data: a dataset of the file's own, or for a new dataset what the plugin's
+     * {@code set_local} makes of hdf5plugin's values, from the datatype and chunk shape:
+     *
+     * <ul>
+     *   <li>LZF ({@code lzf_filter.c}): h5py's filter version 4, liblzf's API version 0x0105, the chunk's
+     *       bytes;</li>
+     *   <li>Blosc ({@code blosc_filter.c}): hdf5-blosc's version 2, Blosc's format 2, the type size (an array's
+     *       base type; above 255, 1), the chunk's bytes, then clevel, shuffle, and compressor;</li>
+     *   <li>bitshuffle ({@code bshuf_h5filter.c}): bitshuffle's version 0.4, the element size, then the block
+     *       size, compression, and (for zstd) level;</li>
+     *   <li>LZ4, Zstandard and bzip2 (no {@code set_local}): the block size, the level, the block size.</li>
+     * </ul>
+     *
+     * The chunk's bytes are an unsigned 32-bit product, as the plugins compute them.
+     */
+    private static int[] thirdPartyClientData(DatasetSpec dataset, FilterSpec filter) {
+        if (filter.clientData() != null) {
+            return filter.clientData();
+        }
+        int[] options = filter.options();
+        int chunkBytes = (int) (dataset.elementSize * elementCount(dataset.chunkShape));
+        return switch (filter.id()) {
+            case Filter.LZF -> new int[] {4, 0x0105, chunkBytes};
+            case Filter.BLOSC -> {
+                int typeSize = dataset.elementSize;
+                if (com.ebremer.falcon.hdf5.message.DatatypeMessage.parse(HdfBuffer.of(dataset.datatype), 0)
+                        instanceof Datatype.Array array) {
+                    typeSize = array.base().size();
+                }
+                yield new int[] {2, 2, typeSize > 255 ? 1 : typeSize, chunkBytes, options[0], options[1], options[2]};
+            }
+            case Filter.BITSHUFFLE -> {
+                int[] data = new int[3 + options.length];
+                data[0] = 0;
+                data[1] = 4;
+                data[2] = dataset.elementSize;
+                System.arraycopy(options, 0, data, 3, options.length);
+                yield data;
+            }
+            default -> options.clone(); // LZ4's block size, Zstandard's level, bzip2's block size
+        };
     }
 
     /** An unsigned little-endian integer datatype of {@code precision} significant bits (for n-bit). */
@@ -4777,12 +5107,26 @@ public final class Hdf5Writer implements AutoCloseable {
     }
 
     private static void writeFilter(GrowBuffer b, boolean legacy, int id, int flags, int... clientData) {
+        writeFilter(b, legacy, id, flags, null, clientData);
+    }
+
+    /**
+     * One filter of the pipeline message, as {@code H5O__pline_encode} writes it: a name (null terminated) for
+     * a filter numbered 256 or above, or in version 1 for any that has one, padded there to 8 bytes.
+     */
+    private static void writeFilter(GrowBuffer b, boolean legacy, int id, int flags, String name, int[] clientData) {
+        byte[] nameBytes = name == null ? new byte[0] : (name + "\0").getBytes(StandardCharsets.US_ASCII);
+        int nameLength = legacy ? (nameBytes.length + 7) / 8 * 8 : nameBytes.length;
         b.u16(id);
-        if (legacy) {
-            b.u16(0); // name length: no name
+        if (legacy || id >= 256) {
+            b.u16(nameLength);
         }
         b.u16(flags);
         b.u16(clientData.length);
+        b.bytes(nameBytes);
+        for (int i = nameBytes.length; i < nameLength; i++) {
+            b.u8(0);
+        }
         for (int value : clientData) {
             b.u32(value);
         }
@@ -6027,11 +6371,17 @@ public final class Hdf5Writer implements AutoCloseable {
 
     /**
      * One filter of a dataset's pipeline: its id and its parameter (deflate level, n-bit precision, szip
-     * pixels per block and coding); for a dataset of the file, the client data the file stored for it.
+     * pixels per block and coding); for a dataset of the file, the client data the file stored for it; for a
+     * new dataset's third-party filter, the values hdf5plugin passes to {@code H5Pset_filter}, from which
+     * {@link #thirdPartyClientData} makes the client data.
      */
-    private record FilterSpec(int id, int parameter, int[] clientData) {
+    private record FilterSpec(int id, int parameter, int[] clientData, int[] options) {
         FilterSpec(int id, int parameter) {
-            this(id, parameter, null);
+            this(id, parameter, null, null);
+        }
+
+        FilterSpec(int id, int parameter, int[] clientData) {
+            this(id, parameter, clientData, null);
         }
     }
 }

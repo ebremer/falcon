@@ -3,11 +3,14 @@ package com.ebremer.falcon.core.compress.bitshuffle;
 import com.ebremer.falcon.core.compress.CompressionFormatException;
 import com.ebremer.falcon.core.compress.lz4.Lz4;
 import com.ebremer.falcon.core.compress.zstd.ZstdDecoder;
+import com.ebremer.falcon.core.compress.zstd.ZstdEncoder;
+import java.io.ByteArrayOutputStream;
+import java.util.Arrays;
 
 /**
  * Kiyoshi Masui's bitshuffle, translated from the scalar reference in {@code bitshuffle_core.c}: the
- * inverse for reading, and the forward transpose ({@link #transpose}) for Blosc's bit-shuffle filter on
- * write. Bitshuffle transposes a block of elements as a bit matrix, so that bit <i>k</i> of every element
+ * inverse for reading, and the forward transpose ({@link #transpose}) for Blosc's bit-shuffle filter and
+ * the bitshuffle filter's own forms ({@link #shuffle}, {@link #compress}) on write. Bitshuffle transposes a block of elements as a bit matrix, so that bit <i>k</i> of every element
  * is stored together; this compresses better than a byte shuffle for many numeric arrays. Blosc uses the
  * transpose on its blocks, and the bitshuffle library (HDF5 filter 32008) applies it to blocks of
  * elements on its own or followed by LZ4 or zstd:
@@ -120,6 +123,98 @@ public final class Bitshuffle {
         }
         System.arraycopy(src, in, out, done * elementSize, leftover);
         return out;
+    }
+
+    /**
+     * Bit-shuffles {@code elements} elements of {@code elementSize} bytes as {@code bshuf_bitshuffle} does:
+     * whole blocks, then the remaining elements rounded down to a multiple of 8, each transposed, then the
+     * last {@code elements % 8} elements copied through. The inverse of {@link #unshuffle}.
+     *
+     * @param src         the elements
+     * @param offset      where they start
+     * @param elements    how many there are
+     * @param elementSize the bytes of one element
+     * @param blockSize   elements per block, a multiple of 8 (0 for {@link #defaultBlockSize})
+     * @return the bit-shuffled bytes, as many as the elements take
+     * @throws IllegalArgumentException if the block size is not a multiple of 8 (bitshuffle's error -81), or
+     *                                  the elements overrun {@code src}
+     */
+    public static byte[] shuffle(byte[] src, int offset, int elements, int elementSize, int blockSize) {
+        int block = encodeBlockSize(src, offset, elements, elementSize, blockSize);
+        byte[] out = new byte[elements * elementSize];
+        byte[] tmp = new byte[Math.min(block, elements) * elementSize];
+        int done = 0;
+        while (done < elements) {
+            int n = blockElements(elements - done, block);
+            if (n == 0) {
+                break;
+            }
+            transpose(src, offset + done * elementSize, out, done * elementSize, n, elementSize, tmp);
+            done += n;
+        }
+        System.arraycopy(src, offset + done * elementSize, out, done * elementSize, (elements - done) * elementSize);
+        return out;
+    }
+
+    /**
+     * Bit-shuffles and compresses as {@code bshuf_compress_lz4} and {@code bshuf_compress_zstd} do: each block
+     * (as {@link #shuffle} cuts them) transposed, then compressed &mdash; by {@code LZ4_compress_default}
+     * (acceleration 1) or {@code ZSTD_compress} at {@code level} &mdash; and stored as {@code compressed size
+     * (4, big-endian) · compressed block}; then the last {@code elements % 8} elements raw. The inverse of
+     * {@link #decompress}; the HDF5 filter's 12-byte header is not included.
+     *
+     * @param src         the elements
+     * @param offset      where they start
+     * @param elements    how many there are
+     * @param elementSize the bytes of one element
+     * @param blockSize   elements per block, a multiple of 8 (0 for {@link #defaultBlockSize})
+     * @param codec       the block compressor
+     * @param level       zstd's level (0 for its default); unused for LZ4
+     * @return the compressed blocks, then the leftover elements
+     * @throws IllegalArgumentException if the block size is not a multiple of 8 (bitshuffle's error -81), or
+     *                                  the elements overrun {@code src}
+     */
+    public static byte[] compress(byte[] src, int offset, int elements, int elementSize, int blockSize,
+                                  BlockCodec codec, int level) {
+        int block = encodeBlockSize(src, offset, elements, elementSize, blockSize);
+        int blockBytes = Math.min(block, elements) * elementSize;
+        byte[] shuffled = new byte[blockBytes];
+        byte[] tmp = new byte[blockBytes];
+        ByteArrayOutputStream out = new ByteArrayOutputStream(elements * elementSize / 2 + 64);
+        int done = 0;
+        while (done < elements) {
+            int n = blockElements(elements - done, block);
+            if (n == 0) {
+                break;
+            }
+            transpose(src, offset + done * elementSize, shuffled, 0, n, elementSize, tmp);
+            byte[] compressed = switch (codec) {
+                case LZ4 -> Lz4.compress(shuffled, 0, n * elementSize, 1);
+                case ZSTD -> ZstdEncoder.compress(Arrays.copyOf(shuffled, n * elementSize), level, false);
+            };
+            int size = compressed.length;
+            out.write(size >>> 24);
+            out.write(size >>> 16);
+            out.write(size >>> 8);
+            out.write(size);
+            out.write(compressed, 0, size);
+            done += n;
+        }
+        out.write(src, offset + done * elementSize, (elements - done) * elementSize);
+        return out.toByteArray();
+    }
+
+    /** The block size for {@link #shuffle} and {@link #compress}, after checking their arguments. */
+    private static int encodeBlockSize(byte[] src, int offset, int elements, int elementSize, int blockSize) {
+        if (elementSize < 1 || elements < 0 || offset < 0 || (long) elements * elementSize > src.length - offset) {
+            throw new IllegalArgumentException(elements + " elements of " + elementSize + " bytes from " + offset
+                    + " overrun " + src.length + " bytes");
+        }
+        int block = blockSize == 0 ? defaultBlockSize(elementSize) : blockSize;
+        if (block < 0 || block % BLOCKED_MULT != 0) {
+            throw new IllegalArgumentException("bitshuffle block size " + blockSize + " is not a multiple of 8");
+        }
+        return block;
     }
 
     /**

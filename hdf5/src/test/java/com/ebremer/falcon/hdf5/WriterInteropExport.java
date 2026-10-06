@@ -6,6 +6,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -257,6 +258,9 @@ class WriterInteropExport {
         writeWf10Edits(dir);
         writeWf11(dir);
 
+        // --- P2 S8: the third-party filters, written new and into files the plugins wrote
+        writePluginFilters(dir);
+
         Files.writeString(dir.resolve("manifest.json"), json(Map.of("files", files)), StandardCharsets.UTF_8);
     }
 
@@ -348,6 +352,210 @@ class WriterInteropExport {
             group("/big").put("count", 40_000);
             group("/big").put("follow", Map.of("é31234", new int[] {1}));
         }
+    }
+
+    /**
+     * The third-party filters (P2 S8: LZF, Blosc, LZ4, bitshuffle, Zstandard, bzip2), each read back by libhdf5
+     * through hdf5plugin (LZF through h5py's own filter): every API form in both formats (version 1 pipeline messages pad the plugins' names to 8
+     * bytes), combined with built-in filters, over compound, array and long string types, with chunks a filter
+     * skipped; datasets that grow, into which libhdf5 then writes a row through the same plugins; and the three
+     * fixture files the plugins wrote, changed by Falcon. Each dataset's filters must read back in libhdf5 as
+     * Falcon wrote them (id, flags, client data, name).
+     */
+    private void writePluginFilters(Path dir) throws IOException {
+        int[] smooth = new int[1000];
+        int[] noise = new int[640];
+        java.util.Random random = new java.util.Random(31);
+        for (int i = 0; i < smooth.length; i++) {
+            smooth[i] = i / 3 + (i % 7);
+        }
+        for (int i = 0; i < noise.length; i++) {
+            noise[i] = random.nextInt();
+        }
+        double[] waves = new double[500];
+        for (int i = 0; i < waves.length; i++) {
+            waves[i] = Math.round(Math.sin(i / 9.0) * 1000) / 8.0;
+        }
+        String[] labels = new String[30];
+        for (int i = 0; i < labels.length; i++) {
+            labels[i] = "label " + (i % 4) + " " + "x".repeat(i % 9);
+        }
+        String[] cnames = {"blosclz", "lz4", "lz4hc", "snappy", "zlib", "zstd"};
+        String[] shuffles = {"noshuffle", "shuffle", "bitshuffle"};
+        for (Hdf5Writer.Format format : Hdf5Writer.Format.values()) {
+            boolean latest = format == Hdf5Writer.Format.LATEST;
+            String name = latest ? "plugin_filters.h5" : "plugin_filters_earliest.h5";
+            Path types = dir.resolve("_types_" + name); // datasets given their data, for their datatypes
+            try (Hdf5Writer w = Hdf5Writer.create(types, format)) {
+                w.root().fixedStringDataset("strings", labels, new long[] {30}, 300);
+                w.float32ArrayDataset("vectors", new long[] {40}, new int[] {3}, floats(120));
+                w.compoundDataset("compound", new long[] {60}, Hdf5Writer.CompoundField.int32("a", Arrays.copyOf(smooth, 60)),
+                        Hdf5Writer.CompoundField.float64("b", Arrays.copyOf(waves, 60)));
+            }
+            try (Hdf5File typed = Hdf5File.open(types);
+                 Hdf5Writer w = Hdf5Writer.create(begin(dir, name, format.name().toLowerCase()), format)) {
+                plugin("/lzf", smooth, w.intChunkedDataset("lzf", smooth, new long[] {1000}, new long[] {64}).lzf());
+                plugin("/shuffle_lzf_fletcher", waves, w.doubleChunkedDataset("shuffle_lzf_fletcher", waves,
+                        new long[] {500}, new long[] {64}).shuffle().lzf().fletcher32());
+                plugin("/lzf_noise", noise, w.intChunkedDataset("lzf_noise", noise, new long[] {640}, new long[] {64}).lzf());
+                for (int i = 0; i < cnames.length; i++) {
+                    plugin("/blosc_" + cnames[i], smooth, w.intChunkedDataset("blosc_" + cnames[i], smooth, new long[] {1000},
+                            new long[] {128}).blosc(cnames[i], 1 + i, shuffles[i % 3]));
+                }
+                plugin("/blosc_default", waves, w.doubleChunkedDataset("blosc_default", waves, new long[] {500},
+                        new long[] {100}).blosc());
+                plugin("/blosc_c0", smooth, w.intChunkedDataset("blosc_c0", smooth, new long[] {1000}, new long[] {128})
+                        .blosc("lz4", 0, "shuffle"));
+                plugin("/blosc_noise", noise, w.intChunkedDataset("blosc_noise", noise, new long[] {640}, new long[] {64})
+                        .blosc("blosclz", 9, "noshuffle"));
+                plugin("/lz4", smooth, w.intChunkedDataset("lz4", smooth, new long[] {1000}, new long[] {128}).lz4());
+                plugin("/lz4_blocks", waves, w.doubleChunkedDataset("lz4_blocks", waves, new long[] {500}, new long[] {100})
+                        .lz4(100));
+                plugin("/lz4_noise", noise, w.intChunkedDataset("lz4_noise", noise, new long[] {640}, new long[] {64}).lz4(64));
+                plugin("/bitshuffle", smooth, w.intChunkedDataset("bitshuffle", smooth, new long[] {1000}, new long[] {128})
+                        .bitshuffle());
+                plugin("/bitshuffle_none", waves, w.doubleChunkedDataset("bitshuffle_none", waves, new long[] {500},
+                        new long[] {100}).bitshuffle("none", 16, 0));
+                plugin("/bitshuffle_zstd", smooth, w.intChunkedDataset("bitshuffle_zstd", smooth, new long[] {1000},
+                        new long[] {128}).bitshuffle("zstd", 0, 9));
+                plugin("/zstd", smooth, w.intChunkedDataset("zstd", smooth, new long[] {1000}, new long[] {128}).zstd());
+                plugin("/zstd_fast", waves, w.doubleChunkedDataset("zstd_fast", waves, new long[] {500}, new long[] {100})
+                        .zstd(-5));
+                plugin("/zstd_max", smooth, w.intChunkedDataset("zstd_max", smooth, new long[] {1000}, new long[] {128})
+                        .zstd(22));
+                // libhdf5 takes 12 of 32 bits for corruption in a version-1 object header; 16 of 32 is usual
+                plugin("/nbit_lz4", smooth, w.intChunkedDataset("nbit_lz4", smooth, new long[] {1000},
+                        new long[] {128}).nbit(latest ? 12 : 16).lz4());
+                plugin("/scaleoffset_zstd", smooth, w.intChunkedDataset("scaleoffset_zstd", smooth, new long[] {1000},
+                        new long[] {128}).scaleOffset().zstd(3));
+                plugin("/bzip2", smooth, w.intChunkedDataset("bzip2", smooth, new long[] {1000}, new long[] {128}).bzip2());
+                plugin("/shuffle_bzip2_fletcher", waves, w.doubleChunkedDataset("shuffle_bzip2_fletcher", waves,
+                        new long[] {500}, new long[] {64}).shuffle().bzip2(1).fletcher32());
+                plugin("/bzip2_noise", noise, w.intChunkedDataset("bzip2_noise", noise, new long[] {640}, new long[] {64})
+                        .bzip2(5));
+                String[] filters = {"lzf", "blosc", "lz4", "bitshuffle", "zstd", "bzip2"};
+                for (String filter : filters) {
+                    Hdf5Writer.DatasetWriter d = w.createDataset("grow_" + filter, Datatype.int32(), 0).chunked(128)
+                            .maxShape(Hdf5Writer.UNLIMITED);
+                    switch (filter) {
+                        case "lzf" -> d.lzf();
+                        case "blosc" -> d.blosc("lz4", 5, "bitshuffle");
+                        case "lz4" -> d.lz4(200);
+                        case "bitshuffle" -> d.bitshuffle("lz4", 64, 0);
+                        case "bzip2" -> d.bzip2(3);
+                        default -> d.zstd(5);
+                    }
+                    d.append(Arrays.copyOf(smooth, 300));
+                    plugin("/grow_" + filter, Arrays.copyOf(smooth, 300), d).put("write_row", true);
+                }
+                for (String typedName : List.of("strings", "vectors", "compound")) {
+                    Dataset source = typed.root().dataset(typedName);
+                    long n = source.dataspace().dimensions()[0];
+                    for (String filter : List.of("blosc", "bitshuffle", "lz4", "bzip2")) {
+                        Hdf5Writer.DatasetWriter d = w.createDataset(typedName + "_" + filter, source.datatype(), n)
+                                .chunked(n / 3 + 1);
+                        switch (filter) {
+                            case "blosc" -> d.blosc("lz4hc", 3, "shuffle");
+                            case "bitshuffle" -> d.bitshuffle("lz4", 8, 0);
+                            case "bzip2" -> d.bzip2(2);
+                            default -> d.lz4();
+                        }
+                        d.writeRaw(new long[] {0}, new long[] {n}, source.readRawBytes());
+                        Map<String, Object> o = plugin("/" + typedName + "_" + filter,
+                                typedName.equals("strings") ? labels : typedName.equals("vectors") ? doubles(floats(120)) : null, d);
+                        if (typedName.equals("compound")) {
+                            o.put("fields", Map.of("a", Arrays.copyOf(smooth, 60), "b", Arrays.copyOf(waves, 60)));
+                        }
+                    }
+                }
+            }
+            Files.delete(types);
+            try (Hdf5File h5 = Hdf5File.open(dir.resolve(name))) {
+                for (Map<String, Object> o : objects) {
+                    Dataset d = h5.root().dataset(((String) o.get("path")).substring(1));
+                    o.put("filters", filterList(d));
+                    o.put("plugin", needsPlugin(d));
+                }
+            }
+        }
+
+        // the plugins' own files, changed by Falcon: a run in every filtered dataset, the growable ones appended to
+        for (String fixture : List.of("plugin_filters.h5", "plugin_filters_write.h5", "bzip2.h5")) {
+            Path file = fixture(dir, fixture, "edit_" + fixture);
+            begin(dir, "edit_" + fixture, "latest");
+            files.getLast().put("min_hdf5", "2.0"); // libhdf5 2.0 wrote it with version-5 layouts
+            Map<String, Integer> sizes = new LinkedHashMap<>();
+            try (Hdf5File h5 = Hdf5File.open(file)) {
+                for (Hdf5Object object : h5.root().children()) {
+                    // integers the manifest's longs hold (not bzip2.h5's uint64 noise)
+                    if (object instanceof Dataset d && !d.filters().isEmpty() && d.dataspace().rank() == 1
+                            && d.datatype() instanceof Datatype.FixedPoint fixed && (fixed.signed() || fixed.size() < 8)) {
+                        sizes.put(d.name(), d.datatype().size());
+                    }
+                }
+            }
+            List<String> names = List.copyOf(sizes.keySet());
+            try (Hdf5Writer w = Hdf5Writer.open(file)) {
+                for (String n : names) {
+                    Hdf5Writer.DatasetWriter d = w.dataset(n);
+                    long middle = d.shape()[0] / 2;
+                    int size = sizes.get(n);
+                    byte[] run = new byte[3 * size];
+                    run[0] = 7;
+                    run[size] = 8;
+                    run[2 * size] = 9;
+                    d.writeRaw(new long[] {middle}, new long[] {3}, run);
+                    if (n.startsWith("grow_")) {
+                        d.append(new int[] {-1, -2, -3, -4, -5});
+                    }
+                }
+            }
+            try (Hdf5File h5 = Hdf5File.open(file)) {
+                for (String n : names) {
+                    Dataset d = h5.root().dataset(n);
+                    Map<String, Object> o = dataset("/" + n, d.readLongs());
+                    o.put("plugin", needsPlugin(d));
+                    o.put("filters", filterList(d));
+                }
+            }
+        }
+    }
+
+    /** A dataset with a third-party filter, and its writer's shape. */
+    private Map<String, Object> plugin(String path, Object values, Hdf5Writer.DatasetWriter writer) {
+        Map<String, Object> o = dataset(path, values);
+        o.put("shape", writer.shape());
+        return o;
+    }
+
+    /** Whether reading the dataset takes hdf5plugin: a filter neither libhdf5's own nor h5py's LZF. */
+    private static boolean needsPlugin(Dataset d) {
+        return d.filters().stream().anyMatch(f -> f.id() > Filter.SCALEOFFSET && f.id() != Filter.LZF);
+    }
+
+    /** Each filter as {@code [id, flags, client data, name]}, h5py's {@code get_filter} with its name decoded. */
+    private static List<Object> filterList(Dataset d) {
+        List<Object> list = new ArrayList<>();
+        for (Filter f : d.filters()) {
+            list.add(List.of(f.id(), f.optional() ? 1 : 0, f.clientData(), f.name()));
+        }
+        return list;
+    }
+
+    private static float[] floats(int n) {
+        float[] a = new float[n];
+        for (int i = 0; i < n; i++) {
+            a[i] = i % 3 == 0 ? i : -i * 0.25f;
+        }
+        return a;
+    }
+
+    private static double[] doubles(float[] values) {
+        double[] a = new double[values.length];
+        for (int i = 0; i < values.length; i++) {
+            a[i] = values[i];
+        }
+        return a;
     }
 
     /** A fixture libhdf5 wrote, copied into the export to be changed. */

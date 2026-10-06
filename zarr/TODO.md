@@ -978,7 +978,8 @@ what was done, then gives the original finding.
       - LZ4: `LZ4_compress_fast` (`Lz4.compress`) and LZ4HC levels 1–9 (`Lz4.compressHc`, including lz4
         1.10's "lz4mid" levels 1–2), from liblz4 1.10.0;
       - BloscLZ: c-blosc 1.21.6's `blosclz_compress`, its entropy probe and bail-outs included;
-      - Snappy: snappy 1.1.10's `CompressFragment`;
+      - Snappy: snappy 1.1.10's `CompressFragment` (1.2.2's since HDF5's S8, 2026-10-06: hdf5plugin
+        builds it, and its hash tables reach 2^15 entries);
       - zlib: `java.util.zip`, zlib 1.3.1 like c-blosc's.
     - **The container** follows c-blosc's write rules, each measured against numcodecs' c-blosc:
       - `compute_blocksize` per compressor: the high-ratio codecs' doubled blocks, and the enlargement for
