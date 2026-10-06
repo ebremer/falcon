@@ -9,6 +9,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
+import java.util.List;
 
 /**
  * The file an {@code Hdf5Writer} writes: a temporary file beside the target, into which raw data is
@@ -46,12 +47,23 @@ public final class OutputFile {
 
     /** Creates the temporary file for {@code target}, its first {@code reserved} bytes kept for the superblock. */
     public static OutputFile create(Path target, long reserved) {
+        return create(target, reserved, new byte[0]);
+    }
+
+    /**
+     * Creates the temporary file for {@code target}, beginning with {@code userBlock} (a user block, or
+     * nothing): its addresses start after it, and their first {@code reserved} bytes are kept for the
+     * superblock.
+     */
+    public static OutputFile create(Path target, long reserved, byte[] userBlock) {
         Path absolute = target.toAbsolutePath();
         Path temp = absolute.resolveSibling("." + absolute.getFileName() + "." + Long.toHexString(System.nanoTime()) + ".tmp");
         try {
             FileChannel channel = FileChannel.open(temp, StandardOpenOption.CREATE_NEW, StandardOpenOption.READ,
                     StandardOpenOption.WRITE, StandardOpenOption.SPARSE);
-            return new OutputFile(absolute, temp, channel, 0, 0, reserved);
+            OutputFile file = new OutputFile(absolute, temp, channel, userBlock.length, 0, reserved);
+            file.write(-userBlock.length, userBlock);
+            return file;
         } catch (IOException e) {
             throw new UncheckedIOException("cannot create " + temp, e);
         }
@@ -160,6 +172,116 @@ public final class OutputFile {
             Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
         } catch (AtomicMoveNotSupportedException e) {
             Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING);
+        }
+    }
+
+    // ------------------------------------------------------------------ the journal (P2 WF10)
+
+    private static final byte[] JOURNAL = {'F', 'a', 'l', 'c', 'o', 'n', 'J', '1'};
+    private static final int TRAILER = 4 + 8 + 8; // checksum, body length, signature
+
+    /**
+     * Writes {@code writes} (each, bytes at an address) as a redo journal after the end of the space allocated,
+     * and flushes the file to disk: written over the file once it is on disk, they can be redone if that is
+     * interrupted ({@link #recover}). {@link #commit} cuts it off.
+     *
+     * <p>The journal: its signature, the number of writes, each write's file offset (absolute: past a user
+     * block too), length and bytes; then a trailer at the file's very end, by which it is found: the lookup3
+     * checksum of all that, its length, and the signature again.
+     */
+    public void writeJournal(List<ObjectHeaderEditor.Patch> writes) {
+        GrowBuffer body = new GrowBuffer();
+        body.bytes(JOURNAL);
+        body.u32(writes.size());
+        for (ObjectHeaderEditor.Patch write : writes) {
+            body.u64(base + write.address());
+            body.u32(write.bytes().length);
+            body.bytes(write.bytes());
+        }
+        byte[] journal = body.toByteArray();
+        GrowBuffer trailer = new GrowBuffer();
+        trailer.u32(com.ebremer.falcon.hdf5.checksum.Lookup3.hashLittle(journal, 0, journal.length, 0));
+        trailer.u64(journal.length);
+        trailer.bytes(JOURNAL);
+        write(end, journal);
+        write(end + journal.length, trailer.toByteArray());
+        force();
+    }
+
+    /**
+     * Redoes a journal an interrupted change left at the end of the file at {@code path}, if there is one:
+     * its writes, then the file cut back to where the journal begins (the changed file's end), each flushed
+     * to disk. A journal cut short, or that fails its checksum, was never relied on, and is cut off.
+     *
+     * @return true if a journal was redone
+     */
+    public static boolean recover(Path path) throws IOException {
+        try (FileChannel channel = FileChannel.open(path, StandardOpenOption.READ)) {
+            if (!hasJournal(channel)) {
+                return false;
+            }
+        }
+        try (FileChannel channel = FileChannel.open(path, StandardOpenOption.READ, StandardOpenOption.WRITE)) {
+            long size = channel.size();
+            ByteBuffer trailer = readFully(channel, size - TRAILER, TRAILER);
+            int checksum = trailer.getInt(0);
+            long length = trailer.getLong(4);
+            long start = size - TRAILER - length;
+            ByteBuffer journal = readFully(channel, start, (int) length);
+            byte[] bytes = journal.array();
+            if (com.ebremer.falcon.hdf5.checksum.Lookup3.hashLittle(bytes, 0, bytes.length, 0) != checksum
+                    || !java.util.Arrays.equals(bytes, 0, 8, JOURNAL, 0, 8)) {
+                return false; // never complete: nothing was written over the file
+            }
+            int count = journal.getInt(8);
+            int p = 12;
+            for (int i = 0; i < count; i++) {
+                long at = journal.getLong(p);
+                int n = journal.getInt(p + 8);
+                ByteBuffer write = ByteBuffer.wrap(bytes, p + 12, n);
+                while (write.hasRemaining()) {
+                    at += channel.write(write, at);
+                }
+                p += 12 + n;
+            }
+            channel.force(true);
+            channel.truncate(start);
+            channel.force(true);
+            return true;
+        }
+    }
+
+    /** True if the file ends with a journal's trailer (its signature, and a length within the file). */
+    private static boolean hasJournal(FileChannel channel) throws IOException {
+        long size = channel.size();
+        if (size < TRAILER + JOURNAL.length + 4) {
+            return false;
+        }
+        ByteBuffer trailer = readFully(channel, size - TRAILER, TRAILER);
+        long length = trailer.getLong(4);
+        return java.util.Arrays.equals(trailer.array(), 12, 20, JOURNAL, 0, 8)
+                && length >= JOURNAL.length + 4 && length <= size - TRAILER && length < Integer.MAX_VALUE;
+    }
+
+    private static ByteBuffer readFully(FileChannel channel, long position, int length) throws IOException {
+        ByteBuffer buffer = ByteBuffer.allocate(length).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        while (buffer.hasRemaining()) {
+            if (channel.read(buffer, position + buffer.position()) < 0) {
+                throw new IOException("the file ends at " + (position + buffer.position()));
+            }
+        }
+        return buffer.flip();
+    }
+
+    /**
+     * Closes an existing file being changed without cutting off what was added: its journal stays, to be
+     * redone when the file is next opened (after a failure while it was written over).
+     */
+    public void closeKeepingJournal() {
+        try {
+            channel.close();
+        } catch (IOException e) {
+            // the journal is on disk already
         }
     }
 

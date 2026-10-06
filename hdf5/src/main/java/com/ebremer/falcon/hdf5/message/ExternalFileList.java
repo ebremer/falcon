@@ -64,6 +64,26 @@ public final class ExternalFileList {
     /** A slot size of all ones: the slot extends to the end of its file. */
     private static final long UNLIMITED = -1L;
 
+    /** The number of slots. */
+    public int slots() {
+        return names.length;
+    }
+
+    /** Slot {@code i}'s file name, as stored. */
+    public String name(int i) {
+        return names[i];
+    }
+
+    /** Where slot {@code i} starts in its file. */
+    public long fileOffset(int i) {
+        return fileOffsets[i];
+    }
+
+    /** Slot {@code i}'s size in bytes, or -1 if it runs to the end of its file. */
+    public long size(int i) {
+        return sizes[i];
+    }
+
     /** Reads part of an external file, under the file's external-file policy. */
     @FunctionalInterface
     public interface FileReader {

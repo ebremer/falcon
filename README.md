@@ -81,11 +81,13 @@ try (Hdf5Writer w = Hdf5Writer.create(Path.of("out.h5"))) {
 ```
 
 The reader handles every HDF5 structure (all superblock/header/group forms, chunk indexes, filters,
-vlen, references, virtual datasets, external links). The writer covers every datatype, all six filters,
-compact, contiguous and chunked storage (growing ones included), dense groups and attributes of any
-size, soft and external links, object and region references (in datasets and attributes), files past
-2 GB, and both the modern and earliest on-disk formats; it changes existing files in place, its own and
-libhdf5's. Full walkthrough in the **[HDF5 User Guide](hdf5/USER_GUIDE.md)**.
+vlen, references, virtual datasets, external links). The writer covers every datatype, all six filters
+(szip in both codings, byte for byte libaec's), compact, contiguous and chunked storage (growing ones
+included), dense groups and attributes of any size, hard, soft and external links, object and region
+references (in datasets and attributes), user blocks, files past 2 GB, and both the modern and earliest
+on-disk formats; it changes existing files in place, its own and libhdf5's (writing into their datasets
+through their filters, moving and deleting links, changing shared attributes), through a journal that
+redoes an interrupted change. Full walkthrough in the **[HDF5 User Guide](hdf5/USER_GUIDE.md)**.
 
 ## Zarr
 

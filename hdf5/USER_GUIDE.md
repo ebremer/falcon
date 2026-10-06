@@ -392,6 +392,15 @@ it is written, at 64-bit offsets, so a file may be far larger than memory or 2 G
 metadata (object headers, chunk indexes, groups) after it. To change a file that exists, see
 [Changing an existing file](#changing-an-existing-file).
 
+A file may start with a user block, as MATLAB v7.3 files do: bytes of the application's own, which HDF5
+readers skip (libhdf5's `H5Pset_userblock`). Give them to `create`; the block is zero-padded to 512, 1024,
+2048, ... bytes, and the HDF5 data follows:
+
+```java
+byte[] header = Arrays.copyOf("MATLAB 7.3 MAT-file ...".getBytes(StandardCharsets.US_ASCII), 128);
+try (Hdf5Writer w = Hdf5Writer.create(path, Hdf5Writer.Format.LATEST, header)) { ... }
+```
+
 - **When `close()` fails,** for example on a reference to an object never added, the target is not
   touched and the writer stays open, the data written so far kept in the temporary file: fix the cause
   and call `close()` again.
@@ -527,21 +536,27 @@ w.intChunkedDataset("big", data, new long[]{100_000}, new long[]{4096})
  .shuffle().deflate(6);                                     // filters apply in call order
 // the chunk shape needs the dataset's rank, dimensions >= 1, and at most 2 GiB per chunk
 
-// also: .fletcher32(), .scaleOffset(), .nbit(precision), .szip()
+// also: .fletcher32(), .scaleOffset(), .nbit(precision), .szip(), .szip(SzipCoding.NEAREST_NEIGHBOUR, 16)
 ```
 
 Filters form a pipeline applied to each chunk in the order they are added, exactly as libhdf5 does, and
 each may be added once. `scaleOffset()` and `nbit(precision)` work on integer data and must come first.
 `nbit(precision)` stores unsigned `precision`-bit values, so a negative or too-wide value is rejected.
-`szip()` works on integer or floating-point data and may only follow `shuffle()`. Every filter writes
-the on-disk form libhdf5 reads: scale-offset chunks are byte-identical to libhdf5's, and szip chunks use
-libhdf5's framing (a chunk szip cannot shrink is stored unfiltered, as libhdf5 does).
+`szip(coding, pixelsPerBlock)` works on integer or floating-point data and may only follow `shuffle()`:
+entropy coding alone (`SzipCoding.ENTROPY`, h5py's `"ec"`) or after nearest-neighbour preprocessing
+(`NEAREST_NEIGHBOUR`, `"nn"`, which suits smooth data), with an even block of 2 to 32 elements; `szip()`
+is entropy coding with blocks of 8. Every filter writes the on-disk form libhdf5 reads, and the chunk
+libhdf5 itself would write: scale-offset and n-bit chunks are libhdf5's byte for byte, and szip chunks
+libaec's (Falcon ports libaec's encoder: zero-block runs, the second extension, its choice of each block's
+coding). A chunk szip cannot shrink is stored unfiltered, as libhdf5 does.
 
 ### Links and references
 
 ```java
 w.softLink("latest", "/run/frames");                        // a path in this file (need not exist)
 w.group("other").externalLink("calibration", "cal.h5", "/gain"); // an object in another file
+w.hardLink("frames", "/run/frames");                        // another name for an object (it must exist)
+w.move("old_name", "/archive/new_name");                    // a link moved (or renamed: a name in its group)
 w.regionReferenceDataset("roi", new long[]{2}, new Hdf5Writer.Region[]{
     Hdf5Writer.Region.block("/image", new long[]{10, 20}, new long[]{64, 64}),
     Hdf5Writer.Region.points("/image", new long[][]{{0, 0}, {5, 7}})});
@@ -551,7 +566,15 @@ A region is all of a dataset, a block, a regular hyperslab, or points. Reference
 path and may be added before or after the reference; they are resolved on `close()`. References may be
 written anywhere a value goes: contiguous, chunked (and filtered) and compact datasets, compound members,
 and attributes (`attribute(name, Datatype.objectReference(), shape, paths)`). A chunked dataset of object
-references keeps its chunks until `close()`. External links exist only in the modern format.
+references keeps its chunks until `close()`.
+
+- **Hard links** (`hardLink(name, targetPath)`): another name for an object added or of the file, by an
+  absolute path through hard links, which must exist when the link is made (as libhdf5's
+  `H5Lcreate_hard` requires). The object's hard-link count counts its names; deleting one name leaves the
+  object to the others. Hard links may form cycles (a group reaching an ancestor).
+- **Moves and renames** (`move(name, newPath)`, libhdf5's `H5Lmove`): the link `name` (or a link at a
+  path) moves to `newPath`, absolute or relative to the group; a group takes what it holds with it. Paths
+  are resolved as the session leaves the file: a reference names an object's place after the moves.
 
 ### Compound, enum, reference, array, sequence, complex
 
@@ -595,7 +618,9 @@ In `EARLIEST`:
 - every attribute goes in the version-1 object header (there is no dense storage);
 - chunked datasets are indexed by version-1 B-trees, and their filter pipeline is message version 1;
 - groups of any size are indexed by version-1 B-trees of as many levels as they need;
-- external links and complex numbers are refused when added.
+- complex numbers are refused when added;
+- a group with an external link, which a symbol table cannot hold, is written in the new format (link
+  messages in its version-1 header), as libhdf5 converts such a group; HDF5 1.8 and later read it.
 
 `EARLIEST` uses the message versions libhdf5 writes for its own earliest setting:
 - dataspace v1;
@@ -626,30 +651,46 @@ try (Hdf5Writer w = Hdf5Writer.open(Path.of("data.h5"))) {
 - **What changes:**
   - Everything a new file can hold can be added anywhere in the file.
   - `group(name)` opens a group the file holds, and `dataset(name)` a dataset. Each follows a hard link
-    only: open a soft or external link's target where it is.
+    only: open a soft or external link's target where it is. An object reached by several hard links is
+    opened once, however it is reached.
   - A dataset of the file keeps its datatype, chunks, filters, and fill value, and grows only within
-    its maximum shape. Its chunks are written through its filters (deflate, shuffle, fletcher32, szip).
+    its maximum shape. Its chunks are written through its filters with the parameters libhdf5 stored for
+    them, as libhdf5 would encode them: deflate, shuffle, fletcher32, szip (either coding), n-bit (any
+    type), and scale-offset (integers, and decimal-scaled floats); partial edge chunks it keeps
+    unfiltered stay so (in a dataset that can grow, whose index Falcon writes as a version-1 B-tree, every
+    chunk is filtered). Data in external raw files is written into those files.
   - Setting an attribute an object already has replaces it.
   - `delete(name)` deletes a link. The object it led to stays in the file, unreachable unless another
     link leads to it (its hard-link count is lowered).
+  - `hardLink` and `move` work on the file's links as on new ones. An external link added to (or moved
+    into) a group of the original format converts that group to the new format, as libhdf5 does.
+  - Attributes kept in the file's shared-message table (SOHM) change like others: one deleted or
+    replaced is released there (its count lowered, as libhdf5 lowers it, and dropped from the index at
+    0); a dataset that grows gets its own dataspace message, releasing the shared one. Their copies stay
+    in the shared-message heap, as unused space.
+  - A group or object whose links or attributes drop below its minimum for dense storage (6) goes back to
+    compact messages, as libhdf5 moves them.
 - **In place:**
-  - New data and metadata go after the file's end. `close()` flushes them to disk, then points the file's
-    existing structures at them (the superblock, then each changed object header, in single writes).
-  - Space freed by a deletion or a replaced attribute is not reused, as libhdf5 does not reuse it either;
-    `h5repack` reclaims it.
-  - Data written into a contiguous dataset of the file goes there at once. `abort()` undoes everything
-    else: it cuts what was added after the file's end.
-  - There is no journal: a crash while `close()` writes the changed headers can leave some changes made.
-    Do not open the file elsewhere while it is changed.
+  - New data and metadata go after the file's end. `close()` writes them, with a journal of every write it
+    will make over the file's own structures (the superblock, changed object headers and indexes), and
+    flushes it all to disk; then it makes those writes, and cuts the journal off.
+  - A change interrupted while those writes are made (a crash, a full disk) is redone by retrying
+    `close()`, or by the next `Hdf5Writer.open` of the file. Meanwhile a version-3 superblock is marked as
+    open by a writer, as libhdf5 marks it, so libhdf5 refuses the file until the change is whole.
+  - Space freed by a deletion or a replaced attribute is not reused, as libhdf5 does not reuse it between
+    sessions: a session never writes over what the file holds before `close()`, so that `abort()` and a
+    crash before then leave the file as it was. `h5repack` reclaims it.
+  - Data written into a contiguous dataset of the file (or its external raw files) goes there at once.
+    `abort()` undoes everything else: it cuts what was added after the file's end.
+  - Do not open the file elsewhere while it is changed.
 - **New objects** take the file's format: the earliest one if its superblock is version 0–1. Groups and
   attributes keep their storage style (original or new, compact or dense, creation order tracked).
 - **Refused** (`HdfUnsupportedException`):
   - files with 4-byte addresses, of a non-default driver (family, multi), that track their free space
-    persistently or in pages, or that are marked as open by a writer;
-  - writing into datasets filtered by scale-offset, n-bit, szip's nearest-neighbour coding, or a
-    third-party filter, and into virtual datasets or data in external files;
-  - changing attributes kept in the shared-message table;
-  - external links in groups of the original format.
+    persistently or in pages, or that are marked as open by a writer (with no journal of Falcon's to redo);
+  - writing into datasets filtered by a third-party filter (see S8 in `TODO.md`), and into virtual
+    datasets, which are views of other datasets: write those;
+  - external raw data files the access policy refuses (by default, outside the HDF5 file's directory).
 
 ---
 

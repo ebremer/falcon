@@ -1,14 +1,15 @@
 package com.ebremer.falcon.hdf5.filter;
 
 /**
- * A pure-Java decoder for the <strong>CCSDS 121.0</strong> adaptive entropy (extended-Rice) coding
- * implemented by <a href="https://gitlab.dkrz.de/k202009/libaec">libaec</a> — the algorithm behind
- * HDF5's {@code szip} filter. Written from the format description (no native code), and validated
- * byte-for-byte against libaec across all coding modes.
+ * A pure-Java decoder and encoder for the <strong>CCSDS 121.0</strong> adaptive entropy (extended-Rice)
+ * coding implemented by <a href="https://gitlab.dkrz.de/k202009/libaec">libaec</a> — the algorithm behind
+ * HDF5's {@code szip} filter. Written from the format description and libaec's encoder (no native code),
+ * and validated byte-for-byte against libaec across all coding modes, both ways.
  *
- * <p>Produces the decoded sample values. Modes handled: sample-splitting (fundamental sequence with
+ * <p>The decoder produces the sample values. Modes handled: sample-splitting (fundamental sequence with
  * {@code k} split bits), uncompressed, zero-block (with remainder-of-segment), and second extension,
- * with optional nearest-neighbour (unit-delay) preprocessing. Bits are read most-significant-first.
+ * with optional nearest-neighbour (unit-delay) preprocessing. Bits are read most-significant-first. The
+ * encoder makes the same choices libaec does, so it writes libaec's stream.
  *
  * <p>Both <b>unsigned</b> and <b>signed</b> samples are decoded; signed data (libaec's
  * {@code DATA_SIGNED}) sign-extends the reference/raw samples and unmaps against the signed value
@@ -28,58 +29,251 @@ public final class Aec {
     }
 
     /**
-     * Encodes {@code samples} (treated as unsigned {@code bitsPerSample}-bit values) into an AEC
-     * bitstream, without preprocessing. Each block of {@code blockSize} samples is emitted in whichever
-     * mode is smaller: sample-splitting with the cost-optimal {@code k}, or uncompressed. The output is
-     * decoded by {@link #decode} (and by libaec) with {@code flags = 0} and matching parameters.
+     * Encodes {@code samples} into an AEC bitstream exactly as libaec's encoder ({@code encode.c}) does,
+     * so its output is libaec's, byte for byte. Samples are taken as {@code bitsPerSample}-bit patterns
+     * (two's complement for signed data). Each reference-sample interval of {@code rsi} blocks is
+     * preprocessed if {@link #FLAG_PREPROCESS} is set (a reference sample, then each sample mapped from its
+     * difference to the one before), and each block of {@code blockSize} samples is then coded in the
+     * option libaec picks for it: a run of zero blocks (up to the end of a 64-block segment or of the
+     * interval, there "remainder of segment"), sample splitting with libaec's search for {@code k} (which
+     * carries over from block to block), the second extension, or uncompressed. A final, shorter interval
+     * is padded with its last sample and coded only as far as its blocks need.
+     *
+     * @param flags {@link #FLAG_PREPROCESS} and {@link #FLAG_SIGNED} (the others do not change the coding)
      */
-    public static byte[] encode(long[] samples, int bitsPerSample, int blockSize) {
+    public static byte[] encode(long[] samples, int bitsPerSample, int blockSize, int rsi, int flags) {
         if (bitsPerSample < 1 || bitsPerSample > 32) {
             throw new IllegalArgumentException("AEC samples are 1 to 32 bits wide, not " + bitsPerSample);
         }
-        int idLen = idLen(bitsPerSample);
-        int idMax = (1 << idLen) - 1;
-        int maxSplitK = Math.min(bitsPerSample - 1, idMax - 2);
-        BitWriter out = new BitWriter();
-        long[] block = new long[blockSize];
-        for (int start = 0; start < samples.length; start += blockSize) {
-            int count = Math.min(blockSize, samples.length - start);
-            for (int i = 0; i < blockSize; i++) {
-                block[i] = i < count ? samples[start + i] : 0; // pad the final block with zeros
-            }
+        if (blockSize < 2 || blockSize > 256 || (blockSize & 1) != 0 || rsi < 1 || rsi > 4096) {
+            throw new IllegalArgumentException("invalid AEC parameters: block=" + blockSize + " rsi=" + rsi);
+        }
+        return new Encoder(bitsPerSample, blockSize, rsi, flags).encode(samples);
+    }
 
-            int bestK = -1;
-            long bestCost = (long) blockSize * bitsPerSample; // uncompressed cost
-            for (int k = 0; k <= maxSplitK; k++) {
-                long cost = (long) blockSize * k;
-                for (long v : block) {
-                    cost += (v >>> k) + 1; // fundamental sequence: (v>>k) zeros plus a stop bit
+    /** libaec's encoder state machine, run over the whole input at once. */
+    private static final class Encoder {
+        private final int bits;
+        private final int blockSize;
+        private final int rsi;
+        private final boolean preprocess;
+        private final boolean signed;
+        private final int idLen;
+        private final int kmax;
+        private final long mask;
+        private final long xmax;
+        private final long xmin;
+        private final BitWriter out = new BitWriter();
+        private final long[] raw;
+        private final long[] d;
+        private int k;                  // the splitting position, carried from block to block
+        private long refSample;
+        private int zeroBlocks;         // a run of zero blocks not yet emitted
+        private boolean zeroRef;        // ... whose first block held the interval's reference sample
+        private long zeroRefSample;
+        private boolean remainderOfSegment;
+
+        Encoder(int bits, int blockSize, int rsi, int flags) {
+            this.bits = bits;
+            this.blockSize = blockSize;
+            this.rsi = rsi;
+            this.preprocess = (flags & FLAG_PREPROCESS) != 0;
+            this.signed = (flags & FLAG_SIGNED) != 0;
+            this.idLen = idLen(bits);
+            this.kmax = (1 << idLen) - 3;
+            this.mask = bits == 64 ? -1L : (1L << bits) - 1;
+            this.xmax = signed ? (1L << (bits - 1)) - 1 : mask;
+            this.xmin = signed ? -(1L << (bits - 1)) : 0;
+            this.raw = new long[rsi * blockSize];
+            this.d = preprocess ? new long[rsi * blockSize] : raw;
+        }
+
+        byte[] encode(long[] samples) {
+            int interval = rsi * blockSize;
+            for (int start = 0; start < samples.length; start += interval) {
+                int got = Math.min(interval, samples.length - start);
+                for (int i = 0; i < interval; i++) {
+                    raw[i] = i < got ? samples[start + i] & mask : raw[got - 1]; // m_get_rsi_resumable's padding
                 }
-                if (cost < bestCost) {
-                    bestCost = cost;
-                    bestK = k;
+                int blocks = got == interval ? rsi : (got + blockSize - 1) / blockSize;
+                if (preprocess) {
+                    preprocess();
+                }
+                for (int b = 0; b < blocks; b++) {
+                    block(b * blockSize, preprocess && b == 0, b == blocks - 1, b + 1);
                 }
             }
+            return out.toByteArray(); // the last byte padded with zero bits
+        }
 
-            if (bestK < 0) { // uncompressed
-                out.write(idMax, idLen);
-                for (long v : block) {
-                    out.write(v, bitsPerSample);
+        /** {@code preprocess_unsigned} / {@code preprocess_signed}: the reference sample, then mapped differences. */
+        private void preprocess() {
+            refSample = raw[0];
+            d[0] = 0;
+            long previous = value(raw[0]);
+            for (int i = 1; i < raw.length; i++) {
+                long x = value(raw[i]);
+                if (x < previous) {
+                    long delta = previous - x;
+                    d[i] = delta <= xmax - previous ? 2 * delta - 1 : xmax - x;
+                } else {
+                    long delta = x - previous;
+                    d[i] = delta <= previous - xmin ? 2 * delta : x - xmin;
                 }
+                previous = x;
+            }
+        }
+
+        private long value(long pattern) {
+            return signed && bits < 64 ? pattern << (64 - bits) >> (64 - bits) : pattern;
+        }
+
+        /** {@code m_check_zero_block} and {@code m_select_code_option} for the block at {@code at}. */
+        private void block(int at, boolean ref, boolean lastOfInterval, int dispensed) {
+            boolean zero = true;
+            for (int i = at; i < at + blockSize && zero; i++) {
+                zero = d[i] == 0;
+            }
+            if (zero) {
+                if (++zeroBlocks == 1) {
+                    zeroRef = ref;
+                    zeroRefSample = refSample;
+                }
+                if (lastOfInterval || dispensed % 64 == 0) {
+                    remainderOfSegment = zeroBlocks > 4;
+                    emitZeroRun();
+                }
+                return;
+            }
+            if (zeroBlocks > 0) {
+                emitZeroRun();
+            }
+            int r = ref ? 1 : 0;
+            long uncompressed = (long) (blockSize - r) * bits;
+            long split = assessSplitting(at, r);
+            long se = assessSecondExtension(at, uncompressed);
+            if (split < uncompressed) {
+                if (split < se) {
+                    emitSplitting(at, r);
+                } else {
+                    emitSecondExtension(at, r);
+                }
+            } else if (uncompressed <= se) {
+                emitUncompressed(at, r);
             } else {
-                out.write(bestK + 1, idLen);
-                for (long v : block) {
-                    out.writeFundamental(v >>> bestK);
+                emitSecondExtension(at, r);
+            }
+        }
+
+        /** {@code assess_splitting_option}: libaec's search for the best {@code k}, from the last block's. */
+        private long assessSplitting(int at, int ref) {
+            long thisBlock = blockSize - ref;
+            long lenMin = Long.MAX_VALUE;
+            int kk = k;
+            int kMin = kk;
+            boolean noTurn = kk == 0;
+            boolean up = true;
+            while (true) {
+                long fs = 0;
+                for (int i = at; i < at + blockSize; i++) {
+                    fs += d[i] >>> kk;
                 }
-                if (bestK > 0) {
-                    long mask = (1L << bestK) - 1;
-                    for (long v : block) {
-                        out.write(v & mask, bestK);
+                long len = fs + thisBlock * (kk + 1);
+                if (len < lenMin) {
+                    if (lenMin < Long.MAX_VALUE) {
+                        noTurn = true;
                     }
+                    lenMin = len;
+                    kMin = kk;
+                    if (up) {
+                        if (fs < thisBlock || kk >= kmax) {
+                            if (noTurn) {
+                                break;
+                            }
+                            kk = k - 1;
+                            up = false;
+                            noTurn = true;
+                        } else {
+                            kk++;
+                        }
+                    } else {
+                        if (fs >= thisBlock || kk == 0) {
+                            break;
+                        }
+                        kk--;
+                    }
+                } else {
+                    if (noTurn) {
+                        break;
+                    }
+                    kk = k - 1;
+                    up = false;
+                    noTurn = true;
+                }
+            }
+            k = kMin;
+            return lenMin & 0xFFFF_FFFFL; // as libaec returns it, a uint32_t
+        }
+
+        /**
+         * {@code assess_se_option}: the second extension's length, or "too long" past {@code limit}, in
+         * libaec's unsigned 64-bit arithmetic (which wraps for 32-bit samples, as there).
+         */
+        private long assessSecondExtension(int at, long limit) {
+            long len = 1;
+            for (int i = at; i < at + blockSize; i += 2) {
+                long sum = d[i] + d[i + 1];
+                len += (sum * (sum + 1) >>> 1) + d[i + 1] + 1;
+                if (Long.compareUnsigned(len, limit) > 0) {
+                    return 0xFFFF_FFFFL;
+                }
+            }
+            return len;
+        }
+
+        private void emitSplitting(int at, int ref) {
+            out.write(k + 1, idLen);
+            if (ref == 1) {
+                out.write(refSample, bits);
+            }
+            for (int i = at + ref; i < at + blockSize; i++) {
+                out.writeFundamental(d[i] >>> k);
+            }
+            if (k > 0) {
+                long low = (1L << k) - 1;
+                for (int i = at + ref; i < at + blockSize; i++) {
+                    out.write(d[i] & low, k);
                 }
             }
         }
-        return out.toByteArray();
+
+        private void emitUncompressed(int at, int ref) {
+            out.write((1 << idLen) - 1, idLen);
+            for (int i = at; i < at + blockSize; i++) {
+                out.write(ref == 1 && i == at ? refSample : d[i], bits);
+            }
+        }
+
+        private void emitSecondExtension(int at, int ref) {
+            out.write(1, idLen + 1);
+            if (ref == 1) {
+                out.write(refSample, bits);
+            }
+            for (int i = at; i < at + blockSize; i += 2) {
+                long sum = d[i] + d[i + 1];
+                out.writeFundamental(sum * (sum + 1) / 2 + d[i + 1]);
+            }
+        }
+
+        private void emitZeroRun() {
+            out.write(0, idLen + 1);
+            if (zeroRef) {
+                out.write(zeroRefSample, bits);
+            }
+            out.writeFundamental(remainderOfSegment ? 4 : zeroBlocks >= 5 ? zeroBlocks : zeroBlocks - 1);
+            zeroBlocks = 0;
+            remainderOfSegment = false;
+        }
     }
 
     /**
@@ -231,38 +425,44 @@ public final class Aec {
         return m;
     }
 
-    /** Most-significant-first bit writer, growing its buffer as needed. */
+    /** Most-significant-first bit writer over a zeroed buffer, growing it as needed. */
     private static final class BitWriter {
         private byte[] data = new byte[64];
-        private int bit;
+        private long bit;
 
         void write(long value, int n) {
             for (int i = n - 1; i >= 0; i--) {
-                writeBit((int) ((value >>> i) & 1));
+                if (((value >>> i) & 1) != 0) {
+                    set(bit);
+                }
+                bit++;
             }
+            capacity(bit);
         }
 
         /** Fundamental sequence: {@code value} zero bits followed by a single one bit. */
         void writeFundamental(long value) {
-            for (long i = 0; i < value; i++) {
-                writeBit(0);
-            }
-            writeBit(1);
+            bit += value;
+            set(bit++);
         }
 
-        private void writeBit(int b) {
-            int index = bit >> 3;
-            if (index >= data.length) {
-                data = java.util.Arrays.copyOf(data, data.length * 2);
+        private void set(long at) {
+            capacity(at + 1);
+            data[(int) (at >> 3)] |= (byte) (0x80 >>> (int) (at & 7));
+        }
+
+        private void capacity(long bits) {
+            long bytes = (bits + 7) >> 3;
+            if (bytes > data.length) {
+                if (bytes > Integer.MAX_VALUE - 8) {
+                    throw new IllegalArgumentException("AEC output exceeds 2 GiB");
+                }
+                data = java.util.Arrays.copyOf(data, (int) Math.max(bytes, Math.min(Integer.MAX_VALUE - 8, 2L * data.length)));
             }
-            if (b != 0) {
-                data[index] |= 1 << (7 - (bit & 7));
-            }
-            bit++;
         }
 
         byte[] toByteArray() {
-            return java.util.Arrays.copyOf(data, (bit + 7) >> 3);
+            return java.util.Arrays.copyOf(data, (int) ((bit + 7) >> 3));
         }
     }
 

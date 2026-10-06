@@ -6,6 +6,7 @@ import com.ebremer.falcon.hdf5.datatype.Datatype;
 import com.ebremer.falcon.hdf5.filter.FilterPipeline;
 import com.ebremer.falcon.hdf5.filter.FilterPipelineMessage;
 import com.ebremer.falcon.hdf5.filter.Filters;
+import com.ebremer.falcon.hdf5.filter.Nbit;
 import com.ebremer.falcon.hdf5.filter.ScaleOffset;
 import com.ebremer.falcon.hdf5.filter.Szip;
 import com.ebremer.falcon.hdf5.io.HdfBuffer;
@@ -66,7 +67,7 @@ import java.util.zip.Deflater;
  * end.
  *
  * <p><b>Changing a file.</b> {@link #open} opens an existing file to change it in place: add to it,
- * write into its datasets, and delete its links and attributes; see there.
+ * write into its datasets, hard-link, move, and delete its links, and change its attributes; see there.
  *
  * <pre>{@code
  * try (Hdf5Writer w = Hdf5Writer.open(Path.of("data.h5"))) {
@@ -95,6 +96,7 @@ public final class Hdf5Writer implements AutoCloseable {
     // Above this many links/attributes, the writer switches from compact header messages to dense
     // storage (a fractal heap indexed by a version-2 B-tree), matching the library's default threshold.
     private static final int MAX_COMPACT = 8;
+    private static final int MIN_DENSE = 6;     // ... and below this many, back from dense storage to compact
     // Dense-storage fractal heaps, as libhdf5 makes them: heap ids of a type byte, the offset (in
     // ceil(bits / 8) bytes) and the length (2 bytes), for heaps of up to 2^bits bytes.
     private static final int ATTR_HEAP_ID = 8;
@@ -135,6 +137,7 @@ public final class Hdf5Writer implements AutoCloseable {
 
     private final Path path;
     private final boolean legacy;
+    private final byte[] userBlock;            // a new file's user block (P2 WF7), or empty
     private final GroupSpec root = new GroupSpec();
     private final GroupWriter rootWriter;
     private OutputFile output;                 // the temporary file, created when the first bytes are written
@@ -142,7 +145,14 @@ public final class Hdf5Writer implements AutoCloseable {
     // Object references (in contiguous data, and in region references' heap objects), patched in the file
     // once the objects' addresses are known.
     private final List<FileReference> fileReferences = new ArrayList<>();
-    private final Map<String, Long> objectAddresses = new HashMap<>();     // absolute path -> object header address
+    // Each layout of the metadata: where each object went (and a group's symbol table), the objects being laid
+    // out (a cycle of hard links reaches one again), whether one was reached so before the first layout placed
+    // it, and the first layout's places, which the second confirms (see complete()).
+    private Map<ObjectSpec, GroupResult> laidOut = new HashMap<>();
+    private final Set<ObjectSpec> inProgress = new HashSet<>();
+    private boolean placeholders;
+    private Map<ObjectSpec, GroupResult> firstLayout = Map.of();
+    private Map<ObjectSpec, Integer> referenceCounts = Map.of(); // the session's objects: the links reaching each
     // The dataset last given its data whole, written when the next dataset or group is added (or on close).
     private DatasetSpec unwritten;
     private String unwrittenPath;
@@ -155,9 +165,18 @@ public final class Hdf5Writer implements AutoCloseable {
     private final ExistingFile existing;
     private final Map<Long, ObjectHeaderEditor> editors = new LinkedHashMap<>();
     private final List<ObjectHeaderEditor.Patch> headerPatches = new ArrayList<>();
-    private final Set<String> deletedPaths = new HashSet<>(); // absolute paths of the file's links deleted
+    private final List<SharedMessages.Release> sharedReleases = new ArrayList<>(); // messages no longer held
+    private final Map<Path, java.nio.channels.FileChannel> externalFiles = new LinkedHashMap<>(); // external raw data
+    // A file being changed: the writes over it (superblock first), once journaled and on disk (P2 WF10).
+    private List<ObjectHeaderEditor.Patch> journal;
+    // For tests: the writes over a file after which writing them fails, as a crash would stop it (-1: never).
+    static volatile int interruptAfter = -1;
+    // The objects of the file opened to change them (groups and datasets), by object header address: each once,
+    // however many links reach it.
+    private final Map<Long, ObjectSpec> opened = new LinkedHashMap<>();
     private long legacyRootBtree = UNDEFINED;  // root group's symbol-table B-tree / local heap (legacy superblock)
     private long legacyRootHeap = UNDEFINED;
+    private boolean rootTableChanged;          // ... changed in this session (rebuilt, or gone: converted)
     private final Lifecycle lifecycle = new Lifecycle();
 
     /** Whether the writer (and every group and dataset handle it gave out) still accepts additions. */
@@ -171,6 +190,16 @@ public final class Hdf5Writer implements AutoCloseable {
         }
     }
 
+    /**
+     * How szip codes a chunk ({@link DatasetWriter#szip(SzipCoding, int)}): entropy coding alone, or after
+     * nearest-neighbour preprocessing (each element coded as its difference from the one before, which
+     * suits smooth data). libhdf5's {@code H5_SZIP_EC_OPTION_MASK} and {@code H5_SZIP_NN_OPTION_MASK}.
+     */
+    public enum SzipCoding {
+        ENTROPY,
+        NEAREST_NEIGHBOUR
+    }
+
     /** On-disk format version: {@link #EARLIEST} writes the original (v0 superblock, symbol-table
      * groups, v1 object headers); {@link #LATEST} the modern checksummed format. */
     public enum Format {
@@ -178,54 +207,99 @@ public final class Hdf5Writer implements AutoCloseable {
         LATEST
     }
 
-    private Hdf5Writer(Path path, Format format, ExistingFile existing) {
+    private Hdf5Writer(Path path, Format format, ExistingFile existing, byte[] userBlock) {
         this.path = path;
         this.legacy = format == Format.EARLIEST;
         this.existing = existing;
+        this.userBlock = userBlock;
         this.groupLeafK = existing != null ? existing.groupLeafK : GROUP_LEAF_K;
         this.groupInternalK = existing != null ? existing.groupInternalK : GROUP_INTERNAL_K;
         this.chunkK = existing != null ? existing.chunkK : ChunkIndexWriter.BTREE_K;
         if (existing != null) {
             root.address = existing.rootAddress;
             root.object = existing.file.root();
+            opened.put(root.address, root);
         }
         this.rootWriter = new GroupWriter(this, root, "", legacy, lifecycle);
     }
 
     /** Begins writing a new HDF5 file at {@code path} in the modern format (completed on {@link #close()}). */
     public static Hdf5Writer create(Path path) {
-        return new Hdf5Writer(path, Format.LATEST, null);
+        return new Hdf5Writer(path, Format.LATEST, null, new byte[0]);
     }
 
     /** Begins writing a new HDF5 file at {@code path} in the given on-disk {@link Format}. */
     public static Hdf5Writer create(Path path, Format format) {
-        return new Hdf5Writer(path, format, null);
+        return new Hdf5Writer(path, format, null, new byte[0]);
     }
 
     /**
-     * Opens the existing HDF5 file at {@code path} to change it in place (P2 WF6): add groups, datasets,
+     * Begins writing a new HDF5 file at {@code path} that starts with a user block (P2 WF7): bytes of the
+     * application's own, which HDF5 readers skip, as libhdf5's {@code H5Pset_userblock} reserves them. The
+     * block is {@code userBlock}, zero-padded to the smallest size libhdf5 allows that holds it (512, 1024,
+     * 2048, ... bytes); the HDF5 data follows. MATLAB v7.3 files keep their 128-byte header in one:
+     *
+     * <pre>{@code
+     * byte[] header = Arrays.copyOf("MATLAB 7.3 MAT-file ...".getBytes(StandardCharsets.US_ASCII), 128);
+     * try (Hdf5Writer w = Hdf5Writer.create(Path.of("data.mat"), Hdf5Writer.Format.LATEST, header)) { ... }
+     * }</pre>
+     *
+     * @throws IllegalArgumentException if the block holds the HDF5 signature at offset 0, 512, 1024, ...
+     *         (where readers look for the superblock), or is larger than 2^30 bytes
+     */
+    public static Hdf5Writer create(Path path, Format format, byte[] userBlock) {
+        return new Hdf5Writer(path, format, null, userBlock(userBlock));
+    }
+
+    /** {@code content}, zero-padded to a user block's size: a power of two of at least 512 bytes. */
+    private static byte[] userBlock(byte[] content) {
+        java.util.Objects.requireNonNull(content, "userBlock");
+        if (content.length > 1 << 30) {
+            throw new IllegalArgumentException("a user block of " + content.length + " bytes is larger than 2^30");
+        }
+        int size = 512;
+        while (size < content.length) {
+            size *= 2;
+        }
+        for (int at = 0; at + HDF5_SIGNATURE.length <= content.length; at = at == 0 ? 512 : at * 2) {
+            if (java.util.Arrays.equals(content, at, at + HDF5_SIGNATURE.length, HDF5_SIGNATURE, 0, HDF5_SIGNATURE.length)) {
+                throw new IllegalArgumentException("the user block holds the HDF5 signature at offset " + at
+                        + ", where readers look for the superblock");
+            }
+        }
+        return java.util.Arrays.copyOf(content, size);
+    }
+
+    /**
+     * Opens the existing HDF5 file at {@code path} to change it in place (P2 WF6, WF10): add groups, datasets,
      * links and attributes anywhere in it; open its groups ({@link GroupWriter#group}) and datasets
-     * ({@link GroupWriter#dataset}) to write their data or set and delete their attributes; and delete links
-     * ({@link GroupWriter#delete}). New objects are written in the file's own format: the earliest one for a
-     * file with a version 0&ndash;1 superblock, else the modern one.
+     * ({@link GroupWriter#dataset}) to write their data or set and delete their attributes (those kept in its
+     * shared-message table too); and hard-link ({@link GroupWriter#hardLink}), move
+     * ({@link GroupWriter#move}) and delete ({@link GroupWriter#delete}) its links. New objects are written in
+     * the file's own format: the earliest one for a file with a version 0&ndash;1 superblock, else the modern
+     * one.
      *
      * <p>The file is changed in place, not rewritten: new data and metadata go after its end as they are
      * written, and {@link #close()} then points the file's existing structures at them (a group's link
-     * storage, an object's header). What a deleted link or a replaced attribute held is left as unused space,
-     * as libhdf5 leaves it; {@code h5repack} reclaims it. Data written into an existing dataset's contiguous
-     * storage goes there at once, which {@link #abort()} cannot undo; anything else is undone by it. The file
-     * must not be open elsewhere while it is changed.
+     * storage, an object's header), through a journal: a change interrupted then is redone when the file is
+     * next opened here. What a deleted link or a replaced attribute held is left as unused space, as libhdf5
+     * leaves it between sessions (a session never writes over what the file holds until {@code close()}, so
+     * that {@link #abort()} and a crash before then leave it as it was); {@code h5repack} reclaims it. Data
+     * written into an existing dataset's contiguous storage (or its external raw data files) goes there at
+     * once, which {@link #abort()} cannot undo; anything else is undone by it. The file must not be open
+     * elsewhere while it is changed.
      *
      * @throws IOException if the file cannot be read or opened for writing
      * @throws HdfUnsupportedException for a file Falcon does not change: with 4-byte addresses, of a file
      *         driver other than the default (family, multi, ...), tracking its free space, or marked as open
-     *         by a writer
+     *         by a writer (without a journal of Falcon's to redo)
      */
     public static Hdf5Writer open(Path path) throws IOException {
+        OutputFile.recover(path); // a change interrupted while it was written over the file: redone first
         ExistingFile existing = ExistingFile.open(path);
         try {
             Hdf5Writer writer = new Hdf5Writer(path, existing.superblockVersion < 2 ? Format.EARLIEST : Format.LATEST,
-                    existing);
+                    existing, new byte[0]);
             writer.output = OutputFile.openExisting(path, existing.base, existing.endOfFile);
             return writer;
         } catch (IOException | RuntimeException e) {
@@ -347,6 +421,16 @@ public final class Hdf5Writer implements AutoCloseable {
         return rootWriter.externalLink(name, fileName, objectPath);
     }
 
+    /** A hard link in the root group (see {@link GroupWriter#hardLink}). */
+    public GroupWriter hardLink(String name, String targetPath) {
+        return rootWriter.hardLink(name, targetPath);
+    }
+
+    /** Moves (or renames) a link of the root group (see {@link GroupWriter#move}). */
+    public GroupWriter move(String name, String newPath) {
+        return rootWriter.move(name, newPath);
+    }
+
     /**
      * Completes the file and closes the writer. The file is written beside {@code path} under a temporary
      * name (raw data as it is written, then the metadata here) and moved into place, so {@code path} ends
@@ -356,9 +440,12 @@ public final class Hdf5Writer implements AutoCloseable {
      * the writer throws {@link HdfClosedException}.
      *
      * <p>A file being changed ({@link #open}) is completed in place: the new metadata is written after its
-     * end and flushed to disk, then its superblock, then the object headers that change, each chunk in a
-     * single write. A failure before that leaves the file as it was (but for contiguous data written into
-     * it); there is no journal, so a crash while the headers are written can leave some changes applied.
+     * end, with a journal of every write over the file's own structures (its superblock, the object headers
+     * and indexes that change), and flushed to disk; then those writes are made, and the journal cut off. A
+     * failure before the journal is on disk leaves the file as it was (but for data written into its
+     * contiguous datasets); one after it is redone by retrying {@code close()}, or by the next
+     * {@link #open} of the file (after a crash, or {@link #abort()}). Meanwhile a version-3 superblock is
+     * marked as open by a writer, as libhdf5 marks it, so libhdf5 refuses the file until the change is whole.
      *
      * <p>{@code close()} cannot tell that the code building the file failed: inside
      * try-with-resources, call {@link #abort()} on failure to avoid writing what was added so far.
@@ -383,7 +470,9 @@ public final class Hdf5Writer implements AutoCloseable {
     /**
      * Closes the writer without writing anything: the temporary file is deleted, and a file already at
      * {@code path} is left as it was (a file being changed loses what was added after its end; data written
-     * into its contiguous datasets stays). Use it when building the file failed part-way:
+     * into its contiguous datasets stays). After a {@link #close()} of a file being changed failed while
+     * writing over the file, its journal is kept instead, and the change is redone when the file is next
+     * opened. Use it when building the file failed part-way:
      *
      * <pre>{@code
      * Hdf5Writer w = Hdf5Writer.create(path);
@@ -401,11 +490,36 @@ public final class Hdf5Writer implements AutoCloseable {
             return;
         }
         lifecycle.closed = true;
+        try {
+            closeExternalFiles(false);
+        } catch (UncheckedIOException e) {
+            // what was written there stays, as data written into the file's contiguous datasets does
+        }
         if (existing != null) {
             existing.close();
         }
-        if (output != null) {
+        if (output != null && journal != null) {
+            output.closeKeepingJournal(); // interrupted while written over: redone when the file is next opened
+        } else if (output != null) {
             output.discard();
+        }
+    }
+
+    /** Closes the external raw data files written to, first flushing them to disk if {@code force}. */
+    private void closeExternalFiles(boolean force) {
+        UncheckedIOException failure = null;
+        for (Map.Entry<Path, java.nio.channels.FileChannel> file : externalFiles.entrySet()) {
+            try (java.nio.channels.FileChannel channel = file.getValue()) {
+                if (force) {
+                    channel.force(true);
+                }
+            } catch (IOException e) {
+                failure = failure != null ? failure : new UncheckedIOException("cannot write " + file.getKey(), e);
+            }
+        }
+        externalFiles.clear();
+        if (failure != null) {
+            throw failure;
         }
     }
 
@@ -417,7 +531,7 @@ public final class Hdf5Writer implements AutoCloseable {
     /** The output file, created when first needed: its first bytes are kept for the superblock. */
     private OutputFile output() {
         if (output == null) {
-            output = OutputFile.create(path, legacy ? LEGACY_SUPERBLOCK_SIZE : SUPERBLOCK_SIZE);
+            output = OutputFile.create(path, legacy ? LEGACY_SUPERBLOCK_SIZE : SUPERBLOCK_SIZE, userBlock);
         }
         return output;
     }
@@ -428,16 +542,28 @@ public final class Hdf5Writer implements AutoCloseable {
      * references, and the superblock. Repeatable: what failed part-way is done again.
      */
     private void complete() throws IOException {
-        finishData(root, "");
+        if (journal != null) {
+            // Retried after a failure while the file was written over: that is redone, and nothing else.
+            applyJournal();
+            output().commit();
+            return;
+        }
+        Map<ObjectSpec, String> objects = objects();
+        referenceCounts = referenceCounts(objects);
+        finishData(objects);
         heaps.sealAll();
-        resolveAttributeIds(root);
+        resolveAttributeIds(objects);
         OutputFile out = output();
         long base = align8(out.end());
-        GrowBuffer buf = layOutMetadata(base);
-        boolean twoLayouts = waitsForAddresses(root);
+        firstLayout = Map.of();
+        placeholders = false;
+        GrowBuffer buf = layOutMetadata(base, objects);
+        // A second layout when object references wait for the first's addresses, a cycle of hard links was
+        // laid out, or (changing a file) groups' symbol tables are cached in entries laid out before them.
+        boolean twoLayouts = waitsForAddresses(objects) || placeholders || existing != null;
         // Every reference's target must exist, which is checked before anything more is written.
         Set<String> targets = new HashSet<>();
-        heldTargets(root, targets);
+        heldTargets(objects, targets);
         for (FileReference reference : fileReferences) {
             targets.add(reference.targetPath());
         }
@@ -451,33 +577,71 @@ public final class Hdf5Writer implements AutoCloseable {
             // Object references in chunks, compact data and attributes (P2 WF8) are filled in once the first
             // layout has placed every object, and the chunks written after the metadata's space; the second
             // layout is the same metadata with them in place, so every object stays where the first put it.
-            Map<String, Long> placed = new HashMap<>(objectAddresses);
+            Map<ObjectSpec, GroupResult> placed = laidOut;
             int size = buf.size();
-            writeHeld(root);
-            buf = layOutMetadata(base);
-            if (buf.size() != size || !objectAddresses.equals(placed)) {
+            writeHeld(objects);
+            firstLayout = placed;
+            buf = layOutMetadata(base, objects);
+            if (buf.size() != size || !laidOut.equals(placed)) {
                 throw new IllegalStateException("the metadata changed between its two layouts");
             }
         }
         for (FileReference reference : fileReferences) {
             out.writeU64(reference.position(), addressOf(reference.targetPath()));
         }
+        closeExternalFiles(true);
         out.write(base, buf.toByteArray());
         long endOfFile = out.end();
         if (existing != null) {
-            // What is new is on disk before the file's structures point at it: the superblock first, which
-            // covers the new space, then the changed object headers, each chunk a single write.
-            out.force();
-            out.write(0, changedSuperblock(endOfFile));
-            out.force();
-            for (ObjectHeaderEditor.Patch patch : headerPatches) {
-                out.write(patch.address(), patch.bytes());
-            }
-            existing.close();
+            // What is new is on disk, with a journal of every write over the file's own structures, before
+            // any is made: the superblock (which covers the new space), the changed object headers and indexes.
+            List<ObjectHeaderEditor.Patch> writes = new ArrayList<>();
+            writes.add(new ObjectHeaderEditor.Patch(0, changedSuperblock(endOfFile)));
+            writes.addAll(headerPatches);
+            out.writeJournal(writes);
+            journal = writes;
+            applyJournal();
         } else {
-            out.write(0, legacy ? superblockV0(rootAddress, endOfFile) : superblock(rootAddress, endOfFile));
+            // With a user block, the base address is where the superblock is, and the end-of-file address
+            // absolute, as libhdf5 writes them.
+            long fileBase = userBlock.length;
+            out.write(0, legacy ? superblockV0(rootAddress, fileBase, endOfFile)
+                    : superblock(rootAddress, fileBase, endOfFile));
         }
         out.commit();
+    }
+
+    /**
+     * Writes the journaled writes over the file (P2 WF10), each step once the last is on disk: the superblock
+     * (in version 3 marked as open by a writer, as libhdf5 marks a file it writes, so libhdf5 refuses the file
+     * until the change is whole), the changed structures, then (version 3) the superblock unmarked. Should this
+     * be interrupted, {@link #open} redoes it from the journal.
+     */
+    private void applyJournal() {
+        OutputFile out = output();
+        byte[] superblock = journal.getFirst().bytes();
+        boolean mark = existing.superblockVersion >= 3;
+        if (mark) {
+            byte[] marked = superblock.clone();
+            marked[11] |= 0x01; // H5F_SUPER_WRITE_ACCESS
+            writeU32(marked, 44, Lookup3.hashLittle(marked, 0, 44, 0));
+            out.write(0, marked);
+        } else {
+            out.write(0, superblock);
+        }
+        out.force();
+        for (int i = 1; i < journal.size(); i++) {
+            if (interruptAfter >= 0 && i > interruptAfter) {
+                throw new UncheckedIOException(new IOException("interrupted after " + interruptAfter + " writes (a test)"));
+            }
+            out.write(journal.get(i).address(), journal.get(i).bytes());
+        }
+        out.force();
+        if (mark) {
+            out.write(0, superblock);
+            out.force();
+        }
+        existing.close();
     }
 
     /**
@@ -491,8 +655,11 @@ public final class Hdf5Writer implements AutoCloseable {
         int baseAt = version == 0 ? 24 : version == 1 ? 28 : 12;
         putU64(sb, baseAt, existing.base);
         putU64(sb, baseAt + 16, existing.base + endOfFile);
-        if (version < 2 && legacyRootBtree != UNDEFINED) {
-            int cache = version == 0 ? 72 : 76;
+        int cache = version == 0 ? 72 : 76;
+        if (version < 2 && rootTableChanged && legacyRootBtree == UNDEFINED) {
+            // The root group converted to the new format: its entry caches no symbol table.
+            java.util.Arrays.fill(sb, cache, cache + 24, (byte) 0);
+        } else if (version < 2 && legacyRootBtree != UNDEFINED) {
             if (sb[cache] == 1 && sb[cache + 1] == 0 && sb[cache + 2] == 0 && sb[cache + 3] == 0) {
                 putU64(sb, cache + 8, legacyRootBtree);
                 putU64(sb, cache + 16, legacyRootHeap);
@@ -510,16 +677,25 @@ public final class Hdf5Writer implements AutoCloseable {
     }
 
     /** Lays out the metadata of every object at {@code base}, recording where each object's header goes. */
-    private GrowBuffer layOutMetadata(long base) {
-        objectAddresses.clear();
+    private GrowBuffer layOutMetadata(long base, Map<ObjectSpec, String> objects) {
+        laidOut = new HashMap<>();
+        inProgress.clear();
         editors.clear();
         headerPatches.clear();
+        sharedReleases.clear();
         GrowBuffer buf = new GrowBuffer(base);
-        GroupResult rootResult = writeGroup(buf, root, "");
+        GroupResult rootResult = layOut(buf, root);
         rootAddress = rootResult.headerAddress();
         legacyRootBtree = rootResult.btreeAddress();
         legacyRootHeap = rootResult.heapAddress();
-        objectAddresses.put("/", rootAddress);
+        rootTableChanged = rootResult.changed();
+        for (ObjectSpec spec : objects.keySet()) {
+            layOut(buf, spec); // the file's objects opened, however they are reached (the rest are laid out by now)
+        }
+        adjustReferenceCounts(objects);
+        if (!sharedReleases.isEmpty()) {
+            headerPatches.addAll(existing.sharedMessages().release(buf, sharedReleases));
+        }
         // The existing object headers that changed: new chunks here, the changed ones written over the file.
         for (ObjectHeaderEditor editor : editors.values()) {
             if (editor.changed()) {
@@ -530,113 +706,336 @@ public final class Hdf5Writer implements AutoCloseable {
     }
 
     /**
-     * The object header address of the object at absolute path {@code path}, once the metadata is laid out:
-     * an object added, or one of the file being changed, unless its link has been deleted.
+     * Lays out an object once in each layout of the metadata (the first link reaching it writes it; the
+     * others point at it), returning where its header is and, for a group of the original format, its symbol
+     * table. An object reached again while it is laid out (through a cycle of hard links) takes the first
+     * layout's place, which the second layout confirms (see {@link #complete}).
+     */
+    private GroupResult layOut(GrowBuffer buf, ObjectSpec spec) {
+        GroupResult done = laidOut.get(spec);
+        if (done != null) {
+            return done;
+        }
+        if (!inProgress.add(spec)) {
+            GroupResult first = firstLayout.get(spec);
+            if (first != null) {
+                return first;
+            }
+            placeholders = true;
+            return spec.inFile() ? storedResult(spec.address) : new GroupResult(0, UNDEFINED, UNDEFINED, false);
+        }
+        GroupResult result;
+        if (spec instanceof GroupSpec group) {
+            result = group.inFile() ? writeExistingGroup(buf, group) : writeGroup(buf, group);
+        } else {
+            DatasetSpec dataset = (DatasetSpec) spec;
+            if (dataset.inFile()) {
+                writeExistingDataset(buf, dataset);
+                result = new GroupResult(dataset.address, UNDEFINED, UNDEFINED, false);
+            } else {
+                result = new GroupResult(writeDataset(buf, dataset), UNDEFINED, UNDEFINED, false);
+            }
+        }
+        inProgress.remove(spec);
+        laidOut.put(spec, result);
+        return result;
+    }
+
+    /** The file's object at {@code address} as the file has it: its symbol table, if a group of the original format. */
+    private GroupResult storedResult(long address) {
+        long[] table = existing.symbolTable(address);
+        return table == null ? new GroupResult(address, UNDEFINED, UNDEFINED, false)
+                : new GroupResult(address, table[0], table[1], false);
+    }
+
+    /** The file's object at {@code address}: laid out if opened, else as the file has it. */
+    private GroupResult fileObjectResult(GrowBuffer buf, long address) {
+        ObjectSpec spec = opened.get(address);
+        return spec != null ? layOut(buf, spec) : storedResult(address);
+    }
+
+    /**
+     * Every object to write, each with a path that reaches it (for messages): those reached from the root by
+     * the session's links (subgroups, datasets, and hard links), and every object of the file opened, whose
+     * changes apply however it is reached, or if it is no longer.
+     */
+    private Map<ObjectSpec, String> objects() {
+        Map<ObjectSpec, String> found = new LinkedHashMap<>();
+        collect(root, "/", found);
+        for (ObjectSpec spec : opened.values()) {
+            found.putIfAbsent(spec, display(spec.object.path()));
+        }
+        return found;
+    }
+
+    private static void collect(ObjectSpec spec, String path, Map<ObjectSpec, String> found) {
+        if (found.putIfAbsent(spec, path) != null) {
+            return;
+        }
+        if (spec instanceof GroupSpec group) {
+            String prefix = path.equals("/") ? "/" : path + "/";
+            for (GroupSpec subgroup : group.groups) {
+                collect(subgroup, prefix + subgroup.name, found);
+            }
+            for (DatasetSpec dataset : group.datasets) {
+                collect(dataset, prefix + dataset.name, found);
+            }
+            for (LinkSpec link : group.links) {
+                if (link.object() != null) {
+                    collect(link.object(), prefix + link.name(), found);
+                }
+            }
+        }
+    }
+
+    /**
+     * The links reaching each of the session's objects, from the groups written: its hard-link count (a new
+     * file's root group starts at 1, the superblock's).
+     */
+    private Map<ObjectSpec, Integer> referenceCounts(Map<ObjectSpec, String> objects) {
+        Map<ObjectSpec, Integer> counts = new HashMap<>();
+        if (!root.inFile()) {
+            counts.put(root, 1);
+        }
+        for (ObjectSpec spec : objects.keySet()) {
+            if (spec instanceof GroupSpec group) {
+                for (GroupSpec subgroup : group.groups) {
+                    if (!subgroup.inFile()) {
+                        counts.merge(subgroup, 1, Integer::sum);
+                    }
+                }
+                for (DatasetSpec dataset : group.datasets) {
+                    if (!dataset.inFile()) {
+                        counts.merge(dataset, 1, Integer::sum);
+                    }
+                }
+                for (LinkSpec link : group.links) {
+                    if (link.object() != null) {
+                        counts.merge(link.object(), 1, Integer::sum);
+                    }
+                }
+            }
+        }
+        return counts;
+    }
+
+    /**
+     * The hard links added to objects of the file, less those of theirs deleted, change their hard-link
+     * counts (kept at least 1: an object no link reaches stays in the file, as unused space).
+     */
+    private void adjustReferenceCounts(Map<ObjectSpec, String> objects) {
+        Map<Long, Integer> change = new LinkedHashMap<>();
+        for (ObjectSpec spec : objects.keySet()) {
+            if (!(spec instanceof GroupSpec group)) {
+                continue;
+            }
+            for (LinkSpec link : group.links) {
+                if (link.address() != UNDEFINED) {
+                    change.merge(link.address(), 1, Integer::sum);
+                }
+            }
+            if (group.inFile()) {
+                for (String name : group.deletedLinks) {
+                    if (((Group) group.object).link(name).orElse(null) instanceof Link.Hard hard) {
+                        change.merge(hard.objectHeaderAddress(), -1, Integer::sum);
+                    }
+                }
+            }
+        }
+        for (Map.Entry<Long, Integer> entry : change.entrySet()) {
+            if (entry.getValue() != 0) {
+                ObjectHeaderEditor editor = editor(entry.getKey());
+                editor.setReferenceCount(Math.max(1, editor.referenceCount() + entry.getValue()));
+            }
+        }
+    }
+
+    /**
+     * The object at absolute path {@code path} as the session leaves the file (its links added, moved and
+     * deleted), followed through hard links: one of the session's (added, or opened from the file), or the
+     * header address of one of the file's not opened; null if there is none.
+     */
+    private Object resolve(String path) {
+        if (!path.startsWith("/")) {
+            return null;
+        }
+        Object node = root;
+        for (String name : path.split("/")) {
+            if (!name.isEmpty() && !name.equals(".")) {
+                node = child(node, name);
+                if (node == null) {
+                    return null;
+                }
+            }
+        }
+        return node;
+    }
+
+    /** The object a group (one of the session's, or the file's at an address) links to as {@code name}, or null. */
+    private Object child(Object node, String name) {
+        if (node instanceof Long address) {
+            ObjectSpec spec = opened.get(address);
+            if (spec == null) {
+                if (!(existing.object("", "", address) instanceof Group group)) {
+                    return null;
+                }
+                return group.link(name).orElse(null) instanceof Link.Hard hard ? fileNode(hard.objectHeaderAddress()) : null;
+            }
+            node = spec;
+        }
+        if (!(node instanceof GroupSpec group)) {
+            return null;
+        }
+        for (GroupSpec subgroup : group.groups) {
+            if (subgroup.name.equals(name)) {
+                return subgroup;
+            }
+        }
+        for (DatasetSpec dataset : group.datasets) {
+            if (dataset.name.equals(name)) {
+                return dataset;
+            }
+        }
+        for (LinkSpec link : group.links) {
+            if (link.name().equals(name)) {
+                return link.object() != null ? link.object() : link.address() != UNDEFINED ? fileNode(link.address()) : null;
+            }
+        }
+        if (group.hasFileLink(name) && ((Group) group.object).link(name).orElse(null) instanceof Link.Hard hard) {
+            return fileNode(hard.objectHeaderAddress());
+        }
+        return null;
+    }
+
+    /**
+     * Where {@code spec} is now, an absolute path ("/" for the root): through the session's links, or for an
+     * object of the file opened but reached by none of them, as the file named it.
+     *
+     * @throws IllegalArgumentException if no link reaches it any more
+     */
+    private String pathOf(ObjectSpec spec) {
+        String path = objects().get(spec);
+        if (path == null) {
+            throw new IllegalArgumentException("the group is no longer in the file: its link was deleted");
+        }
+        return path;
+    }
+
+    /** The file's object at {@code address}: its spec if opened, else its address. */
+    private Object fileNode(long address) {
+        ObjectSpec spec = opened.get(address);
+        return spec != null ? spec : (Object) address;
+    }
+
+    /** A hard link {@code name} to {@code target} (one of the session's objects, or of the file's). */
+    private static LinkSpec hardLinkTo(String name, Object target) {
+        if (target instanceof ObjectSpec spec && !spec.inFile()) {
+            spec.hardLinks++;
+            return new LinkSpec(name, null, null, spec, UNDEFINED);
+        }
+        return new LinkSpec(name, null, null, null, target instanceof ObjectSpec spec ? spec.address : (Long) target);
+    }
+
+    /** The group at {@code node} (opened if it is one of the file's not opened yet), or null if it is not a group. */
+    private GroupSpec groupAt(Object node, String path) {
+        if (node instanceof GroupSpec group) {
+            return group;
+        }
+        if (node instanceof Long address && existing.object("", path, address) instanceof Group group) {
+            return openGroup(group, path.substring(path.lastIndexOf('/') + 1));
+        }
+        return null;
+    }
+
+    /** A group of the file, opened to change it. */
+    private GroupSpec openGroup(Group group, String name) {
+        GroupSpec spec = new GroupSpec();
+        spec.name = name;
+        spec.address = group.objectHeaderAddress();
+        spec.object = group;
+        opened.put(spec.address, spec);
+        return spec;
+    }
+
+    /**
+     * The object header address of the object at absolute path {@code path} as the session leaves the file,
+     * once the metadata is laid out.
      */
     private long addressOf(String path) {
-        Long address = objectAddresses.get(path);
-        if (address != null) {
-            return address;
-        }
-        if (existing != null && deletedPaths.stream().noneMatch(d -> path.equals(d) || path.startsWith(d + "/"))) {
-            java.util.OptionalLong found = existing.address(path);
-            if (found.isPresent()) {
-                return found.getAsLong();
+        Object target = resolve(path);
+        if (target instanceof ObjectSpec spec) {
+            if (spec.inFile()) {
+                return spec.address;
             }
+            GroupResult result = laidOut.get(spec);
+            if (result != null) {
+                return result.headerAddress();
+            }
+        } else if (target instanceof Long address) {
+            return address;
         }
         throw new IllegalArgumentException("reference target does not exist: " + path);
     }
 
-    /** True if object references under {@code group} wait for the metadata's layout (see {@link #complete}). */
-    private boolean waitsForAddresses(GroupSpec group) {
-        for (AttributeSpec attribute : group.attributes) {
-            if (!attribute.refs().isEmpty()) {
-                return true;
-            }
-        }
-        for (GroupSpec subgroup : group.groups) {
-            if (waitsForAddresses(subgroup)) {
-                return true;
-            }
-        }
-        for (DatasetSpec dataset : group.datasets) {
-            if (dataset.storage != null && dataset.storage.waitsForAddresses()) {
-                return true;
-            }
-            for (AttributeSpec attribute : dataset.attributes) {
+    /** True if object references wait for the metadata's layout (see {@link #complete}). */
+    private static boolean waitsForAddresses(Map<ObjectSpec, String> objects) {
+        for (ObjectSpec spec : objects.keySet()) {
+            for (AttributeSpec attribute : spec.attributes) {
                 if (!attribute.refs().isEmpty()) {
                     return true;
                 }
+            }
+            if (spec instanceof DatasetSpec dataset && dataset.storage != null && dataset.storage.waitsForAddresses()) {
+                return true;
             }
         }
         return false;
     }
 
-    /** Adds the targets of the object references under {@code group} that wait for the layout. */
-    private void heldTargets(GroupSpec group, Set<String> targets) {
-        List<AttributeSpec> attributes = new ArrayList<>(group.attributes);
-        for (GroupSpec subgroup : group.groups) {
-            heldTargets(subgroup, targets);
-        }
-        for (DatasetSpec dataset : group.datasets) {
-            if (dataset.storage != null) {
+    /** Adds the targets of the object references that wait for the layout. */
+    private static void heldTargets(Map<ObjectSpec, String> objects, Set<String> targets) {
+        for (ObjectSpec spec : objects.keySet()) {
+            if (spec instanceof DatasetSpec dataset && dataset.storage != null) {
                 dataset.storage.heldTargets(targets);
             }
-            attributes.addAll(dataset.attributes);
-        }
-        for (AttributeSpec attribute : attributes) {
-            for (ValueEncoder.RefPatch ref : attribute.refs()) {
-                targets.add(ref.path());
+            for (AttributeSpec attribute : spec.attributes) {
+                for (ValueEncoder.RefPatch ref : attribute.refs()) {
+                    targets.add(ref.path());
+                }
             }
         }
     }
 
-    /** Fills in the object references under {@code group}, and writes the chunks that waited for them. */
-    private void writeHeld(GroupSpec group) {
-        List<AttributeSpec> attributes = new ArrayList<>(group.attributes);
-        for (GroupSpec subgroup : group.groups) {
-            writeHeld(subgroup);
-        }
-        for (DatasetSpec dataset : group.datasets) {
-            if (dataset.storage != null) {
+    /** Fills in the object references that waited, and writes the chunks that waited for them. */
+    private void writeHeld(Map<ObjectSpec, String> objects) {
+        for (ObjectSpec spec : objects.keySet()) {
+            if (spec instanceof DatasetSpec dataset && dataset.storage != null) {
                 dataset.storage.writeHeld();
             }
-            attributes.addAll(dataset.attributes);
-        }
-        for (AttributeSpec attribute : attributes) {
-            for (ValueEncoder.RefPatch ref : attribute.refs()) {
-                putU64(attribute.data(), (int) ref.offset(), addressOf(ref.path()));
+            for (AttributeSpec attribute : spec.attributes) {
+                for (ValueEncoder.RefPatch ref : attribute.refs()) {
+                    putU64(attribute.data(), (int) ref.offset(), addressOf(ref.path()));
+                }
             }
         }
     }
 
-    /** Writes, for every dataset under {@code group}, the data still to write, and fixes its layout. */
-    private void finishData(GroupSpec group, String groupPath) {
-        for (GroupSpec subgroup : group.groups) {
-            finishData(subgroup, groupPath + "/" + subgroup.name);
-        }
-        for (DatasetSpec dataset : group.datasets) {
-            if (!dataset.inFile() || dataset.storage != null) { // an existing dataset's data written or not
-                storage(dataset, groupPath + "/" + dataset.name).finish();
+    /** Writes, for every dataset written, the data still to write, and fixes its layout. */
+    private void finishData(Map<ObjectSpec, String> objects) {
+        for (Map.Entry<ObjectSpec, String> entry : objects.entrySet()) {
+            if (entry.getKey() instanceof DatasetSpec dataset && (!dataset.inFile() || dataset.storage != null)) {
+                storage(dataset, entry.getValue()).finish(); // an existing dataset's data written or not
             }
         }
     }
 
     /** Fills in the variable-length ids in attribute values, now that every heap collection is placed. */
-    private void resolveAttributeIds(GroupSpec group) {
-        resolveAttributeIds(group.attributes);
-        for (GroupSpec subgroup : group.groups) {
-            resolveAttributeIds(subgroup);
-        }
-        for (DatasetSpec dataset : group.datasets) {
-            resolveAttributeIds(dataset.attributes);
-        }
-    }
-
-    private void resolveAttributeIds(List<AttributeSpec> attributes) {
-        for (AttributeSpec attribute : attributes) {
-            for (ValueEncoder.IdPatch id : attribute.ids()) {
-                putU64(attribute.data(), (int) id.offset(), heaps.address(id.collection()));
+    private void resolveAttributeIds(Map<ObjectSpec, String> objects) {
+        for (ObjectSpec spec : objects.keySet()) {
+            for (AttributeSpec attribute : spec.attributes) {
+                for (ValueEncoder.IdPatch id : attribute.ids()) {
+                    putU64(attribute.data(), (int) id.offset(), heaps.address(id.collection()));
+                }
             }
         }
     }
@@ -718,26 +1117,130 @@ public final class Hdf5Writer implements AutoCloseable {
             lifecycle.check();
             requireName(targetPath, "soft link target");
             claimLinkName(spec, name);
-            spec.links.add(new LinkSpec(name, targetPath, null));
+            spec.links.add(new LinkSpec(name, targetPath, null, null, UNDEFINED));
             return this;
         }
 
         /**
          * An external link: a name that stands for the object at {@code objectPath} in the file
-         * {@code fileName} (relative names are found next to this file), which need not exist.
-         *
-         * @throws HdfUnsupportedException in the earliest format, which has no external links
+         * {@code fileName} (relative names are found next to this file), which need not exist. A group of the
+         * original format (a symbol table, which holds hard and soft links only) is written in the new one
+         * instead, as libhdf5 converts it: link messages, in its version-1 object header; HDF5 1.8 and later
+         * read it.
          */
         public GroupWriter externalLink(String name, String fileName, String objectPath) {
             lifecycle.check();
-            if (legacy || (spec.inFile() && writer.existing.symbolTable(spec.address) != null)) {
-                throw new HdfUnsupportedException("external links are not written in the earliest format, nor added"
-                        + " to a group of the original format");
-            }
             requireName(fileName, "external link file");
             requireName(objectPath, "external link object");
             claimLinkName(spec, name);
-            spec.links.add(new LinkSpec(name, objectPath, fileName));
+            spec.links.add(new LinkSpec(name, objectPath, fileName, null, UNDEFINED));
+            return this;
+        }
+
+        /**
+         * A hard link: another name for the object at {@code targetPath}, an absolute path followed through
+         * hard links, which must exist now (an object added in this session, or one of the file being changed),
+         * as libhdf5's {@code H5Lcreate_hard} requires. The object is then reached by either name, and its
+         * hard-link count is one more; deleting one name leaves it to the other.
+         *
+         * @throws IllegalArgumentException if the name is taken or invalid, or nothing is at {@code targetPath}
+         */
+        public GroupWriter hardLink(String name, String targetPath) {
+            lifecycle.check();
+            requireName(targetPath, "hard link target");
+            Object target = writer.resolve(targetPath);
+            if (target == null) {
+                throw new IllegalArgumentException("no object at '" + targetPath + "' for hard link '" + name
+                        + "' (an absolute path, followed through hard links)");
+            }
+            claimLinkName(spec, name);
+            spec.links.add(hardLinkTo(name, target));
+            return this;
+        }
+
+        /**
+         * Moves a link to {@code newPath} ({@code H5Lmove}): the link {@code name} of this group, or at a path
+         * (absolute, or relative to this group) through hard links. {@code newPath} is absolute, or relative to
+         * this group; its last component is the link's new name, in the group the rest of it names, which must
+         * exist. Renaming a link is moving it within its group. The object the link leads to is not changed:
+         * its other links, and references to it, still reach it; it moves with its own links (a group's
+         * subgroups go with it). A link moved into a group of the original format that cannot hold it (an
+         * external link) converts that group, as {@link #externalLink} does.
+         *
+         * <p>Paths are resolved as the session leaves the file: references by path, resolved on
+         * {@link Hdf5Writer#close()}, name an object's new place.
+         *
+         * @throws IllegalArgumentException if there is no such link, the new name is taken or invalid, there is
+         *         no group to move it into, or a group would move into itself
+         * @throws HdfUnsupportedException for a link of a user-defined type
+         */
+        public GroupWriter move(String name, String newPath) {
+            lifecycle.check();
+            requireName(name, "link");
+            requireName(newPath, "new path");
+            String here = writer.pathOf(spec);
+            String prefix = here.equals("/") ? "/" : here + "/";
+            String source = name.startsWith("/") ? name : prefix + name;
+            String target = newPath.startsWith("/") ? newPath : prefix + newPath;
+            if (target.equals(source)) {
+                return this;
+            }
+            if (target.startsWith(source + "/")) {
+                throw new IllegalArgumentException("cannot move " + source + " into itself (" + target + ")");
+            }
+            int cut = source.lastIndexOf('/');
+            String from = cut == 0 ? "/" : source.substring(0, cut);
+            String link = source.substring(cut + 1);
+            GroupSpec group = writer.groupAt(writer.resolve(from), from);
+            int slash = target.lastIndexOf('/');
+            String newName = target.substring(slash + 1);
+            String parentPath = slash == 0 ? "/" : target.substring(0, slash);
+            GroupSpec destination = writer.groupAt(writer.resolve(parentPath), parentPath);
+            if (group == null) {
+                throw new IllegalArgumentException("no group at " + from + " to move " + link + " from");
+            }
+            if (destination == null) {
+                throw new IllegalArgumentException("no group at " + parentPath + " to move " + source + " into");
+            }
+            if (group.linkNames.contains(link)) {
+                claimLinkName(destination, newName);
+                group.linkNames.remove(link);
+                for (GroupSpec subgroup : new ArrayList<>(group.groups)) {
+                    if (!subgroup.inFile() && subgroup.name.equals(link)) {
+                        group.groups.remove(subgroup);
+                        subgroup.name = newName;
+                        destination.groups.add(subgroup);
+                    }
+                }
+                for (DatasetSpec dataset : new ArrayList<>(group.datasets)) {
+                    if (!dataset.inFile() && dataset.name.equals(link)) {
+                        group.datasets.remove(dataset);
+                        dataset.name = newName;
+                        destination.datasets.add(dataset);
+                    }
+                }
+                for (LinkSpec added : new ArrayList<>(group.links)) {
+                    if (added.name().equals(link)) {
+                        group.links.remove(added);
+                        destination.links.add(new LinkSpec(newName, added.target(), added.file(), added.object(), added.address()));
+                    }
+                }
+            } else if (group.hasFileLink(link)) {
+                LinkSpec moved = switch (((Group) group.object).link(link).orElseThrow()) {
+                    case Link.Hard hard -> new LinkSpec(newName, null, null, null, hard.objectHeaderAddress());
+                    case Link.Soft soft -> new LinkSpec(newName, soft.targetPath(), null, null, UNDEFINED);
+                    case Link.External external -> new LinkSpec(newName, external.objectPath(), external.fileName(), null, UNDEFINED);
+                    case Link.UserDefined user -> throw new HdfUnsupportedException("link " + source
+                            + " is of a user-defined type (" + user.type() + "), which Falcon does not move");
+                };
+                claimLinkName(destination, newName);
+                group.deletedLinks.add(link);
+                group.groups.removeIf(g -> g.inFile() && g.name.equals(link)); // opened: still written, however reached
+                group.datasets.removeIf(d -> d.inFile() && d.name.equals(link));
+                destination.links.add(moved);
+            } else {
+                throw new IllegalArgumentException("no link " + source + " to move");
+            }
             return this;
         }
 
@@ -1004,29 +1507,30 @@ public final class Hdf5Writer implements AutoCloseable {
          */
         public GroupWriter group(String name) {
             lifecycle.check();
-            for (GroupSpec child : spec.groups) {
-                if (child.inFile() && child.name.equals(name)) {
-                    return new GroupWriter(writer, child, path + "/" + name, legacy, lifecycle);
-                }
+            Object child = writer.child(spec, name);
+            if (child instanceof GroupSpec group && group.inFile()) {
+                return new GroupWriter(writer, group, path + "/" + name, legacy, lifecycle); // opened already
             }
-            if (spec.hasFileLink(name)) {
+            if (child instanceof Long address) {
                 // A group of the file being changed: opened, to add to it and change it.
-                if (!(writer.fileObject(spec, name, path) instanceof Group group)) {
+                if (!(writer.existing.object(display(path), name, address) instanceof Group group)) {
                     throw new IllegalArgumentException("'" + name + "' in " + display(path) + " is not a group");
                 }
-                GroupSpec child = new GroupSpec();
-                child.name = name;
-                child.address = group.objectHeaderAddress();
-                child.object = group;
-                spec.groups.add(child);
-                return new GroupWriter(writer, child, path + "/" + name, legacy, lifecycle);
+                GroupSpec opened = writer.openGroup(group, name);
+                if (spec.hasFileLink(name)) {
+                    spec.groups.add(opened); // the group's own link to it
+                }
+                return new GroupWriter(writer, opened, path + "/" + name, legacy, lifecycle);
+            }
+            if (spec.hasFileLink(name)) {
+                writer.fileObject(spec, name, path); // not a hard link: refused, naming it
             }
             claimLinkName(spec, name);
             writer.writeGivenData();
-            GroupSpec child = new GroupSpec();
-            child.name = name;
-            spec.groups.add(child);
-            return new GroupWriter(writer, child, path + "/" + name, legacy, lifecycle);
+            GroupSpec added = new GroupSpec();
+            added.name = name;
+            spec.groups.add(added);
+            return new GroupWriter(writer, added, path + "/" + name, legacy, lifecycle);
         }
 
         /**
@@ -1034,22 +1538,29 @@ public final class Hdf5Writer implements AutoCloseable {
          * ({@link Hdf5Writer#open}), one it holds, to write its data ({@link DatasetWriter#write},
          * {@link DatasetWriter#append}, ...) and set or delete its attributes. A dataset of the file keeps its
          * datatype, shape limits, layout, and filters: it grows only within its maximum shape, and its chunks
-         * are written with its filters (deflate, shuffle, fletcher32, or szip).
+         * are written with its filters, as libhdf5 would encode them (deflate, shuffle, fletcher32, szip,
+         * n-bit, scale-offset; not the third-party ones), its partial edge chunks unfiltered if it keeps them
+         * so. Data in external raw files is written there; a virtual dataset is a view of others: write those.
          *
          * @throws IllegalArgumentException if the group has no dataset of that name (a soft or external link
          *         is not followed: open the dataset where it is)
          */
         public DatasetWriter dataset(String name) {
             lifecycle.check();
-            for (DatasetSpec dataset : spec.datasets) {
-                if (dataset.name.equals(name)) {
-                    return new DatasetWriter(writer, dataset, path + "/" + name, legacy, lifecycle);
-                }
+            Object child = writer.child(spec, name);
+            if (child instanceof DatasetSpec dataset) {
+                return new DatasetWriter(writer, dataset, path + "/" + name, legacy, lifecycle);
             }
-            if (spec.hasFileLink(name) && writer.fileObject(spec, name, path) instanceof Dataset dataset) {
+            if (child instanceof Long address && writer.existing.object(display(path), name, address) instanceof Dataset dataset) {
                 DatasetSpec opened = writer.existingDataset(name, dataset);
-                spec.datasets.add(opened);
+                writer.opened.put(opened.address, opened);
+                if (spec.hasFileLink(name)) {
+                    spec.datasets.add(opened); // the group's own link to it
+                }
                 return new DatasetWriter(writer, opened, path + "/" + name, legacy, lifecycle);
+            }
+            if (child == null && spec.hasFileLink(name)) {
+                writer.fileObject(spec, name, path); // not a hard link: refused, naming it
             }
             throw new IllegalArgumentException("no dataset named \"" + name + "\" in " + display(path));
         }
@@ -1064,17 +1575,23 @@ public final class Hdf5Writer implements AutoCloseable {
         public GroupWriter delete(String name) {
             lifecycle.check();
             if (spec.linkNames.remove(name)) {
-                spec.groups.removeIf(g -> !g.inFile() && g.name.equals(name));
-                spec.datasets.removeIf(d -> !d.inFile() && d.name.equals(name));
-                spec.links.removeIf(l -> l.name().equals(name));
-                if (writer.unwritten != null && writer.unwrittenPath.equals(path + "/" + name)) {
-                    writer.unwritten = null;
+                for (DatasetSpec dataset : spec.datasets) {
+                    if (!dataset.inFile() && dataset.name.equals(name) && writer.unwritten == dataset && dataset.hardLinks == 0) {
+                        writer.unwritten = null; // no other link reaches it: its data is not written
+                    }
                 }
+                spec.groups.removeIf(g -> !g.inFile() && g.name.equals(name)); // written if a hard link reaches it
+                spec.datasets.removeIf(d -> !d.inFile() && d.name.equals(name));
+                for (LinkSpec link : spec.links) {
+                    if (link.name().equals(name) && link.object() != null) {
+                        link.object().hardLinks--;
+                    }
+                }
+                spec.links.removeIf(l -> l.name().equals(name));
             } else if (spec.hasFileLink(name)) {
                 spec.deletedLinks.add(name);
-                spec.groups.removeIf(g -> g.name.equals(name));
-                spec.datasets.removeIf(d -> d.name.equals(name));
-                writer.deletedPaths.add(path + "/" + name);
+                spec.groups.removeIf(g -> g.inFile() && g.name.equals(name)); // opened: still written, however reached
+                spec.datasets.removeIf(d -> d.inFile() && d.name.equals(name));
             } else {
                 throw new IllegalArgumentException("no link named \"" + name + "\" in " + display(path));
             }
@@ -1546,14 +2063,25 @@ public final class Hdf5Writer implements AutoCloseable {
             return this;
         }
 
-        /**
-         * Compresses chunks with the szip filter in the form libhdf5 + libaec store it (entropy coding,
-         * 8 pixels per block; Falcon's pure-Java CCSDS encoder does not apply nearest-neighbour
-         * preprocessing). Chunked integer or floating-point datasets; only {@link #shuffle()} may come
-         * before it. A chunk that szip cannot shrink is stored unfiltered, as libhdf5 does.
-         */
+        /** Compresses chunks with szip's entropy coding, 8 pixels per block: {@code szip(SzipCoding.ENTROPY, 8)}. */
         public DatasetWriter szip() {
+            return szip(SzipCoding.ENTROPY, 8);
+        }
+
+        /**
+         * Compresses chunks with the szip filter, as libhdf5 + libaec store it ({@code H5Pset_szip}): byte for
+         * byte libaec's coding, by Falcon's pure-Java CCSDS 121.0 encoder. Chunked integer or floating-point
+         * datasets; only {@link #shuffle()} may come before it. A chunk that szip cannot shrink is stored
+         * unfiltered, as libhdf5 does.
+         *
+         * @param coding         entropy coding alone, or after nearest-neighbour preprocessing (which suits
+         *                       smooth data); h5py's {@code "ec"} and {@code "nn"}
+         * @param pixelsPerBlock elements coded together: even, 2 to 32 (libaec's standard sizes are 8, 16
+         *                       and 32), and at most a chunk's elements
+         */
+        public DatasetWriter szip(SzipCoding coding, int pixelsPerBlock) {
             lifecycle.check();
+            java.util.Objects.requireNonNull(coding, "coding");
             requireConfigurable();
             requireChunked();
             int typeClass = spec.datatype[0] & 0x0F;
@@ -1565,10 +2093,13 @@ public final class Hdf5Writer implements AutoCloseable {
                     throw new IllegalStateException("szip must come before every filter except shuffle");
                 }
             }
-            if (elementCount(spec.chunkShape) < SZIP_PIXELS_PER_BLOCK) {
-                throw new IllegalStateException("szip needs at least " + SZIP_PIXELS_PER_BLOCK + " elements per chunk");
+            if (pixelsPerBlock < 2 || pixelsPerBlock > 32 || pixelsPerBlock % 2 != 0) {
+                throw new IllegalArgumentException("szip pixels per block must be even and 2-32, not " + pixelsPerBlock);
             }
-            addFilter(Filters.SZIP, 0);
+            if (elementCount(spec.chunkShape) < pixelsPerBlock) {
+                throw new IllegalStateException("szip needs at least " + pixelsPerBlock + " elements per chunk");
+            }
+            addFilter(Filters.SZIP, pixelsPerBlock | (coding == SzipCoding.NEAREST_NEIGHBOUR ? SZIP_NN_PARAMETER : 0));
             return this;
         }
 
@@ -1980,6 +2511,9 @@ public final class Hdf5Writer implements AutoCloseable {
         Datatype type = dataset.datatype();
         com.ebremer.falcon.hdf5.header.HeaderMessage typeMessage =
                 dataset.header().find(com.ebremer.falcon.hdf5.header.MessageType.DATATYPE);
+        if (typeMessage != null) {
+            typeMessage = com.ebremer.falcon.hdf5.header.SharedMessage.resolve(dataset.ctx, typeMessage);
+        }
         byte[] datatype = typeMessage == null ? new byte[0]
                 : typeMessage.buffer().getBytes(typeMessage.bodyOffset(), typeMessage.bodySize());
         long[] shape = dataset.dataspace().dimensions();
@@ -2009,18 +2543,23 @@ public final class Hdf5Writer implements AutoCloseable {
      * The storage of a dataset of the file, made when data is first written to it: its block, inline data,
      * or chunks (which a rewritten chunk replaces, its index written anew), with its filters.
      *
-     * @throws HdfUnsupportedException for a virtual dataset, data in external files, partial edge chunks
-     *         stored unfiltered, or a filter Falcon does not write
+     * @throws HdfUnsupportedException for a virtual dataset, or a filter Falcon does not write (a third-party one)
      */
     private Storage existingStorage(DatasetSpec spec, String path) {
         Dataset dataset = (Dataset) spec.object;
-        if (dataset.header().find(com.ebremer.falcon.hdf5.header.MessageType.EXTERNAL_DATA_FILES) != null) {
-            throw new HdfUnsupportedException("dataset " + path + " keeps its data in external files, which Falcon does not write");
-        }
         Storage storage = new Storage(spec);
+        com.ebremer.falcon.hdf5.header.HeaderMessage external =
+                dataset.header().find(com.ebremer.falcon.hdf5.header.MessageType.EXTERNAL_DATA_FILES);
+        if (external != null) {
+            // Its data in external raw files (P2 WF10): written there, the files found as the reader finds them.
+            storage.external = com.ebremer.falcon.hdf5.message.ExternalFileList.parse(dataset.ctx, external.bodyOffset());
+            storage.externalAccess = dataset.ctx.externalFileAccess();
+            storage.externalDirectory = dataset.ctx.directory();
+        }
         switch (dataset.dataLayout()) {
             case com.ebremer.falcon.hdf5.layout.DataLayout.Virtual virtual ->
-                    throw new HdfUnsupportedException("dataset " + path + " is virtual: its data is other datasets'");
+                    throw new HdfUnsupportedException("dataset " + path + " is virtual, a view of other datasets: write"
+                            + " those");
             case com.ebremer.falcon.hdf5.layout.DataLayout.Compact compact -> {
                 if (compact.data().length != elementCount(spec.shape) * spec.elementSize) {
                     throw new HdfFormatException("dataset " + path + " holds " + compact.data().length + " bytes of compact data");
@@ -2029,44 +2568,49 @@ public final class Hdf5Writer implements AutoCloseable {
             }
             case com.ebremer.falcon.hdf5.layout.DataLayout.Contiguous contiguous -> storage.address = contiguous.address();
             case com.ebremer.falcon.hdf5.layout.DataLayout.Chunked chunked -> {
-                if (chunked.dontFilterPartialBoundChunks()) {
-                    throw new HdfUnsupportedException("dataset " + path + " stores partial edge chunks unfiltered,"
-                            + " which Falcon does not write");
-                }
                 FilterPipeline pipeline = dataset.filterPipeline();
                 if (pipeline != null && !pipeline.filters().isEmpty()) {
                     spec.filters.addAll(encoders(pipeline, spec, path));
                     storage.decoder = pipeline;
+                    // Partial edge chunks stored unfiltered (H5D_CHUNK_DONT_FILTER_PARTIAL_CHUNKS): so they stay.
+                    storage.partialEdgesUnfiltered = chunked.dontFilterPartialBoundChunks();
                 }
                 for (com.ebremer.falcon.hdf5.layout.ChunkRecord chunk : dataset.chunkIndex(chunked).all()) {
                     long[] scaled = new long[spec.chunkShape.length];
                     for (int d = 0; d < scaled.length; d++) {
                         scaled[d] = chunk.offset()[d] / spec.chunkShape[d];
                     }
-                    storage.stored.put(new Cell(scaled),
-                            new ChunkIndexWriter.Entry(scaled, chunk.address(), chunk.size(), chunk.filterMask()));
+                    Cell cell = new Cell(scaled);
+                    storage.stored.put(cell, new ChunkIndexWriter.Entry(scaled, chunk.address(), chunk.size(), chunk.filterMask()));
+                    if (storage.partialEdgesUnfiltered && storage.partial(cell)) {
+                        storage.unfiltered.add(cell);
+                    }
                 }
             }
         }
         return storage;
     }
 
-    /** The writer's form of a dataset's filters, as the file applies them. */
+    /**
+     * The writer's form of a dataset's filters, as the file applies them: the built-in ones, each with the
+     * client data libhdf5 stored for it (P2 WF10: n-bit, scale-offset and szip of either coding included).
+     */
     private static List<FilterSpec> encoders(FilterPipeline pipeline, DatasetSpec spec, String path) {
         List<FilterSpec> filters = new ArrayList<>();
         for (FilterPipeline.Filter filter : pipeline.filters()) {
-            int[] data = filter.clientData();
+            int[] data = filter.clientData().clone();
             switch (filter.id()) {
-                case Filters.DEFLATE -> filters.add(new FilterSpec(Filters.DEFLATE, data.length > 0 ? data[0] : 6));
-                case Filters.SHUFFLE -> filters.add(new FilterSpec(Filters.SHUFFLE, 0));
-                case Filters.FLETCHER32 -> filters.add(new FilterSpec(Filters.FLETCHER32, 0));
-                case Filters.SZIP -> {
-                    if (data.length < 4 || (data[0] & Szip.NN) != 0) {
-                        throw new HdfUnsupportedException("dataset " + path + " is compressed with szip's nearest-neighbour"
-                                + " coding, which Falcon does not write");
+                case Filters.DEFLATE -> filters.add(new FilterSpec(Filters.DEFLATE, data.length > 0 ? data[0] : 6, data));
+                case Filters.SHUFFLE -> filters.add(new FilterSpec(Filters.SHUFFLE, 0, data));
+                case Filters.FLETCHER32 -> filters.add(new FilterSpec(Filters.FLETCHER32, 0, data));
+                case Filters.SZIP, Filters.NBIT, Filters.SCALEOFFSET -> {
+                    // szip's four parameters; n-bit's through its datatype's size; scale-offset's up to its fill value
+                    int needed = filter.id() == Filters.SZIP ? 4 : filter.id() == Filters.NBIT ? 5 : 8;
+                    if (data.length < needed) {
+                        throw new HdfFormatException("dataset " + path + " has " + data.length + " client-data values for filter "
+                                + filter.id());
                     }
-                    spec.szipClientData = data.clone();
-                    filters.add(new FilterSpec(Filters.SZIP, 0));
+                    filters.add(new FilterSpec(filter.id(), 0, data));
                 }
                 default -> throw new HdfUnsupportedException("dataset " + path + " is filtered with "
                         + (filter.name() != null ? filter.name() + " " : "") + "(filter " + filter.id()
@@ -2077,13 +2621,17 @@ public final class Hdf5Writer implements AutoCloseable {
     }
 
     /**
-     * A link added to a group of the file: a hard link (to a group of the original format, with its symbol
+     * A link a group gains, as it is written: a hard link (to a group of the original format, with its symbol
      * table, for its entry's cache), or a soft or external one.
      */
     private record NewLink(String name, long address, long btree, long heap, String target, String file) {
 
-        static NewLink hard(String name, long address, long btree, long heap) {
-            return new NewLink(name, address, btree, heap, null, null);
+        static NewLink hard(String name, GroupResult object) {
+            return new NewLink(name, object.headerAddress(), object.btreeAddress(), object.heapAddress(), null, null);
+        }
+
+        boolean external() {
+            return file != null;
         }
 
         /** Its Link message, with a creation order unless negative. */
@@ -2106,74 +2654,76 @@ public final class Hdf5Writer implements AutoCloseable {
     }
 
     /**
-     * Lays out the changes to a group of the file: the objects added to it and the changes of those opened in
-     * it, then its links (added and deleted) and attributes, through its object header's editor. Returns its
-     * header, and if its symbol table was rebuilt (an original-format group), the new one.
+     * The links a group gains in this session, with the objects they reach laid out: its subgroups and
+     * datasets added (not those of the file opened in it, which it links already), and its links added.
      */
-    private GroupResult writeExistingGroup(GrowBuffer buf, GroupSpec group, String groupPath) {
-        List<NewLink> added = new ArrayList<>();
-        Map<Long, long[]> rebuilt = new HashMap<>(); // groups opened in it whose symbol tables were rebuilt
+    private List<NewLink> addedLinks(GrowBuffer buf, GroupSpec group) {
+        List<NewLink> links = new ArrayList<>();
         for (GroupSpec subgroup : group.groups) {
-            String childPath = groupPath + "/" + subgroup.name;
-            GroupResult child = writeGroup(buf, subgroup, childPath);
-            objectAddresses.put(childPath, child.headerAddress());
-            if (subgroup.inFile()) {
-                if (child.btreeAddress() != UNDEFINED) {
-                    rebuilt.put(subgroup.address, new long[] {child.btreeAddress(), child.heapAddress()});
-                }
-            } else {
-                added.add(NewLink.hard(subgroup.name, child.headerAddress(), child.btreeAddress(), child.heapAddress()));
+            GroupResult result = layOut(buf, subgroup);
+            if (!subgroup.inFile()) {
+                links.add(NewLink.hard(subgroup.name, result));
             }
         }
         for (DatasetSpec dataset : group.datasets) {
-            String childPath = groupPath + "/" + dataset.name;
-            if (dataset.inFile()) {
-                writeExistingDataset(buf, dataset);
-                objectAddresses.put(childPath, dataset.address);
-            } else {
-                long address = writeDataset(buf, dataset);
-                objectAddresses.put(childPath, address);
-                added.add(NewLink.hard(dataset.name, address, UNDEFINED, UNDEFINED));
+            GroupResult result = layOut(buf, dataset);
+            if (!dataset.inFile()) {
+                links.add(NewLink.hard(dataset.name, result));
             }
         }
         for (LinkSpec link : group.links) {
-            added.add(new NewLink(link.name(), UNDEFINED, UNDEFINED, UNDEFINED, link.target(), link.file()));
+            if (link.object() != null) {
+                links.add(NewLink.hard(link.name(), layOut(buf, link.object())));
+            } else if (link.address() != UNDEFINED) {
+                links.add(NewLink.hard(link.name(), fileObjectResult(buf, link.address())));
+            } else {
+                links.add(new NewLink(link.name(), UNDEFINED, UNDEFINED, UNDEFINED, link.target(), link.file()));
+            }
         }
+        return links;
+    }
+
+    /**
+     * Lays out the changes to a group of the file: the objects added to it and the changes of those opened in
+     * it, then its links (added and deleted) and attributes, through its object header's editor. Returns its
+     * header and its symbol table (an original-format group's: as stored, or rebuilt; none once converted).
+     */
+    private GroupResult writeExistingGroup(GrowBuffer buf, GroupSpec group) {
+        List<NewLink> added = addedLinks(buf, group);
         ObjectHeaderEditor editor = editor(group.address);
-        long[] table = null;
         boolean linksChanged = !added.isEmpty() || !group.deletedLinks.isEmpty();
         ObjectHeaderEditor.Message symbolTable = editor.find(17);
+        GroupResult result = new GroupResult(group.address, UNDEFINED, UNDEFINED, false);
         if (symbolTable != null) {
-            if (linksChanged || !rebuilt.isEmpty()) {
-                table = rewriteSymbolTable(buf, editor, symbolTable, group, added, rebuilt);
+            byte[] body = symbolTable.body();
+            long btree = u64(body, 0);
+            long heap = u64(body, 8);
+            // A subgroup opened in it whose symbol table changed is cached anew in its entry.
+            boolean cacheChanged = false;
+            for (GroupSpec subgroup : group.groups) {
+                GroupResult child = laidOut.get(subgroup);
+                cacheChanged |= subgroup.inFile() && child != null && child.changed();
+            }
+            if (added.stream().anyMatch(NewLink::external)) {
+                convertSymbolTable(buf, editor, symbolTable, group, added, btree, heap);
+                result = new GroupResult(group.address, UNDEFINED, UNDEFINED, true);
+            } else if (linksChanged || cacheChanged) {
+                SymbolTable table = rewriteSymbolTable(buf, editor, symbolTable, group, added, btree, heap);
+                result = new GroupResult(group.address, table.btree(), table.heap(), true);
+            } else {
+                result = new GroupResult(group.address, btree, heap, false);
             }
         } else if (linksChanged) {
             rewriteLinks(buf, editor, group, added);
         }
-        // An object a deleted hard link led to is linked once less.
-        for (String name : group.deletedLinks) {
-            if (((Group) group.object).link(name).orElse(null) instanceof Link.Hard hard) {
-                ObjectHeaderEditor target = editor(hard.objectHeaderAddress());
-                int count = target.referenceCount();
-                if (count > 1) {
-                    target.setReferenceCount(count - 1);
-                }
-            }
-        }
         rewriteAttributes(buf, editor, group);
-        return new GroupResult(group.address, table == null ? UNDEFINED : table[0], table == null ? UNDEFINED : table[1]);
+        return result;
     }
 
-    /**
-     * Rebuilds an original-format group's symbol table: its entries but those deleted, those added, and the
-     * groups' caches of their symbol tables (rebuilt or as stored), then points its Symbol Table message at
-     * the new one. Returns the new table's B-tree and heap.
-     */
-    private long[] rewriteSymbolTable(GrowBuffer buf, ObjectHeaderEditor editor, ObjectHeaderEditor.Message message,
-                                      GroupSpec group, List<NewLink> added, Map<Long, long[]> rebuilt) {
-        byte[] body = message.body();
+    /** The original-format group's entries the session keeps (all but those deleted), as they are written now. */
+    private List<SymbolChild> keptEntries(GrowBuffer buf, GroupSpec group, long btree, long heap) {
         List<SymbolChild> children = new ArrayList<>();
-        for (ExistingFile.StoredEntry entry : existing.symbolEntries(u64(body, 0), u64(body, 8))) {
+        for (ExistingFile.StoredEntry entry : existing.symbolEntries(btree, heap)) {
             if (group.deletedLinks.contains(entry.name())) {
                 continue;
             }
@@ -2181,19 +2731,60 @@ public final class Hdf5Writer implements AutoCloseable {
                 children.add(new SymbolChild(entry.name(), UNDEFINED, 2, UNDEFINED, UNDEFINED, entry.softTarget()));
                 continue;
             }
-            long[] cache = rebuilt.get(entry.address());
-            if (cache == null && entry.cacheType() == 1) {
-                cache = existing.symbolTable(entry.address());
-            }
-            children.add(cache == null ? new SymbolChild(entry.name(), entry.address(), 0, UNDEFINED, UNDEFINED, null)
-                    : new SymbolChild(entry.name(), entry.address(), 1, cache[0], cache[1], null));
+            // A group's symbol table: as laid out if it is opened (rebuilt, or gone), else as stored.
+            GroupResult object = opened.containsKey(entry.address()) ? fileObjectResult(buf, entry.address())
+                    : entry.cacheType() == 1 ? storedResult(entry.address()) : null;
+            children.add(object == null || object.btreeAddress() == UNDEFINED
+                    ? new SymbolChild(entry.name(), entry.address(), 0, UNDEFINED, UNDEFINED, null)
+                    : new SymbolChild(entry.name(), entry.address(), 1, object.btreeAddress(), object.heapAddress(), null));
         }
+        return children;
+    }
+
+    /**
+     * Rebuilds an original-format group's symbol table: its entries but those deleted, those added, and the
+     * groups' caches of their symbol tables, then points its Symbol Table message at the new one.
+     */
+    private SymbolTable rewriteSymbolTable(GrowBuffer buf, ObjectHeaderEditor editor, ObjectHeaderEditor.Message message,
+                                           GroupSpec group, List<NewLink> added, long btree, long heap) {
+        List<SymbolChild> children = keptEntries(buf, group, btree, heap);
         for (NewLink link : added) {
             children.add(link.entry());
         }
         SymbolTable table = writeSymbolTable(buf, children);
         editor.replace(message, symbolTableBody(table));
-        return new long[] {table.btree(), table.heap()};
+        return table;
+    }
+
+    /**
+     * Converts an original-format group to the new format, as libhdf5 does when the group gains a link its
+     * symbol table cannot hold, an external one ({@code H5G_obj_insert}): its entries (but those deleted) and
+     * the links added become Link messages (in dense storage beyond 8), with Link Info and Group Info messages
+     * in place of its Symbol Table message. Its old symbol table is left as unused space.
+     */
+    private void convertSymbolTable(GrowBuffer buf, ObjectHeaderEditor editor, ObjectHeaderEditor.Message message,
+                                    GroupSpec group, List<NewLink> added, long btree, long heap) {
+        List<ExistingFile.StoredLink> links = new ArrayList<>();
+        for (SymbolChild child : keptEntries(buf, group, btree, heap)) {
+            byte[] body = child.cacheType() == 2 ? softLinkBody(child.name(), child.linkValue())
+                    : linkBody(child.name(), child.headerAddress());
+            links.add(new ExistingFile.StoredLink(child.name(), body, -1));
+        }
+        for (NewLink link : added) {
+            links.add(new ExistingFile.StoredLink(link.name(), link.message(-1), -1));
+        }
+        editor.remove(message);
+        if (links.size() > MAX_COMPACT) {
+            editor.add(2, 0, writeLinkStorage(buf, links, 0, -1));
+        } else {
+            editor.add(2, 0, linkInfoBody());
+            for (ExistingFile.StoredLink link : links) {
+                editor.add(6, 0, link.message());
+            }
+        }
+        if (editor.find(10) == null) {
+            editor.add(10, 0x01, new byte[] {0, 0});
+        }
     }
 
     /**
@@ -2245,18 +2836,34 @@ public final class Hdf5Writer implements AutoCloseable {
             putU64(body, 2, nextOrder);
         }
         int maxCompact = MAX_COMPACT;
+        int minDense = MIN_DENSE;
         ObjectHeaderEditor.Message groupInfo = editor.find(10);
         if (groupInfo != null && (groupInfo.body()[1] & 0x01) != 0) {
             byte[] g = groupInfo.body();
             maxCompact = (g[2] & 0xff) | (g[3] & 0xff) << 8;
+            minDense = (g[4] & 0xff) | (g[5] & 0xff) << 8;
         }
-        if (!dense && links.size() + fresh.size() <= maxCompact) {
+        int total = links.size() + fresh.size();
+        if (!dense && total <= maxCompact) {
             for (ExistingFile.StoredLink link : fresh) {
                 editor.add(6, 0, link.message());
             }
             if (tracked) {
                 editor.replace(info, body);
             }
+            return;
+        }
+        if (dense && total < minDense) {
+            // Fewer than the group's minimum for dense storage: its links go back into its header, as libhdf5
+            // moves them (H5G__obj_remove_update_linfo), and its Link Info message points at no heap or index.
+            links.addAll(fresh);
+            for (ExistingFile.StoredLink link : links) {
+                editor.add(6, 0, link.message());
+            }
+            for (int at = tracked ? 10 : 2; at < body.length; at += 8) {
+                putU64(body, at, UNDEFINED);
+            }
+            editor.replace(info, body);
             return;
         }
         links.addAll(fresh);
@@ -2282,9 +2889,8 @@ public final class Hdf5Writer implements AutoCloseable {
         Set<String> gone = spec.deletedAttributes;
         if (editor.version() == 1) {
             for (ObjectHeaderEditor.Message message : editor.messages(12)) {
-                requireUnshared(message);
-                if (gone.contains(ExistingFile.attributeName(message.body()))) {
-                    editor.remove(message);
+                if (gone.contains(storedAttribute(message).name())) {
+                    removeAttribute(editor, message);
                 }
             }
             for (AttributeSpec attribute : spec.attributes) {
@@ -2318,17 +2924,17 @@ public final class Hdf5Writer implements AutoCloseable {
             for (ExistingFile.StoredAttribute attribute : existing.denseAttributes(heap, nameIndex)) {
                 if (!gone.contains(attribute.name())) {
                     attributes.add(attribute);
+                } else if (attribute.sharedId() != null) {
+                    sharedReleases.add(new SharedMessages.Release(12, attribute.sharedId()));
                 }
             }
         } else {
             for (ObjectHeaderEditor.Message message : editor.messages(12)) {
-                requireUnshared(message);
-                String name = ExistingFile.attributeName(message.body());
-                if (gone.contains(name)) {
-                    editor.remove(message);
+                ExistingFile.StoredAttribute attribute = storedAttribute(message);
+                if (gone.contains(attribute.name())) {
+                    removeAttribute(editor, message);
                 } else {
-                    attributes.add(new ExistingFile.StoredAttribute(name, message.flags(), message.creationOrder(),
-                            message.body()));
+                    attributes.add(attribute);
                 }
             }
         }
@@ -2343,7 +2949,8 @@ public final class Hdf5Writer implements AutoCloseable {
             int order = tracked ? nextOrder++ : 0;
             fresh.add(new ExistingFile.StoredAttribute(attribute.name(), 0, order, attributeBody(attribute, legacy)));
         }
-        if (!dense && attributes.size() + fresh.size() <= editor.maxCompactAttributes()) {
+        int total = attributes.size() + fresh.size();
+        if (!dense && total <= editor.maxCompactAttributes()) {
             for (ExistingFile.StoredAttribute attribute : fresh) {
                 editor.add(12, 0, attribute.message(), attribute.creationOrder());
             }
@@ -2352,6 +2959,24 @@ public final class Hdf5Writer implements AutoCloseable {
                 infoBody[3] = (byte) (nextOrder >>> 8);
                 editor.replace(info, infoBody);
             }
+            return;
+        }
+        if (dense && total < editor.minDenseAttributes()) {
+            // Fewer than the object's minimum for dense storage: its attributes go back into its header, as
+            // libhdf5 moves them (H5O__attr_remove_update), and its Attribute Info message points at no heap or
+            // index.
+            attributes.addAll(fresh);
+            for (ExistingFile.StoredAttribute attribute : attributes) {
+                editor.add(12, attribute.flags(), attribute.message(), attribute.creationOrder());
+            }
+            if ((infoFlags & 0x01) != 0) {
+                infoBody[2] = (byte) nextOrder;
+                infoBody[3] = (byte) (nextOrder >>> 8);
+            }
+            for (int at = (infoFlags & 0x01) != 0 ? 4 : 2; at < infoBody.length; at += 8) {
+                putU64(infoBody, at, UNDEFINED);
+            }
+            editor.replace(info, infoBody);
             return;
         }
         attributes.addAll(fresh);
@@ -2368,11 +2993,30 @@ public final class Hdf5Writer implements AutoCloseable {
         }
     }
 
-    /** Attributes kept in the file's shared-message table are not changed (nor copied). */
-    private static void requireUnshared(ObjectHeaderEditor.Message message) {
-        if ((message.flags() & 0x02) != 0) {
-            throw new HdfUnsupportedException("attributes kept in the file's shared-message table are not changed");
+    /**
+     * An attribute message of an object's header: its name, flags, creation order and body; for one kept in
+     * the shared-message table (flagged shared), its heap ID, and the name from the heap's copy.
+     */
+    private ExistingFile.StoredAttribute storedAttribute(ObjectHeaderEditor.Message message) {
+        byte[] body = message.body();
+        if ((message.flags() & 0x02) == 0) {
+            return new ExistingFile.StoredAttribute(ExistingFile.attributeName(body), message.flags(),
+                    message.creationOrder(), body, null);
         }
+        byte[] heapId = ExistingFile.sharedId(body);
+        if (heapId == null) {
+            throw new HdfUnsupportedException("an attribute shared otherwise than in the shared-message table");
+        }
+        return new ExistingFile.StoredAttribute(ExistingFile.attributeName(existing.sharedMessage(heapId, 12)),
+                message.flags(), message.creationOrder(), java.util.Arrays.copyOf(body, 10), heapId);
+    }
+
+    /** Removes an attribute message; one kept in the shared-message table is released there. */
+    private void removeAttribute(ObjectHeaderEditor editor, ObjectHeaderEditor.Message message) {
+        if ((message.flags() & 0x02) != 0) {
+            sharedReleases.add(new SharedMessages.Release(12, storedAttribute(message).sharedId()));
+        }
+        editor.remove(message);
     }
 
     /**
@@ -2388,17 +3032,46 @@ public final class Hdf5Writer implements AutoCloseable {
                 throw new HdfFormatException("dataset at " + dataset.address + " has no layout message");
             }
             byte[] old = message.body();
-            if (!java.util.Arrays.equals(java.util.Arrays.copyOf(old, layout.length), layout) || old.length - layout.length >= 8) {
+            if (layout != null && (!java.util.Arrays.equals(java.util.Arrays.copyOf(old, layout.length), layout)
+                    || old.length - layout.length >= 8)) {
                 editor.replace(message, layout);
             }
             if (!java.util.Arrays.equals(dataset.shape, dataset.fileShape)) {
                 ObjectHeaderEditor.Message space = editor.find(1);
-                byte[] body = space.body();
-                int dimensions = body[0] == 1 ? 8 : 4; // after version 1's reserved bytes, or version 2's type
-                for (int d = 0; d < dataset.shape.length; d++) {
-                    putU64(body, dimensions + 8 * d, dataset.shape[d]);
+                if ((space.flags() & 0x02) != 0) {
+                    // Shared in the shared-message table with datasets of the old shape: this one's own now, as
+                    // libhdf5 stops sharing a message it changes, and released there.
+                    byte[] heapId = ExistingFile.sharedId(space.body());
+                    if (heapId == null) {
+                        throw new HdfUnsupportedException("dataset at " + dataset.address + " shares its dataspace with"
+                                + " another object's header, which Falcon does not change");
+                    }
+                    int flags = space.flags() & ~0x02;
+                    editor.remove(space);
+                    editor.add(1, flags, dataspaceBody(dataset.shape, dataset.maxShape, editor.version() == 1));
+                    sharedReleases.add(new SharedMessages.Release(1, heapId));
+                } else {
+                    byte[] body = space.body();
+                    int dimensions = body[0] == 1 ? 8 : 4; // after version 1's reserved bytes, or version 2's type
+                    if ((space.flags() & 0x40) != 0) {
+                        // Kept here, marked shareable: counted in the shared-message table by its encoding, which
+                        // changes, so released there and no longer shareable (libhdf5 would share it anew).
+                        int encoded = dimensions + 8 * dataset.shape.length * ((body[2] & 0x01) != 0 ? 2 : 1);
+                        sharedReleases.add(new SharedMessages.Release(1, null,
+                                java.util.Arrays.copyOf(body, encoded), dataset.address));
+                        int flags = space.flags() & ~0x40;
+                        for (int d = 0; d < dataset.shape.length; d++) {
+                            putU64(body, dimensions + 8 * d, dataset.shape[d]);
+                        }
+                        editor.remove(space);
+                        editor.add(1, flags, java.util.Arrays.copyOf(body, encoded));
+                    } else {
+                        for (int d = 0; d < dataset.shape.length; d++) {
+                            putU64(body, dimensions + 8 * d, dataset.shape[d]);
+                        }
+                        editor.replace(space, body);
+                    }
                 }
-                editor.replace(space, body);
             }
         }
         rewriteAttributes(buf, editor, dataset);
@@ -2414,8 +3087,11 @@ public final class Hdf5Writer implements AutoCloseable {
 
     // --------------------------------------------------------------- serialization
 
-    /** A written group: its object-header address, and (legacy only) its symbol-table B-tree and heap. */
-    private record GroupResult(long headerAddress, long btreeAddress, long heapAddress) {
+    /**
+     * A laid-out object: its object-header address; a group of the original format's symbol table (B-tree and
+     * heap, else undefined); and, for a group of the file, whether that changed in this session.
+     */
+    private record GroupResult(long headerAddress, long btreeAddress, long heapAddress, boolean changed) {
     }
 
     /** One child of a legacy (symbol-table) group. */
@@ -2423,50 +3099,29 @@ public final class Hdf5Writer implements AutoCloseable {
                                String linkValue) {
     }
 
-    private GroupResult writeGroup(GrowBuffer buf, GroupSpec group, String groupPath) {
-        if (group.inFile()) {
-            return writeExistingGroup(buf, group, groupPath);
-        }
-        Map<String, Long> children = new LinkedHashMap<>();
-        List<SymbolChild> symbolChildren = legacy ? new ArrayList<>() : null;
-        for (GroupSpec subgroup : group.groups) {
-            GroupResult child = writeGroup(buf, subgroup, groupPath + "/" + subgroup.name);
-            children.put(subgroup.name, child.headerAddress());
-            objectAddresses.put(groupPath + "/" + subgroup.name, child.headerAddress());
-            if (legacy) {
-                symbolChildren.add(new SymbolChild(subgroup.name, child.headerAddress(), 1,
-                        child.btreeAddress(), child.heapAddress(), null));
+    private GroupResult writeGroup(GrowBuffer buf, GroupSpec group) {
+        List<NewLink> added = addedLinks(buf, group);
+        int references = referenceCounts.getOrDefault(group, 1);
+        if (legacy && added.stream().noneMatch(NewLink::external)) {
+            List<SymbolChild> children = new ArrayList<>();
+            for (NewLink link : added) {
+                children.add(link.entry());
             }
+            return writeSymbolTableGroup(buf, children, group.attributes, references);
         }
-        for (DatasetSpec dataset : group.datasets) {
-            long address = writeDataset(buf, dataset);
-            children.put(dataset.name, address);
-            objectAddresses.put(groupPath + "/" + dataset.name, address);
-            if (legacy) {
-                symbolChildren.add(new SymbolChild(dataset.name, address, 0, UNDEFINED, UNDEFINED, null));
-            }
-        }
-        if (legacy) {
-            for (LinkSpec link : group.links) { // soft links only: the earliest format has no external ones
-                symbolChildren.add(new SymbolChild(link.name(), UNDEFINED, 2, UNDEFINED, UNDEFINED, link.target()));
-            }
-            return writeSymbolTableGroup(buf, symbolChildren, group.attributes);
-        }
+        // The modern format; or in the earliest, a group with an external link, which a symbol table cannot
+        // hold: libhdf5 gives such a group the new format's link messages, in its version-1 header.
         List<NamedLink> links = new ArrayList<>();
-        for (Map.Entry<String, Long> child : children.entrySet()) {
-            links.add(new NamedLink(child.getKey(), linkBody(child.getKey(), child.getValue())));
-        }
-        for (LinkSpec link : group.links) {
-            links.add(new NamedLink(link.name(), link.file() == null ? softLinkBody(link.name(), link.target())
-                    : externalLinkBody(link.name(), link.file(), link.target())));
+        for (NewLink link : added) {
+            links.add(new NamedLink(link.name(), link.message(-1)));
         }
         byte[] linkInfo = links.size() > MAX_COMPACT ? writeDenseLinks(buf, links) : null;
-        byte[] attributeInfo = group.attributes.size() > MAX_COMPACT
+        byte[] attributeInfo = !legacy && group.attributes.size() > MAX_COMPACT
                 ? writeDenseAttributes(buf, group.attributes) : null;
         buf.align(8);
         long headerAddress = buf.position();
-        writeGroupHeader(buf, links, group.attributes, linkInfo, attributeInfo);
-        return new GroupResult(headerAddress, UNDEFINED, UNDEFINED);
+        writeGroupHeader(buf, links, group.attributes, linkInfo, attributeInfo, references);
+        return new GroupResult(headerAddress, UNDEFINED, UNDEFINED, false);
     }
 
     /** A link of a group: its name and its Link message body. */
@@ -2499,12 +3154,12 @@ public final class Hdf5Writer implements AutoCloseable {
                 messages.add(new Message(12, 0x00, attributeBody(attribute, legacy)));
             }
         }
-        writeObjectHeader(buf, messages, 1);
+        writeObjectHeader(buf, messages, referenceCounts.getOrDefault(dataset, 1));
         return headerAddress;
     }
 
-    /** Pixels per szip block: libaec decodes block sizes 8, 16, 32 and 64. */
-    private static final int SZIP_PIXELS_PER_BLOCK = 8;
+    /** The bit of an szip filter's parameter (its pixels per block) that selects nearest-neighbour coding. */
+    private static final int SZIP_NN_PARAMETER = 1 << 16;
     // Filter flags in the pipeline message: libhdf5 marks every filter optional except fletcher32.
     private static final int FILTER_OPTIONAL = 1;
     private static final int FILTER_MANDATORY = 0;
@@ -2636,12 +3291,19 @@ public final class Hdf5Writer implements AutoCloseable {
         // (P2 WF8): a filtered chunk cannot be patched in the file afterwards.
         private final boolean holdsAddresses;
         private long address = UNDEFINED;                                   // contiguous: the block
+        private com.ebremer.falcon.hdf5.message.ExternalFileList external;   // ... or external raw files
+        private ExternalFileAccess externalAccess;
+        private Path externalDirectory;
         private byte[] compact;                                             // compact: the data
         private final Map<Long, Integer> compactIds = new HashMap<>();
         private final Map<Long, String> compactRefs = new HashMap<>();
         private final Map<Cell, ChunkIndexWriter.Entry> stored = new HashMap<>();
         private final Map<Cell, Pending> pending = new HashMap<>();
         private FilterPipeline decoder;
+        // A dataset of the file whose partial edge chunks are stored unfiltered (P2 WF10), and the chunks
+        // stored so: chunks past its extent in some dimension, as libhdf5 tells them.
+        private boolean partialEdgesUnfiltered;
+        private final Set<Cell> unfiltered = new HashSet<>();
 
         Storage(DatasetSpec spec) {
             this.spec = spec;
@@ -2695,6 +3357,10 @@ public final class Hdf5Writer implements AutoCloseable {
         }
 
         private void writeContiguous(long[] offset, long[] count, ValueEncoder.Encoded data) {
+            if (external != null) {
+                writeExternal(offset, count, data);
+                return;
+            }
             if (address == UNDEFINED) {
                 long bytes = elementCount(spec.shape) * size;
                 address = output().allocate(bytes);
@@ -2711,6 +3377,70 @@ public final class Hdf5Writer implements AutoCloseable {
             for (ValueEncoder.RefPatch ref : data.refs()) {
                 fileReferences.add(new FileReference(address + datasetByte(ref.offset(), offset, count, stride), ref.path()));
             }
+        }
+
+        /**
+         * Writes a box of a dataset whose data is in external raw files, into their slots, now. Variable-length
+         * ids are filled in first (placing their heap collection); object references, whose addresses are
+         * known only on close, are not written there.
+         */
+        private void writeExternal(long[] offset, long[] count, ValueEncoder.Encoded data) {
+            if (!data.refs().isEmpty()) {
+                throw new HdfUnsupportedException("dataset " + spec.name + " keeps its data in external files, where"
+                        + " Falcon does not write object references");
+            }
+            byte[] bytes = data.bytes();
+            if (!data.ids().isEmpty()) {
+                bytes = bytes.clone();
+                for (ValueEncoder.IdPatch id : data.ids()) {
+                    putU64(bytes, (int) id.offset(), heaps.address(id.collection()));
+                }
+            }
+            long[] stride = rowMajorStride(spec.shape);
+            byte[] source = bytes;
+            forEachRun(offset, count, spec.shape, (at, index, run) ->
+                    writeExternal(dot(at, stride) * size, source, (int) (index * size), (int) (run * size)));
+        }
+
+        /** Writes {@code length} bytes at byte {@code position} of the data, into the slots that hold it. */
+        private void writeExternal(long position, byte[] bytes, int from, int length) {
+            long start = 0;
+            for (int i = 0; i < external.slots() && length > 0; i++) {
+                long end = external.size(i) < 0 ? Long.MAX_VALUE : start + external.size(i);
+                if (position < end) {
+                    int n = (int) Math.min(length, end - position);
+                    java.nio.ByteBuffer buffer = java.nio.ByteBuffer.wrap(bytes, from, n);
+                    long at = external.fileOffset(i) + position - start;
+                    java.nio.channels.FileChannel channel = externalFile(external.name(i));
+                    try {
+                        while (buffer.hasRemaining()) {
+                            at += channel.write(buffer, at);
+                        }
+                    } catch (IOException e) {
+                        throw new UncheckedIOException("cannot write external raw data file " + external.name(i), e);
+                    }
+                    position += n;
+                    from += n;
+                    length -= n;
+                }
+                start = end;
+            }
+            if (length > 0) {
+                throw new HdfFormatException("dataset " + spec.name + ": its external files hold fewer bytes than its data");
+            }
+        }
+
+        /** The external raw data file {@code name}, opened to write (created, as libhdf5 creates it, if missing). */
+        private java.nio.channels.FileChannel externalFile(String name) {
+            Path file = externalAccess.resolve(name, externalDirectory, "external raw data file");
+            return externalFiles.computeIfAbsent(file, f -> {
+                try {
+                    return java.nio.channels.FileChannel.open(f, java.nio.file.StandardOpenOption.CREATE,
+                            java.nio.file.StandardOpenOption.WRITE);
+                } catch (IOException e) {
+                    throw new UncheckedIOException("cannot open external raw data file " + f, e);
+                }
+            });
         }
 
         /** The byte, from the dataset's start, of byte {@code boxByte} of a box's encoded elements. */
@@ -2815,7 +3545,7 @@ public final class Hdf5Writer implements AutoCloseable {
                 ChunkIndexWriter.Entry entry = stored.remove(cell);
                 byte[] data;
                 if (entry != null) {
-                    data = readBack(entry, elements * size);
+                    data = readBack(entry, elements * size, unfiltered.remove(cell));
                     written.set(0, elements);
                 } else {
                     data = new byte[elements * size];
@@ -2833,10 +3563,10 @@ public final class Hdf5Writer implements AutoCloseable {
             return p;
         }
 
-        private byte[] readBack(ChunkIndexWriter.Entry entry, int chunkBytes) {
+        private byte[] readBack(ChunkIndexWriter.Entry entry, int chunkBytes, boolean storedUnfiltered) {
             byte[] stored = output().read(entry.address(), entry.size());
-            if (spec.filters.isEmpty()) {
-                return stored;
+            if (spec.filters.isEmpty() || storedUnfiltered) {
+                return storedUnfiltered ? java.util.Arrays.copyOf(stored, chunkBytes) : stored;
             }
             if (decoder == null) {
                 decoder = FilterPipelineMessage.parse(HdfBuffer.of(filterPipelineBody(spec, legacy)), 0);
@@ -2852,11 +3582,49 @@ public final class Hdf5Writer implements AutoCloseable {
             for (Map.Entry<Integer, String> ref : p.refs.entrySet()) {
                 putU64(p.data, ref.getKey(), addressOf(ref.getValue()));
             }
-            EncodedChunk encoded = spec.filters.isEmpty() ? new EncodedChunk(p.data, 0) : encodeChunk(p.data, spec);
+            store(cell, p.data);
+            pending.remove(cell);
+        }
+
+        /**
+         * Writes a chunk's elements at the end of the file: filtered, or as they are for a partial edge chunk
+         * of a dataset that keeps those unfiltered.
+         */
+        private void store(Cell cell, byte[] data) {
+            boolean raw = keepsPartialEdgesUnfiltered() && partial(cell);
+            EncodedChunk encoded = spec.filters.isEmpty() || raw ? new EncodedChunk(data, 0) : encodeChunk(data, spec);
             long at = output().allocate(encoded.bytes().length);
             output().write(at, encoded.bytes());
             stored.put(cell, new ChunkIndexWriter.Entry(cell.scaled(), at, encoded.bytes().length, encoded.filterMask()));
-            pending.remove(cell);
+            if (raw) {
+                unfiltered.add(cell);
+            } else {
+                unfiltered.remove(cell);
+            }
+        }
+
+        /** True if the chunk at {@code cell} reaches past the dataset's extent ({@code H5D__chunk_is_partial_edge_chunk}). */
+        boolean partial(Cell cell) {
+            for (int d = 0; d < spec.chunkShape.length; d++) {
+                if ((cell.scaled()[d] + 1) * spec.chunkShape[d] > spec.shape[d]) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /** Whether the chunks are indexed by a version-1 B-tree (a dataset that can grow, or the earliest format). */
+        private boolean usesBTree() {
+            return legacy || (spec.maxShape != null && !java.util.Arrays.equals(spec.maxShape, spec.shape));
+        }
+
+        /**
+         * Whether partial edge chunks stay unfiltered: in a dataset of the file that stores them so, while its
+         * chunks are indexed by a fixed array, whose layout message (version 4) records it. A version-1
+         * B-tree's layout (version 3) cannot, so there every chunk is filtered.
+         */
+        private boolean keepsPartialEdgesUnfiltered() {
+            return partialEdgesUnfiltered && !usesBTree();
         }
 
         /**
@@ -2867,6 +3635,15 @@ public final class Hdf5Writer implements AutoCloseable {
             if (!holdsAddresses) {
                 for (Cell cell : new ArrayList<>(pending.keySet())) {
                     flush(cell, pending.get(cell));
+                }
+            }
+            // Chunks stored unfiltered that are no longer partial edge chunks (the dataset grew), or all of
+            // them under a B-tree index, are filtered now, as libhdf5 does when a dataset grows.
+            for (Cell cell : new ArrayList<>(unfiltered)) {
+                if (!keepsPartialEdgesUnfiltered() || !partial(cell)) {
+                    ChunkIndexWriter.Entry entry = stored.get(cell);
+                    int chunkBytes = Math.toIntExact(elementCount(spec.chunkShape) * size);
+                    store(cell, readBack(entry, chunkBytes, true));
                 }
             }
             if (compact != null) {
@@ -2906,6 +3683,9 @@ public final class Hdf5Writer implements AutoCloseable {
 
         /** The Data Layout message body, writing the chunk index (if any) into {@code buf}. */
         byte[] layout(GrowBuffer buf) {
+            if (external != null) {
+                return null; // in its external files, as its layout and file list say
+            }
             if (spec.compact) {
                 if (compact == null) {
                     compact = new byte[Math.toIntExact(elementCount(spec.shape) * size)];
@@ -2919,7 +3699,8 @@ public final class Hdf5Writer implements AutoCloseable {
                 return contiguousLayoutBody(bytes == 0 ? UNDEFINED : address, bytes);
             }
             long[] chunk = spec.chunkShape;
-            boolean btree = legacy || (spec.maxShape != null && !java.util.Arrays.equals(spec.maxShape, spec.shape));
+            boolean btree = usesBTree();
+            int flags = keepsPartialEdgesUnfiltered() ? DONT_FILTER_PARTIAL_CHUNKS : 0;
             // Chunks still waiting for object addresses are laid out as placeholders of the same size in
             // the index: the first of complete()'s two layouts, which finds those addresses.
             Map<Cell, ChunkIndexWriter.Entry> entriesByCell = new HashMap<>(stored);
@@ -2930,7 +3711,7 @@ public final class Hdf5Writer implements AutoCloseable {
             }
             if (entriesByCell.isEmpty()) {
                 // No chunk written: no index is allocated (libhdf5's own form), and every element is the fill value.
-                return btree ? btreeLayoutBody(chunk, size, UNDEFINED) : chunkedLayoutBody(chunk, size, UNDEFINED);
+                return btree ? btreeLayoutBody(chunk, size, UNDEFINED) : chunkedLayoutBody(chunk, size, UNDEFINED, flags);
             }
             if (btree) {
                 List<ChunkIndexWriter.Entry> entries = new ArrayList<>(entriesByCell.values());
@@ -2953,7 +3734,7 @@ public final class Hdf5Writer implements AutoCloseable {
             }
             int chunkBytes = Math.toIntExact(elementCount(chunk) * size);
             return chunkedLayoutBody(chunk, size,
-                    ChunkIndexWriter.writeFixedArray(buf, cells, byCell, !spec.filters.isEmpty(), chunkBytes));
+                    ChunkIndexWriter.writeFixedArray(buf, cells, byCell, !spec.filters.isEmpty(), chunkBytes), flags);
         }
     }
 
@@ -3077,11 +3858,9 @@ public final class Hdf5Writer implements AutoCloseable {
                 case Filters.SHUFFLE -> shuffle(block, dataset.elementSize);
                 case Filters.DEFLATE -> deflate(block, filter.parameter());
                 case Filters.FLETCHER32 -> appendFletcher32(block);
-                case Filters.NBIT -> filter.parameter() == dataset.elementSize * 8
-                        ? block // full precision: libhdf5 flags "no compression needed" and stores it as is
-                        : nbitEncode(block, dataset.elementSize, filter.parameter());
-                case Filters.SCALEOFFSET -> ScaleOffset.encodeInteger(block, dataset.elementSize, signed(dataset),
-                        fillBits(dataset));
+                // at full precision, libhdf5 flags "no compression needed" and stores the chunk as it is
+                case Filters.NBIT -> Nbit.encode(block, nbitClientData(dataset, filter));
+                case Filters.SCALEOFFSET -> ScaleOffset.encode(block, scaleOffsetClientData(dataset, filter));
                 case Filters.SZIP -> Szip.encode(block, szipClientData(dataset));
                 default -> throw new IllegalStateException("unknown filter " + filter.id());
             };
@@ -3110,11 +3889,46 @@ public final class Hdf5Writer implements AutoCloseable {
         return bits;
     }
 
+    /**
+     * The szip client data: a dataset of the file's own, or libhdf5's for the dataset's coding, pixels per
+     * block, element size, byte order, and chunk shape ({@code H5Z__set_local_szip}).
+     */
     private static int[] szipClientData(DatasetSpec dataset) {
-        if (dataset.szipClientData != null) {
-            return dataset.szipClientData;
+        int parameter = 0;
+        for (FilterSpec filter : dataset.filters) {
+            if (filter.id() == Filters.SZIP) {
+                if (filter.clientData() != null) {
+                    return filter.clientData();
+                }
+                parameter = filter.parameter();
+            }
         }
-        return Szip.clientData(Szip.EC, SZIP_PIXELS_PER_BLOCK, dataset.elementSize * 8, false, dataset.chunkShape);
+        boolean bigEndian = (dataset.datatype[1] & 0x01) != 0;
+        return Szip.clientData((parameter & SZIP_NN_PARAMETER) != 0 ? Szip.NN : Szip.EC, parameter & 0xFF,
+                dataset.elementSize * 8, bigEndian, dataset.chunkShape);
+    }
+
+    /**
+     * The n-bit client data: a dataset of the file's own, or for a new dataset's unsigned little-endian
+     * integers of {@code precision} bits: total, "no compression needed" (at full precision), elements per
+     * chunk, then the atomic type (class 1, size, byte order 0, precision, offset 0).
+     */
+    private static int[] nbitClientData(DatasetSpec dataset, FilterSpec filter) {
+        if (filter.clientData() != null) {
+            return filter.clientData();
+        }
+        int chunkElements = Math.toIntExact(elementCount(dataset.chunkShape));
+        return new int[] {8, filter.parameter() == dataset.elementSize * 8 ? 1 : 0, chunkElements, 1,
+            dataset.elementSize, 0, filter.parameter(), 0};
+    }
+
+    /** The scale-offset client data: a dataset of the file's own, or libhdf5's for a new integer dataset. */
+    private static int[] scaleOffsetClientData(DatasetSpec dataset, FilterSpec filter) {
+        if (filter.clientData() != null) {
+            return filter.clientData();
+        }
+        return ScaleOffset.integerClientData(Math.toIntExact(elementCount(dataset.chunkShape)), dataset.elementSize,
+                signed(dataset), false, fillBits(dataset));
     }
 
     /**
@@ -3131,20 +3945,14 @@ public final class Hdf5Writer implements AutoCloseable {
                 b.u8(0); // reserved
             }
         }
-        int chunkElements = Math.toIntExact(elementCount(dataset.chunkShape));
         for (FilterSpec filter : dataset.filters) {
             switch (filter.id()) {
                 case Filters.DEFLATE -> writeFilter(b, legacy, Filters.DEFLATE, FILTER_OPTIONAL, filter.parameter());
                 case Filters.SHUFFLE -> writeFilter(b, legacy, Filters.SHUFFLE, FILTER_OPTIONAL, dataset.elementSize);
                 case Filters.FLETCHER32 -> writeFilter(b, legacy, Filters.FLETCHER32, FILTER_MANDATORY);
-                // n-bit client data: total, "no compression needed", nelmts, ATOMIC, size, byte order (0=LE),
-                // precision, offset.
-                case Filters.NBIT -> writeFilter(b, legacy, Filters.NBIT, FILTER_OPTIONAL, 8,
-                        filter.parameter() == dataset.elementSize * 8 ? 1 : 0, chunkElements, 1,
-                        dataset.elementSize, 0, filter.parameter(), 0);
+                case Filters.NBIT -> writeFilter(b, legacy, Filters.NBIT, FILTER_OPTIONAL, nbitClientData(dataset, filter));
                 case Filters.SCALEOFFSET -> writeFilter(b, legacy, Filters.SCALEOFFSET, FILTER_OPTIONAL,
-                        ScaleOffset.integerClientData(chunkElements, dataset.elementSize, signed(dataset), false,
-                                fillBits(dataset)));
+                        scaleOffsetClientData(dataset, filter));
                 case Filters.SZIP -> writeFilter(b, legacy, Filters.SZIP, FILTER_OPTIONAL, szipClientData(dataset));
                 default -> throw new IllegalStateException("unknown filter " + filter.id());
             }
@@ -3163,26 +3971,6 @@ public final class Hdf5Writer implements AutoCloseable {
         b.u16(0);         // bit offset
         b.u16(precision); // bit precision
         return b.toByteArray();
-    }
-
-    /** N-bit encode: pack each element's low {@code precision} bits, MSB-first, from the chunk start. */
-    private static byte[] nbitEncode(byte[] chunk, int elementSize, int precision) {
-        int elements = chunk.length / elementSize;
-        byte[] out = new byte[(elements * precision + 7) / 8];
-        long mask = precision >= 64 ? -1L : (1L << precision) - 1;
-        int bit = 0;
-        for (int i = 0; i < elements; i++) {
-            long value = 0;
-            for (int b = 0; b < elementSize; b++) {
-                value |= (long) (chunk[i * elementSize + b] & 0xff) << (8 * b);
-            }
-            long significant = value & mask;
-            for (int k = precision - 1; k >= 0; k--) {
-                out[bit >> 3] |= (int) ((significant >> k) & 1) << (7 - (bit & 7));
-                bit++;
-            }
-        }
-        return out;
     }
 
     private static void writeFilter(GrowBuffer b, boolean legacy, int id, int flags, int... clientData) {
@@ -3240,8 +4028,11 @@ public final class Hdf5Writer implements AutoCloseable {
         return out.toByteArray();
     }
 
+    /** Layout flag (version 4): partial edge chunks are stored unfiltered. */
+    private static final int DONT_FILTER_PARTIAL_CHUNKS = 0x01;
+
     /** The version-4 chunked data-layout message: chunk dimensions and a fixed-array chunk index. */
-    private static byte[] chunkedLayoutBody(long[] chunkShape, int elementSize, long fixedArrayHeaderAddress) {
+    private static byte[] chunkedLayoutBody(long[] chunkShape, int elementSize, long fixedArrayHeaderAddress, int flags) {
         int rank = chunkShape.length;
         long maxDim = elementSize;
         for (long c : chunkShape) {
@@ -3251,7 +4042,7 @@ public final class Hdf5Writer implements AutoCloseable {
         GrowBuffer b = new GrowBuffer();
         b.u8(4);                     // version 4 (HDF5 1.10+; version 5 is HDF5 2.0-only)
         b.u8(2);                     // layout class: chunked
-        b.u8(0);                     // flags
+        b.u8(flags);                 // flags: partial edge chunks unfiltered
         b.u8(rank + 1);              // dimensionality (chunk dims + element size)
         b.u8(encodedLength);
         for (long c : chunkShape) {
@@ -3296,8 +4087,8 @@ public final class Hdf5Writer implements AutoCloseable {
         return (n + 7) & ~7L;
     }
 
-    private void writeGroupHeader(GrowBuffer buf, List<NamedLink> links,
-                                  List<AttributeSpec> attributes, byte[] linkInfo, byte[] attributeInfo) {
+    private void writeGroupHeader(GrowBuffer buf, List<NamedLink> links, List<AttributeSpec> attributes,
+                                  byte[] linkInfo, byte[] attributeInfo, int referenceCount) {
         List<Message> messages = new ArrayList<>();
         // Links: a Link Info message pointing at dense storage, or an empty one plus compact Link messages.
         messages.add(new Message(2, 0x00, linkInfo != null ? linkInfo : linkInfoBody()));
@@ -3311,22 +4102,31 @@ public final class Hdf5Writer implements AutoCloseable {
             messages.add(new Message(21, 0x00, attributeInfo));
         } else {
             for (AttributeSpec attribute : attributes) {
-                messages.add(new Message(12, 0x00, attributeBody(attribute, false)));
+                messages.add(new Message(12, 0x00, attributeBody(attribute, legacy)));
             }
         }
-        writeObjectHeader(buf, messages, 1);
+        writeObjectHeader(buf, messages, referenceCount);
     }
 
     /** One object-header message (type, flags, and body), framed by the version-specific header writer. */
     private record Message(int type, int flags, byte[] body) {
     }
 
-    /** Writes an object header around {@code messages}: version-2 (checksummed) or version-1 by format. */
+    /**
+     * Writes an object header around {@code messages}: version-2 (checksummed) or version-1 by format, with
+     * the object's hard-link count (in version 2, a Reference Count message when it is more than 1).
+     */
     private void writeObjectHeader(GrowBuffer buf, List<Message> messages, int referenceCount) {
         if (legacy) {
             writeObjectHeaderV1(buf, messages, referenceCount);
         } else {
-            writeObjectHeaderV2(buf, messages);
+            List<Message> all = messages;
+            if (referenceCount > 1) {
+                all = new ArrayList<>(messages);
+                all.add(new Message(0x16, 0x00, new byte[] {0, (byte) referenceCount, (byte) (referenceCount >>> 8),
+                    (byte) (referenceCount >>> 16), (byte) (referenceCount >>> 24)}));
+            }
+            writeObjectHeaderV2(buf, all);
         }
     }
 
@@ -3535,23 +4335,27 @@ public final class Hdf5Writer implements AutoCloseable {
                                                 int infoFlags, int maxCreationIndex) {
         List<byte[]> objects = new ArrayList<>();
         for (ExistingFile.StoredAttribute attribute : attributes) {
-            objects.add(attribute.message());
+            if (attribute.sharedId() == null) {
+                objects.add(attribute.message());
+            }
         }
         FractalHeapWriter.Heap heap = FractalHeapWriter.write(buf, objects, ATTR_HEAP_ID, ATTR_HEAP_BITS);
         List<NameRecord> records = new ArrayList<>();
         List<OrderRecord> ordered = new ArrayList<>();
-        for (int i = 0; i < attributes.size(); i++) {
-            ExistingFile.StoredAttribute attribute = attributes.get(i);
+        int next = 0;
+        for (ExistingFile.StoredAttribute attribute : attributes) {
+            // An attribute in the shared-message table is named by its ID there (its record flagged shared).
+            byte[] id = attribute.sharedId() != null ? attribute.sharedId() : heap.ids().get(next++);
             byte[] name = attribute.name().getBytes(StandardCharsets.UTF_8);
             int hash = Lookup3.hashLittle(name);
             GrowBuffer r = new GrowBuffer();
-            r.bytes(heap.ids().get(i));             // heap id (8)
+            r.bytes(id);                            // heap id (8)
             r.u8(attribute.flags());                // message flags
             r.u32((infoFlags & 0x01) != 0 ? attribute.creationOrder() : 0x0000FFFF); // creation order
             r.u32(hash);                            // name hash
             records.add(new NameRecord(hash, name, r.toByteArray()));
             GrowBuffer o = new GrowBuffer();
-            o.bytes(heap.ids().get(i));
+            o.bytes(id);
             o.u8(attribute.flags());
             o.u32(attribute.creationOrder());
             ordered.add(new OrderRecord(attribute.creationOrder(), o.toByteArray()));
@@ -3879,7 +4683,7 @@ public final class Hdf5Writer implements AutoCloseable {
      * (for the parent's scratch-pad cache and the superblock's root entry).
      */
     private GroupResult writeSymbolTableGroup(GrowBuffer buf, List<SymbolChild> children,
-                                              List<AttributeSpec> attributes) {
+                                              List<AttributeSpec> attributes, int referenceCount) {
         SymbolTable table = writeSymbolTable(buf, children);
         buf.align(8);
         long headerAddress = buf.position();
@@ -3888,8 +4692,8 @@ public final class Hdf5Writer implements AutoCloseable {
         for (AttributeSpec attribute : attributes) {
             messages.add(new Message(12, 0x00, attributeBody(attribute, true)));
         }
-        writeObjectHeader(buf, messages, 1);
-        return new GroupResult(headerAddress, table.btree(), table.heap());
+        writeObjectHeader(buf, messages, referenceCount);
+        return new GroupResult(headerAddress, table.btree(), table.heap(), false);
     }
 
     /** A written symbol table: its group B-tree's root and its local heap. */
@@ -4038,7 +4842,7 @@ public final class Hdf5Writer implements AutoCloseable {
     }
 
     /** The original version-0 superblock: the root group is reached through a symbol-table entry. */
-    private byte[] superblockV0(long rootAddress, long endOfFile) {
+    private byte[] superblockV0(long rootAddress, long base, long endOfFile) {
         GrowBuffer sb = new GrowBuffer();
         sb.bytes(HDF5_SIGNATURE);
         sb.u8(0);   // superblock version
@@ -4052,29 +4856,30 @@ public final class Hdf5Writer implements AutoCloseable {
         sb.u16(groupLeafK);
         sb.u16(groupInternalK);
         sb.u32(0);  // file consistency flags
-        sb.u64(0);          // base address
+        sb.u64(base);       // base address: the superblock's, after a user block
         sb.u64(UNDEFINED);  // free-space info address
-        sb.u64(endOfFile);  // end-of-file address
+        sb.u64(base + endOfFile); // end-of-file address (absolute)
         sb.u64(UNDEFINED);  // driver info block address
         sb.u64(0);              // root symbol-table entry: link name offset
         sb.u64(rootAddress);    // root symbol-table entry: object header address
-        sb.u32(1);              // cache type: group
+        boolean cached = legacyRootBtree != UNDEFINED; // no symbol table to cache in a root of the new format
+        sb.u32(cached ? 1 : 0); // cache type: group
         sb.u32(0);              // reserved
-        sb.u64(legacyRootBtree);// scratch pad: root B-tree
-        sb.u64(legacyRootHeap); // scratch pad: root local heap
+        sb.u64(cached ? legacyRootBtree : 0); // scratch pad: root B-tree
+        sb.u64(cached ? legacyRootHeap : 0);  // scratch pad: root local heap
         return sb.toByteArray();
     }
 
-    private static byte[] superblock(long rootAddress, long endOfFile) {
+    private static byte[] superblock(long rootAddress, long base, long endOfFile) {
         GrowBuffer sb = new GrowBuffer();
         sb.bytes(HDF5_SIGNATURE);
         sb.u8(3);
         sb.u8(8);
         sb.u8(8);
         sb.u8(0);
-        sb.u64(0);
+        sb.u64(base);
         sb.u64(UNDEFINED);
-        sb.u64(endOfFile);
+        sb.u64(base + endOfFile);
         sb.u64(rootAddress);
         sb.u32(Lookup3.hashLittle(sb.toByteArray()));
         return sb.toByteArray();
@@ -4321,6 +5126,7 @@ public final class Hdf5Writer implements AutoCloseable {
         final List<AttributeSpec> attributes = new ArrayList<>();
         final Set<String> attributeNames = new HashSet<>();     // added (or replacing the file's) this session
         final Set<String> deletedAttributes = new HashSet<>();  // the file's, deleted or replaced
+        int hardLinks;                     // an object added: the hard links to it (besides its own)
         private Set<String> fileAttributeNames;
 
         boolean inFile() {
@@ -4333,7 +5139,6 @@ public final class Hdf5Writer implements AutoCloseable {
                 return false;
             }
             if (fileAttributeNames == null) {
-                ExistingFile.requireUnsharedAttributes(object); // its attributes will change: refused now if they cannot
                 fileAttributeNames = new HashSet<>();
                 for (Attribute attribute : object.attributes()) {
                     fileAttributeNames.add(attribute.name());
@@ -4347,7 +5152,7 @@ public final class Hdf5Writer implements AutoCloseable {
         String name = "";
         final List<GroupSpec> groups = new ArrayList<>();       // added, or (in the file) opened
         final List<DatasetSpec> datasets = new ArrayList<>();   // added, or (in the file) opened
-        final List<LinkSpec> links = new ArrayList<>();        // soft and external links
+        final List<LinkSpec> links = new ArrayList<>();        // soft, external, and hard links
         final Set<String> linkNames = new HashSet<>();      // groups and datasets share one namespace
         final Set<String> deletedLinks = new HashSet<>();   // the file's links, deleted
         private Set<String> fileLinkNames;
@@ -4368,7 +5173,7 @@ public final class Hdf5Writer implements AutoCloseable {
     }
 
     private static final class DatasetSpec extends ObjectSpec {
-        final String name;
+        String name;
         final byte[] datatype;
         final int elementSize;
         long[] shape;                   // grows, for a dataset with a larger maximum shape
@@ -4384,7 +5189,6 @@ public final class Hdf5Writer implements AutoCloseable {
         boolean compact;                 // store the element data inline in the object header
         final List<FilterSpec> filters = new ArrayList<>(); // the chunk filter pipeline, in write order
         int nbitPrecision = -1;         // -1 = no n-bit filter
-        int[] szipClientData;           // a dataset of the file: its szip parameters
         long[] fileShape;               // a dataset of the file: its shape there
 
         DatasetSpec(String name, byte[] datatype, int elementSize, long[] shape, long[] chunkShape,
@@ -4410,11 +5214,20 @@ public final class Hdf5Writer implements AutoCloseable {
         }
     }
 
-    /** A soft link (no file), or an external link to {@code target} in {@code file}. */
-    private record LinkSpec(String name, String target, String file) {
+    /**
+     * A link added: soft (to {@code target}, no file), external (to {@code target} in {@code file}), or hard,
+     * to an object added in the session ({@code object}) or to one of the file (its header {@code address}).
+     */
+    private record LinkSpec(String name, String target, String file, ObjectSpec object, long address) {
     }
 
-    /** One filter of a dataset's pipeline: its id and its parameter (deflate level, n-bit precision). */
-    private record FilterSpec(int id, int parameter) {
+    /**
+     * One filter of a dataset's pipeline: its id and its parameter (deflate level, n-bit precision, szip
+     * pixels per block and coding); for a dataset of the file, the client data the file stored for it.
+     */
+    private record FilterSpec(int id, int parameter, int[] clientData) {
+        FilterSpec(int id, int parameter) {
+            this(id, parameter, null);
+        }
     }
 }

@@ -41,4 +41,22 @@ class SzipFilterTest {
         }
         assertTrue(count >= 8, "expected several szip chunk vectors, parsed " + count);
     }
+
+    /** The encoder writes libhdf5 + libaec's chunk for each, byte for byte: EC and NN, both byte orders (P2 WF7). */
+    @Test
+    void encodesSzipChunksAsLibaecDoes() throws IOException {
+        int count = 0;
+        for (String line : AecTest.lines("/fixtures/szip_chunks.txt")) {
+            if (line.isBlank() || line.startsWith("#")) {
+                continue;
+            }
+            String[] p = line.split(" ");
+            int[] cd = {Integer.parseInt(p[0]), Integer.parseInt(p[1]), Integer.parseInt(p[2]), Integer.parseInt(p[3])};
+            byte[] encoded = AecTest.hex(p[4]);
+            byte[] raw = AecTest.hex(p[5]);
+            assertArrayEquals(encoded, Szip.encode(raw, cd), "szip chunk mask=" + cd[0] + " ppb=" + cd[1] + " bpp=" + cd[2]);
+            count++;
+        }
+        assertTrue(count >= 8, "expected several szip chunk vectors, parsed " + count);
+    }
 }

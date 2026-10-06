@@ -155,19 +155,26 @@ class WriteEditTest {
         assertThrows(HdfUnsupportedException.class, () -> Hdf5Writer.open(file));
     }
 
-    /** Writing a dataset whose filter Falcon cannot apply is refused before anything is written. */
+    /**
+     * Writing a dataset whose filter Falcon cannot apply (a third-party one: S8) is refused before anything
+     * is written.
+     */
     @Test
     void refusesDataItCannotFilter() throws IOException {
-        Path file = copy("chunked_data.h5");
+        Path file = copy("plugin_filters.h5");
+        int[] before;
+        try (Hdf5File h5 = Hdf5File.open(file)) {
+            before = h5.root().dataset("lzf_i4").readInts();
+        }
         try (Hdf5Writer w = Hdf5Writer.open(file)) {
-            Hdf5Writer.DatasetWriter so = w.dataset("scaleoffset_i4");
-            assertThrows(HdfUnsupportedException.class, () -> so.write(new long[] {0}, new long[] {1}, new int[] {5}));
-            so.stringAttribute("note", "attributes still change");
+            Hdf5Writer.DatasetWriter lzf = w.dataset("lzf_i4");
+            assertThrows(HdfUnsupportedException.class, () -> lzf.write(new long[] {0}, new long[] {1}, new int[] {5}));
+            lzf.stringAttribute("note", "attributes still change");
         }
         try (Hdf5File h5 = Hdf5File.open(file)) {
-            Dataset so = h5.root().dataset("scaleoffset_i4");
-            assertArrayEquals(range(20), so.readInts());
-            assertEquals("attributes still change", so.attribute("note").orElseThrow().readString());
+            Dataset lzf = h5.root().dataset("lzf_i4");
+            assertArrayEquals(before, lzf.readInts());
+            assertEquals("attributes still change", lzf.attribute("note").orElseThrow().readString());
         }
     }
 
@@ -319,7 +326,7 @@ class WriteEditTest {
 
     /**
      * A file whose objects share messages (SOHM): their data is written (a shared filter pipeline applies),
-     * new objects are added, but attributes kept in the shared-message heap are not changed.
+     * and new objects are added (see {@code WriteEditSharedTest} for the shared attributes).
      */
     @ParameterizedTest
     @ValueSource(strings = {"sohm.h5", "sohm_latest.h5"})
@@ -327,8 +334,6 @@ class WriteEditTest {
         Path file = copy(fixture);
         try (Hdf5Writer w = Hdf5Writer.open(file)) {
             w.dataset("b").write(new long[] {4}, new long[] {2}, new int[] {-4, -5});
-            assertThrows(HdfUnsupportedException.class, () -> w.dataset("a").deleteAttribute("units"));
-            assertThrows(HdfUnsupportedException.class, () -> w.group("group").stringAttribute("t", "x"));
             w.intDataset("added", new int[] {1}, new long[] {1});
             w.group("group").intDataset("inner", new int[] {2}, new long[] {1});
         }

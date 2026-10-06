@@ -223,6 +223,15 @@ public final class ObjectHeaderEditor {
         return 8;
     }
 
+    /** The fewest attributes a version-2 header keeps densely before they go back into it (6 unless it says). */
+    public int minDenseAttributes() {
+        if (version == 2 && (headerFlags & 0x10) != 0) {
+            int at = 6 + ((headerFlags & 0x20) != 0 ? 16 : 0);
+            return u16(chunks.getFirst().image, at + 2);
+        }
+        return 6;
+    }
+
     /** The header's messages, in chunk order: all but null and continuation messages. */
     public List<Message> messages() {
         List<Message> result = new ArrayList<>();
@@ -412,14 +421,50 @@ public final class ObjectHeaderEditor {
         Slot best = null;
         for (Chunk chunk : chunks) {
             for (Slot slot : chunk.slots) {
-                int size = messageHeader + slot.bodySize;
-                if (slot.type == NIL && (size == need || size - need >= messageHeader)
-                        && (best == null || slot.bodySize < best.bodySize)) {
+                if (slot.type == NIL && holds(slot, need) && (best == null || slot.bodySize < best.bodySize)) {
                     best = slot;
                 }
             }
         }
         return best;
+    }
+
+    /**
+     * True if {@code slot} holds {@code need} bytes: exactly, or with room for a null message after them; or
+     * in version 2 with fewer bytes over, which become a gap at the chunk's end ({@code H5O__add_gap}).
+     */
+    private boolean holds(Slot slot, int need) {
+        int size = messageHeader + slot.bodySize;
+        return size == need || size - need >= messageHeader || (version == 2 && size > need);
+    }
+
+    /**
+     * Turns {@code size} bytes at {@code at} in a version-2 chunk, too few for a message, into a gap at the
+     * chunk's end, as libhdf5 does: the messages after them move forward, and the gap joins the chunk's own
+     * (a null message, once there are enough bytes for one).
+     */
+    private void addGap(Chunk chunk, int at, int size) {
+        int tail = at + size; // where the chunk's messages end
+        for (Slot slot : chunk.slots) {
+            tail = Math.max(tail, slot.offset + messageHeader + slot.bodySize);
+        }
+        System.arraycopy(chunk.image, at + size, chunk.image, at, tail - at - size);
+        java.util.Arrays.fill(chunk.image, tail - size, tail, (byte) 0);
+        for (Slot slot : chunk.slots) {
+            if (slot.offset >= at + size) {
+                slot.offset -= size;
+            }
+        }
+        int gap = chunk.end - (tail - size);
+        if (gap >= messageHeader) {
+            Slot nil = new Slot(chunk, tail - size, gap - messageHeader, NIL);
+            chunk.slots.add(nil);
+            clear(nil);
+            chunk.gap = false;
+        } else {
+            chunk.gap = true;
+        }
+        chunk.dirty = true;
     }
 
     /**
@@ -475,9 +520,7 @@ public final class ObjectHeaderEditor {
             // Move the smallest message that leaves room for the continuation message where it was.
             for (Chunk chunk : chunks) {
                 for (Slot slot : chunk.slots) {
-                    int size = messageHeader + slot.bodySize;
-                    if (slot.type != NIL && slot.type != CONTINUATION
-                            && (size == continuation || size - continuation >= messageHeader)
+                    if (slot.type != NIL && slot.type != CONTINUATION && holds(slot, continuation)
                             && (moved == null || slot.bodySize < moved.bodySize)) {
                         moved = slot;
                     }
@@ -521,15 +564,20 @@ public final class ObjectHeaderEditor {
         return target;
     }
 
-    /** Puts a message of {@code need} bytes in the null message {@code slot}; the rest stays null. */
+    /**
+     * Puts a message of {@code need} bytes in the null message {@code slot}; the rest stays null, or (fewer
+     * bytes than a message's header) becomes a gap.
+     */
     private Slot place(Slot slot, int need, int type, int flags, byte[] body, int creationOrder) {
         int size = messageHeader + slot.bodySize;
-        if (size > need) {
+        slot.bodySize = need - messageHeader;
+        if (size - need >= messageHeader) {
             Slot rest = new Slot(slot.chunk, slot.offset + need, size - need - messageHeader, NIL);
             slot.chunk.slots.add(slot.chunk.slots.indexOf(slot) + 1, rest);
             clear(rest);
+        } else if (size > need) {
+            addGap(slot.chunk, slot.offset + need, size - need);
         }
-        slot.bodySize = need - messageHeader;
         frame(slot, type, flags, creationOrder, body);
         return slot;
     }

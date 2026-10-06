@@ -110,7 +110,6 @@ class WriteTypesAndLinksTest {
         }
         try (Hdf5Writer w = Hdf5Writer.create(dir.resolve("old.h5"), Hdf5Writer.Format.EARLIEST)) {
             assertThrows(HdfUnsupportedException.class, () -> w.createDataset("c", Datatype.complexOf(Datatype.float32()), 1));
-            assertThrows(HdfUnsupportedException.class, () -> w.externalLink("e", "other.h5", "/x"));
             w.abort();
         }
     }

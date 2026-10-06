@@ -10,8 +10,8 @@ import java.util.zip.Inflater;
 
 /**
  * Decoders for HDF5's six built-in filters: {@code deflate} (via {@code java.util.zip}),
- * {@code shuffle}, {@code fletcher32} (verified), {@code szip} ({@link Szip}), {@code nbit}, and
- * {@code scaleoffset} ({@link ScaleOffset}); and for the common third-party filters LZF, Blosc, LZ4,
+ * {@code shuffle}, {@code fletcher32} (verified), {@code szip} ({@link Szip}), {@code nbit} ({@link Nbit}),
+ * and {@code scaleoffset} ({@link ScaleOffset}); and for the common third-party filters LZF, Blosc, LZ4,
  * bitshuffle, and Zstandard ({@link ThirdPartyFilters}).
  */
 public final class Filters {
@@ -39,7 +39,7 @@ public final class Filters {
             case FLETCHER32 -> verifyAndStripFletcher32(data);
             case SZIP -> Szip.decode(data, filter.clientData(), maxBytes);
             case SCALEOFFSET -> ScaleOffset.decode(data, filter.clientData(), maxBytes);
-            case NBIT -> nbit(data, filter.clientData(), uncompressedSize);
+            case NBIT -> Nbit.decode(data, filter.clientData(), uncompressedSize);
             case ThirdPartyFilters.LZF, ThirdPartyFilters.BLOSC, ThirdPartyFilters.LZ4, ThirdPartyFilters.BITSHUFFLE,
                  ThirdPartyFilters.ZSTD -> ThirdPartyFilters.decode(filter.id(), filter.clientData(), data, elementSize,
                     uncompressedSize, maxBytes);
@@ -49,89 +49,6 @@ public final class Filters {
 
     /** Headroom over the chunk size for intermediate pipeline stages (scale-offset header, checksums). */
     private static final int DECODE_SLACK = 4096;
-
-    private static final int NBIT_ATOMIC = 1;
-    private static final int NBIT_COMPOUND = 3;
-
-    /**
-     * Decodes an n-bit chunk (filter id 5). The filter drops each element's padding bits, packing only
-     * the {@code precision} significant bits (at bit {@code offset}, MSB-first, from the chunk start);
-     * decoding restores full-width, zero-padded elements in the datatype's byte order. Atomic client
-     * data: {@code [total, flag, nelmts, ATOMIC, size, order, precision, offset]}; compound datatypes
-     * ({@code clientData[3] == 3}) pack each record's atomic members in turn.
-     */
-    private static byte[] nbit(byte[] data, int[] clientData, int uncompressedSize) {
-        if (clientData.length > 1 && clientData[1] == 1) {
-            // "no compression needed": the datatype is already at full precision, so libhdf5 stored the
-            // chunk untouched (H5Z__filter_nbit).
-            return data;
-        }
-        int typeClass = clientData.length > 3 ? clientData[3] : NBIT_ATOMIC;
-        if (typeClass == NBIT_COMPOUND) {
-            return nbitCompound(data, clientData, uncompressedSize);
-        }
-        if (clientData.length < 8 || typeClass != NBIT_ATOMIC) {
-            throw new HdfUnsupportedException("n-bit datatype class " + typeClass + " is not supported");
-        }
-        int size = clientData[4];
-        boolean bigEndian = clientData[5] == 1;
-        int precision = clientData[6];
-        int offset = clientData[7];
-        int elements = uncompressedSize / size;
-
-        byte[] out = new byte[uncompressedSize]; // padding bits stay zero
-        long[] bit = {0};
-        for (int i = 0; i < elements; i++) {
-            unpackMember(data, bit, out, i * size, size, bigEndian, precision, offset);
-        }
-        return out;
-    }
-
-    /**
-     * Decodes a compound n-bit chunk: each record's atomic members are packed in turn, each member's
-     * {@code precision} bits (MSB-first) restored full-width and zero-padded at its byte {@code offset}
-     * within the record. Compound client data: {@code [total, flag, nelmts, COMPOUND, size, member
-     * count]} then, per member, {@code [offset, ATOMIC, size, order, precision, bit offset]}.
-     */
-    private static byte[] nbitCompound(byte[] data, int[] clientData, int uncompressedSize) {
-        int recordSize = clientData[4];
-        int members = clientData[5];
-        int elements = uncompressedSize / recordSize;
-        byte[] out = new byte[uncompressedSize];
-        long[] bit = {0};
-        for (int i = 0; i < elements; i++) {
-            int p = 6;
-            for (int m = 0; m < members; m++) {
-                int memberOffset = clientData[p];
-                if (clientData[p + 1] != NBIT_ATOMIC) {
-                    throw new HdfUnsupportedException("nested n-bit compound members are not supported");
-                }
-                int memberSize = clientData[p + 2];
-                boolean bigEndian = clientData[p + 3] == 1;
-                int precision = clientData[p + 4];
-                int bitOffset = clientData[p + 5];
-                unpackMember(data, bit, out, i * recordSize + memberOffset, memberSize,
-                        bigEndian, precision, bitOffset);
-                p += 6;
-            }
-        }
-        return out;
-    }
-
-    /** Unpacks one atomic member's {@code precision} bits (MSB-first) into {@code out} at {@code base}. */
-    private static void unpackMember(byte[] data, long[] bit, byte[] out, int base, int size,
-                                     boolean bigEndian, int precision, int bitOffset) {
-        long significant = 0;
-        for (int b = 0; b < precision; b++) {
-            significant = (significant << 1) | ((data[(int) (bit[0] >> 3)] >> (7 - (int) (bit[0] & 7))) & 1);
-            bit[0]++;
-        }
-        long value = significant << bitOffset;
-        for (int b = 0; b < size; b++) {
-            int shift = bigEndian ? (size - 1 - b) * 8 : b * 8;
-            out[base + b] = (byte) (value >>> shift);
-        }
-    }
 
     /**
      * Inflates a zlib-wrapped deflate stream (HDF5 {@code deflate} / gzip filter), refusing to produce

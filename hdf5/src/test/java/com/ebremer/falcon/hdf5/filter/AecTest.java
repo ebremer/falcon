@@ -33,6 +33,41 @@ class AecTest {
         assertTrue(decodeVectors("/fixtures/aec_ros_vectors.txt") >= 6, "expected remainder-of-segment vectors");
     }
 
+    /**
+     * The encoder writes libaec's own stream for every vector: the same option per block (zero runs,
+     * splitting with libaec's choice of k, second extension, uncompressed), with and without
+     * preprocessing, signed and unsigned, and a final interval shorter than the rest (P2 WF7).
+     */
+    @Test
+    void encodesLibaecReferenceVectorsByteForByte() throws IOException {
+        assertTrue(encodeVectors("/fixtures/aec_vectors.txt") + encodeVectors("/fixtures/aec_ros_vectors.txt") >= 86);
+    }
+
+    private static int encodeVectors(String resource) throws IOException {
+        int count = 0;
+        for (String line : lines(resource)) {
+            if (line.isBlank() || line.startsWith("#")) {
+                continue;
+            }
+            String[] p = line.split(" ");
+            int bpp = Integer.parseInt(p[0]);
+            int bs = Integer.parseInt(p[1]);
+            int rsi = Integer.parseInt(p[2]);
+            int flags = Integer.parseInt(p[3]);
+            String[] valueStrings = p[5].split(",");
+            long[] values = new long[valueStrings.length];
+            for (int i = 0; i < values.length; i++) {
+                values[i] = Long.parseLong(valueStrings[i]);
+            }
+            byte[] encoded = Aec.encode(values, bpp, bs, rsi, flags);
+            assertArrayEquals(hex(p[4]), encoded, "bpp=" + bpp + " bs=" + bs + " rsi=" + rsi + " flags=" + flags);
+            assertArrayEquals(Aec.decode(hex(p[4]), values.length, bpp, bs, rsi, flags),
+                    Aec.decode(encoded, values.length, bpp, bs, rsi, flags));
+            count++;
+        }
+        return count;
+    }
+
     private static int decodeVectors(String resource) throws IOException {
         int count = 0;
         for (String line : lines(resource)) {

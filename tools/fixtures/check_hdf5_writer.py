@@ -6,7 +6,8 @@ script exports the writer's feature matrix (WriterInteropExport: one file per ar
 Falcon changed in place, plus a manifest of expected values) and reads every object back with h5py --
 HDF5 2.0, and optionally an HDF5 1.14 build in a second interpreter -- decoding szip chunks with libaec
 (h5py ships szip disabled). Each library then changes a copy of every file (an attribute on every object,
-a dataset in every group, a row on every dataset that can grow) and reads it all back.
+a dataset in every group, a row on every dataset that can grow, and the attributes a file's manifest names
+deleted) and reads it all back.
 
     python tools/fixtures/check_hdf5_writer.py                      # export via Maven, check with this python
     python tools/fixtures/check_hdf5_writer.py --python114 PATH     # ...and also with an HDF5 1.14 h5py
@@ -22,8 +23,12 @@ import subprocess
 import sys
 import tempfile
 
-import h5py
-import numpy as np
+# External raw data files are named relative to the HDF5 file that lists them, as Falcon resolves them
+# (set before libhdf5 loads: HDF5 2.0 reads it then).
+os.environ.setdefault("HDF5_EXTFILE_PREFIX", "${ORIGIN}")
+
+import h5py  # noqa: E402
+import numpy as np  # noqa: E402
 
 try:
     import imagecodecs  # libaec, for szip chunks
@@ -85,6 +90,26 @@ def szip_values(ds):
     return out
 
 
+def szip_exact(ds):
+    """Checks every szip chunk is libaec's own coding of its contents: decoded, then encoded again by libaec's
+    SZ layer, it comes back byte for byte (Falcon ports libaec's encoder)."""
+    plist = ds.id.get_create_plist()
+    index = [i for i in range(plist.get_nfilters()) if plist.get_filter(i)[0] == h5py.h5z.FILTER_SZIP][0]
+    cd = plist.get_filter(index)[2]
+    params = dict(options_mask=cd[0], pixels_per_block=cd[1], bits_per_pixel=cd[2], pixels_per_scanline=cd[3],
+                  header=True)
+    for chunk in np.ndindex(*[-(-n // c) for n, c in zip(ds.shape, ds.chunks)]):
+        start = tuple(i * c for i, c in zip(chunk, ds.chunks))
+        mask, raw = ds.id.read_direct_chunk(start)
+        if mask & (1 << index):
+            continue  # stored unfiltered: szip could not shrink it
+        raw = bytes(raw)
+        for f in range(plist.get_nfilters() - 1, index, -1):
+            raise AssertionError(f"a filter after szip ({plist.get_filter(f)[0]})")
+        again = bytes(imagecodecs.szip_encode(imagecodecs.szip_decode(raw, **params), **params))
+        assert again == raw, f"chunk at {start}: libaec codes it in {len(again)} bytes, Falcon in {len(raw)}"
+
+
 def as_text(values):
     return [v.decode("utf-8") if isinstance(v, bytes) else str(v) for v in values]
 
@@ -124,6 +149,8 @@ def check_object(f, obj, changed=False):
     if "refcount" in obj:
         rc = h5py.h5o.get_info(item.id).rc
         assert rc == obj["refcount"], f"reference count {rc} != {obj['refcount']}"
+    if "same_as" in obj:  # a hard link: the same object as at another path
+        assert item == f[obj["same_as"]], f"not the object at {obj['same_as']}"
     for name, expected in obj.get("attr_refs", {}).items():
         names = ref_names(f, item.attrs[name])
         assert names == expected, f"attribute {name} references {names} != {expected}"
@@ -172,6 +199,8 @@ def check_object(f, obj, changed=False):
                 assert seconds == obj["time"], f"time {seconds} != {obj['time']}"
             return
         data = szip_values(item) if obj.get("szip") else item[()]
+        if obj.get("szip_exact") and not changed:
+            szip_exact(item)
         if "values" in obj:
             expected = obj["values"]
             flat = np.asarray(data).ravel()
@@ -223,6 +252,14 @@ def check(directory):
             print(f"skip  {entry['file']}: needs HDF5 {entry['min_hdf5']}")
             continue
         path = os.path.join(directory, entry["file"])
+        if entry.get("refused"):  # a change interrupted, its superblock marked as open by a writer
+            try:
+                h5py.File(path, "r").close()
+                print(f"FAIL  {entry['file']}: libhdf5 opened a file marked as open by a writer")
+                failures += 1
+            except OSError:
+                checked += 1
+            continue
         try:
             f = h5py.File(path, "r")
         except Exception as e:  # noqa: BLE001 - report every kind of failure
@@ -230,6 +267,16 @@ def check(directory):
             failures += 1
             continue
         with f:
+            block = entry.get("userblock")
+            if block:  # the user block: its size, and the bytes the application gave
+                try:
+                    assert f.userblock_size == block["size"], f"user block of {f.userblock_size} bytes"
+                    with open(path, "rb") as raw:
+                        head = raw.read(len(block["hex"]) // 2).hex()
+                    assert head == block["hex"], "the user block's bytes differ"
+                except Exception as e:  # noqa: BLE001
+                    print(f"FAIL  {entry['file']}: {e}")
+                    failures += 1
             visited = []
             try:  # walk every link (names only: some objects may need a newer library to open)
                 f.visit(visited.append)
@@ -263,28 +310,39 @@ def change(directory, manifest):
     changed = 0
     scratch = tempfile.mkdtemp(prefix="falcon-interop-changed-")
     for entry in manifest["files"]:
-        if not supported(entry):
+        if not supported(entry) or entry.get("refused"):
             continue
         objects = [o for o in entry["objects"]
                    if not (o.get("min_hdf5") and hdf5_version() < tuple(int(p) for p in o["min_hdf5"].split(".")))
                    and not (o.get("szip") and imagecodecs is None)]
         path = os.path.join(scratch, entry["file"])
         shutil.copy(os.path.join(directory, entry["file"]), path)
+        for companion in entry.get("companions", []):  # its external raw data files
+            shutil.copy(os.path.join(directory, companion), os.path.join(scratch, companion))
         grown = {}
         try:
             with h5py.File(path, "r+") as f:
+                seen = set()  # an object reached by several hard links is changed once
                 for name in dict.fromkeys(o["path"] for o in objects):
                     item = f[name]
+                    if item.id in seen:
+                        continue
+                    seen.add(item.id)
                     item.attrs["_libhdf5"] = np.int32(1)
+                    for attr in next(o for o in objects if o["path"] == name).get("libhdf5_delete_attrs", []):
+                        del item.attrs[attr]  # through the shared-message index Falcon left, if it is shared
                     if isinstance(item, h5py.Group):
                         item.create_dataset("_libhdf5_data", data=np.arange(3, dtype="i4"))
-                    elif item.chunks is not None and item.maxshape and item.maxshape[0] is None:
+                    elif (item.chunks is not None and item.maxshape and item.maxshape[0] is None
+                          and not next(o for o in objects if o["path"] == name).get("libhdf5_no_grow")):
                         grown[name] = item.shape[0]
                         item.resize(item.shape[0] + 1, axis=0)
             with h5py.File(path, "r") as f:
                 for obj in objects:
                     item = f[obj["path"]]
                     assert item.attrs["_libhdf5"] == 1, "libhdf5's attribute is missing"
+                    for attr in obj.get("libhdf5_delete_attrs", []):
+                        assert attr not in item.attrs, f"libhdf5 deleted attribute {attr}, still there"
                     if obj["kind"] == "group":
                         assert list(item["_libhdf5_data"][()]) == [0, 1, 2], "libhdf5's dataset is missing"
                     if obj["path"] in grown:

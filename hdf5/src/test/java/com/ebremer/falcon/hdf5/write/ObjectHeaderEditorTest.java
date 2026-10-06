@@ -127,6 +127,30 @@ class ObjectHeaderEditorTest {
         assertArrayEquals(new byte[24], reloaded.find(1).body());
     }
 
+    /**
+     * A message moved out for the continuation message, larger than it by less than a message header: the
+     * bytes left over become a gap at the chunk's end, the messages after them moving forward (libhdf5's
+     * {@code H5O__add_gap}).
+     */
+    @Test
+    void bytesTooFewForAMessageBecomeAGapAtTheChunksEnd() {
+        byte[] header = headerV2(List.of(messageV2(2, new byte[18]), messageV2(10, new byte[2]), messageV2(6, new byte[8])), 0);
+        ObjectHeaderEditor editor = load(header);
+        editor.add(6, 0, new byte[9]);
+        byte[] file = apply(header, editor);
+        ObjectHeaderEditor reloaded = load(file);
+        assertEquals(List.of(10, 6, 2, 6), types(reloaded), "the link info message moved to the new chunk");
+        assertArrayEquals(new byte[18], reloaded.find(2).body());
+        int end = 7 + (file[6] & 0xff);
+        assertEquals(Lookup3.hashLittle(Arrays.copyOf(file, end)), (int) u32(file, end));
+        // chunk 0: the continuation message (where the link info was), then the two messages moved forward,
+        // then the 2-byte gap
+        assertEquals(0x10, file[7]);
+        assertEquals(10, file[7 + 20]);
+        assertEquals(6, file[7 + 20 + 6]);
+        assertEquals(end - 2, 7 + 20 + 6 + 12);
+    }
+
     @Test
     void replacingKeepsTheSlotOfAMessageOfTheSameSize() {
         byte[] header = headerV2(List.of(messageV2(2, new byte[18]), messageV2(0, new byte[40])), 0);

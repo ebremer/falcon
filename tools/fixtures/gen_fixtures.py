@@ -1593,6 +1593,57 @@ def build_external_paths(out):
         f.create_virtual_dataset("v", layout, fillvalue=-1)
 
 
+def build_partial_edges(f):
+    """Datasets that store their partial edge chunks unfiltered (H5D_CHUNK_DONT_FILTER_PARTIAL_CHUNKS), in
+    the indexes libhdf5 gives them: a fixed array (fixed size, 1-D and 2-D) and an extensible array (one
+    unlimited dimension) -- which Falcon keeps, or filters, when it writes into them (P2 WF10)."""
+    import ctypes
+    lib = _hdf5_library()
+    if lib is None:
+        raise RuntimeError("cannot locate h5py's libhdf5 for H5Pset_chunk_opts")
+    for name, shape, maxshape, chunk, shuffle in ((b"fixed", (10,), (10,), (4,), False),
+                                                  (b"grows", (10,), (h5py.h5s.UNLIMITED,), (4,), False),
+                                                  (b"plane", (5, 7), (5, 7), (2, 3), True)):
+        dc = h5py.h5p.create(h5py.h5p.DATASET_CREATE)
+        dc.set_chunk(chunk)
+        if shuffle:
+            dc.set_shuffle()
+        dc.set_deflate(4)
+        if lib.H5Pset_chunk_opts(ctypes.c_int64(dc.id), ctypes.c_uint(0x0002)) < 0:
+            raise RuntimeError("H5Pset_chunk_opts failed")
+        d = h5py.h5d.create(f.id, name, h5py.h5t.py_create(np.dtype("<i4")), h5py.h5s.create_simple(shape, maxshape), dc)
+        d.write(h5py.h5s.ALL, h5py.h5s.ALL, np.arange(int(np.prod(shape)), dtype="<i4").reshape(shape))
+        d.close()
+
+
+def build_sohm_btree(path):
+    """Attributes in the shared-message heap indexed by a version-2 B-tree (the list's cutoff set to 3, so
+    seven shared attributes pass it), one of them shared by two datasets; and in a second index, the
+    dataspaces and datatypes of three datasets that can grow (the first keeps its own copy, marked
+    shareable; the others share the heap's)."""
+    lib = _hdf5_library()
+    fcpl = h5py.h5p.create(h5py.h5p.FILE_CREATE)
+    if lib.H5Pset_shared_mesg_nindexes(ctypes.c_int64(fcpl.id), ctypes.c_uint(2)) < 0:
+        raise RuntimeError("H5Pset_shared_mesg_nindexes failed")
+    for index, flags in enumerate((SHMESG_ATTR, SHMESG_SDSPACE | SHMESG_DTYPE)):
+        if lib.H5Pset_shared_mesg_index(ctypes.c_int64(fcpl.id), ctypes.c_uint(index), ctypes.c_uint(flags),
+                                        ctypes.c_uint(0)) < 0:
+            raise RuntimeError("H5Pset_shared_mesg_index failed")
+    if lib.H5Pset_shared_mesg_phase_change(ctypes.c_int64(fcpl.id), ctypes.c_uint(3), ctypes.c_uint(2)) < 0:
+        raise RuntimeError("H5Pset_shared_mesg_phase_change failed")
+    fapl = h5py.h5p.create(h5py.h5p.FILE_ACCESS)
+    fapl.set_libver_bounds(h5py.h5f.LIBVER_LATEST, h5py.h5f.LIBVER_LATEST)
+    fid = h5py.h5f.create(path.encode(), h5py.h5f.ACC_TRUNC, fcpl=fcpl, fapl=fapl)
+    with h5py.File(fid) as f:
+        g = f.create_group("g")
+        for i in range(6):
+            g.attrs["u%d" % i] = np.int32(100 + i)
+        for name in ("d1", "d2"):
+            f.create_dataset(name, data=np.arange(3, dtype="i4")).attrs["same"] = np.int32(7)
+        for name in ("e1", "e2", "e3"):
+            f.create_dataset(name, data=np.arange(4, dtype="i4"), chunks=(2,), maxshape=(None,))
+
+
 # name -> builder; `python gen_fixtures.py NAME ...` regenerates just those fixtures.
 def build_tracked_order(f):
     """Groups and objects that track creation order (h5py's track_order): links and attributes, compact
@@ -1646,6 +1697,8 @@ FIXTURES = {
     "paths": lambda: build_paths(OUT),
     "tracked_order": lambda: (_with_file("tracked_order.h5", build_tracked_order, libver="latest"),
                               _with_file("tracked_order_old.h5", build_tracked_order)),
+    "partial_edges": lambda: _with_file("partial_edges.h5", build_partial_edges, libver="latest"),
+    "sohm_btree": lambda: build_sohm_btree(os.path.join(OUT, "sohm_btree.h5")),
 }
 
 

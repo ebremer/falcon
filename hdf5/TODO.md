@@ -1,10 +1,10 @@
 # Falcon HDF5 — remaining work (prioritized)
 
-**Status (2026-10-05, after P2 S1–S7, A1–A12, PF1–PF4, WF1–WF6, WF8, and WF9):** build green, **743 HDF5
-tests** (144 at the review, 187 after the top 10, 206 after P0, 228 after P1, 243 after S1–S3, 256 after
-S4–S7, 439 after A2–A6, 610 after PF1–PF4, 677 after A1–A10, 692 after A11–A12, 707 after WF1–WF4), plus
-38 in the `core` module. The review's top 10, every P1 item, **P2 S1–S7**, **A1–A12**, **PF1–PF4**,
-**WF1–WF6**, **WF8**, **WF9**, and the P0 zstd fix (Z6/Z7, in `core`) are done (see *Done* at the end).
+**Status (2026-10-05, after P2 S1–S7, A1–A12, PF1–PF4, and WF1–WF10):** build green, **782 HDF5 tests**
+(144 at the review, 187 after the top 10, 206 after P0, 228 after P1, 243 after S1–S3, 256 after S4–S7,
+439 after A2–A6, 610 after PF1–PF4, 677 after A1–A10, 692 after A11–A12, 707 after WF1–WF4, 743 after
+WF5–WF9), plus 38 in the `core` module. The review's top 10, every P1 item, **P2 S1–S7**, **A1–A12**,
+**PF1–PF4**, **WF1–WF10**, and the P0 zstd fix (Z6/Z7, in `core`) are done (see *Done* at the end).
 Falcon now:
 
 - reads the files the review showed it misreading:
@@ -42,11 +42,16 @@ Falcon now:
   - virtual-dataset selections read only the parts of the sources they map to;
   - names are found through the name indexes (see `BENCHMARKS.md`);
 - writes files that **HDF5 2.0 and 1.14 read, and change**, checked by `tools/fixtures/check_hdf5_writer.py`.
-  The final run read 246/246 objects with HDF5 2.0 and 226/226 with 1.14.6. Each library then changed every
-  file (an attribute on every object, a dataset in every group, a row on every growable dataset) and read
-  it all back. The P0 edge-case files written by the previous writer fail 19 objects under each version.
+  The final run read 341/341 objects with HDF5 2.0 and 296/296 with 1.14.6. Each library then changed every
+  file (an attribute on every object, a dataset in every group, a row on every growable dataset, the
+  shared attributes a file names deleted) and read it all back; each refused a change left interrupted.
+  The P0 edge-case files written by the previous writer fail 19 objects under each version.
 - changes existing files in place (`Hdf5Writer.open`), its own and libhdf5's, in either format: adds
-  objects, writes into datasets, deletes links and attributes;
+  objects, writes into datasets through every built-in filter as libhdf5 encodes it, hard-links, moves and
+  deletes links, changes attributes (in the shared-message table too), through a journal that redoes an
+  interrupted change;
+- writes szip's nearest-neighbour coding, its encoder a port of libaec's (byte for byte its output), and
+  user blocks;
 - streams what it writes: raw data goes to the file as it is written, so files may pass 2 GB and memory;
   datasets grow (`maxShape`, `append`), and any datatype is written (`createDataset`), with soft and
   external links, and object and region references anywhere (chunks, attributes);
@@ -58,6 +63,32 @@ Falcon now:
   default, and supports concurrent reads of one open file.
 
 P0 and P1 are empty. What remains is features and API (P2) and docs and build (P3).
+
+**Behaviour and API changes in P2 WF7, WF10** (pre-1.0):
+- **New API:**
+  - `Hdf5Writer.create(path, format, userBlock)`: a file that starts with a user block.
+  - `DatasetWriter.szip(SzipCoding, pixelsPerBlock)` and the `Hdf5Writer.SzipCoding` enum (`ENTROPY`,
+    `NEAREST_NEIGHBOUR`); `szip()` is `szip(ENTROPY, 8)`.
+  - `GroupWriter.hardLink(name, targetPath)` and `move(name, newPath)`, and their root delegates.
+- **szip chunks are libaec's** (zero-block runs, the second extension, its choice of `k`): smaller than
+  before for runs of zeros and small values. A big-endian dataset's szip client data now names its byte
+  order (MSB), as libhdf5's does; it named LSB.
+- **n-bit chunks** are libhdf5's size (the significant bits rounded down to whole bytes, plus one): one
+  byte more than before when they end on a byte boundary.
+- **The earliest format** writes external links: a group holding one is written in the new format (link
+  messages in its version-1 header), as libhdf5 converts it. `externalLink` threw.
+- **Changing a file** (`open`):
+  - writes into datasets filtered with n-bit, scale-offset, or szip's nearest-neighbour coding, datasets
+    whose partial edge chunks are stored unfiltered, and data in external raw files; it threw;
+  - changes attributes kept in the shared-message table; it threw;
+  - adds external links to (and moves them into) groups of the original format, converting them; it
+    threw;
+  - returns links or attributes shrunk below the minimum for dense storage (6) to compact messages;
+  - opens an object reached by several hard links once, whichever link reaches it;
+  - journals `close()`'s writes over the file: a `close()` that fails while making them is redone by a
+    retry, or by the next `open`, and `abort()` after one keeps the journal. A version-3 superblock is
+    marked as open by a writer while they are made.
+- `GroupWriter.dataset(name)` also opens a dataset reached by a hard link added in the session.
 
 **Behaviour and API changes in P2 WF5, WF6, WF8, WF9** (pre-1.0):
 - **New: `Hdf5Writer.open(path)`** changes an existing file in place.
@@ -261,14 +292,13 @@ review baseline. Abbreviations: `W` = `Hdf5Writer.java`; other paths are under
    New plugins need Erich's approval.
 3. **PF5 — chunk lookups without reading the whole index,** for very large or remote datasets.
 4. **S8 — writing the third-party filters,** whose encoders core partly has. It would also let `open()`
-   write into datasets so filtered.
-5. **WF10 — what changing a file still refuses:** datasets filtered with scale-offset, n-bit, or a
-   third-party filter; attributes in the shared-message table; hard links to existing objects, and renames.
-6. **PF8 — selected elements copied a run at a time,** not one by one.
-7. **PF6/PF7 — per-file object caches, and virtual mappings that scatter.**
-8. **D4 — Javadoc lint.**
-9. **WF7 — lower-priority writer options:** a user block, szip's better-ratio modes.
-10. **S9 — more registered filters:** Blosc2, bzip2, ZFP, SZ.
+   write into datasets so filtered, the last filters it refuses.
+5. **PF8 — selected elements copied a run at a time,** not one by one.
+6. **PF6/PF7 — per-file object caches, and virtual mappings that scatter.**
+7. **D4 — Javadoc lint.**
+8. **S9 — more registered filters:** Blosc2, bzip2, ZFP, SZ.
+9. **B3 — housekeeping:** committed `__pycache__`.
+10. **WF11 — writing through virtual datasets,** into their sources (low priority).
 
 ---
 
@@ -298,24 +328,21 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
 
 ### Write features & API
 
-- WF1–WF6, WF8, and WF9 are done (see *Done — 2026-10-05 (P2: WF5, WF6, WF8, WF9)* and *(P2: WF1–WF4)*).
-  Still open around them:
-  - [ ] **WF10 — what changing a file (`open`) still refuses or leaves:**
-    - writing into datasets filtered with scale-offset, n-bit, szip's nearest-neighbour coding, or a
-      third-party filter (S8 would supply the encoders), datasets whose partial edge chunks are stored
-      unfiltered, virtual datasets, and data in external files;
-    - changing attributes kept in the shared-message table (SOHM), and external links in groups of the
-      original format;
-    - new API: hard links to existing objects, and renaming or moving links;
-    - space freed by deletions is not reused, and a dense set shrunk below its minimum stays dense
-      (libhdf5 would make it compact again); `h5repack` reclaims both;
-    - there is no journal: a crash while `close()` writes the changed headers can leave some applied.
-- [ ] **WF7 — lower-priority options:**
-  - a user-block option;
-  - szip better-ratio modes (NN preprocessing, zero-block, second extension) — carried over;
-  - ~~sort EARLIEST symbol tables by UTF-8 bytes (`strcmp`), not UTF-16~~ — done in PF3, which looks
-    names up by that order;
-  - ~~set the UTF-8 cset on link and attribute names~~ — done in the P0 pass (LATEST format).
+- WF1–WF10 are done (see *Done — 2026-10-05 (P2: WF7, WF10)*, *(P2: WF5, WF6, WF8, WF9)* and
+  *(P2: WF1–WF4)*). Still open around them:
+  - [ ] **WF11 — writing through virtual datasets.** `open()` refuses to write into a virtual dataset:
+    it is a view of other datasets, often in other files, so a write would go to their sources (libhdf5's
+    `H5Dwrite` on a VDS does, refusing elements no mapping covers). Writing the sources directly works.
+    Low priority.
+  - Third-party filters, for writing into datasets so filtered: S8.
+  - **Not planned: reusing space a session frees** (a deleted object's, a replaced attribute's, an old
+    symbol table's). A session writes only after the file's end until `close()`, which is what lets
+    `abort()` and a crash before `close()` leave the file as it was, and the journal stay small; libhdf5
+    does not reuse such space across sessions either. `h5repack` reclaims it.
+  - **Seen in libhdf5 (1.14.6 and 2.0):** resizing a dataset whose dataspace is shared in the
+    shared-message table corrupts an object header ("message size exceeds buffer end" / "bad flag
+    combination for message"), in a file libhdf5 alone wrote. Falcon gives such a dataset its own dataspace
+    when it grows one, so libhdf5 can resize it afterwards.
 
 ### Performance
 
@@ -369,6 +396,9 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
     value table, growing datasets, typed and string attributes, links, and region references.
   - **Also done (P2 WF5, WF6, WF8, WF9):** changing a file in place (what it changes, what it refuses,
     what `abort()` undoes), references anywhere, and when data given whole is written.
+  - **Also done (P2 WF7, WF10):** szip's codings, user blocks, hard links and moves, the earliest format's
+    external links, and changing a file further (filters with parameters, shared attributes, external raw
+    data, the journal).
 - [ ] **D3 — PLAN.md is stale.**
   - §6 lists the non-existent `dataspace` and `util` packages, omits `data`, `index`, and `group`, and
     says only one package is exported (`datatype` is exported too).
@@ -421,6 +451,85 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
     (`tools/fixtures/gen_zstd_corrupt_vectors.py` → `zstd_corrupt_vectors.txt`): mutations, several
     frames, skippable frames, and trailing data. The old decoder fails 137 of them.
   - The core fuzzer: 1.5M further mutated frames threw only typed exceptions.
+
+## Done — 2026-10-05 (P2: WF7, WF10)
+
+- [x] **WF7 — szip's better-ratio modes, and a user block.**
+  - **szip:** `filter.Aec.encode` is now a port of libaec's encoder (`encode.c`), so its stream is
+    libaec's, byte for byte:
+    - nearest-neighbour preprocessing (a reference sample per interval, then mapped differences), signed
+      and unsigned;
+    - zero-block runs, ended at a 64-block segment or the interval's end ("remainder of segment");
+    - the second extension, sample splitting with libaec's search for `k` (carried from block to block),
+      and uncompressed blocks, chosen as libaec chooses, in its 64-bit arithmetic;
+    - a final, shorter interval padded with its last sample.
+
+    `Szip.encode` pads scanlines as libaec's SZ layer does (the last pixel repeated under
+    nearest-neighbour coding). `DatasetWriter.szip(SzipCoding, pixelsPerBlock)` writes either coding,
+    blocks of 2 to 32.
+  - **User block:** `Hdf5Writer.create(path, format, userBlock)`: the bytes, zero-padded to 512, 1024,
+    ...; the superblock's base address is where it is, and its end-of-file address absolute, as libhdf5
+    writes them. A block holding the HDF5 signature where readers look for one is refused.
+  - **Tests:** `AecTest.encodesLibaecReferenceVectorsByteForByte` (all 122 libaec vectors: signed, unsigned,
+    preprocessed, 8 to 32 bits, remainder of segment); `SzipFilterTest.encodesSzipChunksAsLibaecDoes`;
+    `WriteFilterConformanceTest` (every szip chunk of `szip.h5`, re-encoded, is libhdf5's);
+    `WriteEditFiltersTest.writesSzipNearestNeighbour` and `writesAUserBlock` (both formats),
+    `refusesAUserBlockThatLooksLikeHdf5`.
+- [x] **WF10 — what changing a file refused or left.**
+  - **Filters with parameters of their own:** a dataset of the file keeps the client data libhdf5 stored,
+    and its chunks are encoded with it:
+    - n-bit (new `filter.Nbit`): libhdf5's whole datatype description (atomic, array, compound, no-op
+      types, nested), both ways, so the reader also decodes arrays and nested compounds now; its index
+      walk is libhdf5's, quirk included (after an array of arrays or compounds it stays at the base type);
+    - scale-offset (`ScaleOffset.encode`): integers of fixed or automatic minbits, and decimal-scaled
+      floats, in libhdf5's float or double arithmetic, with fill values, in either byte order;
+    - szip of either coding (WF7).
+
+    All three re-encode every chunk of libhdf5's fixtures byte for byte (`WriteFilterConformanceTest`).
+  - **Partial edge chunks stored unfiltered** stay so under a fixed-array index (whose version-4 layout
+    keeps the flag); under a version-1 B-tree (a dataset that can grow) every chunk is filtered, and
+    chunks that stop being partial are filtered, as libhdf5 filters them when a dataset grows.
+  - **External raw data** is written into its files' slots, the files found as the reader finds them
+    (under its access policy), created if missing as libhdf5 creates them.
+  - **Shared-message table (new `SharedMessages`):** an attribute kept there, deleted or replaced (in a
+    header or in dense storage), is released: its count drops, and at 0 its record leaves the index (a
+    list rewritten in place, a B-tree written anew; the table's count updated). Shared attributes are
+    kept by their heap IDs when an object's attributes are rewritten, compact or dense. A dataset that
+    grows gets its own dataspace message: a shared one (in the heap) is released by its ID, a shareable
+    one kept in its header by its encoding's hash, as libhdf5 finds it.
+  - **Links:** the layout now writes each object once, where its first link reaches it, with paths
+    resolved through the session's tree (and the file's links), so:
+    - `hardLink(name, targetPath)` names an existing object again (cycles included, laid out twice and
+      checked); counts are kept: a Reference Count message (or the version-1 prefix) for new objects, the
+      header's count for the file's;
+    - `move(name, newPath)` moves or renames a link, a group's contents going with it;
+    - a link deleted leaves its object to its other links; an object of the file opened is written
+      however it is reached.
+  - **External links in groups of the original format** convert the group, as `H5G_obj_insert` does: its
+    entries and new links become Link messages (dense beyond 8), with Link Info and Group Info, in place
+    of its Symbol Table message; the root's superblock entry then caches no table. New files in the
+    earliest format do the same.
+  - **Dense back to compact:** links or attributes shrunk below the minimum for dense storage (6, or the
+    object's own) go back into the header, the info message pointing at no heap.
+  - **Object headers:** bytes left over, too few for a message, become a gap at the chunk's end, the
+    messages after them moving forward (`H5O__add_gap`), so a small header can still make room.
+  - **The journal:** `close()` writes, after the new metadata, a redo journal of every write it will make
+    over the file (the superblock, changed headers, shared-message indexes) with a trailer at the file's
+    end, flushes it all, then makes the writes and cuts the journal off. A version-3 superblock is marked as
+    open by a writer meanwhile (as libhdf5 marks it). `Hdf5Writer.open` redoes a journal it finds; a
+    retried `close()` redoes its own; `abort()` after a failed `close()` keeps it.
+  - **Tests:** `WriteEditFiltersTest` (szip, scale-offset, n-bit, partial edge chunks, external raw data),
+    `WriteLinksEditTest` (10: hard links and cycles, moves and renames, conversions, dense shrinking,
+    in new files and in libhdf5's), `WriteEditSharedTest` (3: lists and B-tree indexes, shared and
+    shareable dataspaces), `WriteJournalTest` (5: interrupted changes redone by `open` and by a retried
+    `close`, a version-3 superblock marked meanwhile, a journal cut short ignored), and
+    `ObjectHeaderEditorTest.bytesTooFewForAMessageBecomeAGapAtTheChunksEnd`.
+- **Verified by libhdf5:** `WriterInteropExport` gained `szip_nn.h5` (both formats, every chunk
+  re-encoded by libaec to the same bytes), `userblock.h5` (both), `hard_links.h5` (both), and edited
+  copies of libhdf5's szip, scale-offset, n-bit, partial-edge, group, external-data, dense and SOHM
+  fixtures, plus an interrupted change (refused) and one redone. In the change pass libhdf5 also deletes
+  the shared attributes a file names, through the indexes Falcon left. HDF5 2.0 read 341/341 objects and
+  1.14.6 296/296; each changed every file and read it back.
 
 ## Done — 2026-10-05 (P2: WF5, WF6, WF8, WF9)
 

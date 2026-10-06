@@ -84,26 +84,25 @@ public final class Szip {
     }
 
     /**
-     * Encodes one chunk as libhdf5 + libaec would read it, or returns {@code null} if the coded form is
-     * larger than the input (libhdf5 then stores the chunk unfiltered and sets its filter-mask bit).
-     * Falcon's coder uses entropy coding without nearest-neighbour preprocessing, so {@code cd} must
-     * select {@link #EC} coding.
+     * Encodes one chunk as libhdf5 + libaec do ({@code SZ_BufftoBuffCompress}), byte for byte, with or
+     * without nearest-neighbour preprocessing ({@link #NN} in {@code cd}); or returns {@code null} if the
+     * coded form is larger than the input (libhdf5 then stores the chunk unfiltered and sets its filter-mask
+     * bit).
      */
     public static byte[] encode(byte[] chunk, int[] cd) {
         Params p = Params.of(cd);
-        if ((p.mask & NN) != 0) {
-            throw new IllegalArgumentException("Falcon's szip encoder writes entropy coding (EC) only");
-        }
+        boolean preprocess = (p.mask & NN) != 0;
         byte[] source = p.interleave ? interleave(chunk, p.bitsPerPixel / 8) : chunk;
         int lineBytes = p.pixelsPerScanline * p.pixelSize;
         int paddedLineBytes = p.rsi * p.pixelsPerBlock * p.pixelSize;
-        byte[] padded = addPadding(source, lineBytes, paddedLineBytes);
+        byte[] padded = addPadding(source, lineBytes, paddedLineBytes, p.pixelSize, preprocess);
         boolean msb = (p.mask & MSB) != 0;
         long[] samples = new long[padded.length / p.pixelSize];
         for (int i = 0; i < samples.length; i++) {
             samples[i] = getSample(padded, i * p.pixelSize, p.pixelSize, msb);
         }
-        byte[] coded = Aec.encode(samples, p.bitsPerSample, p.pixelsPerBlock);
+        byte[] coded = Aec.encode(samples, p.bitsPerSample, p.pixelsPerBlock, p.rsi,
+                preprocess ? Aec.FLAG_PREPROCESS : 0);
         if (coded.length > chunk.length) {
             return null;
         }
@@ -173,13 +172,24 @@ public final class Szip {
         }
     }
 
-    /** Pads each {@code lineBytes} scanline (the last one too) with zeros to {@code paddedLineBytes}. */
-    private static byte[] addPadding(byte[] source, int lineBytes, int paddedLineBytes) {
+    /**
+     * libaec {@code add_padding}: pads each {@code lineBytes} scanline (the last one too, however short) to
+     * {@code paddedLineBytes}, with zeros, or under nearest-neighbour preprocessing with its last pixel.
+     */
+    private static byte[] addPadding(byte[] source, int lineBytes, int paddedLineBytes, int pixelSize,
+                                     boolean repeatLast) {
         int lines = (source.length + lineBytes - 1) / lineBytes;
         byte[] out = new byte[lines * paddedLineBytes];
         for (int line = 0; line < lines; line++) {
             int from = line * lineBytes;
-            System.arraycopy(source, from, out, line * paddedLineBytes, Math.min(lineBytes, source.length - from));
+            int length = Math.min(lineBytes, source.length - from);
+            int to = line * paddedLineBytes;
+            System.arraycopy(source, from, out, to, length);
+            if (repeatLast) {
+                for (int at = to + length; at < to + paddedLineBytes; at += pixelSize) {
+                    System.arraycopy(source, from + length - pixelSize, out, at, pixelSize);
+                }
+            }
         }
         return out;
     }

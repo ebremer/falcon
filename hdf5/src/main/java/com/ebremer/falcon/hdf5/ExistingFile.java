@@ -6,6 +6,7 @@ import com.ebremer.falcon.hdf5.group.SymbolTableEntry;
 import com.ebremer.falcon.hdf5.header.HeaderMessage;
 import com.ebremer.falcon.hdf5.header.MessageType;
 import com.ebremer.falcon.hdf5.header.ObjectHeader;
+import com.ebremer.falcon.hdf5.header.SharedMessage;
 import com.ebremer.falcon.hdf5.heap.FractalHeap;
 import com.ebremer.falcon.hdf5.heap.LocalHeap;
 import com.ebremer.falcon.hdf5.io.FileContext;
@@ -19,9 +20,10 @@ import java.util.Arrays;
 import java.util.List;
 
 /**
- * An existing file an {@link Hdf5Writer} changes in place (P2 WF6): read through Falcon's reader, which
+ * An existing file an {@link Hdf5Writer} changes in place (P2 WF6, WF10): read through Falcon's reader, which
  * gives its superblock and what its groups and objects hold, as the raw messages the writer copies when it
- * rebuilds a group's links or an object's attributes.
+ * rebuilds a group's links or an object's attributes (those kept in the shared-message table named by their
+ * heap IDs there).
  *
  * <p>Only files the writer can change safely open: 8-byte addresses and lengths, the default file
  * driver, no persistent free-space tracking or paged allocation (which keep their own record of the
@@ -129,16 +131,6 @@ final class ExistingFile implements AutoCloseable {
         return Hdf5Object.classify(ctx, name, parentPath, address);
     }
 
-    /** The object header address of the object at absolute path {@code path}, if it resolves. */
-    java.util.OptionalLong address(String path) {
-        if (path.equals("/")) {
-            return java.util.OptionalLong.of(rootAddress);
-        }
-        return file.root().child(path.substring(1))
-                .map(object -> java.util.OptionalLong.of(object.objectHeaderAddress()))
-                .orElse(java.util.OptionalLong.empty());
-    }
-
     /** The parsed header at {@code address}. */
     ObjectHeader header(long address) {
         return ObjectHeader.parse(ctx, address);
@@ -212,53 +204,60 @@ final class ExistingFile implements AutoCloseable {
 
     // ------------------------------------------------------------------ attributes
 
-    /** An attribute in an object's dense storage: its name, the record's flags and creation order, its message. */
-    record StoredAttribute(String name, int flags, int creationOrder, byte[] message) {
+    /**
+     * An attribute of an object: its name, the message's (or dense record's) flags and creation order, and
+     * its message; for one kept in the shared-message table (flagged shared, 0x02), the message's ID in the
+     * shared-message heap, and as its message the header message that names it there.
+     */
+    record StoredAttribute(String name, int flags, int creationOrder, byte[] message, byte[] sharedId) {
+        StoredAttribute(String name, int flags, int creationOrder, byte[] message) {
+            this(name, flags, creationOrder, message, null);
+        }
     }
 
-    /** An object's attributes in dense storage: its heap's, through its name index. */
+    /** An object's attributes in dense storage: its heap's (or the shared-message heap's), through its name index. */
     List<StoredAttribute> denseAttributes(long heapAddress, long nameIndex) {
         FractalHeap heap = FractalHeap.parse(ctx, heapAddress);
         List<StoredAttribute> attributes = new ArrayList<>();
         int id = heap.idLength();
         for (byte[] record : BTreeV2.readRecords(ctx, nameIndex)) {
             int flags = record[id] & 0xff;
-            if ((flags & 0x02) != 0) {
-                throw new HdfUnsupportedException("attributes kept in the file's shared-message table are not changed");
-            }
-            byte[] message = heap.readObject(Arrays.copyOfRange(record, 0, id));
+            byte[] heapId = Arrays.copyOfRange(record, 0, id);
             int order = (int) (u64(record, id + 1) & 0xffff_ffffL);
-            attributes.add(new StoredAttribute(attributeName(message), flags, order, message));
+            if ((flags & 0x02) != 0) {
+                attributes.add(new StoredAttribute(attributeName(sharedMessage(heapId, MessageType.ATTRIBUTE)), flags,
+                        order, sharedBody(heapId), heapId));
+            } else {
+                byte[] message = heap.readObject(heapId);
+                attributes.add(new StoredAttribute(attributeName(message), flags, order, message));
+            }
         }
         return attributes;
     }
 
-    /**
-     * Refuses to change the attributes of an object that keeps any in the file's shared-message table: in
-     * its header (a message flagged shared) or in its dense storage (a record flagged shared).
-     */
-    static void requireUnsharedAttributes(Hdf5Object object) {
-        ObjectHeader header = object.header();
-        boolean shared = false;
-        for (HeaderMessage message : header.messages()) {
-            shared |= message.type() == MessageType.ATTRIBUTE && (message.flags() & 0x02) != 0;
-        }
-        HeaderMessage info = header.find(MessageType.ATTRIBUTE_INFO);
-        FileContext ctx = object.ctx;
-        if (!shared && info != null) {
-            long heap = com.ebremer.falcon.hdf5.message.AttributeInfoMessage.fractalHeapAddress(ctx, info);
-            if (heap != HdfBuffer.UNDEFINED_ADDRESS) {
-                int id = FractalHeap.parse(ctx, heap).idLength();
-                for (byte[] record : BTreeV2.readRecords(ctx,
-                        com.ebremer.falcon.hdf5.message.AttributeInfoMessage.nameBTreeAddress(ctx, info))) {
-                    shared |= (record[id] & 0x02) != 0;
-                }
-            }
-        }
-        if (shared) {
-            throw new HdfUnsupportedException("the attributes of " + (object.path().isEmpty() ? "/" : object.path())
-                    + " are kept in the file's shared-message table, which Falcon does not change");
-        }
+    /** The body of the message of {@code type} kept in the shared-message heap under {@code heapId}. */
+    byte[] sharedMessage(byte[] heapId, int type) {
+        HeaderMessage message = SharedMessage.heapMessage(ctx, heapId, type);
+        return message.buffer().getBytes(message.bodyOffset(), message.bodySize());
+    }
+
+    /** The file's shared-message table, or null if it has none. */
+    SharedMessages sharedMessages() {
+        return SharedMessages.of(ctx);
+    }
+
+    /** The body of a header message kept in the shared-message heap under {@code heapId} (version 3, type 1). */
+    static byte[] sharedBody(byte[] heapId) {
+        byte[] body = new byte[10];
+        body[0] = 3;
+        body[1] = 1;
+        System.arraycopy(heapId, 0, body, 2, 8);
+        return body;
+    }
+
+    /** The shared-message heap ID a shared message's body names, or null if it names another object's header. */
+    static byte[] sharedId(byte[] body) {
+        return body.length >= 10 && body[0] == 3 && body[1] == 1 ? Arrays.copyOfRange(body, 2, 10) : null;
     }
 
     /** An Attribute message's name: after its 8-byte start in versions 1 and 2, its 9-byte start in 3. */

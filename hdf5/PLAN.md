@@ -357,7 +357,8 @@ Each stage ends with a **milestone** and concrete **acceptance criteria**. "Refe
   (`.fillValue(long|double)`, exposed on read via `Dataset.fillValueBytes()`). All h5py-verified.
 - Remaining write breadth (niche): the last datatype classes (bitfield / opaque / time); indirect-block
   fractal heaps (dense sets over one direct block, i.e. thousands of links/attrs); szip preprocessing +
-  zero-block / second-extension encode modes for better compression ratios.
+  zero-block / second-extension encode modes for better compression ratios. (All since done: WF1-WF4,
+  WF5, and WF7, below.)
 - **Milestone:** round-trip parity across the full fixture matrix.
 - **Acceptance:** for every fixture, `Falcon-write → h5py-read` and `h5py-write → Falcon-read` agree on
   structure + data; property-based random round-trips pass.
@@ -371,6 +372,13 @@ Each stage ends with a **milestone** and concrete **acceptance criteria**. "Refe
   deleted); dense storage and group B-trees of any size; references in chunks and attributes; data given
   whole written as the next object is added. libhdf5 2.0 and 1.14 read the results and change them
   further.
+- **Writer options, and changing files further ✓** (P2 WF7, WF10): szip's nearest-neighbour coding, its
+  encoder a port of libaec's (byte for byte its output: zero-block runs, the second extension); user
+  blocks; hard links and moves; changing a file now writes into datasets of every built-in filter (with
+  libhdf5's own parameters: n-bit, scale-offset, szip of either coding), partial edge chunks kept
+  unfiltered, and external raw data; changes attributes in the shared-message table; converts
+  original-format groups for external links; returns shrunk dense storage to compact; and journals the
+  writes over the file, redoing an interrupted change on the next open.
 
 ### H9 — API polish, performance, docs  (essentially complete)
 - **Robustness ✓**: a corrupt-input fuzz test truncates and byte-flips 19 fixtures and forces a full
