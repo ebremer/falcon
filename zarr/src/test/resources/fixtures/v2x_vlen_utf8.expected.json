@@ -1,0 +1,18 @@
+{
+ "name": "v2x_vlen_utf8",
+ "shape": [
+  5
+ ],
+ "dtype": "|O",
+ "codecs": [
+  "vlen-utf8",
+  "zstd"
+ ],
+ "values": [
+  "",
+  "abc",
+  "😀",
+  "zz",
+  "zz"
+ ]
+}

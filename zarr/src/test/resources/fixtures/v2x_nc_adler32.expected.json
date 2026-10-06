@@ -1,0 +1,23 @@
+{
+ "name": "v2x_nc_adler32",
+ "shape": [
+  9
+ ],
+ "dtype": "<u4",
+ "codecs": [
+  "bytes",
+  "numcodecs.adler32",
+  "zstd"
+ ],
+ "values": [
+  0,
+  99,
+  198,
+  297,
+  396,
+  495,
+  594,
+  693,
+  792
+ ]
+}

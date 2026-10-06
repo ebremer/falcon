@@ -1,0 +1,21 @@
+{
+  "shape": [
+    9
+  ],
+  "chunks": [
+    4
+  ],
+  "dtype": "<i8",
+  "fill_value": 0,
+  "order": "C",
+  "filters": [
+    {
+      "id": "jenkins_lookup3",
+      "initval": 7,
+      "prefix": null
+    }
+  ],
+  "dimension_separator": ".",
+  "compressor": null,
+  "zarr_format": 2
+}

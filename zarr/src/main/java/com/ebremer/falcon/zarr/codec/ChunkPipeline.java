@@ -28,6 +28,10 @@ import java.util.List;
  * sub-chunks use it, and {@code transpose} may come before either ({@link #decodeVlenChunk},
  * {@link #encodeVlen}).
  *
+ * <p>numcodecs' filters and checksums ({@code numcodecs.delta}, {@code numcodecs.crc32}, ...; see
+ * {@link Numcodecs}) are bytes&rarr;bytes codecs here: a Zarr v2 array's {@code filters} come after its
+ * array&rarr;bytes codec, in numcodecs' order.
+ *
  * <p>Every bytes&rarr;bytes codec decodes against a limit derived from the chunk's size (H1), so a few
  * bytes of corrupt input cannot claim gigabytes of output. Only a variable-length chunk, whose decoded
  * size is not known in advance, is limited by the size of a Java array alone.
@@ -149,7 +153,24 @@ public final class ChunkPipeline {
                         requireBytesCodec(arrayBytesSet, name);
                         byteCodecs.add(BloscCodec.parse(config, dataType.byteCount()));
                     }
-                    default -> throw new ZarrUnsupportedException("unknown codec: '" + name + "'");
+                    case "numcodecs.zlib" -> {
+                        requireBytesCodec(arrayBytesSet, name);
+                        byteCodecs.add(ZlibCodec.parse(config));
+                    }
+                    case "numcodecs.lz4" -> {
+                        requireBytesCodec(arrayBytesSet, name);
+                        byteCodecs.add(Lz4Codec.parse(config));
+                    }
+                    default -> {
+                        if (!Numcodecs.handles(name)) {
+                            throw new ZarrUnsupportedException("unknown codec: '" + name + "'");
+                        }
+                        if (!arrayBytesSet) {
+                            throw Numcodecs.beforeArrayBytes(name);
+                        }
+                        byteCodecs.add(Numcodecs.parse(name, config,
+                                Numcodecs.elementType(dataType, bytesCodec, byteCodecs)));
+                    }
                 }
             }
         } catch (JsonException e) {

@@ -116,6 +116,32 @@ New API: `ZipStore.create`/`open`, `HttpStore.Builder.directoryListing` (F13);
 note, coverage, the oracle note), and D5's last item pinned `zarr==3.4.0` and `numcodecs==0.17.0`, which
 regenerate every Zarr fixture with the same metadata and values. What remains is P2's F3 and F4.
 
+**Update (2026-10-06): P2's F3 and F4 are done, and with them the whole review.** 683 Zarr tests, 18 more
+under a small heap, and 83 core tests pass. Checked against zarr-python 3.4:
+- zarr-python reads all 273 arrays `check_zarr_writer.py` checks and all 42 v2 arrays Falcon wrote into
+  (`check_zarr_v2_writes.py`);
+- Falcon reads 40 more zarr-python v2 arrays and 8 v3 ones.
+
+Checked against c-blosc and numcodecs:
+- c-blosc decodes every Falcon Blosc buffer, and outside zstd they are c-blosc's bytes;
+- Falcon matches 772 numcodecs filter vectors.
+
+Behaviour changes worth knowing:
+- Blosc's header follows c-blosc where Falcon's used to differ (F3):
+  - a buffer under 128 bytes is stored whole;
+  - a buffer stored whole keeps its compressor, split flag, and block size;
+  - a type size above 255 keeps its shuffle flag.
+- v2 arrays with `U`, `S`, `V`, time, structured, or `|O` dtypes, Fortran order, numcodecs filters, or zlib
+  and lz4 compressors now open (F4); a hierarchy listing that skipped them shows them.
+- Writes into v2 arrays follow the blosc and zstd configuration, and a v2 gzip without a `level` now writes
+  at numcodecs' level 1, not 5 (F4).
+- `ZarrArray.codecNames()` of a v2 array names the translated codecs, `numcodecs.<id>` among them (F4).
+
+New API: `ArraySpec.Builder.blosc(cname, clevel, shuffle)`. In core: `BloscEncoder`'s compressor constants,
+`compressor(cname)`, and `compress(data, typeSize, shuffle, blockSize, clevel, compressor)`; and
+`Lz4.compress`, `compressHc`, and `maxCompressedLength`. Nothing remains open in P0–P3; what is left are the
+non-goals below (creating v2 arrays, the extension data types zarr-python does not write, and the rest).
+
 ## Do these first — top 10
 
 1. ~~**Z1/Z2 — node replacement destroys or corrupts data.**~~ Done 2026-10-05 (below).
@@ -487,9 +513,9 @@ and the codec pipeline and data path (the rest).
     `BloscEncoder.compress`). The configuration is validated when the pipeline is built (an unknown
     `cname` or `shuffle`, a `clevel` outside 0..9, a non-positive `typesize`, a negative `blocksize`), and a
     missing field (v2 metadata records none) takes the previous behaviour.
-    - **Still not honoured:** zstd's `level` (one encoder level, F12) and a Blosc `cname` other than `zstd`
+    - ~~**Still not honoured:** zstd's `level` (one encoder level) and a Blosc `cname` other than `zstd`
       (Falcon compresses with zstd inside Blosc; valid, self-describing Blosc, but not the named
-      compressor: F3). Documented in the guide.
+      compressor).~~ Both are honoured now: zstd's `level` since F12, the `cname` since F3.
     - Tests: `CodecConfigurationTest` (the frame's checksum flag; Blosc's shuffle flags, type size, block
       size, and memcpy at clevel 0); `check_zarr_writer.py` checks the stored bytes of arrays configured
       that way, and zarr-python reads them.
@@ -879,8 +905,8 @@ Zarr's main use case is sharded data in object storage, so these matter more tha
 
 ## P2 — features & API
 
-Items 1–5 of the previous TODO's top-5 are F1–F5 below. F1, F2, and F5–F14 are done (2026-10-06); each
-says what was done, then gives the original finding.
+Items 1–5 of the previous TODO's top-5 are F1–F5 below. All of P2 is done (2026-10-06); each item says
+what was done, then gives the original finding.
 
 - [x] **F1 — cloud object stores (S3 / GCS / Azure).** The primary Zarr use case. First add `HttpStore`
   hooks (auth and custom headers, the missing-status policy, presigned URLs; see I7) so `HttpStore` can
@@ -943,15 +969,128 @@ says what was done, then gives the original finding.
     - Tests: `ConsolidatedFixtureTest` (with exact request counts), `ConsolidatedTest`.
 
   The original finding follows.
-- [ ] **F3 — full blosc encode configurations** (lz4 / lz4hc / zlib + bit-shuffle at a chosen `clevel`),
+- [x] **F3 — full blosc encode configurations** (lz4 / lz4hc / zlib + bit-shuffle at a chosen `clevel`),
   and honouring the configured codec parameters on write (I9). (carried over)
-- [ ] **F4 — Zarr v2 read gaps:**
+  **Done 2026-10-06.**
+    Falcon writes Blosc with every internal compressor, and each buffer is c-blosc 1.21's, byte for byte,
+    for every compressor but zstd (Falcon's own encoder, unchanged).
+    - **Core encoders**, ports checked against the libraries numcodecs 0.17 links:
+      - LZ4: `LZ4_compress_fast` (`Lz4.compress`) and LZ4HC levels 1–9 (`Lz4.compressHc`, including lz4
+        1.10's "lz4mid" levels 1–2), from liblz4 1.10.0;
+      - BloscLZ: c-blosc 1.21.6's `blosclz_compress`, its entropy probe and bail-outs included;
+      - Snappy: snappy 1.1.10's `CompressFragment`;
+      - zlib: `java.util.zip`, zlib 1.3.1 like c-blosc's.
+    - **The container** follows c-blosc's write rules, each measured against numcodecs' c-blosc:
+      - `compute_blocksize` per compressor: the high-ratio codecs' doubled blocks, and the enlargement for
+        codecs that split, forced sizes included;
+      - `split_block`: every codec but zstd splits a block into type-size streams when the type size is at
+        most 16 and a block holds at least 128 elements; the leftover block never splits;
+      - each compressor's level: lz4's acceleration is `10 − clevel`; lz4hc, zlib, and BloscLZ take the
+        clevel;
+      - raw streams, and buffers stored whole (clevel 0, under 128 bytes, or not shrinking). Such a header
+        keeps the compressor, the split flag, and the block size, and a type size above 255 keeps its
+        shuffle flag.
+    - **Kept deviation:** a buffer that is not a whole number of elements is byte-shuffled when the bit
+      shuffle is asked for. c-blosc 1.18 and later restore the partial element; 1.17 and older garble it.
+    - **Zarr:**
+      - `blosc` honours `cname` on write, I9's last gap.
+      - `ArraySpec.Builder.blosc(cname, clevel, shuffle)` picks the settings for a new array.
+      - New `numcodecs.zlib` {level} and `numcodecs.lz4` {acceleration} codecs, zarr-python 3's names for
+        numcodecs' Zlib and LZ4, read and write numcodecs' own bytes. They serve both v3 arrays and F4's v2
+        compressors.
+    - **New core API:**
+      - `BloscEncoder.BLOSCLZ`…`ZSTD` (c-blosc's compcodes, which are also HDF5's Blosc `cd_values[6]`);
+      - `BloscEncoder.compressor(cname)`;
+      - `BloscEncoder.compress(data, typeSize, shuffle, blockSize, clevel, compressor)`;
+      - `Lz4.compress`, `Lz4.compressHc`, and `Lz4.maxCompressedLength`.
+    - Oracles:
+      - `gen_blosc_encode_vectors.py`: Falcon reproduces 1,512 c-blosc buffers and 468 liblz4 blocks
+        exactly (`BloscEncodeVectorsTest`, by SHA-256).
+      - `check_blosc_encoder.py`, rewritten to run `WriteBloscCases.java` itself, over 20,027 cases:
+        - c-blosc decodes all 18,435 non-empty Falcon buffers;
+        - all 13,964 non-zstd buffers outside the kept deviation are c-blosc's bytes;
+        - the headers match except for the 1,100 partial-element cases, and 3 zstd buffers with forced
+          128-byte blocks, which Falcon stores whole because its zstd frames run larger;
+        - ratios equal c-blosc's for blosclz, lz4, lz4hc, and zlib, and are within about 2–3% for zstd.
+      - Snappy: numcodecs' c-blosc has none. imagecodecs' c-blosc 1.21.6 decodes all 324 Falcon snappy
+        buffers, and snappy 1.2.2 decodes every raw stream.
+      - `check_zarr_writer.py` gains 23 arrays: every cname × shuffle, `ArraySpec.blosc`,
+        `numcodecs.zlib`/`lz4`, and lz4 inside a shard. Each chunk is checked to be numcodecs' bytes, and
+        zarr-python 3.4 reads 273 of 273 arrays.
+      - `gen_zarr_numcodecs_fixtures.py`: Falcon reads 7 zarr-python arrays (`numcodecs.zlib`/`lz4`,
+        lz4hc).
+    - Tests: `BloscCompressorsTest`, `BloscEncodeVectorsTest`, `NumcodecsCompressorsTest`, and additions to
+      `Lz4Test` and `CodecConfigurationTest`. `ZarrWriteTest.roundTripsWithBlosc` now writes a chunk that
+      compresses; c-blosc stores its old 96-byte chunk whole, and so does Falcon.
+
+  The original finding follows.
+- [x] **F4 — Zarr v2 read gaps:**
   - filters (delta, fixed-scale-offset, …);
   - the top-level `zlib` and `lz4` compressors;
   - Fortran (`"F"`) order;
   - `<U` / `|S` / `|O` dtypes.
 
   (carried over and extended)
+  **Done 2026-10-06.**
+    `V2Metadata` was rewritten. It translates every v2 array, `.zmetadata` entries included, into a v3
+    document, checking each convention against how zarr-python 3.4 reads and writes v2.
+    - **Dtypes:**
+      - `U<n>` → `fixed_length_utf32`, `S<n>` → `null_terminated_bytes`, `V<n>` → `raw_bytes`;
+      - `M8`/`m8` with a unit and multiplier → `numpy.datetime64`/`numpy.timedelta64`; a bare `<M8` gets
+        NumPy's generic unit;
+      - structured lists, nested too → `struct`, the `bytes` codec's endian taken from the multi-byte
+        fields;
+      - `|O` with `vlen-utf8` or `vlen-bytes` first in `filters` → `string` or `variable_length_bytes`,
+        that object codec becoming the array→bytes codec.
+    - **Fill values** read as zarr-python 3.4 reads them. `null` is the type's default (zero, NaT, empty
+      text, an all-zero struct). A structured base64 fill is decoded in the dtype's byte order and kept in
+      Falcon's object form. A `vlen-utf8` array's numeric fill (zarr-python 2's `0`) reads as its text.
+    - **Fortran order:** a `transpose` reversing the axes, ahead of the array→bytes codec, strings
+      included.
+    - **Filters, then the compressor,** become bytes→bytes codecs after the array→bytes codec, in v2
+      order:
+      - `gzip`, `zstd`, and `blosc` keep their v3 names, their configurations now translated with
+        numcodecs' defaults (gzip level 1, where Falcon wrote 5);
+      - Blosc's type size is the element size numcodecs hands c-blosc, after the filters, and its automatic
+        shuffle resolves as numcodecs resolves it;
+      - every other codec becomes `numcodecs.<id>`, zarr-python 3's name, configured as numcodecs is.
+    - **The filters,** new codecs in `codec`, read and write byte for byte as numcodecs 0.17 with NumPy 2
+      does: delta, fixedscaleoffset, quantize, bitround, astype, packbits, shuffle, and the checksums
+      crc32, crc32c, adler32, fletcher32, and jenkins_lookup3. `zlib` and `lz4` are F3's codecs.
+      - `NumpyType` does NumPy's dtype parsing, casts, promotion, and NEP 50 arithmetic.
+      - The element type is tracked along the chain, so a filter gets what the previous one made.
+      - Where NumPy is undefined (a NaN or out-of-range float cast to an integer), Falcon converts as Java
+        does and wraps; such cases are left out of the vectors.
+      - In Zarr v3 metadata the byte codecs (shuffle, the checksums) work where zarr-python 3 writes them.
+        The element filters, which zarr-python 3 writes before `bytes` as array→array codecs, are refused
+        there.
+    - **Writing into a v2 array** goes through the same translation, so it now follows the blosc and zstd
+      configuration (it used to drop it). Falcon writes the chunks zarr-python writes.
+    - `ZarrArray.codecNames()` gives the translated list, such as `[transpose, bytes, numcodecs.delta,
+      numcodecs.zlib]`.
+    - **Refused** (`ZarrUnsupportedException`, naming the id and its role):
+      - the `categorize` filter;
+      - object codecs other than vlen-utf8/vlen-bytes;
+      - bz2, lzma, pcodec, zfpy;
+      - subarray, object, and mixed-endian struct fields;
+      - zero-length U/S/V.
+    - **More lenient than zarr-python 3.4:** nested structured dtypes, a struct's `null` fill, and a
+      `vlen-bytes` fill of `0`.
+    - Oracles:
+      - `gen_zarr_v2_ext_fixtures.py`: 40 zarr-python 3.4 v2 arrays covering every dtype, F order, every
+        filter, zlib, lz4, blosc and zstd configurations, and combinations. Falcon reads them, and writing
+        the same values into empty copies stores zarr-python's chunks byte for byte where the codecs are
+        deterministic.
+      - `WriteZarrV2Cases.java` + `check_zarr_v2_writes.py`: Falcon writes into copies of them (reversed
+        values, resizes, boxes across chunks). zarr-python 3.4 reads 42 of 42, and the script checks each
+        Blosc header's compressor, type size, and shuffle.
+      - `gen_numcodecs_filter_vectors.py`: 772 numcodecs vectors, checked both ways byte for byte, plus
+        NumPy's promotion table and the quantize scales. It also writes a zarr-python v3 array using
+        shuffle and every checksum, which Falcon reads and rewrites to identical chunks.
+    - Tests: `V2FixtureTest`, `V2MetadataTest`, `NumcodecsVectorsTest`, `NumcodecsPipelineTest` (with a
+      damage fuzz), `NumcodecsFixtureTest`. `HierarchyFixtureTest` reads the v2 `<U8` child it used to skip.
+
+  The original finding follows.
 - [x] **F5 — the `vlen-bytes` data type.** (carried over)
   **Done 2026-10-06.**
     `DataType.BYTES` is zarr-python's `variable_length_bytes` (`"bytes"` opens too),
@@ -964,7 +1103,7 @@ says what was done, then gives the original finding.
     - zarr-python 3.4's arrays read (`bytes_plain`, `bytes_sharded`, `bytes_transposed`, from the new
       `gen_zarr_bytes_fixtures.py`); zarr-python reads what Falcon writes (7 more `check_zarr_writer.py`
       cases); the fuzz runs over the new fixtures.
-    - Zarr v2's `|O` with a `vlen-bytes` filter is still F4.
+    - Zarr v2's `|O` with a `vlen-bytes` filter reads since F4.
     - Tests: `BytesArrayTest`, `DataFixturesTest.variableLengthBytes`.
 
   The original finding follows.
@@ -1238,8 +1377,8 @@ says what was done, then gives the original finding.
       - Tests: `Blosc2DecoderTest`, `CompressionRobustnessTest.blosc2SurvivesCorruption`, Zarr's
         `Blosc2ChunkTest`; `BloscHeaderTest` now reads versions 3–6 and refuses 7.
     - **Not done:** registry data types zarr-python does not write (`bfloat16`, `float8_*`, `float6_*`,
-      `float4_e2m1fn`, `int2`/`int4`/`uint2`/`uint4`, `complex_*`); v2 dtype strings for the extension types
-      (F4); per-field struct accessors; storage transformers that must be understood (none exists);
+      `float4_e2m1fn`, `int2`/`int4`/`uint2`/`uint4`, `complex_*`); ~~v2 dtype strings for the extension types~~ (done with
+      F4); per-field struct accessors; storage transformers that must be understood (none exists);
       c-blosc2 variable-length blocks and dictionaries (imagecodecs cannot write them, so there is no
       oracle), bytedelta and the other plugins, lazy chunks and super-chunk frames, and HDF5's Blosc2 filter
       (32026; see hdf5 S9).
@@ -1249,7 +1388,7 @@ says what was done, then gives the original finding.
     are refused cleanly today. (carried over)
 
 **Out of scope / deferred (unchanged):**
-- **Zarr v2 *writing*** — Falcon writes v3 only.
+- **Creating Zarr v2 arrays** — Falcon creates v3 only. Writing into an existing v2 array works (F4).
 - **`com.ebremer.falcon.core` extraction** — investigated and deferred (`PLAN.md` §10). Revisit if HDF5
   S4 (third-party HDF5 filters) wants Falcon's zstd, blosc, or lz4.
 

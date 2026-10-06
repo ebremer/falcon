@@ -1,0 +1,17 @@
+{
+ "name": "v2x_nc_vlen_utf8_lz4",
+ "shape": [
+  4
+ ],
+ "dtype": "|O",
+ "codecs": [
+  "vlen-utf8",
+  "numcodecs.lz4"
+ ],
+ "values": [
+  "a",
+  "bb",
+  "",
+  "ccc"
+ ]
+}

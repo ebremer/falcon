@@ -211,7 +211,10 @@ public final class ZarrArray extends ZarrNode {
 
     /**
      * {@return the codec names, in pipeline order} Only the top-level codecs: a sharded array's include
-     * {@code sharding_indexed} but not the codecs inside it.
+     * {@code sharding_indexed} but not the codecs inside it. A Zarr v2 array's are the ones its metadata
+     * translates to: {@code transpose} for Fortran order, {@code bytes} (or the object codec,
+     * {@code vlen-utf8} or {@code vlen-bytes}), then its filters and its compressor, each numcodecs codec
+     * other than {@code gzip}, {@code zstd}, and {@code blosc} named {@code numcodecs.<id>}.
      */
     public List<String> codecNames() {
         return metadata.codecNames();

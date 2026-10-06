@@ -1,0 +1,19 @@
+{
+  "shape": [
+    13
+  ],
+  "chunks": [
+    10
+  ],
+  "dtype": "|b1",
+  "fill_value": false,
+  "order": "C",
+  "filters": [
+    {
+      "id": "packbits"
+    }
+  ],
+  "dimension_separator": ".",
+  "compressor": null,
+  "zarr_format": 2
+}

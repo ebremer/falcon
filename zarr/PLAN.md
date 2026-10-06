@@ -6,26 +6,31 @@ It is **Falcon Phase 2**; the HDF5 module (Phase 1) is the sibling and the templ
 (reader-before-writer, thin vertical slice first, every stage gated by conformance tests). See the root
 [`PLAN.md`](../PLAN.md) for the umbrella roadmap.
 
-> **Status (2026-10-06): Z0–Z9 complete, and the 2026-10-04 review's P0, P1, and P3 done, and P2 but for
-> F3 and F4.** The module reads Zarr v2 and v3 and writes v3, checked against **zarr-python** both ways:
-> Falcon reads 96 fixture stores and 2 ZIP archives zarr-python wrote (3.2.1 for the first, 3.4.0 since),
-> each against an expected-value sidecar, and zarr-python 3.4 reads the 250 arrays, 6 hierarchies, and 4
-> ZIP archives Falcon writes (`check_zarr_writer.py`, `check_zarr_hierarchies.py`, `check_zip_store.py`).
+> **Status (2026-10-06): Z0–Z9 complete, and the 2026-10-04 review's P0–P3 all done.** The module reads
+> Zarr v2 and v3, writes v3, and writes into existing v2 arrays, checked against **zarr-python** both ways.
+> Falcon reads 144 fixture stores and 2 ZIP archives zarr-python wrote (3.2.1 for the first, 3.4.0 since),
+> each against an expected-value sidecar. zarr-python 3.4 reads the 273 arrays, 42 written-into v2 arrays,
+> 6 hierarchies, and 4 ZIP archives Falcon writes (`check_zarr_writer.py`, `check_zarr_v2_writes.py`,
+> `check_zarr_hierarchies.py`, `check_zip_store.py`).
 > - **Data:** every core data type, variable-length strings and bytes, the extension types zarr-python
 >   writes (datetimes, fixed-size strings and bytes, structs), the regular and rectilinear chunk grids,
->   sharding (nested, with byte-range reads and partial writes), resizing, and consolidated metadata.
-> - **Compression,** hand-written in pure Java in `core`: zstd and Blosc are decoded (316 libzstd frames,
->   500 c-blosc buffers, 122 c-blosc2 chunks) and encoded (libzstd reads 101 Falcon frames at every
->   level, c-blosc 240 Falcon buffers); gzip and crc32c come from `java.util.zip`.
+>   sharding (nested, with byte-range reads and partial writes), resizing, and consolidated metadata;
+>   Zarr v2's NumPy dtypes, Fortran order, and numcodecs filters and compressors.
+> - **Compression,** hand-written in pure Java in `core`:
+>   - zstd and Blosc are decoded: 316 libzstd frames, 500 c-blosc buffers, 122 c-blosc2 chunks.
+>   - zstd is encoded: libzstd reads 101 Falcon frames at every level.
+>   - Blosc is encoded with every internal compressor, as c-blosc's own bytes but for zstd: Falcon
+>     reproduces 1,512 c-blosc buffers and 468 liblz4 blocks exactly, and c-blosc decodes all 18,435
+>     non-empty buffers of a cross-check matrix.
+>   - numcodecs' filters run byte for byte as numcodecs does (772 vectors).
+>   - gzip, zlib, and the CRC-32 checksums come from `java.util.zip`.
 > - **Stores:** memory, filesystem, ZIP (read and written), read-only HTTP (byte ranges; listing from
 >   directory index pages when asked), and S3-compatible object storage (SigV4).
 > - **Robustness:** corrupt input fails with typed exceptions, fuzzed under a small heap and stack;
->   handles are safe across threads; an opt-in decoded-chunk cache. 567 tests, and 18 more under a small
+>   handles are safe across threads; an opt-in decoded-chunk cache. 683 tests, and 18 more under a small
 >   heap, pass; the public API's Javadoc is complete and checked by the compile.
 >
-> **Remaining** (tracked in [`TODO.md`](TODO.md)): P2's F3 (Blosc's other internal compressors when
-> writing) and F4 (Zarr v2 read gaps: v2 filters, the top-level zlib and lz4 compressors, Fortran order, and
-> the `<U`/`|S`/`|O` dtypes); and the non-goals below.
+> **Remaining** (tracked in [`TODO.md`](TODO.md)): nothing from the review; the non-goals below.
 
 ---
 
@@ -79,7 +84,8 @@ com.ebremer.falcon.zarr             Public API: Zarr, ZarrGroup, ZarrArray, Zarr
         …zarr.metadata              zarr.json / v2 parse and serialize; consolidated metadata; extension fields
         …zarr.chunk                 Regular and rectilinear chunk grids; chunk key encoding (default / v2)
         …zarr.codec                 Codec pipeline + bytes / vlen / transpose / gzip / crc32c / sharding_indexed,
-                                    and the zstd / blosc codecs over core's compressors
+                                    the zstd / blosc / numcodecs.lz4 codecs over core's compressors, and
+                                    numcodecs' zlib, filters, and checksums (with NumPy's dtype arithmetic)
         …zarr.data                  Chunk assembly and writing, element conversion, the chunk cache, resize
 ```
 
@@ -108,7 +114,9 @@ The data model is Zarr's own; only the compression codecs are shared with HDF5, 
 - ~~**Blosc / Zstandard** codecs until they are hand-written in pure Java~~ — done (Z8, and P2's F12 for
   the zstd encoder's levels): decoded and encoded from scratch, now in `core`, the same "implement
   compression from scratch, no native/deps" decision made for HDF5's szip.
-- **Zarr v2** — read (Z8); v2 *writing* is out of scope.
+- **Zarr v2** — read (Z8; P2's F4 closed the gaps: NumPy's string, byte, time, structured, and object
+  dtypes, Fortran order, numcodecs' filters, and the zlib and lz4 compressors), and written into once it
+  exists; *creating* v2 arrays is out of scope.
 
 ## 4. Design decisions
 
@@ -150,8 +158,10 @@ The data model is Zarr's own; only the compression codecs are shared with HDF5, 
 | `crc32c` | bytes → bytes | `java.util.zip.CRC32C` (4-byte LE trailer) | Z4 | Z7 |
 | `vlen-utf8` / `vlen-bytes` | array → bytes | hand-written (numcodecs' VLen layout) | after Z9 / F5 | after Z9 / F5 |
 | `sharding_indexed` | array → bytes | hand-written (sub-chunks + offset/length index; nested, F11) | Z6 | Z7 |
-| `blosc` | bytes → bytes | **from scratch, pure Java**, in `core` (container + blosclz/lz4/lz4hc/zlib/zstd/snappy + byte/bit shuffle; c-blosc2's format too, F14) | Z8 ✅ | Z8 ✅ (no/byte/bit shuffle, clevel; zstd inside) |
+| `blosc` | bytes → bytes | **from scratch, pure Java**, in `core` (container + blosclz/lz4/lz4hc/zlib/zstd/snappy + byte/bit shuffle; c-blosc2's format too, F14) | Z8 ✅ | Z8 ✅ (no/byte/bit shuffle, clevel; every internal compressor, c-blosc's bytes but for zstd, F3) |
 | `zstd` | bytes → bytes | **from scratch, pure Java**, in `core` (RFC 8878) | Z8 ✅ | Z8 ✅ (levels 1–22, F12) |
+| `numcodecs.zlib` / `numcodecs.lz4` | bytes → bytes | `java.util.zip`; LZ4 from scratch in `core` (numcodecs' size-prefixed block) | F3 ✅ | F3 ✅ |
+| numcodecs filters and checksums (`numcodecs.delta`, `fixedscaleoffset`, `quantize`, `bitround`, `astype`, `packbits`, `shuffle`, `crc32`, `crc32c`, `adler32`, `fletcher32`, `jenkins_lookup3`) | bytes → bytes (a v2 array's filters; shuffle and the checksums in v3 too) | hand-written, NumPy 2's casts and promotion | F4 ✅ | F4 ✅ |
 
 ### 5.4 Stores
 | Store | Read | Write | Byte-range | Stage |
@@ -245,7 +255,7 @@ store written by zarr-python (§8). Stages are dependency-ordered.
 - **Acceptance:** for each fixture, `Falcon-write → zarr-python-read` and `zarr-python-write →
   Falcon-read` agree on structure + data; property-based random round-trips pass.
 
-### Z8 — Compression breadth & compatibility ✅ *done (bar the v2-write/Fortran non-goals)*
+### Z8 — Compression breadth & compatibility ✅ *done (v2's Fortran order and filters since P2's F4; creating v2 arrays is a non-goal)*
 - **Pure-Java `zstd`** (RFC 8878 decode first, then encode) and/or **`blosc`** (blosclz/lz4 + shuffle) —
   from scratch, validated against numcodecs/zstd reference vectors (a dev-time tool, like libaec for szip).
 - **Zarr v2 read compatibility**: `.zgroup`/`.zarray`/`.zattrs`, v2 dtype strings (`<i4`, `|u1`, …),

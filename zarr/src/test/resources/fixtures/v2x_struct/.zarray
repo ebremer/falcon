@@ -1,0 +1,40 @@
+{
+  "shape": [
+    6
+  ],
+  "chunks": [
+    4
+  ],
+  "dtype": [
+    [
+      "a",
+      "<i4"
+    ],
+    [
+      "b",
+      "<f8"
+    ],
+    [
+      "c",
+      "|S2"
+    ],
+    [
+      "d",
+      "<U2"
+    ],
+    [
+      "t",
+      "<M8[s]"
+    ],
+    [
+      "f",
+      "|b1"
+    ]
+  ],
+  "fill_value": "CQAAAAAAAAAAAPg/enp5AAAAeQAAAIBRAQAAAAAAAQ==",
+  "order": "C",
+  "filters": null,
+  "dimension_separator": ".",
+  "compressor": null,
+  "zarr_format": 2
+}

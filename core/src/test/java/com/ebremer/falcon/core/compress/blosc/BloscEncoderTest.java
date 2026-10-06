@@ -88,7 +88,8 @@ class BloscEncoderTest {
     /**
      * The header stores the type size in one byte. A larger type size was written modulo 256 while the data
      * was shuffled with the full size, so 256 read back as 0 and 300 as 44: wrong bytes. Like c-blosc, the
-     * encoder now writes 1 and does not shuffle.
+     * encoder now writes 1, and, as c-blosc 1.21 does, keeps the shuffle flag asked for (shuffling one-byte
+     * elements changes nothing).
      */
     @Test
     void typeSizesAbove255AreWrittenAsOne() {
@@ -99,7 +100,7 @@ class BloscEncoderTest {
             }
             byte[] buffer = BloscEncoder.compress(data, ts);
             assertEquals(ts > 255 ? 1 : ts, buffer[3] & 0xff, "header type size for " + ts);
-            assertEquals(ts > 255 ? 0 : 1, buffer[2] & 0x01, "shuffle flag for " + ts);
+            assertEquals(1, buffer[2] & 0x01, "shuffle flag for " + ts);
             assertArrayEquals(data, BloscDecoder.decompress(buffer), "ts" + ts);
             byte[] empty = BloscEncoder.compress(new byte[0], ts);
             assertEquals(ts > 255 ? 1 : ts, empty[3] & 0xff, "empty buffer's type size for " + ts);
@@ -164,7 +165,7 @@ class BloscEncoderTest {
                 }
             }
             // A whole number of elements keeps the bit shuffle; a partial one switches to the byte shuffle,
-            // whose trailing bytes c-blosc restores (it cannot restore a bit-shuffled block's).
+            // whose trailing bytes every c-blosc restores (before 1.18 it did not restore a bit-shuffled block's).
             byte[] whole = java.util.Arrays.copyOf(data, ts * 5000);
             assertEquals(0x04, BloscEncoder.compress(whole, ts, BloscEncoder.BITSHUFFLE, 0)[2] & 0x05);
             if (ts > 1) {

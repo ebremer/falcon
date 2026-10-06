@@ -149,10 +149,10 @@ public final class ArraySpec {
         }
         if (b.blosc) {
             int typeSize = Math.max(b.dataType.byteCount(), 1); // variable-length elements have no fixed size
-            boolean shuffle = typeSize > 1;
+            String shuffle = b.bloscShuffle != null ? b.bloscShuffle : typeSize > 1 ? "shuffle" : "noshuffle";
             inner.add(named("blosc", JsonObject.builder()
-                    .put("cname", "zstd").put("clevel", 5)
-                    .put("shuffle", shuffle ? "shuffle" : "noshuffle")
+                    .put("cname", b.bloscCname).put("clevel", b.bloscClevel)
+                    .put("shuffle", shuffle)
                     .put("typesize", typeSize).put("blocksize", 0).build()));
         }
         if (b.crc32c) {
@@ -257,6 +257,9 @@ public final class ArraySpec {
         private boolean zstd;
         private int zstdLevel;
         private boolean blosc;
+        private String bloscCname = "zstd";
+        private int bloscClevel = 5;
+        private String bloscShuffle; // null: the byte shuffle for multi-byte elements, else none
         private boolean crc32c;
         private long[] subChunkShape;
         private boolean indexAtStart;
@@ -401,12 +404,49 @@ public final class ArraySpec {
         }
 
         /**
-         * Compresses chunks with {@code blosc} (byte-shuffle + zstd; c-blosc/zarr-python read it).
+         * Compresses chunks with {@code blosc} (byte-shuffle + zstd; c-blosc/zarr-python read it): zstd at
+         * clevel 5, and the byte shuffle for multi-byte elements, replacing any earlier
+         * {@link #blosc(String, int, String)} settings.
          *
          * @return this builder
          */
         public Builder blosc() {
             this.blosc = true;
+            this.bloscCname = "zstd";
+            this.bloscClevel = 5;
+            this.bloscShuffle = null;
+            return this;
+        }
+
+        /**
+         * Compresses chunks with {@code blosc} with the given internal compressor, level, and filter, in blocks
+         * c-blosc sizes, the type size the element's. Falcon writes each buffer as c-blosc 1.21 writes it, byte
+         * for byte, but for zstd, whose encoder is Falcon's own.
+         *
+         * @param cname   the internal compressor: {@code blosclz}, {@code lz4}, {@code lz4hc}, {@code zlib},
+         *                {@code zstd}, or {@code snappy} (which numcodecs' c-blosc, and so zarr-python, cannot
+         *                read)
+         * @param clevel  the level, 0 (stored as it is) to 9
+         * @param shuffle the filter: {@code noshuffle}, {@code shuffle} (bytes), or {@code bitshuffle}
+         * @return this builder
+         * @throws IllegalArgumentException if a setting is none of those
+         */
+        public Builder blosc(String cname, int clevel, String shuffle) {
+            if (!List.of("blosclz", "lz4", "lz4hc", "zlib", "zstd", "snappy").contains(cname)) {
+                throw new IllegalArgumentException("blosc cname must be blosclz, lz4, lz4hc, zlib, zstd, or snappy, not "
+                        + cname);
+            }
+            if (clevel < 0 || clevel > 9) {
+                throw new IllegalArgumentException("blosc clevel must be 0 to 9, not " + clevel);
+            }
+            if (!List.of("noshuffle", "shuffle", "bitshuffle").contains(shuffle)) {
+                throw new IllegalArgumentException("blosc shuffle must be noshuffle, shuffle, or bitshuffle, not "
+                        + shuffle);
+            }
+            this.blosc = true;
+            this.bloscCname = cname;
+            this.bloscClevel = clevel;
+            this.bloscShuffle = shuffle;
             return this;
         }
 

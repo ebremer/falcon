@@ -1,0 +1,22 @@
+{
+  "shape": [
+    5
+  ],
+  "chunks": [
+    2
+  ],
+  "dtype": "|O",
+  "fill_value": "eHk=",
+  "order": "C",
+  "filters": [
+    {
+      "id": "vlen-bytes"
+    }
+  ],
+  "dimension_separator": ".",
+  "compressor": {
+    "id": "gzip",
+    "level": 1
+  },
+  "zarr_format": 2
+}

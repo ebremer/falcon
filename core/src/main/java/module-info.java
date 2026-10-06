@@ -1,6 +1,7 @@
 /**
- * Falcon Core &mdash; code shared by Falcon's format modules: pure-Java decoders (and, for zstd and
- * Blosc, encoders) for the compression formats both HDF5 filters and Zarr codecs use.
+ * Falcon Core &mdash; code shared by Falcon's format modules: pure-Java decoders (and, for zstd, Blosc
+ * with each of its internal compressors, and LZ4, encoders) for the compression formats both HDF5 filters
+ * and Zarr codecs use.
  *
  * <ul>
  *   <li>{@code compress.zstd} &mdash; Zstandard (RFC 8878);</li>

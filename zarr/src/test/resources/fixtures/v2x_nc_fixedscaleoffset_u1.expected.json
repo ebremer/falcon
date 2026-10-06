@@ -1,0 +1,24 @@
+{
+ "name": "v2x_nc_fixedscaleoffset_u1",
+ "shape": [
+  10
+ ],
+ "dtype": "<f8",
+ "codecs": [
+  "bytes",
+  "numcodecs.fixedscaleoffset",
+  "numcodecs.zlib"
+ ],
+ "values": [
+  1000.0,
+  1000.1,
+  1000.2,
+  1000.3,
+  1000.4,
+  1000.6,
+  1000.7,
+  1000.8,
+  1000.9,
+  1001.0
+ ]
+}

@@ -9,16 +9,19 @@
 h5py==3.16.0          # bundles HDF5 2.0.0 -- the reference oracle
 numpy>=2.0
 imagecodecs>=2026.1   # libaec: AEC / szip reference vectors and real-format szip chunks; c-blosc2 3.x:
-                      # Falcon Core's Blosc2 chunk vectors (gen_blosc2_vectors.py)
+                      # Falcon Core's Blosc2 chunk vectors (gen_blosc2_vectors.py); a c-blosc with snappy:
+                      # check_blosc_encoder.py decodes Falcon's snappy Blosc buffers with it when installed
 hdf5plugin>=7.1       # Blosc, LZ4, bitshuffle and Zstandard HDF5 filters (plugin_filters.h5, gen_core_vectors.py)
 #
 # check_hdf5_writer.py can additionally read Falcon's output with an HDF5 1.14 build. Put that in a
 # second environment (its own venv) and pass it with --python114:
 #   h5py==3.14.0       # bundles HDF5 1.14.6
 #
-# Zarr fixtures and interop checks, and Falcon Core's zstd / Blosc / Snappy vectors (gen_zarr_*.py,
-# check_zarr_*.py, check_zip_store.py, gen_zstd_vectors.py, gen_blosc_vectors.py, gen_snappy_vectors.py,
-# check_zstd_encoder.py, check_blosc_encoder.py):
-zarr==3.4.0           # every Zarr fixture regenerates with it, same metadata and values (zarr/TODO.md D5)
-numcodecs==0.17.0
+# Zarr fixtures and interop checks, and Falcon Core's zstd / Blosc / Snappy / LZ4 vectors (gen_zarr_*.py,
+# check_zarr_*.py, check_zip_store.py, gen_numcodecs_filter_vectors.py, gen_zstd_vectors.py,
+# gen_blosc_vectors.py, gen_blosc_encode_vectors.py, gen_snappy_vectors.py, check_zstd_encoder.py,
+# check_blosc_encoder.py):
+zarr==3.4.0           # every Zarr fixture regenerates with it, same metadata and values (zarr/TODO.md D5);
+                      # it brings google-crc32c, which numcodecs' crc32c codec needs
+numcodecs==0.17.0     # also the byte reference for Falcon's Blosc, LZ4, and numcodecs filter encoders
 zstandard>=0.23

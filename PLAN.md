@@ -59,5 +59,5 @@ Locked at review and applied uniformly across the reactor:
   (data types, byte I/O, checksums, and chunk indexing are format-specific and correctly separate).
   `core` holds the compression codecs only: HDF5's third-party filters needed Zarr's zstd and Blosc, so
   on 2026-10-05 they moved there rather than being copied. Details in [`zarr/PLAN.md`](zarr/PLAN.md) §10.
-- Module-specific non-goals (SWMR / MPI / HL APIs for HDF5; Zarr v2 writing; …) are
+- Module-specific non-goals (SWMR / MPI / HL APIs for HDF5; creating Zarr v2 arrays; …) are
   listed in each module's PLAN and TODO.

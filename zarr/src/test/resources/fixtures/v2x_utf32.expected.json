@@ -1,0 +1,20 @@
+{
+ "name": "v2x_utf32",
+ "shape": [
+  7
+ ],
+ "dtype": "<U4",
+ "codecs": [
+  "bytes",
+  "zstd"
+ ],
+ "values": [
+  "",
+  "abc",
+  "😀😁x",
+  "a\u0000b",
+  "δδδδ",
+  "zz",
+  "zz"
+ ]
+}

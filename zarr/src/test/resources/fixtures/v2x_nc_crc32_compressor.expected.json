@@ -1,0 +1,22 @@
+{
+ "name": "v2x_nc_crc32_compressor",
+ "shape": [
+  9
+ ],
+ "dtype": "<i4",
+ "codecs": [
+  "bytes",
+  "numcodecs.crc32"
+ ],
+ "values": [
+  -3,
+  -2,
+  -1,
+  0,
+  1,
+  2,
+  3,
+  4,
+  5
+ ]
+}

@@ -1,0 +1,17 @@
+{
+ "name": "v2x_utf32_be",
+ "shape": [
+  4
+ ],
+ "dtype": ">U3",
+ "codecs": [
+  "bytes",
+  "gzip"
+ ],
+ "values": [
+  "ab",
+  "xyz",
+  "",
+  "q"
+ ]
+}

@@ -20,23 +20,25 @@ import java.util.TreeSet;
  * describes how the <em>encoder</em> was set up) is not consulted when reading.
  *
  * <p>Reading supports the {@code blosclz}/{@code lz4}/{@code lz4hc}/{@code zlib}/{@code zstd}/{@code snappy}
- * internal compressors with byte- or bit-shuffle. Writing honours the configuration's {@code shuffle}
- * ({@code noshuffle}, {@code shuffle}, {@code bitshuffle}), {@code typesize}, {@code blocksize}, and
- * {@code clevel} (I9), through {@link BloscEncoder}. The internal compressor is always zstd, whatever
- * {@code cname} says: the output is still valid Blosc, which every reader decodes from its own header,
- * but Falcon has no encoder for the others yet. A configuration without a field (v2 metadata records
- * none) gets zstd at level 5, the byte shuffle for multi-byte elements, and automatic block sizes.
+ * internal compressors with byte- or bit-shuffle. Writing honours the whole configuration (I9, F3), through
+ * {@link BloscEncoder}: the {@code cname} (every one of the six; c-blosc's buffer for the same data, byte
+ * for byte, except with zstd, whose encoder is Falcon's own), {@code clevel}, {@code shuffle}
+ * ({@code noshuffle}, {@code shuffle}, {@code bitshuffle}), {@code typesize}, and {@code blocksize}. A
+ * field left out gets zarr-python's default: zstd at clevel 5, the byte shuffle for multi-byte elements, the
+ * element's size, and automatic block sizes.
  */
 final class BloscCodec implements BytesBytesCodec {
 
     private static final Set<String> CNAMES = Set.of("blosclz", "lz4", "lz4hc", "zlib", "zstd", "snappy");
 
+    private final int compressor;
     private final int typeSize;
     private final int shuffle;
     private final int blockSize;
     private final int clevel;
 
-    private BloscCodec(int typeSize, int shuffle, int blockSize, int clevel) {
+    private BloscCodec(int compressor, int typeSize, int shuffle, int blockSize, int clevel) {
+        this.compressor = compressor;
         this.typeSize = typeSize;
         this.shuffle = shuffle;
         this.blockSize = blockSize;
@@ -67,7 +69,7 @@ final class BloscCodec implements BytesBytesCodec {
         if (blockSize < 0) {
             throw new ZarrFormatException("blosc blocksize must not be negative, was " + blockSize);
         }
-        return new BloscCodec(typeSize, shuffle, blockSize, clevel);
+        return new BloscCodec(BloscEncoder.compressor(cname), typeSize, shuffle, blockSize, clevel);
     }
 
     @Override
@@ -104,6 +106,6 @@ final class BloscCodec implements BytesBytesCodec {
 
     @Override
     public byte[] encode(byte[] input) {
-        return BloscEncoder.compress(input, typeSize, shuffle, blockSize, clevel);
+        return BloscEncoder.compress(input, typeSize, shuffle, blockSize, clevel, compressor);
     }
 }

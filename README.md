@@ -116,11 +116,14 @@ out.writeDoubles(myData);
 ```
 
 Every codec the ecosystem commonly uses is supported — `bytes`, `transpose`, `gzip`, `crc32c`,
-`sharding_indexed`, `vlen-utf8` strings and `vlen-bytes` byte strings, and the `zstd` and `blosc` families
-— with `zstd`/`blosc` read *and* written by Falcon's own pure-Java encoders (libzstd / c-blosc /
-zarr-python read the output). Consolidated metadata is read and written, so a remote hierarchy opens in
-one request; rectilinear chunk grids and the extension data types zarr-python writes (datetimes,
-fixed-size strings and bytes, structs) are read and written too. Stores: in-memory, filesystem, ZIP (read
+`sharding_indexed`, `vlen-utf8` strings and `vlen-bytes` byte strings, the `zstd` and `blosc` families, and
+numcodecs' `zlib`, `lz4`, filters, and checksums — with `zstd`/`blosc` read *and* written by Falcon's own
+pure-Java encoders (libzstd / c-blosc / zarr-python read the output; Blosc with every internal compressor,
+byte for byte as c-blosc writes it, zstd aside). Zarr v2 arrays open with their numcodecs filters,
+Fortran order, and NumPy string, byte, time, structured, and object dtypes. Consolidated metadata is read
+and written, so a remote hierarchy opens in one request; rectilinear chunk grids and the extension data
+types zarr-python writes (datetimes, fixed-size strings and bytes, structs) are read and written too.
+Stores: in-memory, filesystem, ZIP (read
 and written), read-only HTTP (byte-range; listing from directory index pages), and S3-compatible object
 storage (Amazon S3, Google Cloud Storage, MinIO, R2; requests signed with SigV4). Full walkthrough in the
 **[Zarr User Guide](zarr/USER_GUIDE.md)**.

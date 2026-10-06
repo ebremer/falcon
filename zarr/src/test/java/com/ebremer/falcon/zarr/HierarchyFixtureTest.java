@@ -6,11 +6,17 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.ebremer.falcon.zarr.json.JsonValue;
+import com.ebremer.falcon.zarr.store.MemoryStore;
+import java.io.File;
+import java.io.IOException;
 import java.net.URISyntaxException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -101,22 +107,34 @@ class HierarchyFixtureTest {
     }
 
     /**
-     * P1 I3: one child Falcon cannot open (a v2 "&lt;U8" array) aborted children(), arrays(), and groups().
-     * They now leave it out; childNames() lists it, and child(name) says why it fails. The numpy.datetime64
-     * array beside it, once refused as well, opens since P2 F14.
+     * P1 I3: one child Falcon cannot open aborted children(), arrays(), and groups(). They now leave it
+     * out; childNames() lists it, and child(name) says why it fails. Of zarr-python's children here, the
+     * numpy.datetime64 array, once refused, opens since P2 F14, and the v2 "&lt;U8" array since P2 F4; a v2
+     * array of pickled objects, added to a copy of the store, still cannot be opened.
      */
     @Test
-    void childrenThatCannotBeOpenedAreLeftOut() {
-        ZarrGroup root = Zarr.open(fixture("p1_mixed")).asGroup();
-        assertEquals(List.of("good", "text", "when", "zz_group"), root.childNames());
-        assertEquals(List.of("good", "when", "zz_group"), names(root.children()));
-        assertEquals(List.of("good", "when"), names(root.arrays()));
-        assertEquals(List.of("zz_group"), names(root.groups()));
-        assertArrayEquals(new double[] {1.25, 2.5}, root.array("good").readDoubles());
+    void childrenThatCannotBeOpenedAreLeftOut() throws IOException {
+        MemoryStore store = new MemoryStore();
+        Path root = fixture("p1_mixed");
+        try (Stream<Path> files = Files.walk(root)) {
+            for (Path file : files.filter(Files::isRegularFile).toList()) {
+                store.set(root.relativize(file).toString().replace(File.separatorChar, '/'), Files.readAllBytes(file));
+            }
+        }
+        store.set("pickled/.zarray", ("{\"zarr_format\":2,\"shape\":[2],\"chunks\":[2],\"dtype\":\"|O\","
+                + "\"fill_value\":null,\"order\":\"C\",\"filters\":[{\"id\":\"pickle\",\"protocol\":5}],"
+                + "\"compressor\":null}").getBytes(StandardCharsets.UTF_8));
+        ZarrGroup group = Zarr.open(store).asGroup();
+        assertEquals(List.of("good", "pickled", "text", "when", "zz_group"), group.childNames());
+        assertEquals(List.of("good", "text", "when", "zz_group"), names(group.children()));
+        assertEquals(List.of("good", "text", "when"), names(group.arrays()));
+        assertEquals(List.of("zz_group"), names(group.groups()));
+        assertArrayEquals(new double[] {1.25, 2.5}, group.array("good").readDoubles());
         // 2026-01-01 and 2026-01-02, in seconds since 1970
-        assertArrayEquals(new long[] {1767225600L, 1767312000L}, root.array("when").readLongs());
+        assertArrayEquals(new long[] {1767225600L, 1767312000L}, group.array("when").readLongs());
+        assertArrayEquals(new String[] {"alpha", "beta"}, group.array("text").readStrings());
 
-        ZarrUnsupportedException text = assertThrows(ZarrUnsupportedException.class, () -> root.child("text"));
-        assertTrue(text.getMessage().contains("<U8"), text.getMessage());
+        ZarrUnsupportedException pickled = assertThrows(ZarrUnsupportedException.class, () -> group.child("pickled"));
+        assertTrue(pickled.getMessage().contains("'pickle'"), pickled.getMessage());
     }
 }

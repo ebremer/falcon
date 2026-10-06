@@ -1,0 +1,17 @@
+{
+ "name": "v2x_datetime_10s_be",
+ "shape": [
+  5
+ ],
+ "dtype": ">M8[10s]",
+ "codecs": [
+  "bytes"
+ ],
+ "values": [
+  0,
+  -3,
+  12345,
+  5,
+  5
+ ]
+}

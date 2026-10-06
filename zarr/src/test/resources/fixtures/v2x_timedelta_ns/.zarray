@@ -1,0 +1,18 @@
+{
+  "shape": [
+    5
+  ],
+  "chunks": [
+    5
+  ],
+  "dtype": "<m8[ns]",
+  "fill_value": -9223372036854775808,
+  "order": "C",
+  "filters": null,
+  "dimension_separator": ".",
+  "compressor": {
+    "id": "zstd",
+    "level": 3
+  },
+  "zarr_format": 2
+}

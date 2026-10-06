@@ -12,7 +12,10 @@ the exact writers (F8), the extension data types (F14: numpy.datetime64 and nump
 counts, fixed_length_utf32, null_terminated_bytes, raw_bytes, and a struct with a nested struct, compared
 packed little-endian; the partial arrays' fill values are checked to be what Falcon wrote), and rectilinear
 chunk grids (F14: read with zarr-python's array.rectilinear_chunks, the stored grid and chunk files checked
-too). Dev-time tool; zarr-python is not a Falcon dependency. Run it before every release:
+too). P2 F3 added Blosc's other internal compressors and numcodecs' Zlib and LZ4 (numcodecs.zlib and
+numcodecs.lz4): each of those chunks must be the bytes numcodecs itself writes for the same data and
+configuration (Blosc's zstd excepted: Falcon's zstd encoder is its own). Dev-time tool; zarr-python is not a
+Falcon dependency. Run it before every release:
 
     mvn -pl zarr -am compile
     java -cp "zarr/target/classes;core/target/classes" tools/fixtures/WriteZarrCases.java OUT_DIR
@@ -29,6 +32,8 @@ import sys
 import warnings
 
 import numpy as np
+import numcodecs
+import numcodecs.blosc
 import zarr
 
 POOL = ["alpha", "", "gamma-δ", "中文", "emoji-\U0001f600", "x"]
@@ -144,15 +149,48 @@ def chunk_files(directory, name):
             yield os.path.join(d, f)
 
 
+BLOSC_FORMATS = {"blosclz": 0, "lz4": 1, "lz4hc": 1, "zlib": 3}  # the header's compressor format, by cname
+SHUFFLES = {"noshuffle": 0, "shuffle": 1, "bitshuffle": 2}
+
+
+def numcodecs_problem(directory, name):
+    """F3: a Blosc chunk must be c-blosc's, and a numcodecs.zlib/lz4 chunk numcodecs' own, byte for byte."""
+    meta = json.load(open(os.path.join(directory, name, "zarr.json"), encoding="utf-8"))
+    codec = meta["codecs"][-1]
+    conf = codec.get("configuration", {})
+    for path in chunk_files(directory, name):
+        stored = open(path, "rb").read()
+        if codec["name"] == "blosc":
+            if stored[2] >> 5 != BLOSC_FORMATS[conf["cname"]]:
+                return f"{os.path.basename(path)}: blosc compressor format {stored[2] >> 5}, cname {conf['cname']}"
+            raw = bytes(numcodecs.blosc.decompress(stored))
+            ref = bytes(numcodecs.blosc.compress(raw, conf["cname"].encode(), conf["clevel"],
+                                                 SHUFFLES[conf["shuffle"]], conf["blocksize"], conf["typesize"]))
+        elif codec["name"] == "numcodecs.zlib":
+            raw = numcodecs.Zlib().decode(stored)
+            ref = bytes(numcodecs.Zlib(**conf).encode(raw))
+        else:
+            raw = numcodecs.LZ4().decode(stored)
+            ref = bytes(numcodecs.LZ4(**conf).encode(raw))
+        if ref != stored:
+            return f"{os.path.basename(path)}: {len(stored)} bytes, not numcodecs' {len(ref)}"
+    return None
+
+
 def layout_problem(directory, name):
     """For arrays whose codec configuration Falcon must honour (I9), what the stored bytes get wrong."""
+    blosc_cname = name.split("_blosc_")[1].split("_")[0] if "_blosc_" in name else None
+    if blosc_cname in BLOSC_FORMATS or ("_numcodecs_" in name and not name.endswith("_sharded")):
+        problem = numcodecs_problem(directory, name)
+        if problem:
+            return problem
     if name == "int32_zstd_checksum":
         for path in chunk_files(directory, name):
             frame = open(path, "rb").read()
             if not (frame[4] >> 2) & 1:
                 return f"{os.path.basename(path)}: zstd frame without the configured content checksum"
-    if name.startswith("float64_blosc_") or name == "int16_blosc_lz4":
-        want = {"noshuffle": 0, "shuffle": 1, "lz4": 1, "bitshuffle": 4}[name.rsplit("_", 1)[1]]
+    if name.startswith("float64_blosc_") and blosc_cname not in BLOSC_FORMATS:  # zstd: no byte check above
+        want = {"noshuffle": 0, "shuffle": 1, "bitshuffle": 4}[name.rsplit("_", 1)[1]]
         checked = 0
         for path in chunk_files(directory, name):
             header = open(path, "rb").read(16)
@@ -215,6 +253,7 @@ RECTILINEAR_GRIDS = {
 
 
 def main(directory):
+    numcodecs.blosc.set_nthreads(1)  # blocks in order, as Falcon writes them
     zarr.config.set({"array.rectilinear_chunks": True})  # F14: zarr-python reads rectilinear grids only so
     manifest = json.load(open(os.path.join(directory, "manifest.json"), encoding="utf-8"))
     failures = 0

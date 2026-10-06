@@ -263,6 +263,36 @@ public class WriteZarrCases {
                 "[" + BYTES_LE + ",{\"name\":\"blosc\",\"configuration\":{\"cname\":\"lz4\",\"clevel\":5,"
                         + "\"shuffle\":\"shuffle\",\"typesize\":2,\"blocksize\":0}}]", "[13,7]");
 
+        // P2 F3: Blosc writes the compressor its cname names (every one zarr-python's numcodecs has), and
+        // numcodecs' Zlib and LZ4 under zarr-python 3's names; check_zarr_writer.py re-encodes each chunk with
+        // numcodecs and compares the bytes.
+        String[][] cnames = {{"blosclz", "9"}, {"lz4", "3"}, {"lz4hc", "9"}, {"zlib", "4"}};
+        for (String[] c : cnames) {
+            for (String shuffle : new String[] {"noshuffle", "shuffle", "bitshuffle"}) {
+                handMade("float64_blosc_" + c[0] + "_" + shuffle, "float64",
+                        "[" + BYTES_LE + ",{\"name\":\"blosc\",\"configuration\":{\"cname\":\"" + c[0] + "\",\"clevel\":"
+                                + c[1] + ",\"shuffle\":\"" + shuffle + "\",\"typesize\":8,\"blocksize\":0}}]", "[13,7]");
+            }
+            handMade("int32_blosc_" + c[0], "int32",
+                    "[" + BYTES_LE + ",{\"name\":\"blosc\",\"configuration\":{\"cname\":\"" + c[0] + "\",\"clevel\":5,"
+                            + "\"shuffle\":\"shuffle\",\"typesize\":4,\"blocksize\":0}}]");
+        }
+        // and ArraySpec's own Blosc settings (F3)
+        write(root.createArray("int32_blosc_lz4hc_spec", ArraySpec.builder(SHAPE, DataType.INT32).chunkShape(6, 4)
+                .blosc("lz4hc", 7, "bitshuffle").build()), "int32", ByteOrder.LITTLE_ENDIAN, null);
+        write(root.createArray("uint16_blosc_blosclz_spec", ArraySpec.builder(SHAPE, DataType.UINT16)
+                .blosc("blosclz", 9, "shuffle").build()), "uint16", ByteOrder.LITTLE_ENDIAN, null);
+        handMade("int32_numcodecs_zlib", "int32", "[" + BYTES_LE + ",{\"name\":\"numcodecs.zlib\",\"configuration\":"
+                + "{\"level\":3}}]");
+        handMade("float64_numcodecs_zlib_default", "float64", "[" + BYTES_LE + ",{\"name\":\"numcodecs.zlib\","
+                + "\"configuration\":{}}]", "[13,7]");
+        handMade("int16_numcodecs_lz4", "int16", "[" + BYTES_LE + ",{\"name\":\"numcodecs.lz4\",\"configuration\":{}}]");
+        handMade("uint8_numcodecs_lz4_accel", "uint8", "[" + BYTES_LE + ",{\"name\":\"numcodecs.lz4\","
+                + "\"configuration\":{\"acceleration\":8}}]", "[13,7]");
+        handMade("int32_numcodecs_lz4_sharded", "int32", "[" + shard("[3,2]", "[" + bytes
+                + ",{\"name\":\"numcodecs.lz4\",\"configuration\":{}}]") + ",{\"name\":\"numcodecs.zlib\","
+                + "\"configuration\":{}}]"); // zarr-python requires the configuration, even an empty one
+
         // P2 F14: rectilinear chunk grids. Rows in chunks of 2, 5, 6 and columns of 3, 1, 3, in the core types and
         // strings and bytes; then lengths in runs, lengths past the array, shards of two shapes, write_empty,
         // the v2 keys, a transpose, and resizes (grown past the listed lengths, so a chunk is added; and shrunk

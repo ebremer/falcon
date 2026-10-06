@@ -3,18 +3,163 @@ package com.ebremer.falcon.core.compress.blosc;
 import com.ebremer.falcon.core.compress.CompressionFormatException;
 
 /**
- * Snappy block-format decompression, which is what Blosc's {@code snappy} internal codec stores (the raw
- * format of {@code snappy_uncompress}, not the framing format). Modern c-blosc dropped snappy, but older
- * blosc buffers may still use it.
+ * The Snappy block format, which is what Blosc's {@code snappy} internal codec stores (the raw format of
+ * {@code snappy_compress}/{@code snappy_uncompress}, not the framing format). c-blosc builds without
+ * snappy by default (numcodecs' does), but other builds and older blosc buffers may use it.
  *
  * <p>The stream is a varint uncompressed length followed by elements. Each element's tag byte has the
  * type in its low two bits: a literal run (the length in the upper six bits, extended by up to four
  * trailing bytes for large runs), or a copy of an earlier run selected by a 1-, 2-, or 4-byte
  * back-reference offset. Copies may overlap the output written so far.
+ *
+ * <p>The compressor follows Google's snappy 1.1.10 ({@code CompressFragment}, with its portable
+ * multiplicative hash): 64 KiB fragments, each with a fresh hash table sized to it, a scan that skips
+ * faster the longer it finds no match, and copies of at most 64 bytes.
  */
 final class Snappy {
 
+    private static final int BLOCK_SIZE = 1 << 16;
+    private static final int MIN_HASH_TABLE_SIZE = 1 << 8;
+    private static final int MAX_HASH_TABLE_BITS = 14;
+    private static final int INPUT_MARGIN = 15;
+
     private Snappy() {
+    }
+
+    /** {@code snappy_max_compressed_length}: {@code 32 + n + n / 6}. */
+    static int maxCompressedLength(int length) {
+        return 32 + length + length / 6;
+    }
+
+    /**
+     * Compresses one block into {@code dst}, as {@code snappy_compress}: 0 if {@code maxOut} is below
+     * {@link #maxCompressedLength} (snappy refuses a smaller buffer, whatever the data), else the stream's
+     * length, which for incompressible data can exceed the input's.
+     */
+    static int compress(byte[] src, int off, int length, byte[] dst, int dstOff, int maxOut) {
+        if (maxOut < maxCompressedLength(length)) {
+            return 0;
+        }
+        int op = dstOff;
+        for (int n = length; ; n >>>= 7) { // the uncompressed length, a varint
+            if (n < 0x80) {
+                dst[op++] = (byte) n;
+                break;
+            }
+            dst[op++] = (byte) (n | 0x80);
+        }
+        int[] table = new int[1 << MAX_HASH_TABLE_BITS];
+        for (int start = 0; start < length; start += BLOCK_SIZE) {
+            int fragment = Math.min(BLOCK_SIZE, length - start);
+            int tableSize = Math.max(MIN_HASH_TABLE_SIZE,
+                    Math.min(1 << MAX_HASH_TABLE_BITS, Integer.highestOneBit(Math.max(fragment - 1, 1)) << 1));
+            java.util.Arrays.fill(table, 0, tableSize, 0);
+            op = compressFragment(src, off + start, fragment, dst, op, table, tableSize - 1);
+        }
+        return op - dstOff;
+    }
+
+    /** {@code CompressFragment}: one fragment of at most 64 KiB; returns the new output position. */
+    private static int compressFragment(byte[] src, int input, int length, byte[] dst, int op, int[] table,
+                                        int mask) {
+        int ip = input;
+        int ipEnd = input + length;
+        if (length >= INPUT_MARGIN) {
+            int ipLimit = ipEnd - INPUT_MARGIN;
+            fragment:
+            while (true) {
+                int nextEmit = ip++;
+                int skip = 32;
+                int candidate;
+                while (true) { // look for a 4-byte match, stepping further the longer none turns up
+                    int data = read32(src, ip);
+                    int entry = hash(data, mask);
+                    int bytesBetweenHashLookups = skip >>> 5;
+                    skip += bytesBetweenHashLookups;
+                    int nextIp = ip + bytesBetweenHashLookups;
+                    if (nextIp > ipLimit) {
+                        ip = nextEmit;
+                        break fragment;
+                    }
+                    candidate = input + table[entry];
+                    table[entry] = ip - input;
+                    if (data == read32(src, candidate)) {
+                        break;
+                    }
+                    ip = nextIp;
+                }
+                op = emitLiteral(src, nextEmit, ip - nextEmit, dst, op);
+                do { // copies, for as long as the bytes after one start another
+                    int matched = 4;
+                    while (ip + matched < ipEnd && src[candidate + matched] == src[ip + matched]) {
+                        matched++;
+                    }
+                    int offset = ip - candidate;
+                    ip += matched;
+                    op = emitCopy(dst, op, offset, matched);
+                    if (ip >= ipLimit) {
+                        break fragment;
+                    }
+                    table[hash(read32(src, ip - 1), mask)] = ip - input - 1;
+                    int entry = hash(read32(src, ip), mask);
+                    candidate = input + table[entry];
+                    table[entry] = ip - input;
+                } while (read32(src, ip) == read32(src, candidate));
+            }
+        }
+        if (ip < ipEnd) {
+            op = emitLiteral(src, ip, ipEnd - ip, dst, op);
+        }
+        return op;
+    }
+
+    private static int emitLiteral(byte[] src, int from, int length, byte[] dst, int op) {
+        int n = length - 1;
+        if (n < 60) {
+            dst[op++] = (byte) (n << 2);
+        } else {
+            int count = ((31 - Integer.numberOfLeadingZeros(n)) >>> 3) + 1;
+            dst[op++] = (byte) ((59 + count) << 2);
+            for (int i = 0; i < count; i++) {
+                dst[op++] = (byte) (n >>> (8 * i));
+            }
+        }
+        System.arraycopy(src, from, dst, op, length);
+        return op + length;
+    }
+
+    /** {@code EmitCopy}: 64-byte copies while at least 68 remain, then one or two to finish. */
+    private static int emitCopy(byte[] dst, int op, int offset, int length) {
+        while (length >= 68) {
+            op = emitCopyAtMost64(dst, op, offset, 64);
+            length -= 64;
+        }
+        if (length > 64) {
+            op = emitCopyAtMost64(dst, op, offset, 60);
+            length -= 60;
+        }
+        return emitCopyAtMost64(dst, op, offset, length);
+    }
+
+    private static int emitCopyAtMost64(byte[] dst, int op, int offset, int length) {
+        if (length < 12 && offset < 2048) { // a 1-byte offset: 3 bits of it in the tag
+            dst[op++] = (byte) (1 + ((length - 4) << 2) + ((offset >>> 8) << 5));
+            dst[op++] = (byte) offset;
+        } else { // a 2-byte offset
+            dst[op++] = (byte) (2 + ((length - 1) << 2));
+            dst[op++] = (byte) offset;
+            dst[op++] = (byte) (offset >>> 8);
+        }
+        return op;
+    }
+
+    /** The table entry for 4 bytes: snappy's portable hash ({@code 0x1e35a7bd}), masked to the table. */
+    private static int hash(int bytes, int mask) {
+        return ((bytes * 0x1e35a7bd) >>> (31 - MAX_HASH_TABLE_BITS + 1)) & mask;
+    }
+
+    private static int read32(byte[] b, int p) {
+        return (b[p] & 0xff) | (b[p + 1] & 0xff) << 8 | (b[p + 2] & 0xff) << 16 | (b[p + 3] & 0xff) << 24;
     }
 
     /** Decompresses one Snappy block, which must produce exactly {@code outLength} bytes. */

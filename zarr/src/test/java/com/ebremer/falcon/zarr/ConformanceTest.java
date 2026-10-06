@@ -61,7 +61,10 @@ class ConformanceTest {
         "zarr_python_defaults",
         // blosc, the other compressor Zarr stores commonly use
         "blosc_lz4_int32", "blosc_zstd_float64", "blosc_noshuffle_int16", "blosc_zlib_uint8",
-        "blosc_blosclz_int32", "blosc_bitshuffle_int32", "blosc_bitshuffle_float64"})
+        "blosc_blosclz_int32", "blosc_bitshuffle_int32", "blosc_bitshuffle_float64", "blosc_lz4hc_float32",
+        // numcodecs' Zlib and LZ4, as zarr-python 3 names them in v3 metadata (gen_zarr_numcodecs_fixtures.py)
+        "numcodecs_zlib_int32", "numcodecs_zlib_default_float64", "numcodecs_zlib_crc32c_uint16",
+        "numcodecs_lz4_int16", "numcodecs_lz4_accel_uint8", "numcodecs_lz4_sharded_int32"})
     void readsZarrPythonFixture(String name) {
         JsonObject meta = expected(name);
         ZarrArray array = Zarr.open(fixture(name)).asArray();

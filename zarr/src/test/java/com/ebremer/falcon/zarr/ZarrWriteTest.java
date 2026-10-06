@@ -13,6 +13,7 @@ import com.ebremer.falcon.zarr.store.FileSystemStore;
 import com.ebremer.falcon.zarr.store.MemoryStore;
 import java.nio.ByteOrder;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
@@ -191,18 +192,29 @@ class ZarrWriteTest {
         assertArrayEquals(data, Zarr.openArray(store).readInts());
     }
 
+    /**
+     * Blosc compresses a chunk of 128 bytes or more, and, as c-blosc does (F3), stores a smaller one whole: the
+     * 16-byte header, then the bytes.
+     */
     @Test
     void roundTripsWithBlosc() {
         MemoryStore store = new MemoryStore();
-        ZarrArray a = Zarr.createArray(store, ArraySpec.builder(new long[] {4, 6}, DataType.INT32)
-                .chunkShape(4, 6).blosc().build());
-        int[] data = new int[24];
-        for (int i = 0; i < 24; i++) {
+        ZarrArray a = Zarr.createArray(store, ArraySpec.builder(new long[] {8, 6}, DataType.INT32)
+                .chunkShape(8, 6).blosc().build());
+        int[] data = new int[48];
+        for (int i = 0; i < 48; i++) {
             data[i] = i % 5;
         }
         a.writeInts(data);
-        assertTrue(store.get("c/0/0").orElseThrow().length < 24 * 4, "blosc should compress the chunk");
+        assertTrue(store.get("c/0/0").orElseThrow().length < 48 * 4, "blosc should compress the chunk");
         assertArrayEquals(data, Zarr.openArray(store).readInts());
+
+        MemoryStore small = new MemoryStore();
+        ZarrArray b = Zarr.createArray(small, ArraySpec.builder(new long[] {4, 6}, DataType.INT32)
+                .chunkShape(4, 6).blosc().build());
+        b.writeInts(Arrays.copyOf(data, 24));
+        assertEquals(16 + 24 * 4, small.get("c/0/0").orElseThrow().length, "under 128 bytes, stored whole");
+        assertArrayEquals(Arrays.copyOf(data, 24), Zarr.openArray(small).readInts());
     }
 
     @Test

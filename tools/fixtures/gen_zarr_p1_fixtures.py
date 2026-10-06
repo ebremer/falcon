@@ -12,8 +12,9 @@ Falcon reads against the values written here:
                    in a v3 group, a v3 array, and a v2 array's .zattrs
   p1_v2_cases      v2 arrays: a complex dtype with fill_value null, and dimension_separator null
                    (zarr-python 2 wrote it; zarr-python 3.4 refuses it, so it is patched in afterwards)
-  p1_mixed         a v3 group holding readable children next to ones Falcon cannot open: a v2 "<U8"
-                   array, and a numpy.datetime64 array (an extension data type, which opens since P2 F14)
+  p1_mixed         a v3 group holding readable children next to ones Falcon could not open: a v2 "<U8"
+                   array (which opens since P2 F4), and a numpy.datetime64 array (an extension data type,
+                   which opens since P2 F14)
 """
 import json, os, shutil
 import numpy as np

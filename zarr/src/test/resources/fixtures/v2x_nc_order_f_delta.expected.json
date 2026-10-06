@@ -1,0 +1,40 @@
+{
+ "name": "v2x_nc_order_f_delta",
+ "shape": [
+  4,
+  6
+ ],
+ "dtype": "<i4",
+ "codecs": [
+  "transpose",
+  "bytes",
+  "numcodecs.delta",
+  "numcodecs.zlib"
+ ],
+ "values": [
+  -8,
+  3,
+  14,
+  25,
+  36,
+  47,
+  58,
+  69,
+  80,
+  91,
+  102,
+  113,
+  124,
+  135,
+  146,
+  157,
+  168,
+  179,
+  190,
+  201,
+  212,
+  223,
+  234,
+  245
+ ]
+}

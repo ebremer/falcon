@@ -1,0 +1,26 @@
+{
+ "name": "v2x_order_f_str",
+ "shape": [
+  3,
+  4
+ ],
+ "dtype": "|O",
+ "codecs": [
+  "transpose",
+  "vlen-utf8"
+ ],
+ "values": [
+  "a",
+  "bb",
+  "ccc",
+  "dddd",
+  "e",
+  "",
+  "δ",
+  "😀",
+  "x",
+  "y",
+  "z",
+  "w"
+ ]
+}

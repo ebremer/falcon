@@ -5,12 +5,16 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.ebremer.falcon.core.compress.blosc.BloscEncoder;
 import com.ebremer.falcon.core.compress.zstd.ZstdEncoder;
 import com.ebremer.falcon.zarr.ArraySpec;
+import com.ebremer.falcon.zarr.Zarr;
+import com.ebremer.falcon.zarr.ZarrArray;
 import com.ebremer.falcon.zarr.ZarrFormatException;
 import com.ebremer.falcon.zarr.datatype.DataType;
 import com.ebremer.falcon.zarr.json.Json;
 import com.ebremer.falcon.zarr.json.JsonObject;
+import com.ebremer.falcon.zarr.store.MemoryStore;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
@@ -23,7 +27,8 @@ import org.junit.jupiter.api.Test;
  * checksum a {@code "checksum": true} array asks for, and Blosc always byte-shuffled with automatic blocks,
  * whatever {@code shuffle}, {@code typesize}, {@code blocksize}, or {@code clevel} said. The output was
  * still readable, but not what the metadata describes. The zstd {@code level}, and the zstd level Blosc's
- * {@code clevel} implies, took effect with P2 F12, when the encoder gained levels.
+ * {@code clevel} implies, took effect with P2 F12, when the encoder gained levels; Blosc's {@code cname} with
+ * P2 F3, when Falcon gained the other internal compressors.
  */
 class CodecConfigurationTest {
 
@@ -78,6 +83,26 @@ class CodecConfigurationTest {
         assertEquals(0x02, blosc("shuffle", 8, 0, 0)[2] & 0x02, "clevel 0 stores the data as it is");
     }
 
+    /**
+     * The {@code cname} names the compressor inside Blosc (F3): zstd was written whatever it said. Each buffer
+     * is now the one c-blosc writes (Falcon Core's BloscEncodeVectorsTest checks that byte for byte); here, the
+     * header's compressor format and the pipeline's round trip.
+     */
+    @Test
+    void bloscWritesTheCompressorItsCnameNames() {
+        String[] cnames = {"blosclz", "lz4", "lz4hc", "snappy", "zlib", "zstd"};
+        int[] formats = {0, 1, 1, 2, 3, 4};
+        for (int c = 0; c < cnames.length; c++) {
+            ChunkPipeline p = pipeline(DataType.FLOAT64, 8192, "{\"name\":\"blosc\",\"configuration\":{\"cname\":\""
+                    + cnames[c] + "\",\"clevel\":5,\"shuffle\":\"shuffle\",\"typesize\":8,\"blocksize\":0}}");
+            byte[] stored = p.encode(doubles(), new byte[8]);
+            assertEquals(formats[c], (stored[2] & 0xff) >>> 5, cnames[c]);
+            assertEquals(0, stored[2] & 0x02, cnames[c] + " compresses these doubles");
+            assertArrayEquals(BloscEncoder.compress(doubles(), 8, BloscEncoder.SHUFFLE, 0, 5, c), stored, cnames[c]);
+            assertArrayEquals(doubles(), p.decode(stored), cnames[c]);
+        }
+    }
+
     @Test
     void aBloscConfigurationWithoutFieldsUsesTheDefaults() {
         // v2 metadata records no Blosc configuration: byte shuffle by element size, automatic blocks.
@@ -85,6 +110,7 @@ class CodecConfigurationTest {
         byte[] stored = p.encode(doubles(), new byte[8]);
         assertEquals(0x01, stored[2] & 0x05);
         assertEquals(8, stored[3]);
+        assertEquals(4, (stored[2] & 0xff) >>> 5, "zstd, zarr-python's default cname");
         assertArrayEquals(doubles(), p.decode(stored));
     }
 
@@ -152,6 +178,43 @@ class CodecConfigurationTest {
         byte[] b = high.encode(data, new byte[1]);
         assertTrue(b.length < a.length, b.length + " at clevel 9, " + a.length + " at clevel 1");
         assertArrayEquals(data, low.decode(b));
+    }
+
+    /**
+     * {@code ArraySpec.blosc(cname, clevel, shuffle)} records the three (F3), and the array's chunks are written
+     * with them; {@code blosc()} keeps zstd at clevel 5 with the byte shuffle.
+     */
+    @Test
+    void anArraySpecRecordsItsBloscSettings() {
+        JsonObject lz4 = ArraySpec.builder(new long[] {64}, DataType.FLOAT64).blosc("lz4hc", 7, "bitshuffle").build()
+                .toJson().get("codecs").asArray().get(1).asObject().get("configuration").asObject();
+        assertEquals("lz4hc", lz4.get("cname").asString());
+        assertEquals(7, lz4.get("clevel").asNumber().intValue());
+        assertEquals("bitshuffle", lz4.get("shuffle").asString());
+        assertEquals(8, lz4.get("typesize").asNumber().intValue());
+        JsonObject plain = ArraySpec.builder(new long[] {64}, DataType.FLOAT64).blosc().build()
+                .toJson().get("codecs").asArray().get(1).asObject().get("configuration").asObject();
+        assertEquals("zstd", plain.get("cname").asString());
+        assertEquals("shuffle", plain.get("shuffle").asString());
+
+        MemoryStore store = new MemoryStore();
+        ZarrArray a = Zarr.createArray(store, ArraySpec.builder(new long[] {8192}, DataType.FLOAT64)
+                .blosc("zlib", 9, "noshuffle").build());
+        ByteBuffer values = ByteBuffer.wrap(doubles()).order(ByteOrder.LITTLE_ENDIAN);
+        double[] expected = new double[8192];
+        values.asDoubleBuffer().get(expected);
+        a.writeDoubles(expected);
+        byte[] chunk = store.get("c/0").orElseThrow();
+        assertEquals(3, (chunk[2] & 0xff) >>> 5, "zlib's format");
+        assertEquals(0, chunk[2] & 0x05, "no shuffle");
+        assertArrayEquals(BloscEncoder.compress(doubles(), 8, BloscEncoder.NOSHUFFLE, 0, 9, BloscEncoder.ZLIB), chunk);
+        assertArrayEquals(expected, Zarr.openArray(store).readDoubles());
+
+        ArraySpec.Builder b = ArraySpec.builder(new long[] {1}, DataType.INT8);
+        assertThrows(IllegalArgumentException.class, () -> b.blosc("LZ4", 5, "shuffle"));
+        assertThrows(IllegalArgumentException.class, () -> b.blosc("lz4", 10, "shuffle"));
+        assertThrows(IllegalArgumentException.class, () -> b.blosc("lz4", -1, "shuffle"));
+        assertThrows(IllegalArgumentException.class, () -> b.blosc("lz4", 5, "byteshuffle"));
     }
 
     /** {@code ArraySpec.zstd(level)} records the level; libzstd's range is checked. */

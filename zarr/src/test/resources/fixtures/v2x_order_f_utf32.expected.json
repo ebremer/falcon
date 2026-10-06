@@ -1,0 +1,23 @@
+{
+ "name": "v2x_order_f_utf32",
+ "shape": [
+  3,
+  3
+ ],
+ "dtype": "<U3",
+ "codecs": [
+  "transpose",
+  "bytes"
+ ],
+ "values": [
+  "a",
+  "bc",
+  "def",
+  "g",
+  "",
+  "hi",
+  "jkl",
+  "m",
+  "n"
+ ]
+}

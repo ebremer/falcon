@@ -1,0 +1,22 @@
+{
+ "name": "v2x_nc_jenkins",
+ "shape": [
+  9
+ ],
+ "dtype": "<i8",
+ "codecs": [
+  "bytes",
+  "numcodecs.jenkins_lookup3"
+ ],
+ "values": [
+  -3,
+  -2,
+  -1,
+  0,
+  1,
+  2,
+  3,
+  4,
+  5
+ ]
+}
