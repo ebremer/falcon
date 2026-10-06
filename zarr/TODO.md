@@ -112,11 +112,16 @@ New API: `ZipStore.create`/`open`, `HttpStore.Builder.directoryListing` (F13);
 `DataType.Field`, and `DataType.fromJson`/`toJson`/`hasByteOrder`/`unit`/`scaleFactor`/`fields`/
 `fieldOffset`/`defaultFillValue` (F14). What remains is P2's F3 and F4, and P3's D3.
 
+**Update (2026-10-06): P3 is done.** D3 rewrote `PLAN.md`'s stale parts (status, packages, the shared-model
+note, coverage, the oracle note), and D5's last item pinned `zarr==3.4.0` and `numcodecs==0.17.0`, which
+regenerate every Zarr fixture with the same metadata and values. What remains is P2's F3 and F4.
+
 ## Do these first — top 10
 
 1. ~~**Z1/Z2 — node replacement destroys or corrupts data.**~~ Done 2026-10-05 (below).
-2. **Z3/C1 — chunk cache.** ~~Reads are stale across handles~~ (Z3, done 2026-10-05), ~~and concurrent use
-   throws `ConcurrentModificationException`~~ (the cache part of C1, done with Z3). The rest of C1 is open.
+2. ~~**Z3/C1 — chunk cache.**~~ ~~Reads are stale across handles~~ (Z3, done 2026-10-05), ~~and concurrent
+   use throws `ConcurrentModificationException`~~ (the cache part of C1, done with Z3). The rest of C1 was
+   done 2026-10-06 (below).
 3. ~~**Z4 — silent numeric conversion on write.**~~ Done 2026-10-05 (below).
 4. ~~**Z5 — the blosc encoder corrupts data when the element size is ≥ 256 bytes.**~~ Done 2026-10-05 in
    core (below).
@@ -1250,6 +1255,8 @@ says what was done, then gives the original finding.
 
 ## P3 — docs, build, housekeeping
 
+All of P3 is done (2026-10-06).
+
 - [x] **D1 — fix docs that overclaim.** Done 2026-10-06, with H1: the guide now says decompression is
   bounded by what a chunk holds, except a string chunk, bounded only by the 2 GB a Java array holds.
   - ~~`USER_GUIDE.md` (*What is and isn't supported*) says "never … out-of-memory from a bogus declared
@@ -1265,13 +1272,21 @@ says what was done, then gives the original finding.
   - ~~create/replace semantics~~ and ~~numeric conversion and narrowing rules~~: done with Z1 and Z4
     (*Writing*);
   - ~~`HttpStore` limitations (key encoding, 403 handling)~~.
-- [ ] **D3 — `PLAN.md` is stale.**
-  - The status block still says "Z0–Z7 complete; Z8/Z9 partially complete" and "228 tests green" (it is
-    270).
-  - The "Remaining" sentence is garbled ("and benchmarks and …") and lists work that is done.
-  - §2 says only the first package is exported (four are), lists a non-existent `util` package, and
-    omits `data`.
-  - The §2 "shared model note" contradicts the §10 deferral.
+- [x] **D3 — `PLAN.md` is stale.** Done 2026-10-06.
+  - ~~The status block still says "Z0–Z7 complete; Z8/Z9 partially complete" and "228 tests green"~~: it
+    now gives the state after P2 (Z0–Z9, P0, P1, P3, and P2 but F3/F4), what is checked against
+    zarr-python, libzstd, c-blosc, and c-blosc2 and with what counts, the stores, and 567 + 18 tests.
+  - ~~The "Remaining" sentence is garbled~~: it names F3 and F4 and the non-goals.
+  - ~~§2 says only the first package is exported, lists a non-existent `util` package, and omits
+    `data`~~: four are exported, `util` is gone, `data` is listed, and the tree shows `core` and the
+    module's docs.
+  - ~~The §2 "shared model note" contradicts the §10 deferral~~: it now points to §10 (no shared model;
+    only the codecs are shared, in `core`), as §4's data-model row does.
+  - Also corrected: §1 and §5 (extension data types, the rectilinear grid, the `vlen-*` codecs, nested
+    sharding, c-blosc2, zstd levels, `S3Store`); §3's Blosc/zstd non-goal (done) and v2 (read since Z8);
+    Z8's `HttpStore`, which uses `java.net.HttpURLConnection`, not `java.net.http` (a module beyond
+    `java.base`); §8's oracle note, which said zarr-python was not installed. In this file, the top-10
+    list said "the rest of C1 is open"; it was done with P1.
 - [x] **D4 — Javadoc lint.** Done 2026-10-06. `-Xdoclint:all` over the four exported packages
   (`com.ebremer.falcon.zarr`, `.datatype`, `.json`, `.store`): **0 warnings**, from 308 (245 at the
   review; the API grew). `-Xdoclint:all,-missing` over every package: 0 too.
@@ -1288,8 +1303,14 @@ says what was done, then gives the original finding.
     the file and line (checked: removing one `@return` fails the compile). Tests and internal packages are
     not checked. The API F13 and F14 added came in documented.
 - [x] **D5 — Python tooling.** `tools/fixtures/requirements.txt` now exists (added with the HDF5 fixes).
-  It lists `zarr>=3.2,<4`, numcodecs, zstandard, h5py and imagecodecs, with venv instructions.
-  - Remaining: pin zarr to the exact fixture version (3.2.1) if byte-identical regeneration matters.
+  It lists zarr, numcodecs, zstandard, h5py and imagecodecs, with venv instructions.
+  - ~~Remaining: pin zarr to the exact fixture version (3.2.1) if byte-identical regeneration matters.~~
+    Done 2026-10-06: pinned to `zarr==3.4.0` and `numcodecs==0.17.0`, not 3.2.1. The generators since P1
+    were run with 3.4.0, and 3.4.0 regenerates the 3.2.1 fixtures too: every one of the 11 `gen_zarr_*.py` scripts, run with 3.4.0 into a scratch
+    copy, wrote the same metadata and the same values, and the same chunk bytes but for gzip's header
+    timestamp (and a crc32c after it), one 3.2.1 gzip shard whose streams 3.4.0 compresses 4–5 bytes
+    shorter (`sharded_2d_gzip`; decoded identically), and the ZIP fixtures' entry times and order
+    (zarr-python writes chunks concurrently). Those bytes are not reproducible under any pin.
 - [x] **B1 — the surefire `argLine` `--add-reads com.ebremer.falcon.zarr=jdk.httpserver` prints
   `WARNING: Unknown module` on every test run** (`zarr/pom.xml`). Done 2026-10-06: removed.
   - **Why it was dead:** Surefire 3.5.2 ran every module's tests on the class path, not the module path.

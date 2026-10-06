@@ -6,17 +6,26 @@ It is **Falcon Phase 2**; the HDF5 module (Phase 1) is the sibling and the templ
 (reader-before-writer, thin vertical slice first, every stage gated by conformance tests). See the root
 [`PLAN.md`](../PLAN.md) for the umbrella roadmap.
 
-> **Status: Z0–Z7 complete; Z8/Z9 partially complete.** The module reads and writes Zarr v3 and is
-> **verified against zarr-python 3.2.1** — 25 conformance fixtures with expected-value sidecars. Both
-> compressors the ecosystem actually uses are decoded by hand-written, pure-Java implementations: a
-> **Zstandard** decoder (RFC 8878, validated against 18 libzstd frames — zarr-python's default) and a
-> **Blosc** decoder (container + `blosclz`/`lz4`/`lz4hc`/`zlib`/`zstd` + byte- and bit-shuffle,
-> validated against 51 c-blosc buffers). Zarr **v2 stores are read** too (`.zarray`/`.zgroup`/`.zattrs` translated to the v3 model).
-> Corrupt-input fuzzing is in place. Stores: memory, filesystem,
-> **ZIP** archive, and read-only **HTTP** (byte-range requests). An opt-in decoded-chunk cache,
-> a streaming `blocks()` API, and a user guide round out the Z9 polish. 228 tests green.
+> **Status (2026-10-06): Z0–Z9 complete, and the 2026-10-04 review's P0, P1, and P3 done, and P2 but for
+> F3 and F4.** The module reads Zarr v2 and v3 and writes v3, checked against **zarr-python** both ways:
+> Falcon reads 96 fixture stores and 2 ZIP archives zarr-python wrote (3.2.1 for the first, 3.4.0 since),
+> each against an expected-value sidecar, and zarr-python 3.4 reads the 250 arrays, 6 hierarchies, and 4
+> ZIP archives Falcon writes (`check_zarr_writer.py`, `check_zarr_hierarchies.py`, `check_zip_store.py`).
+> - **Data:** every core data type, variable-length strings and bytes, the extension types zarr-python
+>   writes (datetimes, fixed-size strings and bytes, structs), the regular and rectilinear chunk grids,
+>   sharding (nested, with byte-range reads and partial writes), resizing, and consolidated metadata.
+> - **Compression,** hand-written in pure Java in `core`: zstd and Blosc are decoded (316 libzstd frames,
+>   500 c-blosc buffers, 122 c-blosc2 chunks) and encoded (libzstd reads 101 Falcon frames at every
+>   level, c-blosc 240 Falcon buffers); gzip and crc32c come from `java.util.zip`.
+> - **Stores:** memory, filesystem, ZIP (read and written), read-only HTTP (byte ranges; listing from
+>   directory index pages when asked), and S3-compatible object storage (SigV4).
+> - **Robustness:** corrupt input fails with typed exceptions, fuzzed under a small heap and stack;
+>   handles are safe across threads; an opt-in decoded-chunk cache. 567 tests, and 18 more under a small
+>   heap, pass; the public API's Javadoc is complete and checked by the compile.
 >
-> **Remaining** (tracked in [`TODO.md`](TODO.md)): and benchmarks and byte-range coalescing for sharding.
+> **Remaining** (tracked in [`TODO.md`](TODO.md)): P2's F3 (Blosc's other internal compressors when
+> writing) and F4 (Zarr v2 read gaps: v2 filters, the top-level zlib and lz4 compressors, Fortran order, and
+> the `<U`/`|S`/`|O` dtypes); and the non-goals below.
 
 ---
 
@@ -29,9 +38,11 @@ directory, a zip file, an object store, memory). The v3 core spec defines, and F
   partial byte-range reads;
 - a **hierarchy** of **groups** and **arrays** addressed by `/`-separated paths, each node described by a
   JSON metadata document at `<path>/zarr.json`;
-- **data types** (bool, signed/unsigned integers, floats, complex, raw bits);
-- a **regular chunk grid** dividing an array into fixed-shape chunks, with a configurable **chunk key
-  encoding**;
+- **data types** (bool, signed/unsigned integers, floats, complex, raw bits), plus the registered
+  extension types zarr-python writes (variable-length strings and bytes, datetimes, fixed-size strings
+  and bytes, structs);
+- a **regular chunk grid** dividing an array into fixed-shape chunks (and the registered `rectilinear`
+  grid, whose chunks differ in shape), with a configurable **chunk key encoding**;
 - a **fill value** for chunks absent from the store;
 - a **codec pipeline** — ordered array→array, one array→bytes, then bytes→bytes codecs — that transforms
   a chunk between its array form and its stored bytes.
@@ -45,32 +56,34 @@ conformance tests against data written by the reference **zarr-python** library 
 
 ```
 falcon/
+├── core/                            com.ebremer.falcon.core: the compression codecs (zstd, Blosc, LZ4, …)
 ├── hdf5/                            Falcon Phase 1 (built)
 └── zarr/                            Falcon Phase 2 (this module)
-    ├── pom.xml                      parent = com.ebremer:falcon
+    ├── pom.xml                      parent = com.ebremer:falcon; requires core
     ├── PLAN.md                      this document
+    ├── TODO.md                      remaining work, and what was done
+    ├── USER_GUIDE.md                the public API, with examples
+    ├── BENCHMARKS.md                measured throughput
     └── src/{main,test}/java/
         ├── module-info.java         module com.ebremer.falcon.zarr
         └── com/ebremer/falcon/zarr/…
 ```
 
-Package layout (`com.ebremer.falcon.zarr.*`), only the first exported:
+Package layout (`com.ebremer.falcon.zarr.*`); the first four are exported:
 
 ```
-com.ebremer.falcon.zarr             Public API: Zarr, ZarrGroup, ZarrArray, ZarrNode, DataType, Selection …
-        …zarr.json                  Hand-written JSON model + reader + writer (no JDK JSON in java.base)
-        …zarr.store                 Store SPI; FileSystemStore, MemoryStore, ZipStore; byte-range reads
-        …zarr.metadata              zarr.json parse/serialize: ArrayMetadata, GroupMetadata, extension fields
+com.ebremer.falcon.zarr             Public API: Zarr, ZarrGroup, ZarrArray, ZarrNode, ArraySpec, Selection …
         …zarr.datatype              Zarr data types; element byte layout; fill-value JSON codec
-        …zarr.chunk                 Regular and rectilinear chunk grids; chunk key encoding (default / v2); chunk coordinates
-        …zarr.codec                 Codec pipeline SPI + bytes / transpose / gzip / crc32c / sharding_indexed
-        …zarr.util                  Shared small utilities
+        …zarr.json                  Hand-written JSON model + reader + writer (no JDK JSON in java.base)
+        …zarr.store                 Store SPI; Memory, FileSystem, Zip, Http, and S3 stores; byte-range reads
+        …zarr.metadata              zarr.json / v2 parse and serialize; consolidated metadata; extension fields
+        …zarr.chunk                 Regular and rectilinear chunk grids; chunk key encoding (default / v2)
+        …zarr.codec                 Codec pipeline + bytes / vlen / transpose / gzip / crc32c / sharding_indexed,
+                                    and the zstd / blosc codecs over core's compressors
+        …zarr.data                  Chunk assembly and writing, element conversion, the chunk cache, resize
 ```
 
-**Shared model note.** The N-dimensional array, data-type, and chunk-grid abstractions overlap with HDF5's.
-Once this module stabilizes, the common pieces may be promoted to a **`com.ebremer.falcon.core`** module
-(as the root plan anticipates) so both formats share one in-memory model. Until then, no premature
-abstraction — Zarr keeps its own model and HDF5 is untouched.
+The data model is Zarr's own; only the compression codecs are shared with HDF5, in `core` (§10).
 
 ## 3. Goals & non-goals
 
@@ -92,9 +105,10 @@ abstraction — Zarr keeps its own model and HDF5 is untouched.
   only other one registered) is read and written, and so are the extension data types zarr-python writes;
   storage transformers with `must_understand: false` are read past (none is registered), as are other
   `must_understand: false` fields. Registry data types zarr-python does not write remain out of scope.
-- **Blosc / Zstandard** codecs until they are hand-written in pure Java (staged in Z8) — the same
-  "implement compression from scratch, no native/deps" decision made for HDF5's szip.
-- **Zarr v2** — read-compatibility is an optional Z8 add; v2 writing is out of scope.
+- ~~**Blosc / Zstandard** codecs until they are hand-written in pure Java~~ — done (Z8, and P2's F12 for
+  the zstd encoder's levels): decoded and encoded from scratch, now in `core`, the same "implement
+  compression from scratch, no native/deps" decision made for HDF5's szip.
+- **Zarr v2** — read (Z8); v2 *writing* is out of scope.
 
 ## 4. Design decisions
 
@@ -103,20 +117,23 @@ abstraction — Zarr keeps its own model and HDF5 is untouched.
 | Language level | JDK 25, `--release 25` | Matches the reactor. |
 | Dependencies | None at runtime; JUnit 5 test-only | "Pure JDK" mandate. |
 | JSON | **Hand-written** reader/writer (`zarr.json`) | `java.base` has no JSON; keeps zero-dependency. Small, spec-scoped (objects, arrays, strings, numbers, booleans, null; UTF-8; the special float strings). |
-| Stores | Filesystem (`java.nio.file`), memory, zip (`java.util.zip`), HTTP and S3 (`HttpURLConnection`); **byte-range reads** in the SPI | Byte-range reads make sharding and partial selections cheap. `java.net.http` would be a module beyond `java.base`, so the remote stores use `java.net.HttpURLConnection`. |
-| Codecs | `bytes` / `transpose` hand-written; `gzip` via `java.util.zip`; `crc32c` via `java.util.zip.CRC32C`; `sharding_indexed` hand-written; `blosc`/`zstd` **from scratch** (Z8) | All pure-JDK; external compressors implemented from the published formats, not wrapped. |
-| Data model | Own N-D array/dtype/chunk model; promote to `com.ebremer.falcon.core` later | No premature cross-module abstraction. |
+| Stores | Filesystem (`java.nio.file`), memory, ZIP (read and written by hand; CRC-32 and inflate from `java.util.zip`), HTTP and S3 (`HttpURLConnection`); **byte-range reads** in the SPI | Byte-range reads make sharding and partial selections cheap. `java.net.http` would be a module beyond `java.base`, so the remote stores use `java.net.HttpURLConnection`. |
+| Codecs | `bytes` / `transpose` / `vlen-*` hand-written; `gzip` via `java.util.zip`; `crc32c` via `java.util.zip.CRC32C`; `sharding_indexed` hand-written; `blosc`/`zstd` **from scratch** (Z8), in `core` | All pure-JDK; external compressors implemented from the published formats, not wrapped. |
+| Data model | Own N-D array/dtype/chunk model; only the codecs are shared, in `core` (§10) | A shared model would distort both formats' models (§10). |
 | Endianness | Per the `bytes` codec `endian` config | The spec puts byte order in the codec, not the data type. |
 | Error model | Typed exceptions (`ZarrException`, `ZarrFormatException`, `ZarrUnsupportedException`) | Precise diagnostics; corrupt input never crashes the JVM (mirrors HDF5's hardening). |
 
 ## 5. Coverage matrices
 
-### 5.1 Data types (Zarr v3 core)
+### 5.1 Data types (Zarr v3 core, then the extension types zarr-python writes)
 | Type | Bytes | Stage | Type | Bytes | Stage |
 |---|---|---|---|---|---|
 | `bool` | 1 | Z2 | `uint8/16/32/64` | 1/2/4/8 | Z2 |
 | `int8/16/32/64` | 1/2/4/8 | Z2 | `float16/32/64` | 2/4/8 | Z2 |
 | `complex64/128` | 8/16 | Z2 | `r*` (raw bits, e.g. `r8`) | */8 | Z2 |
+| `string` (vlen-utf8) | variable | after Z9 | `variable_length_bytes` (vlen-bytes) | variable | F5 |
+| `numpy.datetime64` / `numpy.timedelta64` | 8 | F14 | `fixed_length_utf32` | 4 × length | F14 |
+| `null_terminated_bytes` / `raw_bytes` | length | F14 | `struct` (legacy `structured` read) | sum of fields | F14 |
 
 ### 5.2 Chunk key encoding
 | Encoding | Key example (coords 1,2) | Separator | Stage |
@@ -131,9 +148,10 @@ abstraction — Zarr keeps its own model and HDF5 is untouched.
 | `transpose` | array → array | hand-written (axis permutation) | Z4 | Z7 |
 | `gzip` | bytes → bytes | `java.util.zip` (gzip container) | Z4 | Z7 |
 | `crc32c` | bytes → bytes | `java.util.zip.CRC32C` (4-byte LE trailer) | Z4 | Z7 |
-| `sharding_indexed` | array → bytes | hand-written (sub-chunks + offset/length index) | Z6 | Z7 |
-| `blosc` | bytes → bytes | **from scratch, pure Java** (container + blosclz/lz4/zlib/zstd + byte/bit shuffle) | Z8 ✅ | Z8 ✅ (byte shuffle + zstd) |
-| `zstd` | bytes → bytes | **from scratch, pure Java** (RFC 8878) | Z8 ✅ | Z8 ✅ (LZ77 + FSE) |
+| `vlen-utf8` / `vlen-bytes` | array → bytes | hand-written (numcodecs' VLen layout) | after Z9 / F5 | after Z9 / F5 |
+| `sharding_indexed` | array → bytes | hand-written (sub-chunks + offset/length index; nested, F11) | Z6 | Z7 |
+| `blosc` | bytes → bytes | **from scratch, pure Java**, in `core` (container + blosclz/lz4/lz4hc/zlib/zstd/snappy + byte/bit shuffle; c-blosc2's format too, F14) | Z8 ✅ | Z8 ✅ (no/byte/bit shuffle, clevel; zstd inside) |
+| `zstd` | bytes → bytes | **from scratch, pure Java**, in `core` (RFC 8878) | Z8 ✅ | Z8 ✅ (levels 1–22, F12) |
 
 ### 5.4 Stores
 | Store | Read | Write | Byte-range | Stage |
@@ -142,6 +160,7 @@ abstraction — Zarr keeps its own model and HDF5 is untouched.
 | `FileSystemStore` | ✓ | ✓ | ✓ | Z0 / Z7 |
 | `ZipStore` | ✓ | ✓ (written in place, F13) | ✓ (STORED entries) | Z8 / F13 |
 | `HttpStore` (read-only) | ✓ (lists from HTML index pages, opt-in, F13) | — | ✓ (Range) | Z8 (optional) |
+| `S3Store` (SigV4) | ✓ | ✓ | ✓ | F1 |
 
 ## 6. Roadmap — stages Z0–Z9
 
@@ -231,7 +250,8 @@ store written by zarr-python (§8). Stages are dependency-ordered.
   from scratch, validated against numcodecs/zstd reference vectors (a dev-time tool, like libaec for szip).
 - **Zarr v2 read compatibility**: `.zgroup`/`.zarray`/`.zattrs`, v2 dtype strings (`<i4`, `|u1`, …),
   v2 chunk keys, and the v2 compressor/filters mapping (blosc/zlib/…).
-- **`ZipStore`**; optional read-only **`HttpStore`** (`java.net.http`, HTTP `Range`).
+- **`ZipStore`**; optional read-only **`HttpStore`** (`java.net.HttpURLConnection`, HTTP `Range`;
+  `java.net.http` would be a module beyond `java.base`).
 - **Milestone:** open blosc/zstd-compressed and v2 stores.
 - **Acceptance:** blosc/zstd chunks decode to the reference values; a zarr-python v2 store reads correctly.
 
@@ -270,13 +290,14 @@ store written by zarr-python (§8). Stages are dependency-ordered.
 5. **Robustness/fuzz**: truncated/corrupt metadata and chunks raise typed exceptions with context —
    never crash the JVM or return silently-wrong data.
 
-**Reference oracle.** zarr-python (v3) + numcodecs, installed as a **dev-time tool** (`pip install zarr
-numcodecs`), analogous to h5py for HDF5 — *not* a Falcon dependency. A small committed Python script
-regenerates the fixtures offline. **Note:** zarr-python is not currently installed in this environment, so
-Z0–Z3 lean on hand-crafted, spec-derived fixtures (the JSON metadata and chunk bytes are fully specified);
-zarr-python is installed before the codec/array stages (Z4+) where an oracle adds the most value. For
-codecs the JDK cannot produce (zstd/blosc), reference vectors come from numcodecs/zstd (dev-time tools),
-mirroring the libaec approach for szip.
+**Reference oracle.** zarr-python (v3) + numcodecs, installed as a **dev-time tool**
+(`tools/fixtures/requirements.txt`), analogous to h5py for HDF5 — *not* a Falcon dependency. Committed
+`tools/fixtures/gen_zarr_*.py` scripts write the fixtures, and the `check_*.py` scripts read Falcon's
+output back with zarr-python (`WriteZarrCases.java` and its siblings write it). Z0–Z3 began with
+hand-crafted, spec-derived fixtures; zarr-python 3.2.1 wrote the first oracle fixtures and 3.4.0 the rest,
+and 3.4.0 regenerates every one of them with the same metadata and values (P3's D5). For the codecs the JDK
+cannot produce (zstd, Blosc), reference vectors come from libzstd, c-blosc, and c-blosc2 (through
+numcodecs, zstandard, and imagecodecs), mirroring the libaec approach for szip.
 
 ## 9. Sequencing at a glance
 
@@ -313,8 +334,8 @@ that should stay separate:
   memory-mapped files); Zarr uses `byte[]`/`ByteBuffer` over a key-value `Store` SPI. Different substrates.
 - **Checksums** — HDF5 hand-writes lookup3 and fletcher32; Zarr calls the JDK's `java.util.zip.CRC32C`.
   No shared code.
-- **Chunk indexing** — HDF5's v1/v2 B-trees and fixed/extensible arrays vs Zarr's regular grid plus
-  sharding. Different.
+- **Chunk indexing** — HDF5's v1/v2 B-trees and fixed/extensible arrays vs Zarr's regular and
+  rectilinear grids plus sharding. Different.
 
 The only genuinely identical, mechanically-shareable code is a ~40-line N-dimensional row-major
 strided block copy (HDF5's `ChunkedReader.copyIntersection`, Zarr's `data.Blocks.copy`) — too small to

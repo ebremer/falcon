@@ -16,10 +16,9 @@ hdf5plugin>=7.1       # Blosc, LZ4, bitshuffle and Zstandard HDF5 filters (plugi
 # second environment (its own venv) and pass it with --python114:
 #   h5py==3.14.0       # bundles HDF5 1.14.6
 #
-# Zarr fixtures, and Falcon Core's zstd / Blosc / Snappy vectors (gen_zarr_fixtures.py,
-# gen_zarr_v2_fixtures.py, gen_zarr_extension_fixtures.py, gen_zarr_rectilinear_fixtures.py,
-# gen_zarr_zip_fixtures.py, gen_zstd_vectors.py, gen_blosc_vectors.py, gen_snappy_vectors.py,
-# check_zstd_encoder.py, check_blosc_encoder.py, check_zarr_writer.py, check_zip_store.py):
-zarr>=3.2,<4
-numcodecs>=0.15
+# Zarr fixtures and interop checks, and Falcon Core's zstd / Blosc / Snappy vectors (gen_zarr_*.py,
+# check_zarr_*.py, check_zip_store.py, gen_zstd_vectors.py, gen_blosc_vectors.py, gen_snappy_vectors.py,
+# check_zstd_encoder.py, check_blosc_encoder.py):
+zarr==3.4.0           # every Zarr fixture regenerates with it, same metadata and values (zarr/TODO.md D5)
+numcodecs==0.17.0
 zstandard>=0.23
