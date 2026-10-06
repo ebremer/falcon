@@ -51,6 +51,7 @@ public final class ChunkWriter {
                     "selection holds " + total + " elements of " + elementSize + " bytes but got " + elements.length
                             + " bytes");
         }
+        meta.pipeline().checkEncodable(); // a codec that only decodes refuses every write, before anything changes
         if (total == 0) {
             return;
         }

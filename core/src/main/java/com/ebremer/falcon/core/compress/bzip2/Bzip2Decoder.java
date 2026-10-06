@@ -20,8 +20,10 @@ import java.util.Arrays;
  * Undoing the move-to-front coding and then the Burrows&ndash;Wheeler transform gives the block, in which a
  * run of 4 equal bytes is followed by a count of 0 to 251 more. The stream ends with the magic
  * {@code 0x177245385090} and a CRC combining the blocks'. Every CRC is verified, and libbzip2's checks on a
- * block's structure are made, so a corrupt stream fails with {@link CompressionFormatException}; bytes after
- * the end of the stream are ignored, as libbzip2 does.
+ * block's structure are made, in libbzip2's order (each magic byte as it is read), so a corrupt stream fails
+ * with {@link CompressionFormatException}; bytes after the end of the stream are ignored, as libbzip2 does.
+ * {@link #decompressConcatenated} reads streams that follow one another, as Python's {@code bz2.decompress}
+ * does.
  */
 public final class Bzip2Decoder {
 
@@ -32,6 +34,8 @@ public final class Bzip2Decoder {
     private static final int MAX_SELECTORS = 2 + 900000 / GROUP_SIZE;
     private static final int RUNA = 0;
     private static final int RUNB = 1;
+    private static final long BLOCK_MAGIC = 0x314159265359L;
+    private static final long END_MAGIC = 0x177245385090L;
 
     private Bzip2Decoder() {
     }
@@ -55,7 +59,51 @@ public final class Bzip2Decoder {
         if (maxSize < 0) {
             throw new IllegalArgumentException("negative maximum size " + maxSize);
         }
-        return new Bzip2Decoder.Stream(src, offset, offset + length, maxSize).decode();
+        Stream stream = new Stream(src, offset, offset + length, maxSize);
+        stream.decode();
+        return stream.output();
+    }
+
+    /**
+     * Decompresses the bzip2 streams that follow one another in {@code length} bytes of {@code src} from
+     * {@code offset}, as Python's {@code bz2.decompress} reads them (numcodecs' {@code BZ2} codec calls it):
+     * each stream starts at the byte after the one before it ends, until the bytes run out, and their output
+     * is joined. The first stream must be whole and valid. After it, bytes libbzip2 does not take for a stream
+     * (a header or magic that is wrong, a CRC that does not match, any other structural error) end the input
+     * and are ignored, along with what that stream decoded, as Python ignores them; but a stream that is cut
+     * short, every byte so far being valid, is an error. No bytes at all decode to none. {@code maxSize}
+     * bounds every stream decoded, even one Python would decode in full only to drop it for a bad CRC.
+     *
+     * @param src     the compressed bytes
+     * @param offset  where the first stream starts
+     * @param length  the bytes available
+     * @param maxSize the most bytes the streams may decode to, together
+     * @return the decompressed bytes of every stream read
+     * @throws CompressionFormatException if the first stream is malformed, a stream is truncated, or the
+     *                                    streams decode to more than {@code maxSize} bytes
+     */
+    public static byte[] decompressConcatenated(byte[] src, int offset, int length, int maxSize) {
+        if (offset < 0 || length < 0 || length > src.length - offset) {
+            throw new IllegalArgumentException("invalid range " + offset + "+" + length + " of " + src.length);
+        }
+        if (maxSize < 0) {
+            throw new IllegalArgumentException("negative maximum size " + maxSize);
+        }
+        Stream stream = new Stream(src, offset, offset + length, maxSize);
+        for (int streams = 0; stream.pos < stream.end; streams++) {
+            int mark = stream.outSize;
+            try {
+                stream.decode();
+            } catch (CompressionFormatException e) {
+                if (streams == 0 || stream.truncated || stream.tooLarge) {
+                    throw e;
+                }
+                stream.outSize = mark; // not a stream: Python drops it and everything after it
+                break;
+            }
+            stream.nextStream();
+        }
+        return stream.output();
     }
 
     /** The state of one stream's decoding. */
@@ -67,6 +115,8 @@ public final class Bzip2Decoder {
         private int pos;
         private long bitBuffer;
         private int bitCount;
+        private boolean truncated; // the input ran out, every bit read so far valid (libbzip2 would wait for more)
+        private boolean tooLarge;  // the output passed maxSize
 
         private byte[] out;
         private int outSize;
@@ -90,7 +140,8 @@ public final class Bzip2Decoder {
             this.out = new byte[(int) Math.min(maxSize, Math.max(64L, 4L * (end - start)))];
         }
 
-        byte[] decode() {
+        /** Decodes one stream from {@code pos}, appending its bytes to the output. */
+        void decode() {
             if (bits(8) != 'B' || bits(8) != 'Z' || bits(8) != 'h') {
                 throw new CompressionFormatException("bzip2 stream does not start with \"BZh\"");
             }
@@ -101,17 +152,13 @@ public final class Bzip2Decoder {
             int blockMax = 100000 * level;
             int combined = 0;
             while (true) {
-                long magic = ((long) bits(24) << 24) | bits(24);
-                if (magic == 0x177245385090L) {
+                if (endOfStream()) {
                     int stored = bits32();
                     if (stored != combined) {
                         throw new CompressionFormatException(String.format(
                                 "bzip2 stream CRC mismatch: stored 0x%08x, computed 0x%08x", stored, combined));
                     }
-                    return outSize == out.length ? out : Arrays.copyOf(out, outSize);
-                }
-                if (magic != 0x314159265359L) {
-                    throw new CompressionFormatException(String.format("bad bzip2 block magic 0x%012x", magic));
+                    return;
                 }
                 int storedCrc = bits32();
                 int computed = block(blockMax);
@@ -124,9 +171,43 @@ public final class Bzip2Decoder {
         }
 
         /** Decodes one block after its CRC, appending it to the output; returns the CRC of its bytes. */
+        /**
+         * Reads the 6 magic bytes of a block ({@code 0x314159265359}) or of the stream's end
+         * ({@code 0x177245385090}), checking each as it is read, as libbzip2 does; true at the end.
+         */
+        private boolean endOfStream() {
+            int first = bits(8);
+            if (first != 0x31 && first != 0x17) {
+                throw new CompressionFormatException(String.format("bad bzip2 block magic: first byte 0x%02x", first));
+            }
+            long magic = first == 0x31 ? BLOCK_MAGIC : END_MAGIC;
+            for (int shift = 32; shift >= 0; shift -= 8) {
+                int b = bits(8);
+                if (b != (int) (magic >>> shift & 0xff)) {
+                    throw new CompressionFormatException(String.format("bad bzip2 %s magic: byte 0x%02x",
+                            first == 0x31 ? "block" : "end-of-stream", b));
+                }
+            }
+            return first == 0x17;
+        }
+
+        /** Readies the next of concatenated streams: the bits left of the last byte read are its padding. */
+        void nextStream() {
+            bitBuffer = 0;
+            bitCount = 0;
+        }
+
+        /** The bytes decoded so far. */
+        byte[] output() {
+            return outSize == out.length ? out : Arrays.copyOf(out, outSize);
+        }
+
         private int block(int blockMax) {
             boolean randomised = bits(1) == 1;
             int origPtr = bits(24);
+            if (origPtr > 10 + blockMax) { // libbzip2 checks this at once, before the block's tables
+                throw new CompressionFormatException("bzip2 block's origin " + origPtr + " is past its block size");
+            }
 
             // The symbol map: which byte values occur, in order.
             int ranges = bits(16);
@@ -329,6 +410,7 @@ public final class Bzip2Decoder {
                 return;
             }
             if (needed > maxSize) {
+                tooLarge = true;
                 throw new CompressionFormatException("bzip2 stream decodes to more than " + maxSize + " bytes");
             }
             out = Arrays.copyOf(out, (int) Math.min(maxSize, Math.max(needed, 2L * out.length)));
@@ -341,9 +423,11 @@ public final class Bzip2Decoder {
         }
 
         private CompressionFormatException tooBig(long nblock, int blockMax, long cap) {
-            return nblock > blockMax
-                    ? new CompressionFormatException("bzip2 block holds more than its " + blockMax + " bytes")
-                    : new CompressionFormatException("bzip2 stream decodes to more than " + maxSize + " bytes");
+            if (nblock > blockMax) {
+                return new CompressionFormatException("bzip2 block holds more than its " + blockMax + " bytes");
+            }
+            tooLarge = true;
+            return new CompressionFormatException("bzip2 stream decodes to more than " + maxSize + " bytes");
         }
 
         /** {@code BZ2_hbCreateDecodeTables} for table {@code t}. */
@@ -402,6 +486,7 @@ public final class Bzip2Decoder {
         private int bits(int n) {
             while (bitCount < n) {
                 if (pos >= end) {
+                    truncated = true;
                     throw new CompressionFormatException("bzip2 stream is truncated");
                 }
                 bitBuffer = (bitBuffer << 8) | (src[pos++] & 0xff);

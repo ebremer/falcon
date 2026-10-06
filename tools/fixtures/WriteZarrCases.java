@@ -5,6 +5,7 @@ import com.ebremer.falcon.zarr.ZarrArray;
 import com.ebremer.falcon.zarr.ZarrGroup;
 import com.ebremer.falcon.zarr.datatype.DataType;
 import com.ebremer.falcon.zarr.datatype.DataType.Field;
+import com.ebremer.falcon.zarr.datatype.DataTypeKind;
 import com.ebremer.falcon.zarr.json.Json;
 import com.ebremer.falcon.zarr.json.JsonObject;
 import com.ebremer.falcon.zarr.json.JsonString;
@@ -28,9 +29,10 @@ import java.util.function.IntUnaryOperator;
  * {@code withWriteEmptyChunks} (F7), resized arrays (F6), nested shards (F11), uint64 and complex values
  * written with {@code writeUnsignedLongs}/{@code writeComplex} (F8), the extension data types zarr-python
  * writes (F14: numpy.datetime64, numpy.timedelta64, fixed_length_utf32, null_terminated_bytes, raw_bytes,
- * and struct), and rectilinear chunk grids (F14; arrays named {@code *_rectilinear*}, which zarr-python
- * reads with {@code array.rectilinear_chunks}). Dev-time tool, run with the JDK's source launcher from the
- * repo root, after {@code mvn -pl zarr -am compile}:
+ * and struct), rectilinear chunk grids (F14; arrays named {@code *_rectilinear*}, which zarr-python
+ * reads with {@code array.rectilinear_chunks}), and numcodecs' bzip2 codec ({@code numcodecs.bz2}). Arrays
+ * with the {@code reshape} codec are not among them: zarr-python 3.4 does not read it. Dev-time tool, run with
+ * the JDK's source launcher from the repo root, after {@code mvn -pl zarr -am compile}:
  *
  * <pre>
  *     java -cp "zarr/target/classes;core/target/classes" tools/fixtures/WriteZarrCases.java OUT_DIR
@@ -293,6 +295,19 @@ public class WriteZarrCases {
                 + ",{\"name\":\"numcodecs.lz4\",\"configuration\":{}}]") + ",{\"name\":\"numcodecs.zlib\","
                 + "\"configuration\":{}}]"); // zarr-python requires the configuration, even an empty one
 
+        // numcodecs' BZ2 (numcodecs.bz2): ArraySpec's bz2(level), and arrays Falcon did not create with each level
+        // setting; check_zarr_writer.py re-encodes each chunk with numcodecs and compares the bytes.
+        write(root.createArray("int32_numcodecs_bz2_spec", ArraySpec.builder(SHAPE, DataType.INT32).chunkShape(6, 4)
+                .bz2(5).build()), "int32", ByteOrder.LITTLE_ENDIAN, null);
+        handMade("float64_numcodecs_bz2_default", "float64", "[" + BYTES_LE + ",{\"name\":\"numcodecs.bz2\","
+                + "\"configuration\":{}}]", "[13,7]");
+        handMade("uint8_numcodecs_bz2_l9", "uint8", "[" + BYTES_LE + ",{\"name\":\"numcodecs.bz2\","
+                + "\"configuration\":{\"level\":9}}]");
+        write(root.createArray("int16_numcodecs_bz2_crc32c_sharded", ArraySpec.builder(SHAPE, DataType.INT16)
+                .chunkShape(6, 4).sharding(3, 2).bz2(2).crc32c().build()), "int16", ByteOrder.LITTLE_ENDIAN, PARTIAL);
+        write(root.createArray("string_numcodecs_bz2", ArraySpec.builder(SHAPE, DataType.STRING).chunkShape(6, 4)
+                .bz2(1).build()), "string", ByteOrder.LITTLE_ENDIAN, null);
+
         // P2 F14: rectilinear chunk grids. Rows in chunks of 2, 5, 6 and columns of 3, 1, 3, in the core types and
         // strings and bytes; then lengths in runs, lengths past the array, shards of two shapes, write_empty,
         // the v2 keys, a transpose, and resizes (grown past the listed lengths, so a chunk is added; and shrunk
@@ -334,8 +349,74 @@ public class WriteZarrCases {
         regrown.resize(10, 5).resize(SHAPE);
         MANIFEST.add(entry(regrown.name(), "float64", new long[] {0, 10, 0, 5}));
 
+        // cast_value: elements stored cast to another data type (zarr-extensions codecs/cast_value), plain, after
+        // zstd or Blosc, inside the shards (where ArraySpec.castValue puts it, as zarr-python does), partly written
+        // with a fill value the cast changes, and before the shards (hand-made). check_zarr_writer.py reads each with
+        // zarr-python (cast-value-rs) and checks it, and its chunks, against zarr-python's own write of the same data.
+        for (String[] c : CASTS) {
+            for (String layout : new String[] {"plain", "zstd", "blosc", "sharded", "partial", "before_sharding"}) {
+                writeCast(c, layout);
+            }
+        }
+
         Files.writeString(out.resolve("manifest.json"), "[\n" + String.join(",\n", MANIFEST) + "\n]\n");
         System.out.println(MANIFEST.size() + " arrays written to " + out);
+    }
+
+    /**
+     * The cast_value arrays: name, the values' dtype (the array's data type, uint64x being uint64), the cast's
+     * data_type, rounding, out_of_range (null: none), scalar_map (null: none), and the fill value of the partly
+     * written arrays, which the cast changes or must carry through (a NaN mapped to 0 and back).
+     */
+    static final String[][] CASTS = {
+        {"f64_u8", "float64", "uint8", "nearest-even", "clamp", null, "2.7"},
+        {"f64_i16_away", "float64", "int16", "nearest-away", null, null, "-1.5"},
+        {"f32_f16_tz", "float32", "float16", "towards-zero", "clamp", null, "0.3"},
+        {"f16_i8_map", "float16", "int8", "nearest-even", "clamp",
+            "{\"encode\":[[\"NaN\",0]],\"decode\":[[0,\"NaN\"]]}", "NaN"},
+        {"i64_f32_up", "int64", "float32", "towards-positive", null, null, "-7"},
+        {"u64x_f64", "uint64x", "float64", "nearest-even", null, null, "12345"},
+        {"i32_u8_wrap", "int32", "uint8", "nearest-even", "wrap", null, "300"},
+        {"i16_f16", "int16", "float16", "nearest-even", null, null, "-5"},
+    };
+
+    /** One cast_value array of {@link #CASTS} in {@code layout}; a partial layout is written in PARTIAL only. */
+    static void writeCast(String[] c, String layout) throws Exception {
+        String name = "cast_" + c[0] + "_" + layout;
+        DataType type = c[1].equals("uint64x") ? DataType.UINT64 : DataType.of(c[1]);
+        DataType target = DataType.of(c[2]);
+        boolean partial = layout.equals("partial") || layout.equals("before_sharding");
+        ArraySpec.Builder b = ArraySpec.builder(SHAPE, type).chunkShape(6, 4)
+                .castValue(target, c[3], c[4], c[5] == null ? null : Json.parse(c[5]).asObject());
+        if (partial) {
+            if (type.kind() == DataTypeKind.FLOAT) {
+                b.fillValue(Double.parseDouble(c[6]));
+            } else {
+                b.fillValue(Long.parseLong(c[6]));
+            }
+        }
+        switch (layout) {
+            case "zstd" -> b.zstd();
+            case "blosc" -> b.blosc("lz4", 5, "shuffle");
+            case "sharded", "partial" -> b.sharding(3, 2);
+            default -> {
+            }
+        }
+        if (!layout.equals("before_sharding")) {
+            write(root.createArray(name, b.build()), c[1], ByteOrder.LITTLE_ENDIAN, partial ? PARTIAL : null);
+            return;
+        }
+        // cast_value before sharding_indexed, which ArraySpec does not build: the shard holds the bytes codec only
+        JsonObject spec = b.build().toJson();
+        String bytes = target.byteCount() == 1 ? "{\"name\":\"bytes\"}" : BYTES_LE;
+        String codecs = "[" + spec.get("codecs").asArray().get(0).toJson() + "," + shard("[3,2]", "[" + bytes + "]")
+                + "]";
+        JsonObject.Builder json = JsonObject.builder();
+        for (var e : spec.members().entrySet()) {
+            json.put(e.getKey(), e.getKey().equals("codecs") ? Json.parse(codecs) : e.getValue());
+        }
+        store.set(name + "/zarr.json", Json.writeBytes(json.build()));
+        write(root.array(name), c[1], ByteOrder.LITTLE_ENDIAN, PARTIAL);
     }
 
     /** A 13 x 7 array of {@code dtype} on the rectilinear grid of rows 2, 5, 6 and columns 3, 1, 3. */

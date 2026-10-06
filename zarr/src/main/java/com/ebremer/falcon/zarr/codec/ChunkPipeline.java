@@ -25,8 +25,13 @@ import java.util.List;
  * <p>Variable-length elements take the same chain with an {@code Object[]} for the array (a
  * {@code String[]} for strings, a {@code byte[][]} for byte strings): the array&rarr;bytes codec is
  * {@code vlen-utf8} or {@code vlen-bytes} ({@link VlenCodec}), or {@code sharding_indexed} whose
- * sub-chunks use it, and {@code transpose} may come before either ({@link #decodeVlenChunk},
+ * sub-chunks use it, and {@code transpose} or {@code reshape} may come before either ({@link #decodeVlenChunk},
  * {@link #encodeVlen}).
+ *
+ * <p>{@code cast_value} converts the elements to another data type on their way to the array&rarr;bytes codec,
+ * so the codecs after it ({@code bytes}, a shard's sub-chunks, Blosc's type size, numcodecs' element type) work
+ * on that type, and the fill value a caller passes, in the array's data type, is cast for them as an element is
+ * ({@link #checkFillValue}).
  *
  * <p>numcodecs' filters and checksums ({@code numcodecs.delta}, {@code numcodecs.crc32}, ...; see
  * {@link Numcodecs}) are bytes&rarr;bytes codecs here: a Zarr v2 array's {@code filters} come after its
@@ -48,12 +53,15 @@ public final class ChunkPipeline {
     private final VlenCodec vlen;             // the array->bytes codec when it is variable-length, else null
     private final List<BytesBytesCodec> byteCodecs;
     private final int[] boundaryShape; // chunk shape at the array->bytes boundary (after array->array encode)
+    private final DataType boundaryType; // element type at the array->bytes boundary (after any cast_value)
+    private final DataType[] arrayTypes; // per array->array codec: the element type on its decoded side
+    private final boolean keepsLayout;   // no array->array codec moves an element (a region maps onto itself)
     private final long[] decodeLimits; // per bytes->bytes codec: the most bytes its decode may produce
     private final long maxEncodedLength;
 
     private ChunkPipeline(DataType dataType, int[] chunkShape, List<ArrayArrayCodec> arrayCodecs,
                           ArrayBytesCodec bytesCodec, VlenCodec vlen, List<BytesBytesCodec> byteCodecs,
-                          int[] boundaryShape) {
+                          int[] boundaryShape, DataType boundaryType) {
         this.dataType = dataType;
         this.chunkShape = chunkShape;
         this.arrayCodecs = arrayCodecs;
@@ -61,9 +69,20 @@ public final class ChunkPipeline {
         this.vlen = vlen;
         this.byteCodecs = byteCodecs;
         this.boundaryShape = boundaryShape;
+        this.boundaryType = boundaryType;
+        this.arrayTypes = new DataType[arrayCodecs.size()];
+        DataType type = dataType;
+        boolean keeps = true;
+        for (int i = 0; i < arrayTypes.length; i++) {
+            arrayTypes[i] = type;
+            type = arrayCodecs.get(i).encodedType(type);
+            keeps &= arrayCodecs.get(i).keepsLayout();
+        }
+        this.keepsLayout = keeps;
         // The encode chain grows the array->bytes output stage by stage; decoding stage i may produce at
         // most what stage i was given when encoding.
-        long limit = bytesCodec == null ? Long.MAX_VALUE : bytesCodec.maxEncodedSize(boundaryShape, dataType.byteCount());
+        long limit = bytesCodec == null ? Long.MAX_VALUE
+                : bytesCodec.maxEncodedSize(boundaryShape, boundaryType.byteCount());
         this.decodeLimits = new long[byteCodecs.size()];
         for (int i = 0; i < byteCodecs.size(); i++) {
             decodeLimits[i] = limit;
@@ -92,6 +111,7 @@ public final class ChunkPipeline {
         VlenCodec vlen = null;
         List<BytesBytesCodec> byteCodecs = new ArrayList<>();
         int[] boundaryShape = shape;
+        DataType boundaryType = dataType; // what a cast_value turns the elements into
 
         try {
             for (JsonObject spec : codecSpecs) {
@@ -109,25 +129,48 @@ public final class ChunkPipeline {
                         arrayCodecs.add(codec);
                         boundaryShape = codec.encodedShape(boundaryShape);
                     }
+                    case "reshape" -> {
+                        if (arrayBytesSet) {
+                            throw new ZarrFormatException(
+                                    "array->array codec 'reshape' appears after the array->bytes codec");
+                        }
+                        ReshapeCodec codec = ReshapeCodec.parse(config, boundaryShape); // for this chunk shape
+                        arrayCodecs.add(codec);
+                        boundaryShape = codec.encodedShape(boundaryShape);
+                    }
+                    case "cast_value" -> {
+                        if (arrayBytesSet) {
+                            throw new ZarrFormatException(
+                                    "array->array codec 'cast_value' appears after the array->bytes codec");
+                        }
+                        CastValueCodec codec = CastValueCodec.parse(config, boundaryType);
+                        arrayCodecs.add(codec);
+                        boundaryType = codec.encodedType(boundaryType);
+                        long bytes = (long) Pipelines.elementCount(boundaryShape) * boundaryType.byteCount();
+                        if (bytes > Integer.MAX_VALUE) {
+                            throw new ZarrFormatException("a chunk of " + Arrays.toString(chunkShape) + " "
+                                    + boundaryType.name() + " elements is larger than the 2 GB a single buffer holds");
+                        }
+                    }
                     case "bytes" -> {
                         if (arrayBytesSet) {
                             throw new ZarrFormatException("more than one array->bytes codec");
                         }
-                        if (dataType.isVariableLength()) {
-                            throw new ZarrFormatException("the '" + dataType.name() + "' data type requires the '"
-                                    + VlenCodec.of(dataType).codecName() + "' codec, not 'bytes'");
+                        if (boundaryType.isVariableLength()) {
+                            throw new ZarrFormatException("the '" + boundaryType.name() + "' data type requires the '"
+                                    + VlenCodec.of(boundaryType).codecName() + "' codec, not 'bytes'");
                         }
-                        bytesCodec = BytesCodec.parse(config, dataType);
+                        bytesCodec = BytesCodec.parse(config, boundaryType);
                     }
                     case "vlen-utf8", "vlen-bytes" -> {
                         if (arrayBytesSet) {
                             throw new ZarrFormatException("more than one array->bytes codec");
                         }
-                        VlenCodec codec = VlenCodec.of(dataType);
+                        VlenCodec codec = VlenCodec.of(boundaryType);
                         if (codec == null || !codec.codecName().equals(name)) {
                             throw new ZarrFormatException("the '" + name + "' codec requires the '"
                                     + (name.equals("vlen-utf8") ? DataType.STRING : DataType.BYTES).name()
-                                    + "' data type, not '" + dataType.name() + "'");
+                                    + "' data type, not '" + boundaryType.name() + "'");
                         }
                         vlen = codec;
                     }
@@ -143,7 +186,7 @@ public final class ChunkPipeline {
                         if (arrayBytesSet) {
                             throw new ZarrFormatException("more than one array->bytes codec");
                         }
-                        bytesCodec = ShardingCodec.parse(config, dataType, boundaryShape);
+                        bytesCodec = ShardingCodec.parse(config, boundaryType, boundaryShape);
                     }
                     case "zstd" -> {
                         requireBytesCodec(arrayBytesSet, name);
@@ -151,7 +194,7 @@ public final class ChunkPipeline {
                     }
                     case "blosc" -> {
                         requireBytesCodec(arrayBytesSet, name);
-                        byteCodecs.add(BloscCodec.parse(config, dataType.byteCount()));
+                        byteCodecs.add(BloscCodec.parse(config, boundaryType.byteCount()));
                     }
                     case "numcodecs.zlib" -> {
                         requireBytesCodec(arrayBytesSet, name);
@@ -161,6 +204,18 @@ public final class ChunkPipeline {
                         requireBytesCodec(arrayBytesSet, name);
                         byteCodecs.add(Lz4Codec.parse(config));
                     }
+                    case "numcodecs.bz2" -> {
+                        requireBytesCodec(arrayBytesSet, name);
+                        byteCodecs.add(Bz2Codec.parse(config));
+                    }
+                    case ZfpyCodec.NAME -> {
+                        if (!arrayBytesSet) { // zarr-python 3's array->bytes codec
+                            bytesCodec = ZfpyCodec.parse(config, boundaryType);
+                        } else { // a Zarr v2 compressor or filter, after the bytes codec
+                            byteCodecs.add(ZfpyCodec.Compressor.parse(config,
+                                    Numcodecs.elementType(boundaryType, bytesCodec, byteCodecs)));
+                        }
+                    }
                     default -> {
                         if (!Numcodecs.handles(name)) {
                             throw new ZarrUnsupportedException("unknown codec: '" + name + "'");
@@ -169,7 +224,7 @@ public final class ChunkPipeline {
                             throw Numcodecs.beforeArrayBytes(name);
                         }
                         byteCodecs.add(Numcodecs.parse(name, config,
-                                Numcodecs.elementType(dataType, bytesCodec, byteCodecs)));
+                                Numcodecs.elementType(boundaryType, bytesCodec, byteCodecs)));
                     }
                 }
             }
@@ -181,7 +236,7 @@ public final class ChunkPipeline {
             throw new ZarrFormatException("codec pipeline has no array->bytes codec");
         }
         return new ChunkPipeline(dataType, shape, List.copyOf(arrayCodecs), bytesCodec, vlen,
-                List.copyOf(byteCodecs), boundaryShape);
+                List.copyOf(byteCodecs), boundaryShape, boundaryType);
     }
 
     private static void requireBytesCodec(boolean arrayBytesSet, String name) {
@@ -216,11 +271,11 @@ public final class ChunkPipeline {
 
     /**
      * The shape of the sub-chunks a shard holds, when the array&rarr;bytes codec is {@code sharding_indexed}
-     * and no array&rarr;array codec comes before it, so that a read fetches and decodes only the sub-chunks
-     * it overlaps; otherwise {@code null} (a chunk is decoded whole).
+     * and no array&rarr;array codec before it moves elements (a {@code cast_value} does not), so that a read
+     * fetches and decodes only the sub-chunks it overlaps; otherwise {@code null} (a chunk is decoded whole).
      */
     public int[] subChunkShape() {
-        return bytesCodec instanceof ShardingCodec sharding && arrayCodecs.isEmpty()
+        return bytesCodec instanceof ShardingCodec sharding && keepsLayout
                 ? sharding.subChunkShape() : null;
     }
 
@@ -276,10 +331,11 @@ public final class ChunkPipeline {
                     "chunk is " + elements.length + " bytes, expected " + expected);
         }
         ArrayValue array = new ArrayValue(elements, chunkShape);
-        for (ArrayArrayCodec codec : arrayCodecs) {
-            array = codec.encode(array, elementSize);
+        ByteOrder order = elementOrder();
+        for (int i = 0; i < arrayCodecs.size(); i++) {
+            array = arrayCodecs.get(i).encode(array, arrayTypes[i], order);
         }
-        byte[] bytes = bytesCodec.encode(array, elementSize, fillElement, writeEmptyChunks);
+        byte[] bytes = bytesCodec.encode(array, boundaryType.byteCount(), boundaryFill(fillElement), writeEmptyChunks);
         for (BytesBytesCodec codec : byteCodecs) {
             bytes = codec.encode(bytes);
         }
@@ -306,9 +362,9 @@ public final class ChunkPipeline {
      * Decodes the chunk read through {@code source}, returning its elements in C order.
      *
      * <p>{@code regionOrigin}/{@code regionShape} name the part of the chunk the caller needs: with a
-     * sharding codec and no other array-stage codecs, only the sub-chunks overlapping that region are
-     * fetched and decoded, and the rest of the returned buffer holds {@code fillElement}. Callers must
-     * not read outside the region they asked for.
+     * sharding codec and no array-stage codec that moves elements (a {@code cast_value} only converts them), only
+     * the sub-chunks overlapping that region are fetched and decoded, and the rest of the returned buffer holds
+     * {@code fillElement} (cast there and back). Callers must not read outside the region they asked for.
      *
      * @return the chunk's elements, or {@code null} if the chunk is absent from the store
      */
@@ -324,18 +380,16 @@ public final class ChunkPipeline {
         }
         // A transpose between the chunk and the bytes permutes axes, so a region expressed in logical
         // coordinates does not map onto the encoded layout: decode the whole chunk in that case.
-        boolean wholeChunk = !arrayCodecs.isEmpty();
+        boolean wholeChunk = !keepsLayout;
         int[] origin = wholeChunk ? new int[boundaryShape.length] : regionOrigin;
         int[] extent = wholeChunk ? boundaryShape : regionShape;
 
-        int elementSize = dataType.byteCount();
-        ArrayValue array = bytesCodec.decode(effective, boundaryShape, elementSize, fillElement, origin, extent);
+        ArrayValue array = bytesCodec.decode(effective, boundaryShape, boundaryType.byteCount(),
+                boundaryFill(fillElement), origin, extent);
         if (array == null) {
             return null;
         }
-        for (int i = arrayCodecs.size() - 1; i >= 0; i--) {
-            array = arrayCodecs.get(i).decode(array, elementSize);
-        }
+        array = undoArrayCodecs(array);
         if (!Arrays.equals(array.shape, chunkShape)) {
             throw new ZarrFormatException("decoded chunk shape " + Arrays.toString(array.shape)
                     + " does not match " + Arrays.toString(chunkShape));
@@ -345,16 +399,18 @@ public final class ChunkPipeline {
 
     /**
      * Decodes only {@code [regionOrigin, regionOrigin + regionShape)} of the chunk, as a buffer of the
-     * region's shape (PF1). A shard with nothing around it fetches and allocates no more than the region
-     * needs; any other chunk is decoded whole and the region cut out of it.
+     * region's shape (PF1). A shard with nothing around it but {@code cast_value} fetches and allocates no
+     * more than the region needs; any other chunk is decoded whole and the region cut out of it.
      *
      * @return the region's elements in C order, or {@code null} if the chunk is absent from the store
      */
     public byte[] decodeRegion(ChunkBytes source, byte[] fillElement, int[] regionOrigin, int[] regionShape) {
         requireFixedSize();
         int elementSize = dataType.byteCount();
-        if (bytesCodec instanceof ShardingCodec sharding && arrayCodecs.isEmpty() && byteCodecs.isEmpty()) {
-            return sharding.decodeRegion(source, elementSize, fillElement, regionOrigin, regionShape);
+        if (bytesCodec instanceof ShardingCodec sharding && keepsLayout && byteCodecs.isEmpty()) {
+            byte[] region = sharding.decodeRegion(source, boundaryType.byteCount(), boundaryFill(fillElement),
+                    regionOrigin, regionShape);
+            return region == null ? null : undoArrayCodecs(new ArrayValue(region, regionShape)).data;
         }
         byte[] chunk = decodeChunk(source, fillElement, regionOrigin, regionShape);
         if (chunk == null || Arrays.equals(regionShape, chunkShape)) {
@@ -368,11 +424,59 @@ public final class ChunkPipeline {
 
     /**
      * Whether a read of part of a chunk fetches and decodes only the parts it needs: the chunk is a shard
-     * with no codec before or after the sharding codec. A shard nested in another is then read through a
-     * {@link ChunkBytes#slice} of the outer one.
+     * with no codec before or after the sharding codec but {@code cast_value}. A shard nested in another is
+     * then read through a {@link ChunkBytes#slice} of the outer one.
      */
     boolean readsPartially() {
-        return bytesCodec instanceof ShardingCodec && arrayCodecs.isEmpty() && byteCodecs.isEmpty();
+        return bytesCodec instanceof ShardingCodec && keepsLayout && byteCodecs.isEmpty();
+    }
+
+    /** Undoes the array&rarr;array codecs, last first. */
+    private ArrayValue undoArrayCodecs(ArrayValue encoded) {
+        ArrayValue array = encoded;
+        ByteOrder order = elementOrder();
+        for (int i = arrayCodecs.size() - 1; i >= 0; i--) {
+            array = arrayCodecs.get(i).decode(array, arrayTypes[i], order);
+        }
+        return array;
+    }
+
+    /** The fill element as the array&rarr;bytes codec sees it: cast by any {@code cast_value}. */
+    private byte[] boundaryFill(byte[] fillElement) {
+        byte[] fill = fillElement;
+        ByteOrder order = elementOrder();
+        for (int i = 0; i < arrayCodecs.size(); i++) {
+            fill = arrayCodecs.get(i).encodeFill(fill, arrayTypes[i], order);
+        }
+        return fill;
+    }
+
+    /**
+     * Checks that the fill value survives this pipeline's {@code cast_value} codecs (a shard's sub-chunk
+     * pipeline's too): cast forward and back, each without error, as the {@code cast_value} specification
+     * requires of an array's metadata. zarr-python casts the fill value forward when it opens the array; the
+     * cast back is what decoding a shard's absent sub-chunks, or the parts of a chunk a region read leaves out,
+     * relies on.
+     *
+     * @param fillElement the array's fill value: one element of the pipeline's data type in {@link #elementOrder()}
+     * @throws ZarrFormatException if the fill value cannot be cast either way
+     */
+    public void checkFillValue(byte[] fillElement) {
+        byte[] fill = fillElement;
+        ByteOrder order = elementOrder();
+        try {
+            for (int i = 0; i < arrayCodecs.size(); i++) {
+                byte[] encoded = arrayCodecs.get(i).encodeFill(fill, arrayTypes[i], order);
+                arrayCodecs.get(i).decodeFill(encoded, arrayTypes[i], order);
+                fill = encoded;
+            }
+        } catch (ZarrFormatException e) {
+            throw new ZarrFormatException("the fill value does not survive the cast_value codec both ways: "
+                    + e.getMessage(), e);
+        }
+        if (bytesCodec instanceof ShardingCodec sharding) {
+            sharding.checkFillValue(fill);
+        }
     }
 
     /**
@@ -402,6 +506,21 @@ public final class ChunkPipeline {
         }
         return ((ShardingCodec) bytesCodec).update(oldShard, chunk, chunkShape, dataType.byteCount(),
                 fillElement, regionOrigin, regionShape, writeEmptyChunks);
+    }
+
+    /**
+     * Checks that this pipeline can encode chunks, as a write must before it changes anything: every codec
+     * in it, and in a shard's sub-chunk pipeline, has an encoder.
+     *
+     * @throws ZarrUnsupportedException if a codec only decodes ({@code numcodecs.zfpy})
+     */
+    public void checkEncodable() {
+        if (bytesCodec instanceof ZfpyCodec || byteCodecs.stream().anyMatch(ZfpyCodec.Compressor.class::isInstance)) {
+            throw ZfpyCodec.readOnly();
+        }
+        if (bytesCodec instanceof ShardingCodec sharding) {
+            sharding.checkEncodable();
+        }
     }
 
     private void requireFixedSize() {

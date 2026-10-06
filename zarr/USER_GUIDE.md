@@ -441,12 +441,16 @@ Falcon implements the Zarr v3 codec pipeline `(array→array)* (array→bytes) (
 | `vlen-utf8` (variable-length strings) | ✅ | ✅ |
 | `vlen-bytes` (variable-length byte strings) | ✅ | ✅ |
 | `transpose` (axis order) | ✅ | ✅ |
+| `cast_value` (zarr-extensions: elements stored as another integer or float type, by value) | ✅ | ✅ (cast-value-rs 0.4.2's results bit for bit: every rounding mode, clamp and wrap, `scalar_map`) |
+| `reshape` (zarr-extensions: another chunk shape, the same element order) | ✅ | ✅ (zarr-python 3.4 does not read it) |
 | `gzip` | ✅ | ✅ |
 | `crc32c` (checksum) | ✅ | ✅ |
 | `sharding_indexed` | ✅ (byte-range; nested to any depth) | ✅ (nested too) |
 | `zstd` | ✅ | ✅ (pure Java, levels 1–22, the content checksum when configured; libzstd reads it) |
 | `blosc` (blosclz/lz4/lz4hc/zlib/zstd/snappy + byte/bit shuffle; c-blosc2 chunks too) | ✅ | ✅ (every internal compressor; no, byte, or bit shuffle; the configured clevel, block size, and type size; c-blosc 1.21's bytes exactly, but for zstd, Falcon's own encoder; c-blosc reads it) |
 | `numcodecs.zlib`, `numcodecs.lz4` (numcodecs' compressors) | ✅ | ✅ (numcodecs' bytes exactly: zlib's stream; liblz4's block after a 4-byte length) |
+| `numcodecs.bz2` (numcodecs' bzip2) | ✅ (concatenated streams, as Python's `bz2.decompress`) | ✅ (numcodecs' bytes exactly: libbzip2 1.0.8's stream) |
+| `numcodecs.zfpy` (numcodecs' zfp, array→bytes) | ✅ (every mode numcodecs writes, bit for bit as zfpy) | ❌ read-only (Falcon has no zfp encoder): a write throws `ZarrUnsupportedException` |
 | `numcodecs.shuffle`, `numcodecs.crc32`, `crc32c`, `adler32`, `fletcher32`, `jenkins_lookup3` | ✅ | ✅ |
 | numcodecs' element filters (`numcodecs.delta`, `fixedscaleoffset`, `quantize`, `bitround`, `astype`, `packbits`) | ✅ in a [v2 array](#zarr-v2)'s filters | ✅ likewise |
 
@@ -483,6 +487,56 @@ to libzstd 1.5.7's, better on some inputs and worse on others by up to about 10%
 float32 0.883, as libzstd; Java source text 0.215 against 0.228). At 16 and up it trails slightly, having
 no optimal parsing. It is slower than libzstd: about 30–90 MB/s at levels 1–3 depending on the data,
 15–40 MB/s at 9, and 3–11 MB/s at 19.
+
+**Casting values (`cast_value`).** The `cast_value` codec (zarr-extensions; zarr-python 3.4 reads and
+writes it through the `cast-value-rs` package) stores each element converted *by value* to another integer or
+float type, for example float64 measurements as uint8, or float32 as float16:
+
+```java
+ArraySpec spec = ArraySpec.builder(new long[] {1000, 1000}, DataType.FLOAT64)
+        .chunkShape(100, 100)
+        .castValue(DataType.UINT8, "nearest-even", "clamp", null)   // or castValue(DataType.UINT8)
+        .zstd()
+        .build();
+```
+
+- **`rounding`:** `nearest-even` (the default), `towards-zero`, `towards-positive`, `towards-negative`, or
+  `nearest-away`.
+- **`out_of_range`:** `null` (a value outside the type's range fails), `clamp` (the nearest bound; for a
+  float type, the infinity), or `wrap` (modulo 2^N, integer types only).
+- **`scalarMap`:** maps chosen values first, as `{"encode": [["NaN", 0]], "decode": [[0, "NaN"]]}`.
+
+Reads cast back to the array's type. Falcon's results are cast-value-rs's bit for bit, its corner cases
+included: float64 reaches float16 through float32, so it can round twice; a float32 `2^31` saturates to
+int32's maximum; an int64 too large for float16 becomes infinity, and reads back as int64's maximum. A value
+that cannot be cast fails the write or read with `ZarrFormatException`: a NaN or infinity to an integer
+type, or a value out of range with no `out_of_range`. The fill value must cast both ways, which `build()`
+(and opening an array's codecs) checks.
+
+The cast goes before the `bytes` codec, inside the shard when sharding, where zarr-python puts it. The
+codecs after it (a shard's sub-chunks, Blosc's type size) see the stored type. Arrays that cast before
+sharding are read and written too. Only the types Falcon models can be cast: `int2`, `int4`, `uint2`,
+`uint4`, `bfloat16`, and the float8, float6, and float4 types are refused by name. Falcon follows the
+specification where zarr-python 3.4 differs:
+- a repeated `scalar_map` key takes its first value (zarr-python's, its last);
+- a float written as a hex string in a `scalar_map` is read by its bits (zarr-python cannot read it);
+- an array whose fill value casts forward but not back is refused (zarr-python checks only forward).
+
+**Reshaping chunks (`reshape`).** The `reshape` codec (zarr-extensions) gives each chunk another shape,
+keeping its elements' C order, before the codecs after it: `ArraySpec.Builder.reshape(shape)`, its `shape`
+as the specification writes it (sizes, arrays of input dimensions, and one `-1`). Every rule of the
+specification is checked for each chunk shape of the grid, so a rectilinear grid works too. A shard after it
+holds the reshaped chunk, so its sub-chunk shape has the reshaped rank. The specification's
+`prod(A_shape[input_dims[0]])` is read as `prod(A_shape[:input_dims[0]])`, which its own example needs.
+zarr-python 3.4 does not implement `reshape`; zarrs 0.23 (Rust) reads Falcon's fixtures as Falcon does.
+
+**bzip2 and zfp (numcodecs).** `ArraySpec.Builder.bz2(level)` compresses chunks with numcodecs' bzip2 (levels
+1–9; numcodecs' default is 1), byte for byte as numcodecs writes them. Reading follows Python's
+`bz2.decompress`, as numcodecs calls it: streams that follow one another are joined, and after the first
+stream, bytes libbzip2 rejects are ignored. `numcodecs.zfpy` (zfp, through numcodecs' `zfpy`) is read: the
+stream's header must hold the array's data type (int32, int64, float32, or float64) and the chunk's shape.
+Falcon cannot write it: any write to an array with zfpy in its codecs, a shard's included, throws
+`ZarrUnsupportedException` before anything changes.
 
 **Storage transformers.** No storage transformer is registered with Zarr, and Falcon implements none. An
 array whose `storage_transformers` lists one that says `"must_understand": false` opens, as the v3
@@ -540,6 +594,8 @@ byte for byte (checked against 772 numcodecs vectors):
 | `shuffle` | also in Zarr v3 metadata |
 | `crc32`, `crc32c`, `adler32`, `fletcher32`, `jenkins_lookup3` | checked on read (a mismatch is a `ZarrFormatException`); also in Zarr v3 metadata; a lookup3 `prefix` is not supported |
 | `zlib`, `lz4` | as the compressor or a filter; also in Zarr v3 metadata |
+| `bz2` | as the compressor or a filter; also in Zarr v3 metadata; several streams in one chunk read as Python reads them |
+| `zfpy` | read only, as the compressor or a filter: the stream must hold the elements numcodecs gave zfpy (little-endian int32, int64, float32, or float64) |
 
 Where NumPy leaves the result undefined, Falcon converts as Java does and wraps to the width. That covers
 a NaN or an out-of-range float cast to an integer.
@@ -550,7 +606,8 @@ In Zarr v3 metadata, zarr-python 3 places the element filters (`delta` through `
 **Not supported** (`ZarrUnsupportedException`, naming it; zarr-python 3.4 refuses most of these too):
 - the `categorize` filter;
 - object codecs other than `vlen-utf8` and `vlen-bytes` (`vlen-array`, `json2`, `msgpack2`, `pickle`);
-- the `bz2`, `lzma`, `pcodec`, and `zfpy` compressors;
+- the `lzma` and `pcodec` compressors;
+- writing an array compressed with `zfpy` (Falcon has no zfp encoder);
 - subarray fields, object fields, and structs mixing little- and big-endian fields;
 - zero-length `U`, `S`, and `V`.
 
@@ -684,7 +741,8 @@ zarr-python writes (`numpy.datetime64`, `numpy.timedelta64`, `fixed_length_utf32
 `null_terminated_bytes`, `raw_bytes`, `struct`); the regular chunk grid and the rectilinear one
 (zarr-python's `array.rectilinear_chunks`); both chunk key encodings; every codec in the table above
 (including `zstd` and `blosc` written by Falcon's own encoders, Blosc with every internal compressor and
-shuffle filter, and c-blosc2's chunk format on read); sharding, nested too, with efficient byte-range
+shuffle filter, and c-blosc2's chunk format on read), among them the zarr-extensions `cast_value` and
+`reshape` codecs and numcodecs' `bz2` (read and written) and `zfpy` (read); sharding, nested too, with efficient byte-range
 reads and writes, for strings too; selections, navigation by path, and block streaming (by chunk,
 sub-chunk, or any block shape); resizing, and zarr-python's `write_empty_chunks`; storage transformers
 that need not be understood (`must_understand: false`, read past); consolidated metadata, read and
@@ -692,7 +750,7 @@ written; changing attributes and deleting nodes; the memory, filesystem, ZIP (re
 (listing from directory index pages, when asked), and S3-compatible stores.
 
 **Not supported** (see [`TODO.md`](TODO.md)): creating Zarr v2 arrays; the v2 `categorize` filter,
-object codecs other than `vlen-utf8`/`vlen-bytes`, and the `bz2`/`lzma`/`pcodec`/`zfpy` compressors;
+object codecs other than `vlen-utf8`/`vlen-bytes`, and the `lzma`/`pcodec` compressors; writing `zfpy`;
 numcodecs' element filters as Zarr v3 array→array codecs; extension metadata that must be understood,
 other extension data types (`bfloat16`, the `float8`/`int4` families, and other registry types
 zarr-python does not write), and storage transformers that must be understood (none is registered);

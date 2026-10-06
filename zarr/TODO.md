@@ -142,6 +142,16 @@ New API: `ArraySpec.Builder.blosc(cname, clevel, shuffle)`. In core: `BloscEncod
 `Lz4.compress`, `compressHc`, and `maxCompressedLength`. Nothing remains open in P0–P3; what is left are the
 non-goals below (creating v2 arrays, the extension data types zarr-python does not write, and the rest).
 
+**F15, F16 (2026-10-06)** add four codecs: the zarr-extensions `cast_value` and `reshape`, read and written,
+and numcodecs' `bz2` (read and written) and `zfpy` (read). Tests: zarr 854 + 19, core 131.
+- New API: `ArraySpec.Builder.castValue(DataType)`, `castValue(DataType, rounding, outOfRange, scalarMap)`,
+  `reshape(JsonArray)`, and `bz2(level)`. In core: `Bzip2Decoder.decompressConcatenated`.
+- Behaviour changes:
+  - v2 arrays and v3 metadata with `bz2` or `zfpy` now open; they were refused by name.
+  - The codec pipeline carries the element type through the array→array stage: the codecs after a
+    `cast_value` see the stored type.
+  - A write to an array with `zfpy` in its codecs throws `ZarrUnsupportedException` before anything changes.
+
 ## Do these first — top 10
 
 1. ~~**Z1/Z2 — node replacement destroys or corrupts data.**~~ Done 2026-10-05 (below).
@@ -1072,7 +1082,7 @@ what was done, then gives the original finding.
     - **Refused** (`ZarrUnsupportedException`, naming the id and its role):
       - the `categorize` filter;
       - object codecs other than vlen-utf8/vlen-bytes;
-      - bz2, lzma, pcodec, zfpy;
+      - lzma, pcodec (bz2 and zfpy are read since F16);
       - subarray, object, and mixed-endian struct fields;
       - zero-length U/S/V.
     - **More lenient than zarr-python 3.4:** nested structured dtypes, a struct's `null` fill, and a
@@ -1381,12 +1391,66 @@ what was done, then gives the original finding.
       `float4_e2m1fn`, `int2`/`int4`/`uint2`/`uint4`, `complex_*`); ~~v2 dtype strings for the extension types~~ (done with
       F4); per-field struct accessors; storage transformers that must be understood (none exists);
       c-blosc2 variable-length blocks and dictionaries (imagecodecs cannot write them, so there is no
-      oracle), bytedelta and the other plugins, lazy chunks and super-chunk frames, and HDF5's Blosc2 filter
-      (32026; see hdf5 S9).
+      oracle), bytedelta and the other plugins, lazy chunks, and super-chunk frames. (HDF5's Blosc2 filter,
+      32026, is read since hdf5's S9, through core's frame reader.)
 
   The original finding follows.
   - Non-`regular` chunk grids, storage transformers, extension data types, and blosc2 (format ≥ 3). All
     are refused cleanly today. (carried over)
+
+- [x] **F15 — `cast_value` (zarr-extensions).** Done 2026-10-06.
+  - **The codec:** read and written, every `rounding` mode, `out_of_range` absent, `clamp`, or `wrap`, and
+    `scalar_map`, with every result cast-value-rs 0.4.2's (zarr-python's backend) bit for bit.
+    - Its corner cases are kept: float64 reaches float16 through float32, so it can round twice; a float32
+      `2^31` saturates to int32's maximum; an int64 too large for float16 becomes infinity, and reads back as
+      int64's maximum.
+    - A value that cannot be cast is a `ZarrFormatException`. The fill value must cast both ways (zarr-python
+      checks only forward); `build()` and opening an array's codecs check it.
+    - The configuration is validated as zarr-python validates it. Types Falcon does not model (`int2`,
+      `int4`, `uint2`, `uint4`, `bfloat16`, the float8/6/4 types) are refused by name.
+    - Where zarr-python 3.4 departs from the specification, Falcon follows the specification: a repeated
+      `scalar_map` key takes its first value, and a hex-string float is read by its bits.
+  - **The pipeline** now carries the element type through the array→array stage. The `bytes` codec, shards
+    (their inner pipelines and fill), Blosc's type size, numcodecs' element type, and the decode limits use
+    the stored type, and the caller's fill value is cast for them. With the cast before a shard, a partial
+    read still fetches only the sub-chunks it needs; a partial write re-encodes the whole shard.
+  - **Writing:** `ArraySpec.Builder.castValue(...)` puts the cast inside the shard, where zarr-python puts it,
+    in zarr-python's JSON form. Writing into existing arrays works wherever the cast sits.
+  - **Oracles:**
+    - `gen_cast_value_vectors.py`: 459,210 scalar vectors from `cast_value_rs.cast_array`, over every pair of
+      the 11 types, 5 roundings, 3 out-of-range modes, and with and without a `scalar_map`. Falcon matches
+      every one, errors included.
+    - `gen_zarr_cast_value_fixtures.py`: 13 zarr-python arrays, read exactly. Writing them again gives
+      zarr-python's chunks byte for byte, but for gzip and zstd.
+    - `check_zarr_writer.py`: zarr-python reads 48 Falcon-written cast arrays as written, 40 of them
+      byte-identical to its own.
+  - Tests: `CastValueVectorsTest`, `CastValueCodecTest`, `CastValueFixtureTest`, `CastValueArrayTest`.
+- [x] **F16 — `reshape` (zarr-extensions), and numcodecs' `bz2` and `zfpy`.** Done 2026-10-06.
+  - **`reshape`:** read and written (`ArraySpec.Builder.reshape`). Every rule of the specification is checked
+    for each chunk shape, so rectilinear grids work. The specification's `prod(A_shape[input_dims[0]])` is
+    read as `prod(A_shape[:input_dims[0]])`, which its own example needs. It composes with `transpose` on
+    either side, a shard of the reshaped chunk, every bytes→bytes codec, and strings.
+    - zarr-python 3.4 does not implement it, so `gen_zarr_reshape_fixtures.py` composes its 12 fixtures:
+      NumPy reshapes each chunk, and zarr-python stores it with the codecs after `reshape`. Falcon reads all
+      and writes byte-identical chunks.
+    - zarrs 0.23.8 (Rust), checked once by hand, reads the 11 fixed-size fixtures as Falcon does, and writes
+      the same chunks for 10 (the 11th: the same sub-chunks in another order within the shard).
+  - **`bz2`** (v3 `numcodecs.bz2`; v2 compressor or filter): written byte for byte as numcodecs writes it
+    (libbzip2 1.0.8; `ArraySpec.Builder.bz2(level)`). Read as Python's `bz2.decompress` reads it: streams
+    that follow one another are joined, and after the first stream, bytes libbzip2 rejects are ignored. Core
+    gains `Bzip2Decoder.decompressConcatenated`, checked against 23 Python vectors.
+  - **`zfpy`**, read only (v3 array→bytes `numcodecs.zfpy`; v2 compressor or filter): every mode numcodecs
+    writes decodes bit for bit as zfpy (fixed rate, precision, and accuracy; expert with tolerance 0;
+    reversible, numcodecs' default). The stream's type must be the array's (in v2, the elements numcodecs
+    gave zfpy: little-endian int32, int64, float32, or float64), and in v3 its shape the chunk's. A write to
+    an array with zfpy throws `ZarrUnsupportedException` before anything changes.
+  - **Oracles:** `gen_zarr_bz2_zfpy_fixtures.py` (29 zarr-python arrays, read exactly, among them chunks of two
+    concatenated streams and a stream followed by junk); `check_zarr_writer.py` and `check_zarr_v2_writes.py`
+    (zarr-python reads Falcon's bz2 arrays, each chunk numcodecs' bytes).
+  - Tests: `ReshapeCodecTest`, `ReshapeFixtureTest`, `Bz2ZfpyCodecTest`, `Bz2ZfpyFixtureTest`, and the new
+    fixtures in `RobustnessTest`.
+  - **Still open:** a zfp encoder, which would make zfpy writable (HDF5's ZFP filter would gain it too); the
+    `lzma` and `pcodec` compressors.
 
 **Out of scope / deferred:**
 - **Creating Zarr v2 arrays** — Falcon creates v3 only. Writing into an existing v2 array works (F4).

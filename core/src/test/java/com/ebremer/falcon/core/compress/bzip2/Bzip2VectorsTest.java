@@ -115,6 +115,69 @@ class Bzip2VectorsTest {
         assertArrayEquals(stream, Bzip2Encoder.compress(around, 3, data.length, 9));
     }
 
+    /**
+     * Streams that follow one another, and bytes after a stream, read as Python's {@code bz2.decompress} reads
+     * them (bzip2_concat_vectors.txt): every stream's output joined, invalid bytes after the first stream
+     * ignored, a stream cut short refused.
+     */
+    @Test
+    void concatenatedStreamsReadAsPythonReadsThem() {
+        List<String[]> vectors = Vectors.read("bzip2_concat_vectors.txt");
+        assertEquals(23, vectors.size());
+        int refused = 0;
+        for (String[] v : vectors) {
+            byte[] input = Vectors.hex(v[1].substring(1));
+            if (v[2].equals("error")) {
+                assertThrows(CompressionFormatException.class,
+                        () -> Bzip2Decoder.decompressConcatenated(input, 0, input.length, 1 << 20), v[0]);
+                refused++;
+                continue;
+            }
+            String[] result = v[2].split("/");
+            int size = Integer.parseInt(result[0]);
+            // A generous bound: a stream that is ignored for a bad CRC is decoded first, against the bound.
+            byte[] out = Bzip2Decoder.decompressConcatenated(input, 0, input.length, 1 << 20);
+            assertEquals(size, out.length, v[0]);
+            assertEquals(result[1], sha256(out), v[0]);
+            if (size > 0) {
+                assertThrows(CompressionFormatException.class,
+                        () -> Bzip2Decoder.decompressConcatenated(input, 0, input.length, size - 1), v[0] + " bound");
+            }
+            // within a range of a larger array
+            byte[] around = new byte[input.length + 9];
+            System.arraycopy(input, 0, around, 4, input.length);
+            assertArrayEquals(out, Bzip2Decoder.decompressConcatenated(around, 4, input.length, 1 << 20), v[0] + " range");
+        }
+        assertEquals(8, refused);
+    }
+
+    @Test
+    void oneStreamIsReadAloneAndBoundsHoldAcrossStreams() {
+        byte[] a = "falcon falcon falcon".getBytes(StandardCharsets.US_ASCII);
+        byte[] b = make("runs", 3000, 4);
+        byte[] sa = Bzip2Encoder.compress(a, 1);
+        byte[] sb = Bzip2Encoder.compress(b, 9);
+        byte[] both = Arrays.copyOf(sa, sa.length + sb.length);
+        System.arraycopy(sb, 0, both, sa.length, sb.length);
+        // decompress reads the first stream only; decompressConcatenated both
+        assertArrayEquals(a, Bzip2Decoder.decompress(both, 0, both.length, 1 << 16));
+        byte[] joined = Arrays.copyOf(a, a.length + b.length);
+        System.arraycopy(b, 0, joined, a.length, b.length);
+        assertArrayEquals(joined, Bzip2Decoder.decompressConcatenated(both, 0, both.length, joined.length));
+        // the bound is on the streams together: a second stream past it is refused, not ignored, even one that
+        // would turn out to be corrupt (Python, unbounded, would decode it to its CRC and drop it)
+        assertThrows(CompressionFormatException.class,
+                () -> Bzip2Decoder.decompressConcatenated(both, 0, both.length, a.length + 1));
+        byte[] corrupt = both.clone();
+        corrupt[sa.length + 10] ^= 0x10; // the second stream's block CRC
+        assertArrayEquals(a, Bzip2Decoder.decompressConcatenated(corrupt, 0, corrupt.length, joined.length));
+        assertThrows(CompressionFormatException.class,
+                () -> Bzip2Decoder.decompressConcatenated(corrupt, 0, corrupt.length, a.length));
+        assertArrayEquals(new byte[0], Bzip2Decoder.decompressConcatenated(both, 3, 0, 10));
+        assertThrows(IllegalArgumentException.class, () -> Bzip2Decoder.decompressConcatenated(both, 1, both.length, 10));
+        assertThrows(IllegalArgumentException.class, () -> Bzip2Decoder.decompressConcatenated(both, 0, both.length, -1));
+    }
+
     @Test
     void malformedStreamsAreRejected() {
         byte[] data = make("text", 5000, 3);

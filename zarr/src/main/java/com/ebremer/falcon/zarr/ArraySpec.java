@@ -136,11 +136,28 @@ public final class ArraySpec {
 
     private static List<JsonValue> buildCodecs(Builder b) {
         List<JsonValue> inner = new ArrayList<>();
+        // cast_value first, as zarr-python puts its filters (inside the shard, when sharding); the codecs after
+        // it see the type it casts to.
+        DataType stored = b.dataType;
+        if (b.castType != null) {
+            JsonObject.Builder config = JsonObject.builder().put("data_type", b.castType.toJson());
+            if (!b.castRounding.equals("nearest-even")) {
+                config.put("rounding", b.castRounding); // the default is left out, as zarr-python leaves it
+            }
+            if (b.castOutOfRange != null) {
+                config.put("out_of_range", b.castOutOfRange);
+            }
+            if (b.castScalarMap != null) {
+                config.put("scalar_map", b.castScalarMap);
+            }
+            inner.add(named("cast_value", config.build()));
+            stored = b.castType;
+        }
         // The array->bytes codec: vlen-utf8 or vlen-bytes for variable-length elements, otherwise the
         // fixed-size bytes codec.
         inner.add(b.dataType.isVariableLength()
                 ? named(VlenCodec.of(b.dataType).codecName(), JsonObject.builder().build())
-                : bytesCodec(b.dataType, b.endian));
+                : bytesCodec(stored, b.endian));
         if (b.gzipLevel != null) {
             inner.add(named("gzip", JsonObject.builder().put("level", b.gzipLevel).build()));
         }
@@ -148,18 +165,27 @@ public final class ArraySpec {
             inner.add(named("zstd", JsonObject.builder().put("level", b.zstdLevel).put("checksum", false).build()));
         }
         if (b.blosc) {
-            int typeSize = Math.max(b.dataType.byteCount(), 1); // variable-length elements have no fixed size
+            int typeSize = Math.max(stored.byteCount(), 1); // variable-length elements have no fixed size
             String shuffle = b.bloscShuffle != null ? b.bloscShuffle : typeSize > 1 ? "shuffle" : "noshuffle";
             inner.add(named("blosc", JsonObject.builder()
                     .put("cname", b.bloscCname).put("clevel", b.bloscClevel)
                     .put("shuffle", shuffle)
                     .put("typesize", typeSize).put("blocksize", 0).build()));
         }
+        if (b.bz2Level != null) {
+            inner.add(named("numcodecs.bz2", JsonObject.builder().put("level", b.bz2Level).build()));
+        }
         if (b.crc32c) {
             inner.add(named("crc32c", null));
         }
+        // reshape, an array->array codec, comes first: a shard holds the reshaped chunk
+        List<JsonValue> outer = new ArrayList<>();
+        if (b.reshape != null) {
+            outer.add(named("reshape", JsonObject.builder().put("shape", b.reshape).build()));
+        }
         if (b.subChunkShape == null) {
-            return List.copyOf(inner);
+            outer.addAll(inner);
+            return List.copyOf(outer);
         }
         JsonObject sharding = JsonObject.builder()
                 .put("chunk_shape", numbers(b.subChunkShape))
@@ -168,7 +194,8 @@ public final class ArraySpec {
                         bytesCodec(DataType.UINT64, ByteOrder.LITTLE_ENDIAN), named("crc32c", null))))
                 .put("index_location", b.indexAtStart ? "start" : "end")
                 .build();
-        return List.of(named("sharding_indexed", sharding));
+        outer.add(named("sharding_indexed", sharding));
+        return List.copyOf(outer);
     }
 
     private static JsonValue bytesCodec(DataType dataType, ByteOrder endian) {
@@ -260,9 +287,15 @@ public final class ArraySpec {
         private String bloscCname = "zstd";
         private int bloscClevel = 5;
         private String bloscShuffle; // null: the byte shuffle for multi-byte elements, else none
+        private Integer bz2Level;
+        private JsonArray reshape;
         private boolean crc32c;
         private long[] subChunkShape;
         private boolean indexAtStart;
+        private DataType castType;     // null: no cast_value
+        private String castRounding;
+        private String castOutOfRange; // null: an element out of range fails the write
+        private JsonObject castScalarMap;
 
         private Builder(long[] shape, DataType dataType) {
             this.shape = shape.clone();
@@ -447,6 +480,106 @@ public final class ArraySpec {
             this.bloscCname = cname;
             this.bloscClevel = clevel;
             this.bloscShuffle = shuffle;
+            return this;
+        }
+
+        /**
+         * Compresses chunks with numcodecs' bzip2 codec, {@code numcodecs.bz2}, as zarr-python 3 names it: each
+         * chunk one bzip2 stream, written byte for byte as numcodecs writes it (libbzip2 1.0.8, through Python's
+         * {@code bz2} module), which zarr-python reads.
+         *
+         * @param level the block size in units of 100&nbsp;kB, 1 (numcodecs' default) to 9 (bzip2's default)
+         * @return this builder
+         * @throws IllegalArgumentException if {@code level} is not 1 to 9
+         */
+        public Builder bz2(int level) {
+            if (level < 1 || level > 9) {
+                throw new IllegalArgumentException("bz2 level must be 1 to 9, not " + level);
+            }
+            this.bz2Level = level;
+            return this;
+        }
+
+        /**
+         * Reshapes each chunk before it is stored, with the {@code reshape} codec (zarr-extensions
+         * {@code codecs/reshape}): the elements keep their C order, only the shape the codecs after it see
+         * changes, so a {@link #sharding} sub-chunk shape is of the reshaped rank. {@code shape} has one entry
+         * per reshaped dimension: a positive size; an array of chunk dimensions whose sizes multiply to it,
+         * which fits chunks of any shape (a rectilinear grid's); or {@code -1}, at most once, for the size that
+         * makes the element counts agree. The chunk dimensions named must strictly increase across
+         * {@code shape}, each entry naming a run of them that it spans exactly ({@code [[0, 1], [2]]} merges a
+         * chunk's first two dimensions; {@code [[0], 2, -1]} splits its second in two, of size 2 and the rest);
+         * {@link #build()} checks every chunk shape against them. zarr-python 3.4 does not read the codec.
+         *
+         * @param shape the codec's {@code shape} configuration
+         * @return this builder
+         */
+        public Builder reshape(JsonArray shape) {
+            this.reshape = shape;
+            return this;
+        }
+
+        /**
+         * Stores the elements converted by value to {@code dataType}, with the {@code cast_value} codec
+         * (zarr-extensions {@code codecs/cast_value}; zarr-python 3.4 reads it with the cast-value-rs package),
+         * rounded to nearest even, an element outside {@code dataType}'s range failing the write. See
+         * {@link #castValue(DataType, String, String, JsonObject)}.
+         *
+         * @param dataType the stored data type: {@code int8} to {@code uint64}, {@code float16},
+         *                 {@code float32}, or {@code float64}
+         * @return this builder
+         * @throws IllegalArgumentException if {@code dataType} is not an integer or float type
+         */
+        public Builder castValue(DataType dataType) {
+            return castValue(dataType, "nearest-even", null, null);
+        }
+
+        /**
+         * Stores the elements converted by value to {@code dataType}, with the {@code cast_value} codec
+         * (zarr-extensions {@code codecs/cast_value}), placed before the {@code bytes} codec (inside the shard,
+         * when {@link #sharding}), where zarr-python places it; the codecs after it, Blosc's type size among
+         * them, see {@code dataType}. A write casts each element as cast-value-rs (zarr-python's backend)
+         * does, bit for bit, and a read casts it back to the array's data type the same way. An element that
+         * cannot be cast (NaN or an infinity to an integer, or a value out of range with no
+         * {@code outOfRange}) fails the write or read with {@link ZarrFormatException}. The fill value must
+         * survive the cast both ways, which {@link #build()} checks. Both data types must be integer or float
+         * types; the array's must not be variable-length.
+         *
+         * @param dataType   the stored data type: {@code int8} to {@code uint64}, {@code float16},
+         *                   {@code float32}, or {@code float64}
+         * @param rounding   how a value between two of the target's is rounded: {@code nearest-even},
+         *                   {@code towards-zero}, {@code towards-positive}, {@code towards-negative}, or
+         *                   {@code nearest-away}
+         * @param outOfRange what becomes of a value outside the target's range: {@code null} (it is an error),
+         *                   {@code clamp} (the nearest bound; for a float target, the infinity), or {@code wrap}
+         *                   (modulo 2<sup>N</sup>; an integer {@code dataType} only)
+         * @param scalarMap  the {@code scalar_map}, applied before any other rule, or {@code null}: an object of
+         *                   {@code "encode"} (array type to {@code dataType}) and {@code "decode"} (back), each
+         *                   an array of {@code [input, output]} pairs in the Zarr v3 fill value encoding of
+         *                   their types, such as {@code {"encode": [["NaN", 0]], "decode": [[0, "NaN"]]}}
+         * @return this builder
+         * @throws IllegalArgumentException if {@code dataType} is not an integer or float type, or
+         *                                  {@code rounding} or {@code outOfRange} is none of those
+         */
+        public Builder castValue(DataType dataType, String rounding, String outOfRange, JsonObject scalarMap) {
+            DataTypeKind kind = dataType.kind();
+            if (kind != DataTypeKind.INT && kind != DataTypeKind.UINT && kind != DataTypeKind.FLOAT) {
+                throw new IllegalArgumentException("cast_value casts to an integer or float data type, not '"
+                        + dataType.name() + "'");
+            }
+            if (!List.of("nearest-even", "towards-zero", "towards-positive", "towards-negative", "nearest-away")
+                    .contains(rounding)) {
+                throw new IllegalArgumentException("cast_value rounding must be nearest-even, towards-zero,"
+                        + " towards-positive, towards-negative, or nearest-away, not " + rounding);
+            }
+            if (outOfRange != null && !outOfRange.equals("clamp") && !outOfRange.equals("wrap")) {
+                throw new IllegalArgumentException("cast_value out_of_range must be null, clamp, or wrap, not "
+                        + outOfRange);
+            }
+            this.castType = dataType;
+            this.castRounding = rounding;
+            this.castOutOfRange = outOfRange;
+            this.castScalarMap = scalarMap;
             return this;
         }
 

@@ -46,13 +46,15 @@ import java.util.regex.Pattern;
  *       array&rarr;bytes codec: {@code gzip}, {@code zstd}, and {@code blosc} to the v3 codecs of those names,
  *       their configurations translated, and every other numcodecs codec Falcon implements to
  *       {@code numcodecs.<id>}, the name zarr-python 3 gives it, configured as numcodecs is (less the
- *       {@code id});</li>
+ *       {@code id}): {@code zfpy} among them, though in Zarr v3 metadata it is an array&rarr;bytes codec,
+ *       for zarr-python 3 hands a v2 compressor the chunk's elements after its filters, as here;</li>
  *   <li>the chunk grid to a {@code regular} grid, and the {@code dimension_separator} to the {@code v2}
  *       chunk key encoding (no {@code "c"} prefix).</li>
  * </ul>
  *
  * <p>Writing into a translated v2 array goes through the same pipeline, so the chunks written are those
- * zarr-python writes for that metadata. Creating v2 arrays is out of scope.
+ * zarr-python writes for that metadata (but for {@code zfpy}, which Falcon only reads). Creating v2 arrays is
+ * out of scope.
  */
 public final class V2Metadata {
 
@@ -65,10 +67,10 @@ public final class V2Metadata {
     /** The key of a v2 hierarchy's consolidated metadata, which zarr-python writes beside the root group's. */
     public static final String ZMETADATA = ".zmetadata";
 
-    /** The numcodecs codecs read as {@code numcodecs.<id>}: the filters, checksums, and two compressors. */
+    /** The numcodecs codecs read as {@code numcodecs.<id>}: the filters, checksums, and four compressors. */
     private static final Set<String> NUMCODECS = Set.of(
             "delta", "fixedscaleoffset", "quantize", "bitround", "astype", "packbits", "shuffle",
-            "crc32", "crc32c", "adler32", "fletcher32", "jenkins_lookup3", "zlib", "lz4");
+            "crc32", "crc32c", "adler32", "fletcher32", "jenkins_lookup3", "zlib", "lz4", "bz2", "zfpy");
     /** The numcodecs codecs that turn objects into bytes; a {@code |O} array's first filter is one. */
     private static final Set<String> OBJECT_CODECS = Set.of(
             "vlen-utf8", "vlen-bytes", "vlen-array", "json2", "msgpack2", "pickle", "json", "msgpack");

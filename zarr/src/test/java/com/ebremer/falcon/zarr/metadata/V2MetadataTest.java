@@ -223,14 +223,31 @@ class V2MetadataTest {
         assertEquals(List.of("bytes", "numcodecs.delta", "numcodecs.jenkins_lookup3", "numcodecs.zlib"),
                 parse(z).codecNames());
         for (String id : List.of("delta", "fixedscaleoffset", "quantize", "bitround", "astype", "packbits", "shuffle",
-                "crc32", "crc32c", "adler32", "fletcher32", "jenkins_lookup3", "zlib", "lz4")) {
+                "crc32", "crc32c", "adler32", "fletcher32", "jenkins_lookup3", "zlib", "lz4", "bz2", "zfpy")) {
             assertEquals("numcodecs." + id, parse(compressed("{\"id\":\"" + id + "\"}")).codecNames().get(1), id);
         }
     }
 
     @Test
+    void bz2AndZfpyKeepNumcodecsSettings() {
+        assertEquals("{\"name\":\"numcodecs.bz2\",\"configuration\":{\"level\":9}}",
+                compressorOf(compressed("{\"id\":\"bz2\",\"level\":9}")));
+        assertEquals("{\"name\":\"numcodecs.bz2\",\"configuration\":{}}", compressorOf(compressed("{\"id\":\"bz2\"}")));
+        // zfpy stays after the bytes codec, as a v2 compressor: zarr-python 3 hands it the chunk's elements there
+        String zfpy = compressed("{\"id\":\"zfpy\",\"mode\":2,\"compression_kwargs\":{\"rate\":8},\"tolerance\":-1,"
+                + "\"rate\":8,\"precision\":-1}").replace("\"<i4\"", "\"<f8\"");
+        assertEquals("[{\"name\":\"bytes\",\"configuration\":{\"endian\":\"little\"}},{\"name\":\"numcodecs.zfpy\","
+                + "\"configuration\":{\"mode\":2,\"compression_kwargs\":{\"rate\":8},\"tolerance\":-1,\"rate\":8,"
+                + "\"precision\":-1}}]", codecs(zfpy));
+        // and among the filters, as numcodecs allows any codec there
+        String filtered = zarray("\"<i4\"", "").replace("\"filters\":null", "\"filters\":[{\"id\":\"bz2\",\"level\":3}]")
+                .replace("\"compressor\":null", "\"compressor\":{\"id\":\"zlib\",\"level\":1}");
+        assertEquals(List.of("bytes", "numcodecs.bz2", "numcodecs.zlib"), parse(filtered).codecNames());
+    }
+
+    @Test
     void codecsFalconCannotReadAreRefusedByName() {
-        for (String id : List.of("bz2", "lzma", "pcodec", "zfpy", "base64", "categorize")) {
+        for (String id : List.of("lzma", "pcodec", "base64", "categorize", "zfp", "bz")) {
             ZarrUnsupportedException c = assertThrows(ZarrUnsupportedException.class,
                     () -> v3(compressed("{\"id\":\"" + id + "\"}")));
             assertTrue(c.getMessage().contains("compressor '" + id + "'"), c.getMessage());

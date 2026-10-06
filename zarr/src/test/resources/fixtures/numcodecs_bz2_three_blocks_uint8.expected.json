@@ -1,0 +1,13 @@
+{
+ "name": "numcodecs_bz2_three_blocks_uint8",
+ "shape": [
+  250000
+ ],
+ "dtype": "|u1",
+ "codecs": [
+  "bytes",
+  "numcodecs.bz2"
+ ],
+ "count": 250000,
+ "sha256": "0a81bb852f96703da6f44a7cf858e284e2e458aa1fc1f6bb55b8ef9dfdf61949"
+}

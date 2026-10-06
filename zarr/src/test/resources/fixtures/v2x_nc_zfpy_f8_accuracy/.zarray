@@ -1,0 +1,26 @@
+{
+  "shape": [
+    30,
+    40
+  ],
+  "chunks": [
+    16,
+    16
+  ],
+  "dtype": "<f8",
+  "fill_value": 0.0,
+  "order": "C",
+  "filters": null,
+  "dimension_separator": ".",
+  "compressor": {
+    "id": "zfpy",
+    "mode": 4,
+    "compression_kwargs": {
+      "tolerance": 0.0001
+    },
+    "tolerance": 0.0001,
+    "rate": -1,
+    "precision": -1
+  },
+  "zarr_format": 2
+}

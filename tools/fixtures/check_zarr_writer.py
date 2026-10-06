@@ -14,8 +14,11 @@ packed little-endian; the partial arrays' fill values are checked to be what Fal
 chunk grids (F14: read with zarr-python's array.rectilinear_chunks, the stored grid and chunk files checked
 too). P2 F3 added Blosc's other internal compressors and numcodecs' Zlib and LZ4 (numcodecs.zlib and
 numcodecs.lz4): each of those chunks must be the bytes numcodecs itself writes for the same data and
-configuration (Blosc's zstd excepted: Falcon's zstd encoder is its own). Dev-time tool; zarr-python is not a
-Falcon dependency. Run it before every release:
+configuration (Blosc's zstd excepted: Falcon's zstd encoder is its own); numcodecs' BZ2 (numcodecs.bz2) is
+checked the same way. The cast_value arrays (cast_*; reading them needs cast-value-rs) must read as zarr-python
+reads its own write of the same data into the same metadata, each written element its value cast and cast back
+by cast-value-rs, and their chunks (a shard's sub-chunk by sub-chunk) must be zarr-python's byte for byte unless
+zstd or gzip compresses them. Dev-time tool; zarr-python is not a Falcon dependency. Run it before every release:
 
     mvn -pl zarr -am compile
     java -cp "zarr/target/classes;core/target/classes" tools/fixtures/WriteZarrCases.java OUT_DIR
@@ -154,7 +157,7 @@ SHUFFLES = {"noshuffle": 0, "shuffle": 1, "bitshuffle": 2}
 
 
 def numcodecs_problem(directory, name):
-    """F3: a Blosc chunk must be c-blosc's, and a numcodecs.zlib/lz4 chunk numcodecs' own, byte for byte."""
+    """F3: a Blosc chunk must be c-blosc's, and a numcodecs.zlib/lz4/bz2 chunk numcodecs' own, byte for byte."""
     meta = json.load(open(os.path.join(directory, name, "zarr.json"), encoding="utf-8"))
     codec = meta["codecs"][-1]
     conf = codec.get("configuration", {})
@@ -169,6 +172,9 @@ def numcodecs_problem(directory, name):
         elif codec["name"] == "numcodecs.zlib":
             raw = numcodecs.Zlib().decode(stored)
             ref = bytes(numcodecs.Zlib(**conf).encode(raw))
+        elif codec["name"] == "numcodecs.bz2":
+            raw = numcodecs.BZ2().decode(stored)
+            ref = bytes(numcodecs.BZ2(**conf).encode(raw))
         else:
             raw = numcodecs.LZ4().decode(stored)
             ref = bytes(numcodecs.LZ4(**conf).encode(raw))
@@ -252,6 +258,112 @@ RECTILINEAR_GRIDS = {
 }
 
 
+def cast_codecs(codecs):
+    """The cast_value configurations of a codec list, outermost first (into a shard's own codecs)."""
+    out = []
+    for c in codecs:
+        if c["name"] == "cast_value":
+            out.append(c["configuration"])
+        elif c["name"] == "sharding_indexed":
+            out += cast_codecs(c["configuration"]["codecs"])
+    return out
+
+
+def cast_through(values, configurations):
+    """values cast by each configuration and back again, as cast-value-rs (zarr-python's backend) casts them."""
+    from cast_value_rs import cast_array
+
+    def run(a, conf, target, side):
+        entries = None
+        if conf.get("scalar_map") and conf["scalar_map"].get(side):
+            to_src = int if a.dtype.kind in "iu" else float
+            to_tgt = int if np.dtype(target).kind in "iu" else float
+            entries = {to_src(k): to_tgt(v) for k, v in conf["scalar_map"][side]}
+        return cast_array(np.ascontiguousarray(a), target_dtype=str(np.dtype(target)),
+                          rounding_mode=conf.get("rounding", "nearest-even"),
+                          out_of_range_mode=conf.get("out_of_range"), scalar_map_entries=entries)
+
+    types = [values.dtype]
+    a = values
+    for conf in configurations:
+        a = run(a, conf, conf["data_type"], "encode")
+        types.append(a.dtype)
+    for conf, back in zip(reversed(configurations), reversed(types[:-1])):
+        a = run(a, conf, back, "decode")
+    return a
+
+
+def sub_chunks(shard, count):
+    """A shard's sub-chunks (None for an absent one), by its index at the end (little-endian, crc32c)."""
+    index = shard[len(shard) - 4 - 16 * count:len(shard) - 4]
+    out = []
+    for k in range(count):
+        offset, length = struct.unpack("<QQ", index[16 * k:16 * k + 16])
+        out.append(None if offset == length == 2 ** 64 - 1 else shard[offset:offset + length])
+    return out
+
+
+def cast_problem(directory, name, dtype, written):
+    """A cast_value array Falcon wrote: each written element must read as its value cast and cast back by
+    cast-value-rs, every element as zarr-python reads its own write of the same data into the same metadata,
+    and, where the codecs are deterministic (no zstd, no gzip), the chunks must be zarr-python's byte for byte
+    (a shard's sub-chunks one by one: zarr-python lays them out in Morton order, Falcon in C order)."""
+    import shutil
+    import tempfile
+    path = os.path.join(directory, name)
+    meta = json.load(open(os.path.join(path, "zarr.json"), encoding="utf-8"))
+    a = zarr.open_array(path, mode="r")
+    got = a[...]
+    np_dtype = np.dtype("uint64" if dtype == "uint64x" else dtype)
+    if written is None:
+        rows, cols = (0, SHAPE[0]), (0, SHAPE[1])
+    else:
+        rows, cols = (written[0], written[1]), (written[2], written[3])
+    values = np.array([[value(dtype, r * SHAPE[1] + c) for c in range(*cols)] for r in range(*rows)], dtype=np_dtype)
+    unsigned = np.dtype(f"u{np_dtype.itemsize}")
+
+    # A written element equal to the fill value, in a (sub-)chunk of nothing else, is not stored (zarr-python
+    # compares a chunk with the fill value before encoding it), and reads as the fill value itself.
+    want = cast_through(values.reshape(-1), cast_codecs(meta["codecs"])).reshape(values.shape).view(unsigned)
+    region = got[rows[0]:rows[1], cols[0]:cols[1]].view(unsigned)
+    fill = np.array(a.fill_value, dtype=np_dtype).view(unsigned)
+    ok = (region == want) | ((values.view(unsigned) == fill) & (region == fill))
+    if not ok.all():
+        bad = tuple(np.argwhere(~ok)[0])
+        return (f"written element {bad} reads {got[rows[0] + bad[0], cols[0] + bad[1]]!r}, cast-value-rs gives "
+                f"{want.view(np_dtype)[bad]!r}")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        own = os.path.join(tmp, name)
+        os.makedirs(own)
+        shutil.copy(os.path.join(path, "zarr.json"), own)
+        z = zarr.open_array(own, mode="r+")
+        z[rows[0]:rows[1], cols[0]:cols[1]] = values
+        theirs = z[...]
+        if not np.array_equal(got.view(unsigned), theirs.view(unsigned)):
+            bad = tuple(np.argwhere(got.view(unsigned) != theirs.view(unsigned))[0])
+            return f"element {bad} reads {got[bad]!r}; zarr-python's own write reads {theirs[bad]!r}"
+        names = json.dumps(meta["codecs"])
+        if '"zstd"' in names or '"gzip"' in names:
+            return None
+        ours = {os.path.relpath(f, path): open(f, "rb").read() for f in chunk_files(directory, name)}
+        their = {os.path.relpath(f, own): open(f, "rb").read() for f in chunk_files(tmp, name)}
+        if sorted(ours) != sorted(their):
+            return f"chunks {sorted(ours)}, zarr-python stores {sorted(their)}"
+        outer = meta["codecs"][-1]
+        count = 0
+        if outer["name"] == "sharding_indexed":
+            count = 1
+            for whole, sub in zip(meta["chunk_grid"]["configuration"]["chunk_shape"],
+                                  outer["configuration"]["chunk_shape"]):
+                count *= whole // sub
+        for key, data in ours.items():
+            same = sub_chunks(data, count) == sub_chunks(their[key], count) if count else data == their[key]
+            if not same:
+                return f"chunk {key} differs from zarr-python's"
+    return None
+
+
 def main(directory):
     numcodecs.blosc.set_nthreads(1)  # blocks in order, as Falcon writes them
     zarr.config.set({"array.rectilinear_chunks": True})  # F14: zarr-python reads rectilinear grids only so
@@ -259,6 +371,14 @@ def main(directory):
     failures = 0
     for case in manifest:
         name, dtype, written = case["name"], case["dtype"], case["written"]
+        if name.startswith("cast_"):
+            try:
+                problem = cast_problem(directory, name, dtype, written)
+            except Exception as e:  # noqa: BLE001 -- report every case
+                problem = f"{type(e).__name__}: {e}"
+            failures += problem is not None
+            print(f"FAIL {name}: {problem}" if problem else f"ok   {name}")
+            continue
         try:
             a = zarr.open_array(os.path.join(directory, name), mode="r")
             got = a[...].reshape(-1)

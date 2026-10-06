@@ -1,0 +1,59 @@
+{
+  "zarr_format": 3,
+  "node_type": "array",
+  "shape": [
+    10,
+    8
+  ],
+  "data_type": "int32",
+  "chunk_grid": {
+    "name": "rectilinear",
+    "configuration": {
+      "kind": "inline",
+      "chunk_shapes": [
+        [
+          2,
+          5,
+          3
+        ],
+        [
+          4,
+          4
+        ]
+      ]
+    }
+  },
+  "chunk_key_encoding": {
+    "name": "default",
+    "configuration": {
+      "separator": "/"
+    }
+  },
+  "fill_value": 0,
+  "codecs": [
+    {
+      "name": "reshape",
+      "configuration": {
+        "shape": [
+          [
+            0,
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "name": "bytes",
+      "configuration": {
+        "endian": "little"
+      }
+    },
+    {
+      "name": "numcodecs.bz2",
+      "configuration": {
+        "level": 1
+      }
+    }
+  ],
+  "attributes": {}
+}

@@ -309,8 +309,20 @@ public final class ArrayMetadata implements NodeMetadata {
     public ChunkPipeline pipeline() {
         ChunkPipeline p = pipeline;
         if (p == null) {
-            p = ChunkPipeline.of(dataType, firstChunkShape(), codecs);
+            p = build(firstChunkShape());
             pipeline = p;
+        }
+        return p;
+    }
+
+    /**
+     * The pipeline for chunks of {@code shape}, with the fill value checked against it: a {@code cast_value}
+     * codec must be able to cast the fill value both ways ({@link ChunkPipeline#checkFillValue}).
+     */
+    private ChunkPipeline build(long[] shape) {
+        ChunkPipeline p = ChunkPipeline.of(dataType, shape, codecs);
+        if (!dataType.isVariableLength() && dataType.byteCount() <= MAX_EAGER_FILL) {
+            p.checkFillValue(fillValueBytes(p.elementOrder()));
         }
         return p;
     }
@@ -338,7 +350,7 @@ public final class ArrayMetadata implements NodeMetadata {
         List<Long> key = Arrays.stream(shape).boxed().toList();
         ChunkPipeline p = pipelines.get(key);
         if (p == null) {
-            p = ChunkPipeline.of(dataType, shape, codecs); // may throw: then nothing is cached
+            p = build(shape); // may throw: then nothing is cached
             pipelines.putIfAbsent(key, p);
         }
         return p;

@@ -1,5 +1,6 @@
 import com.ebremer.falcon.zarr.Zarr;
 import com.ebremer.falcon.zarr.ZarrArray;
+import com.ebremer.falcon.zarr.ZarrUnsupportedException;
 import com.ebremer.falcon.zarr.json.Json;
 import com.ebremer.falcon.zarr.json.JsonArray;
 import com.ebremer.falcon.zarr.json.JsonNumber;
@@ -32,7 +33,7 @@ import java.util.stream.Stream;
  *
  * (':' separates the classpath outside Windows). manifest.json lists each copy with every element it
  * should read as, in the sidecars' form (numbers, text, int64 time counts, hex byte strings). Arrays whose
- * codecs Falcon does not have are skipped and listed.
+ * codecs Falcon does not have, or only reads (zfpy), are skipped and listed.
  */
 public class WriteZarrV2Cases {
 
@@ -89,7 +90,8 @@ public class WriteZarrV2Cases {
                     manifest.add(entry(name + "_box", merged));
                 }
             } catch (RuntimeException e) {
-                if (!String.valueOf(e.getMessage()).contains("unknown codec")) {
+                // a codec Falcon does not have, or one it only reads (zfpy)
+                if (!(e instanceof ZarrUnsupportedException) && !String.valueOf(e.getMessage()).contains("unknown codec")) {
                     throw e;
                 }
                 skipped.add(name + " (" + e.getMessage() + ")");

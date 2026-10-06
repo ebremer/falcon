@@ -129,6 +129,16 @@ final class ShardingCodec implements ArrayBytesCodec {
         return subChunkShape.clone();
     }
 
+    /** {@link ChunkPipeline#checkEncodable()} for the sub-chunks' pipeline. */
+    void checkEncodable() {
+        inner.checkEncodable();
+    }
+
+    /** {@link ChunkPipeline#checkFillValue} for the sub-chunks' pipeline, whose fill element this codec is given. */
+    void checkFillValue(byte[] fillElement) {
+        inner.checkFillValue(fillElement);
+    }
+
     @Override
     public ByteOrder elementByteOrder() {
         return inner.elementOrder();

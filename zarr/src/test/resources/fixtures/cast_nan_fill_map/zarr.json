@@ -1,0 +1,53 @@
+{
+  "shape": [
+    13,
+    7
+  ],
+  "data_type": "float32",
+  "chunk_grid": {
+    "name": "regular",
+    "configuration": {
+      "chunk_shape": [
+        4,
+        3
+      ]
+    }
+  },
+  "chunk_key_encoding": {
+    "name": "default",
+    "configuration": {
+      "separator": "/"
+    }
+  },
+  "fill_value": "NaN",
+  "codecs": [
+    {
+      "name": "cast_value",
+      "configuration": {
+        "data_type": "int8",
+        "out_of_range": "clamp",
+        "scalar_map": {
+          "encode": [
+            [
+              "NaN",
+              -128
+            ]
+          ],
+          "decode": [
+            [
+              -128,
+              "NaN"
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "name": "bytes"
+    }
+  ],
+  "attributes": {},
+  "zarr_format": 3,
+  "node_type": "array",
+  "storage_transformers": []
+}

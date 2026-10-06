@@ -4,8 +4,9 @@ Falcon's reading of v2 is checked against zarr-python's own arrays (gen_zarr_v2_
 checks the other direction: Falcon writes through the pipeline it translates a .zarray to (the v2 dtypes,
 Fortran order, the numcodecs filters and compressors, blosc and zstd configurations), and zarr-python must
 read every element as written. Where a chunk is blosc-compressed, its header must also carry the type size
-and shuffle numcodecs would have given c-blosc for that array, and the compressor its cname names. Dev-time
-tool; zarr-python is not a Falcon dependency:
+and shuffle numcodecs would have given c-blosc for that array, and the compressor its cname names; a chunk
+compressed with bz2 must be the bytes numcodecs' BZ2 writes. Dev-time tool; zarr-python is not a Falcon
+dependency:
 
     mvn -pl zarr -am compile
     java -cp "zarr/target/classes;core/target/classes" tools/fixtures/WriteZarrV2Cases.java OUT_DIR
@@ -17,6 +18,7 @@ import os
 import sys
 import warnings
 
+import numcodecs
 import numpy as np
 import zarr
 import zarr.storage
@@ -74,6 +76,22 @@ def blosc_problems(path, zarray):
     return problems
 
 
+def bz2_problems(path, zarray):
+    """Each stored chunk against the stream numcodecs' BZ2 writes for its bytes, at the configured level."""
+    c = zarray.get("compressor") or {}
+    if c.get("id") != "bz2":
+        return []
+    codec = numcodecs.get_codec(c)
+    problems = []
+    for key in sorted(os.listdir(path)):
+        if key.startswith("."):
+            continue
+        stored = open(os.path.join(path, key), "rb").read()
+        if bytes(codec.encode(codec.decode(stored))) != stored:
+            problems.append(f"chunk {key}: not the stream numcodecs writes at level {c.get('level', 1)}")
+    return problems
+
+
 def expect_header(zarray, c, flags, typesize):
     want_ts = itemsize(zarray)
     out = []
@@ -126,6 +144,7 @@ def main(directory):
                 i = bad[0]
                 problems.append(f"{len(bad)} elements differ, first [{i}]: read {got[i]!r}, wrote {want[i]!r}")
             problems += blosc_problems(path, zarray)
+            problems += bz2_problems(path, zarray)
         except Exception as e:  # noqa: BLE001 - report and go on
             problems = [f"{type(e).__name__}: {e}"]
         if problems:
