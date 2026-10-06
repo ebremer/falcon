@@ -118,7 +118,7 @@ out.writeDoubles(myData);
 
 Every codec the ecosystem commonly uses is supported — `bytes`, `transpose`, `gzip`, `crc32c`,
 `sharding_indexed`, `vlen-utf8` strings and `vlen-bytes` byte strings, the `zstd` and `blosc` families, and
-numcodecs' `zlib`, `lz4`, `bz2`, `zfpy` (read), filters, and checksums, the zarr-extensions `cast_value` and
+numcodecs' `zlib`, `lz4`, `bz2`, `zfpy`, filters, and checksums, the zarr-extensions `cast_value` and
 `reshape` — with `zstd`/`blosc` read *and* written by Falcon's own
 pure-Java encoders (libzstd / c-blosc / zarr-python read the output; Blosc with every internal compressor,
 byte for byte as c-blosc writes it, zstd aside). Zarr v2 arrays open with their numcodecs filters,

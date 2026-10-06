@@ -67,6 +67,16 @@ public final class ZfpDecoder {
     private ZfpDecoder() {
     }
 
+    /** The coefficients' order by sequency in a block of {@code dims} dimensions, which the encoder shares. */
+    static int[] perm(int dims) {
+        return switch (dims) {
+            case 1 -> PERM_1;
+            case 2 -> PERM_2;
+            case 3 -> PERM_3;
+            default -> PERM_4;
+        };
+    }
+
     /**
      * Decompresses a bare zfp stream (as H5Z-ZFP stores each chunk) of the field and mode {@code header}
      * describes.
@@ -150,12 +160,7 @@ public final class ZfpDecoder {
             this.type = header.type();
             this.dims = header.dimensions();
             this.size = 1 << (2 * dims);
-            this.perm = switch (dims) {
-                case 1 -> PERM_1;
-                case 2 -> PERM_2;
-                case 3 -> PERM_3;
-                default -> PERM_4;
-            };
+            this.perm = perm(dims);
             this.minbits = header.minbits() & UINT_MASK;
             this.maxbits = header.maxbits() & UINT_MASK;
             this.maxprec = header.maxprec();

@@ -53,7 +53,7 @@ import java.util.regex.Pattern;
  * </ul>
  *
  * <p>Writing into a translated v2 array goes through the same pipeline, so the chunks written are those
- * zarr-python writes for that metadata (but for {@code zfpy}, which Falcon only reads). Creating a v2 array
+ * zarr-python writes for that metadata. Creating a v2 array
  * goes the other way: {@link #dtype} and {@link #fillValue} give the {@code .zarray} members zarr-python 3.4
  * writes for a v3 data type and fill value, and the document is then read back through this translation.
  */

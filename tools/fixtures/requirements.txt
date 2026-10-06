@@ -31,4 +31,5 @@ numcodecs==0.17.0     # also the byte reference for Falcon's Blosc, LZ4, and num
 zstandard>=0.23
 cast-value-rs==0.4.2  # zarr-python's backend for the cast_value codec: gen_cast_value_vectors.py's vectors,
                       # gen_zarr_cast_value_fixtures.py, and check_zarr_writer.py's cast_* arrays
-zfpy==1.0.1           # numcodecs.ZFPY (gen_zarr_bz2_zfpy_fixtures.py); 1.0.1 is the first for NumPy 2
+zfpy==1.0.1           # numcodecs.ZFPY (gen_zarr_bz2_zfpy_fixtures.py) and gen_zfp_encoder_vectors.py; 1.0.1 is the
+                      # first for NumPy 2

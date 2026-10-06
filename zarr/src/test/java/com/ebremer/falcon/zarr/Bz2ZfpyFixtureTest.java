@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.ebremer.falcon.zarr.datatype.DataType;
 import com.ebremer.falcon.zarr.json.Json;
 import com.ebremer.falcon.zarr.json.JsonObject;
 import com.ebremer.falcon.zarr.json.JsonValue;
@@ -28,8 +29,8 @@ import org.junit.jupiter.params.provider.ValueSource;
 /**
  * Zarr v3 and v2 arrays zarr-python 3.4 wrote with numcodecs' {@code BZ2} and {@code ZFPY}
  * ({@code tools/fixtures/gen_zarr_bz2_zfpy_fixtures.py}): Falcon reads exactly what zarr-python reads (zfp's
- * lossy modes bit for bit), writing the same values into a bz2 array stores the chunks zarr-python stored, and
- * a zfpy array refuses every write.
+ * lossy modes bit for bit), and writing the same values (for zfp's lossy modes, the values zarr-python was
+ * given) stores the chunks zarr-python stored, byte for byte.
  */
 class Bz2ZfpyFixtureTest {
 
@@ -106,46 +107,104 @@ class Bz2ZfpyFixtureTest {
         check(name, a);
     }
 
-    /** A zfpy array is read-only: every write, even of the fill value alone, is refused before the store changes. */
+    /**
+     * Writing the values zarr-python was given into an empty copy of each zfpy array stores, chunk for chunk,
+     * zfpy's streams: in every mode, type, and dimensionality, after a transpose, under a shard, before crc32c,
+     * and in v2 after a delta filter (which hands zfpy a flat array).
+     */
     @ParameterizedTest
-    @ValueSource(strings = {"numcodecs_zfpy_f8_reversible_2d", "numcodecs_zfpy_i4_rate_2d", "numcodecs_zfpy_sharded_f8",
-        "numcodecs_zfpy_crc32c_f8", "v2x_nc_zfpy_f4_rate", "v2x_nc_delta_zfpy_i4"})
-    void zfpyArraysRefuseWrites(String name) {
+    @ValueSource(strings = {
+        "numcodecs_zfpy_f8_reversible_2d", "numcodecs_zfpy_f4_rate_1d", "numcodecs_zfpy_f8_precision_3d",
+        "numcodecs_zfpy_f8_accuracy_4d", "numcodecs_zfpy_f4_expert_2d", "numcodecs_zfpy_i4_rate_2d",
+        "numcodecs_zfpy_i8_reversible_3d", "numcodecs_zfpy_i4_precision_1d", "numcodecs_zfpy_i8_accuracy_4d",
+        "numcodecs_zfpy_crc32c_f8", "numcodecs_zfpy_transpose_f4", "numcodecs_zfpy_sharded_f8",
+        "v2x_nc_zfpy_f8_accuracy", "v2x_nc_zfpy_f4_rate", "v2x_nc_zfpy_i8_reversible_3d",
+        "v2x_nc_zfpy_i4_precision_4d", "v2x_nc_zfpy_f8_expert", "v2x_nc_delta_zfpy_i4"})
+    void writingStoresWhatZfpyStored(String name) {
         Map<String, byte[]> original = files(fixture(name), true);
-        MemoryStore store = store(original);
-        ZarrArray a = Zarr.openArray(store);
-        int count = (int) java.util.Arrays.stream(a.shape()).reduce(1, (x, y) -> x * y);
-        int size = a.dataType().byteCount();
-        ZarrUnsupportedException whole = assertThrows(ZarrUnsupportedException.class,
-                () -> a.writeRawBytes(new byte[count * size]));
-        assertTrue(whole.getMessage().contains("numcodecs.zfpy"), whole.getMessage());
-        long[] origin = new long[a.shape().length];
-        long[] one = new long[origin.length];
-        java.util.Arrays.fill(one, 1);
-        assertThrows(ZarrUnsupportedException.class, () -> a.select(origin, one).writeRawBytes(new byte[size]));
-        assertEquals(original.keySet(), keys(store));
+        MemoryStore store = store(files(fixture(name), false));
+        JsonObject want = expected(name);
+        JsonValue inputs = want.find("inputs").orElse(want.get("values")); // a lossless array's values are its inputs
+        write(Zarr.openArray(store), JsonObject.builder().put("values", inputs).build());
+        assertEquals(original.keySet(), keys(store), name + ": keys");
         for (Map.Entry<String, byte[]> e : original.entrySet()) {
-            assertArrayEquals(e.getValue(), store.get(e.getKey()).orElseThrow(), e.getKey());
+            if (!isMetadata(e.getKey())) {
+                assertArrayEquals(e.getValue(), store.get(e.getKey()).orElseThrow(), name + ": chunk " + e.getKey());
+            }
         }
-        check(name, a);
+        check(name, Zarr.openArray(store)); // and reads back as zarr-python read its own
     }
 
     /**
-     * Shrinking a zfpy array writes no chunk, so it is done; growing it must set the part of an edge chunk it
-     * brings back inside the array to the fill value, a write, so it is refused and the shape stays.
+     * The builder's {@code zfpy} methods write the codec zarr-python writes (its configuration only the
+     * arguments given), and zarr-python's inputs written into the array give its chunks byte for byte.
      */
     @Test
-    void resizingAZfpyArrayWritesNoChunk() {
+    void theBuilderWritesZarrPythonsZfpyArrays() {
+        Map<String, ArraySpec> specs = Map.of(
+                "numcodecs_zfpy_f4_rate_1d", ArraySpec.builder(new long[] {1000}, DataType.FLOAT32).chunkShape(300)
+                        .zfpyRate(12).build(),
+                "numcodecs_zfpy_f8_precision_3d", ArraySpec.builder(new long[] {9, 10, 11}, DataType.FLOAT64)
+                        .chunkShape(5, 4, 6).zfpyPrecision(20).build(),
+                "numcodecs_zfpy_f8_accuracy_4d", ArraySpec.builder(new long[] {6, 5, 7, 9}, DataType.FLOAT64)
+                        .chunkShape(4, 3, 5, 4).zfpyAccuracy(1e-3).build(),
+                "numcodecs_zfpy_f8_reversible_2d", ArraySpec.builder(new long[] {37, 23}, DataType.FLOAT64)
+                        .chunkShape(16, 10).zfpy().build(),
+                "numcodecs_zfpy_crc32c_f8", ArraySpec.builder(new long[] {50}, DataType.FLOAT64).chunkShape(20)
+                        .zfpy().crc32c().build(),
+                "numcodecs_zfpy_sharded_f8", ArraySpec.builder(new long[] {10, 7}, DataType.FLOAT64).chunkShape(8, 5)
+                        .sharding(4, 5).zfpy().build());
+        specs.forEach((name, spec) -> {
+            Map<String, byte[]> original = files(fixture(name), true);
+            MemoryStore store = new MemoryStore();
+            ZarrArray a = Zarr.createArray(store, spec);
+            JsonValue want = Json.parse(original.get("zarr.json")).asObject().get("codecs");
+            V2CreateTest.assertSame(want, spec.toJson().get("codecs"), name + ": codecs"); // 12 is 12.0
+            JsonObject expected = expected(name);
+            JsonValue inputs = expected.find("inputs").orElse(expected.get("values"));
+            write(a, JsonObject.builder().put("values", inputs).build());
+            for (Map.Entry<String, byte[]> e : original.entrySet()) {
+                if (!isMetadata(e.getKey())) {
+                    assertArrayEquals(e.getValue(), store.get(e.getKey()).orElseThrow(), name + ": chunk " + e.getKey());
+                }
+            }
+        });
+        // zfp compresses only int32, int64, float32, and float64, in 1 to 4 dimensions; not strings
+        assertThrows(IllegalArgumentException.class,
+                () -> ArraySpec.builder(new long[] {8}, DataType.INT16).zfpy().build());
+        assertThrows(IllegalArgumentException.class,
+                () -> ArraySpec.builder(new long[] {2, 2, 2, 2, 2}, DataType.FLOAT32).zfpy().build());
+        assertThrows(IllegalArgumentException.class,
+                () -> ArraySpec.builder(new long[] {8}, DataType.STRING).zfpy().build());
+        assertThrows(IllegalArgumentException.class, () -> ArraySpec.builder(new long[] {8}, DataType.FLOAT32)
+                .zfpyRate(0));
+        // a cast to a type zfp compresses
+        ArraySpec cast = ArraySpec.builder(new long[] {8}, DataType.FLOAT64).castValue(DataType.FLOAT32).zfpy().build();
+        ZarrArray a = Zarr.createArray(new MemoryStore(), cast);
+        a.writeDoubles(new double[] {0.5, 1.5, -2, 3.25, 0, 7, 8.125, -1});
+        assertArrayEquals(new double[] {0.5, 1.5, -2, 3.25, 0, 7, 8.125, -1}, a.readDoubles());
+    }
+
+    /**
+     * Resizing rewrites only the chunk the new edge cuts: growing again stores it with the fill value past the
+     * old edge, re-encoded (zfp's lossy modes then move its other values a little, as zarr-python's own
+     * read-modify-write does), and leaves every other chunk as it was.
+     */
+    @Test
+    void resizingAZfpyArrayRewritesOnlyTheEdgeChunk() {
         MemoryStore store = store(files(fixture("numcodecs_zfpy_f4_rate_1d"), true));
+        Map<String, byte[]> before = files(fixture("numcodecs_zfpy_f4_rate_1d"), true);
         ZarrArray a = Zarr.openArray(store);
-        double[] before = a.readDoubles();
-        ZarrArray shrunk = a.resize(950);
-        assertArrayEquals(java.util.Arrays.copyOf(before, 950), shrunk.readDoubles());
-        assertThrows(ZarrUnsupportedException.class, () -> shrunk.resize(1000));
-        assertEquals(950, Zarr.openArray(store).shape()[0]);
-        ZarrArray cut = shrunk.resize(600); // the chunks past it are deleted: no write either
-        assertEquals(List.of("c/0", "c/1", "zarr.json"), store.list().stream().sorted().toList());
-        assertArrayEquals(java.util.Arrays.copyOf(before, 600), cut.readDoubles());
+        double[] values = a.readDoubles();
+        ZarrArray grown = a.resize(950).resize(1000);
+        double[] got = grown.readDoubles();
+        for (String key : List.of("c/0", "c/1", "c/2")) {
+            assertArrayEquals(before.get(key), store.get(key).orElseThrow(), key);
+        }
+        assertArrayEquals(java.util.Arrays.copyOf(values, 900), java.util.Arrays.copyOf(got, 900));
+        for (int i = 900; i < 1000; i++) {
+            assertEquals(i < 950 ? values[i] : 0, got[i], 0.05, "element " + i); // the fill, re-encoded lossily too
+        }
     }
 
     // ---- helpers -------------------------------------------------------------------------------------

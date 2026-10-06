@@ -1477,6 +1477,77 @@ def build_zfp(f):
             f.create_dataset("expected/" + name, data=g["d"][()])
 
 
+def build_zfp_write(f):
+    """The oracle for Falcon's ZFP filter encoder (P2 S10): each dataset hdf5plugin's H5Z-ZFP (zfp 1.0.1)
+    compressed, its input kept uncompressed under /input (zfp is lossy, so the stored values cannot be
+    compressed again to the same chunks), its settings in its "zfp" attribute ("rate 6.0", "precision 24",
+    "accuracy 0.01", "reversible", "expert minbits maxbits maxprec minexp", or "defaults"). Falcon, writing the
+    input with those settings, must store the same client data and every chunk byte for byte: every scalar
+    type, unsigned ones too (H5Z-ZFP compresses them as signed), 1 to 4 used dimensions and dimensions of size
+    1, chunks cut at the edges, every mode (fixed rate in the short and 64-bit encodings, precision 64 and
+    accuracy 0 as zfp's expert mode), NaN, infinities, -0 and subnormals, and a checksum after the filter."""
+    import hdf5plugin
+    rng = np.random.default_rng(37)
+
+    def smooth(shape, dtype, scale=1000.0):
+        grids = np.meshgrid(*[np.linspace(0, 4, n) for n in shape], indexing="ij")
+        values = sum(np.cos(g * (i + 1.5)) for i, g in enumerate(grids)) * scale
+        return (values + rng.normal(scale=scale / 50, size=shape)).astype(dtype)
+
+    info = np.finfo(np.float64)
+    specials = rng.choice(np.array([np.nan, np.inf, -np.inf, -0.0, 0.0, info.tiny, info.tiny / 8,
+                                    -info.smallest_subnormal, info.max, 1.0, -2.5, 7e-3], dtype="<f8"), (12, 25))
+    sources = {
+        "f4_1d": (smooth((250,), "<f4"), (64,)),
+        "f8_2d": (smooth((40, 30), "<f8"), (16, 16)),
+        "f4_3d": (smooth((10, 9, 8), "<f4"), (5, 9, 8)),
+        "f8_4d": (smooth((6, 5, 4, 7), "<f8"), (3, 5, 4, 7)),
+        "i4_2d": ((smooth((33, 20), "<f8") * 1000).astype("<i4"), (11, 20)),
+        "i8_3d": ((smooth((8, 8, 8), "<f8") * 2**30).astype("<i8"), (4, 8, 8)),
+        "u4_1d": ((smooth((90,), "<f8") * 1000 + 2**31).astype("<u4"), (40,)),
+        "f8_unit_dims": (smooth((3, 1, 16, 1, 20), "<f8"), (1, 1, 16, 1, 20)),
+        "f8_specials": (specials, (8, 10)),
+        "f4_tiny": ((smooth((8, 8), "<f8") * 1e-41).astype("<f4"), (8, 8)),
+        "f8_zeros": (np.zeros((12, 12), "<f8"), (8, 8)),
+    }
+    modes = {
+        "rate6": ("rate 6.0", hdf5plugin.Zfp(rate=6.0)),
+        "rate40": ("rate 40.0", hdf5plugin.Zfp(rate=40.0)),   # past 2048 bits a block in 3 and 4 dimensions
+        "prec24": ("precision 24", hdf5plugin.Zfp(precision=24)),
+        "prec64": ("precision 64", hdf5plugin.Zfp(precision=64)),
+        "acc1e-2": ("accuracy 0.01", hdf5plugin.Zfp(accuracy=1e-2)),
+        "acc0": ("accuracy 0.0", hdf5plugin.Zfp(accuracy=0.0)),
+        "rev": ("reversible", hdf5plugin.Zfp(reversible=True)),
+        "expert": ("expert 200 1200 48 -40", hdf5plugin.Zfp(minbits=200, maxbits=1200, maxprec=48, minexp=-40)),
+        "defaults": ("defaults", hdf5plugin.Zfp()),
+    }
+    plan = {
+        "f4_1d": ("rate6", "prec24", "acc1e-2", "rev", "expert", "defaults"),
+        "f8_2d": ("rate6", "prec24", "prec64", "acc1e-2", "acc0", "rev", "expert"),
+        "f4_3d": ("rate6", "rate40", "acc1e-2", "rev"),
+        "f8_4d": ("rate6", "rate40", "prec24", "rev"),
+        "i4_2d": ("rate6", "prec24", "acc1e-2", "rev"),
+        "i8_3d": ("rate40", "prec24", "rev", "expert"),
+        "u4_1d": ("prec24", "rev"),
+        "f8_unit_dims": ("expert", "rev", "rate6"),
+        "f8_specials": ("rev", "rate6", "acc1e-2"),
+        "f4_tiny": ("rate6", "rev"),
+        "f8_zeros": ("rate6", "rev", "expert"),
+    }
+    for source, (data, chunks) in sources.items():
+        f.create_dataset("input/" + source, data=data)
+        for mode in plan[source]:
+            setting, filters = modes[mode]
+            d = f.create_dataset(f"{source}_{mode}", data=data, chunks=chunks, **filters)
+            d.attrs["source"] = source
+            d.attrs["zfp"] = setting
+    data, chunks = sources["f8_2d"]
+    d = f.create_dataset("f8_2d_rate6_fletcher32", data=data, chunks=chunks, fletcher32=True,
+                         **hdf5plugin.Zfp(rate=6.0))
+    d.attrs["source"] = "f8_2d"
+    d.attrs["zfp"] = "rate 6.0"
+
+
 def _lookup3(data, initval=0):
     """Bob Jenkins' lookup3 hashlittle, as libhdf5's H5_checksum_lookup3 computes metadata checksums."""
     m = 0xFFFFFFFF
@@ -2073,6 +2144,7 @@ FIXTURES = {
     "plugin_filters_write": lambda: _with_file("plugin_filters_write.h5", build_plugin_filters_write, libver="latest"),
     "bzip2": lambda: _with_file("bzip2.h5", build_bzip2, libver="latest"),
     "zfp": lambda: _with_file("zfp.h5", build_zfp, libver="latest"),
+    "zfp_write": lambda: _with_file("zfp_write.h5", build_zfp_write, libver="latest"),
     "blosc2": lambda: _with_file("blosc2.h5", build_blosc2, libver="latest"),
     "sz": lambda: build_sz(os.path.join(OUT, "sz.h5")),
     "vds_unlimited": lambda: build_vds_unlimited(OUT),

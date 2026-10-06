@@ -9,7 +9,9 @@ and shape back); a Zarr v2 array names them "bz2" and "zfpy" as its compressor (
 writes zarr/src/test/resources/fixtures/<name>/ and <name>.expected.json: the shape, the dtype, the codec names
 Falcon's pipeline has (a v2 array's as Falcon translates its .zarray), and what zarr-python reads back, every
 element in C order (zfp is lossy: the values are zarr-python's decoded ones, which Falcon must match bit for
-bit). A large array's sidecar holds the SHA-256 of its elements, little-endian, instead of the elements.
+bit, and a lossy array's sidecar also holds the "inputs" zarr-python was given, which written again must give
+its chunks byte for byte). A large array's sidecar holds the SHA-256 of its elements, little-endian, instead of
+the elements.
 
 The bz2 cases cover the levels, chunks of several bzip2 blocks, bz2 under a shard, among v2 filters, and chunks
 rewritten as zarr-python's numcodecs reads them though it never writes them: several bzip2 streams one after
@@ -190,9 +192,11 @@ def build(c):
         meta["sha256"] = hashlib.sha256(got.astype(c["dtype"].newbyteorder("<")).tobytes()).hexdigest()
     else:
         meta["values"] = falcon_values(got, c["dtype"])
+    lossless = np.array_equal(got, np.asarray(c["values"]).astype(c["dtype"]))
+    if not lossless:  # the values zarr-python was given, for writing them again: zfp's stream depends on them
+        meta["inputs"] = falcon_values(np.asarray(c["values"]).astype(c["dtype"]), c["dtype"])
     with open(os.path.join(OUT, c["name"] + ".expected.json"), "w", encoding="utf-8", newline="\n") as f:
         json.dump(meta, f, indent=1)
-    lossless = np.array_equal(got, np.asarray(c["values"]).astype(c["dtype"]))
     print(f"  {c['name']:38s} {c['dtype'].str:4s} {' -> '.join(meta['codecs'])}{'' if lossless else '  (lossy)'}")
 
 

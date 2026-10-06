@@ -18,7 +18,9 @@ configuration (Blosc's zstd excepted: Falcon's zstd encoder is its own); numcode
 checked the same way. The cast_value arrays (cast_*; reading them needs cast-value-rs) must read as zarr-python
 reads its own write of the same data into the same metadata, each written element its value cast and cast back
 by cast-value-rs, and their chunks (a shard's sub-chunk by sub-chunk) must be zarr-python's byte for byte unless
-zstd or gzip compresses them. Dev-time tool; zarr-python is not a Falcon dependency. Run it before every release:
+zstd or gzip compresses them. The numcodecs.zfpy arrays (zfpy_*; zfp is lossy) must read as zarr-python reads
+its own write of the same data into the same metadata, and their chunks must be zfpy's byte for byte (P2 F18).
+Dev-time tool; zarr-python is not a Falcon dependency. Run it before every release:
 
     mvn -pl zarr -am compile
     java -cp "zarr/target/classes;core/target/classes" tools/fixtures/WriteZarrCases.java OUT_DIR
@@ -303,6 +305,49 @@ def sub_chunks(shard, count):
     return out
 
 
+def zfpy_problem(directory, name, dtype, written):
+    """A numcodecs.zfpy array Falcon wrote (zfp is lossy): every element must read as zarr-python reads its own
+    write of the same values into the same metadata, and the chunks must be zarr-python's (zfpy's) byte for
+    byte, a shard's sub-chunks one by one."""
+    import shutil
+    import tempfile
+    path = os.path.join(directory, name)
+    meta = json.load(open(os.path.join(path, "zarr.json"), encoding="utf-8"))
+    got = zarr.open_array(path, mode="r")[...]
+    if written is None:
+        rows, cols = (0, SHAPE[0]), (0, SHAPE[1])
+    else:
+        rows, cols = (written[0], written[1]), (written[2], written[3])
+    values = np.array([[value(dtype, r * SHAPE[1] + c) for c in range(*cols)] for r in range(*rows)], dtype=dtype)
+    with tempfile.TemporaryDirectory() as tmp:
+        own = os.path.join(tmp, name)
+        os.makedirs(own)
+        shutil.copy(os.path.join(path, "zarr.json"), own)
+        z = zarr.open_array(own, mode="r+")
+        z[rows[0]:rows[1], cols[0]:cols[1]] = values
+        theirs = z[...]
+        unsigned = np.dtype(f"u{got.dtype.itemsize}")
+        if not np.array_equal(got.view(unsigned), theirs.view(unsigned)):
+            bad = tuple(np.argwhere(got.view(unsigned) != theirs.view(unsigned))[0])
+            return f"element {bad} reads {got[bad]!r}; zarr-python's own write reads {theirs[bad]!r}"
+        ours = {os.path.relpath(f, path): open(f, "rb").read() for f in chunk_files(directory, name)}
+        their = {os.path.relpath(f, own): open(f, "rb").read() for f in chunk_files(tmp, name)}
+        if sorted(ours) != sorted(their):
+            return f"chunks {sorted(ours)}, zarr-python stores {sorted(their)}"
+        outer = meta["codecs"][-1]
+        count = 0
+        if outer["name"] == "sharding_indexed":
+            count = 1
+            for whole, sub in zip(meta["chunk_grid"]["configuration"]["chunk_shape"],
+                                  outer["configuration"]["chunk_shape"]):
+                count *= whole // sub
+        for key, data in ours.items():
+            same = sub_chunks(data, count) == sub_chunks(their[key], count) if count else data == their[key]
+            if not same:
+                return f"chunk {key} differs from zarr-python's"
+    return None
+
+
 def cast_problem(directory, name, dtype, written):
     """A cast_value array Falcon wrote: each written element must read as its value cast and cast back by
     cast-value-rs, every element as zarr-python reads its own write of the same data into the same metadata,
@@ -371,9 +416,10 @@ def main(directory):
     failures = 0
     for case in manifest:
         name, dtype, written = case["name"], case["dtype"], case["written"]
-        if name.startswith("cast_"):
+        if name.startswith("cast_") or name.startswith("zfpy_"):
             try:
-                problem = cast_problem(directory, name, dtype, written)
+                check = cast_problem if name.startswith("cast_") else zfpy_problem
+                problem = check(directory, name, dtype, written)
             except Exception as e:  # noqa: BLE001 -- report every case
                 problem = f"{type(e).__name__}: {e}"
             failures += problem is not None

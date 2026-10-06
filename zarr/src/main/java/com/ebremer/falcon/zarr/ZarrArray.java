@@ -36,9 +36,9 @@ import java.util.stream.Stream;
  *
  * <p>A chunk that a write leaves holding only the fill value is deleted rather than stored, as Zarr
  * represents empty chunks; a handle from {@link #withWriteEmptyChunks(boolean)} stores it instead. An array
- * whose codecs include one Falcon only decodes ({@code numcodecs.zfpy}) is read-only: every write, and a
- * resize that would clear part of a stored chunk, throws {@link ZarrUnsupportedException} before anything
- * changes.
+ * whose codecs cannot encode its chunks ({@code numcodecs.zfpy} in a mode numcodecs does not write, or of
+ * elements zfp does not compress) is read-only: every write, and a resize that would clear part of a stored
+ * chunk, throws {@link ZarrUnsupportedException} before anything changes.
  */
 public final class ZarrArray extends ZarrNode {
 

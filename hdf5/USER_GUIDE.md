@@ -594,7 +594,19 @@ Without arguments they take hdf5plugin's defaults: Blosc's LZ4 at clevel 5 after
 block per chunk for LZ4, LZ4 for bitshuffle, zstd's level 3, and bzip2's 900,000-byte blocks. Each chunk
 is the plugin's own, byte for byte (h5py's liblzf, c-blosc 1.21, liblz4, bitshuffle, libbzip2), except
 zstd, whose frames come from Falcon's own encoder, which libzstd reads. A chunk LZF or Blosc cannot
-shrink is stored unfiltered, as the plugins leave it. Blosc2, ZFP, and SZ are read, not written.
+shrink is stored unfiltered, as the plugins leave it. Blosc2 and SZ are read, not written.
+
+ZFP (32013, LLNL's H5Z-ZFP) is written as `hdf5plugin.Zfp` sets it up, every chunk libzfp 1.0.1's byte for
+byte:
+- `zfpRate(rate)`: each block of 4<sup>d</sup> values in `floor(4^d * rate + 0.5)` bits;
+- `zfpPrecision(precision)`: that many bit planes of each block;
+- `zfpAccuracy(tolerance)`: each value within the tolerance;
+- `zfpReversible()`: lossless;
+- `zfpExpert(minbits, maxbits, maxprec, minexp)`: each parameter.
+
+zfp is lossy but for `zfpReversible()`. It must be the first filter, and H5Z-ZFP takes 4- and 8-byte
+little-endian integers and floats in chunks with 1 to 4 dimensions longer than 1 (the dimensions of size 1
+are left out of zfp's field). Falcon refuses anything else before writing.
 
 ### Links and references
 
@@ -746,8 +758,8 @@ try (Hdf5Writer w = Hdf5Writer.open(Path.of("data.h5"))) {
 - **Refused** (`HdfUnsupportedException`):
   - files with 4-byte addresses, of a non-default driver (family, multi), that track their free space
     persistently or in pages, or that are marked as open by a writer (with no journal of Falcon's to redo);
-  - writing into datasets filtered by Blosc2, ZFP, SZ, or a filter Falcon does not know (it writes into
-    LZF, Blosc, LZ4, bitshuffle, Zstandard, and bzip2 datasets, with their client data);
+  - writing into datasets filtered by Blosc2, SZ, or a filter Falcon does not know (it writes into LZF,
+    Blosc, LZ4, bitshuffle, Zstandard, bzip2, and ZFP datasets, with their client data);
   - writing through a virtual dataset of variable-length or reference data (as reading one is), into a
     source of another type (other than the other byte order), or into a source file read through a
     resolver;
@@ -834,5 +846,5 @@ The following are not supported:
 - **Multi-file drivers** (family, multi, split). `driverInfo()` reports them, and Falcon reads only the
   file it opened.
 
-On the write side, Blosc2, ZFP, and SZ are not written (Falcon has no encoders for them), and changing a
+On the write side, Blosc2 and SZ are not written (Falcon has no encoders for them), and changing a
 file refuses what *Changing an existing file* lists. See [`TODO.md`](TODO.md).

@@ -164,6 +164,18 @@ does. Tests: zarr 921 + 19.
   - `consolidate()` on a v2 group writes its `.zmetadata` (it was refused). A node of the other format
     below a group stops the consolidation, in v3 as before and now in v2.
 
+**F18 (2026-10-06)** writes numcodecs' zfpy, through Falcon Core's new zfp encoder. Tests: zarr 939 + 19, core
+138.
+- New API: `ArraySpec.Builder.zfpy()`, `zfpyAccuracy(tolerance)`, `zfpyRate(rate)`, and
+  `zfpyPrecision(precision)`. In core: `ZfpEncoder`, and `ZfpHeader.of`, `withRate`, `withPrecision`,
+  `withAccuracy`, `withReversible`, `withParameters`, and `encodedMode`.
+- Behaviour changes:
+  - Arrays with `numcodecs.zfpy` (v3) or a `zfpy` compressor or filter (v2) are written; every write threw
+    `ZarrUnsupportedException`. Writes are refused, before anything changes, only where numcodecs could not
+    write either: a mode other than 2, 3, or 4, elements zfp does not compress, or chunks of more than 4
+    dimensions.
+  - `ArraySpec.Builder` refuses, at `build()`, a zfpy array of elements zfp does not compress.
+
 
 1. ~~**Z1/Z2 — node replacement destroys or corrupts data.**~~ Done 2026-10-05 (below).
 2. ~~**Z3/C1 — chunk cache.**~~ ~~Reads are stale across handles~~ (Z3, done 2026-10-05), ~~and concurrent
@@ -1461,8 +1473,8 @@ what was done, then gives the original finding.
     (zarr-python reads Falcon's bz2 arrays, each chunk numcodecs' bytes).
   - Tests: `ReshapeCodecTest`, `ReshapeFixtureTest`, `Bz2ZfpyCodecTest`, `Bz2ZfpyFixtureTest`, and the new
     fixtures in `RobustnessTest`.
-  - **Still open:** a zfp encoder, which would make zfpy writable (HDF5's ZFP filter would gain it too); the
-    `lzma` and `pcodec` compressors.
+  - **Still open:** ~~a zfp encoder, which would make zfpy writable (HDF5's ZFP filter would gain it too)~~
+    (F18); the `lzma` and `pcodec` compressors.
 
 - [x] **F17 — creating Zarr v2 arrays and groups.** Done 2026-10-06. It was out of scope; Falcon now creates
   what it already read and wrote into.
@@ -1478,7 +1490,7 @@ what was done, then gives the original finding.
     - New v2 settings: `order('F')`, numcodecs `filters(...)` and `compressor(...)` as `.zarray` lists
       them. `gzip`, `zstd`, `blosc`, and `bz2` set the compressor, as numcodecs configures each.
     - Refused for v2: sharding, `cast_value`, `reshape`, `crc32c`, a rectilinear grid, dimension names, the
-      `default` chunk key encoding, two compressors, and `zfpy` (Falcon has no zfp encoder). Refused for v3:
+      `default` chunk key encoding, two compressors, and `zfpy` (written since F18). Refused for v3:
       the v2 settings, which need `zarrFormat(2)`.
   - **Groups:** `Zarr.createGroup(store, attributes, overwrite, 2)` writes a `.zgroup` and `.zattrs`. A
     group creates its children in its own format, as zarr-python does; a spec that names the other format
@@ -1497,6 +1509,28 @@ what was done, then gives the original finding.
       hierarchy (groups with attributes, Fortran-ordered strings, blosc, delta with zlib) opened through its
       `.zmetadata`. The written-into arrays now include the 12 `v2_*` fixtures.
   - Tests: `V2CreateTest`; `ConsolidatedTest.consolidateRefusesMixedFormatsAndReadOnlyStores`.
+- [x] **F18 — writing numcodecs' zfpy.** Done 2026-10-06. Falcon read zfpy (F16) but had no zfp encoder.
+  - **The encoder** (`core`'s `compress.zfp.ZfpEncoder`, shared with HDF5's ZFP filter) ports zfp 1.0.1's,
+    every stream libzfp's byte for byte: `gen_zfp_encoder_vectors.py` checks 556 streams of libzfp's own
+    (zfpy's 64-bit words with the header inline; H5Z-ZFP's 8-bit words with the header apart), every mode,
+    type, and dimensionality, NaN, infinities, subnormals, and integers at their limits.
+  - **The codec** writes each chunk as `zfpy.compress_numpy(chunk, write_header=True)` does, in the mode
+    numcodecs' `ZFPY` chooses from its configuration: fixed accuracy with a tolerance (0: expert), fixed
+    rate (set without the scalar type, as zfpy sets it), fixed precision, or, for a parameter of -1, the
+    reversible mode. In v3 the chunk is compressed in its own shape (after a transpose, its transposed one);
+    as a v2 compressor, in the shape numcodecs is handed: the chunk's, or after a filter that flattens it
+    (all but astype and bitround), one dimension. The builder writes zarr-python's configuration: only the
+    arguments given in v3, every attribute (`compression_kwargs` included) in v2.
+  - **Oracles:**
+    - `Bz2ZfpyFixtureTest`: writing the inputs zarr-python was given (the lossy fixtures' sidecars now
+      record them, as `inputs`) into empty copies of its 18 zfpy arrays stores its chunks byte for byte,
+      in every mode, type, and dimensionality, after a transpose, under a shard, before crc32c, and in v2
+      after a delta filter; the builder writes 6 of them again from scratch, the same.
+    - `check_zarr_writer.py`: zarr-python reads Falcon's 8 zfpy arrays, and writing the same values itself
+      stores the same chunks; `check_zarr_v2_writes.py` the same for the 12 v2 zfpy arrays Falcon wrote into
+      or created (of 129 v2 nodes).
+  - Tests: `ZfpEncoderTest` (core), `Bz2ZfpyFixtureTest`, `Bz2ZfpyCodecTest.zfpyEncodesAsZfpy`,
+    `V2CreateTest.zfpyIsCreatedAsNumcodecsConfiguresIt`.
 
 **Out of scope / deferred:**
 - **A shared data model in `com.ebremer.falcon.core`** — investigated and deferred (`PLAN.md` §10): data

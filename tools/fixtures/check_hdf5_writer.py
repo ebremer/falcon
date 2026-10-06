@@ -5,8 +5,8 @@ Falcon's own round-trip tests (WriteTest) only prove the writer and reader agree
 script exports the writer's feature matrix (WriterInteropExport: one file per area, among them files
 Falcon changed in place, plus a manifest of expected values) and reads every object back with h5py --
 HDF5 2.0, and optionally an HDF5 1.14 build in a second interpreter -- decoding szip chunks with libaec
-(h5py ships szip disabled), and reading the third-party filters (Blosc, LZ4, bitshuffle, Zstandard, bzip2)
-through hdf5plugin, checking each dataset's filters (id, flags, client data, name) as libhdf5 reports them. Each
+(h5py ships szip disabled), and reading the third-party filters (Blosc, LZ4, bitshuffle, Zstandard, bzip2,
+ZFP) through hdf5plugin, checking each dataset's filters (id, flags, client data, name) as libhdf5 reports them. Each
 library then changes a copy of every file (an attribute on every object, a dataset in every group, a row on
 every dataset that can grow -- written, through the plugins, for the third-party filters -- and the
 attributes a file's manifest names deleted) and reads it all back.

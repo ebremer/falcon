@@ -175,11 +175,15 @@ public final class ArraySpec {
             inner.add(named("cast_value", config.build()));
             stored = b.castType;
         }
-        // The array->bytes codec: vlen-utf8 or vlen-bytes for variable-length elements, otherwise the
-        // fixed-size bytes codec.
-        inner.add(b.dataType.isVariableLength()
-                ? named(VlenCodec.of(b.dataType).codecName(), JsonObject.builder().build())
-                : bytesCodec(stored, b.endian));
+        // The array->bytes codec: numcodecs.zfpy if chosen (which refuses variable-length elements), vlen-utf8
+        // or vlen-bytes for variable-length elements, otherwise the fixed-size bytes codec.
+        if (b.zfpyMode != null) {
+            inner.add(named("numcodecs.zfpy", zfpyV3(b.zfpyMode, b.zfpyParameter)));
+        } else {
+            inner.add(b.dataType.isVariableLength()
+                    ? named(VlenCodec.of(b.dataType).codecName(), JsonObject.builder().build())
+                    : bytesCodec(stored, b.endian));
+        }
         if (b.gzipLevel != null) {
             inner.add(named("gzip", JsonObject.builder().put("level", b.gzipLevel).build()));
         }
@@ -238,8 +242,7 @@ public final class ArraySpec {
 
     /**
      * The settings a Zarr v2 array cannot have, or {@code null} if it can have them all: the v3 codecs and
-     * grids, dimension names, a chunk key encoding but {@code v2}, more than one compressor, and
-     * {@code zfpy}, which Falcon does not write.
+     * grids, dimension names, a chunk key encoding but {@code v2}, and more than one compressor.
      */
     private static String v2Problem(Builder b) {
         List<String> v3Only = new ArrayList<>();
@@ -280,21 +283,15 @@ public final class ArraySpec {
         if (b.bz2Level != null) {
             compressors.add("bz2");
         }
+        if (b.zfpyMode != null) {
+            compressors.add("zfpy");
+        }
         if (b.compressor != null) {
             compressors.add("compressor(...)");
         }
         if (compressors.size() > 1) {
             return "a Zarr v2 array has one compressor, but " + String.join(" and ", compressors)
                     + " were chosen (filters(...) takes more codecs, applied before it)";
-        }
-        List<JsonObject> v2Codecs = new ArrayList<>(b.filters != null ? b.filters : List.of());
-        if (b.compressor != null) {
-            v2Codecs.add(b.compressor);
-        }
-        for (JsonObject codec : v2Codecs) {
-            if (codec.members().get("id") instanceof JsonString id && id.value().equals("zfpy")) {
-                return "Falcon reads zfpy but cannot write it (it has no zfp encoder)";
-            }
         }
         return null;
     }
@@ -346,7 +343,40 @@ public final class ArraySpec {
         if (b.bz2Level != null) {
             return JsonObject.builder().put("id", "bz2").put("level", b.bz2Level).build();
         }
+        if (b.zfpyMode != null) {
+            return zfpyV2(b.zfpyMode, b.zfpyParameter);
+        }
         return JsonNull.INSTANCE;
+    }
+
+    /**
+     * numcodecs' {@code ZFPY} in Zarr v3 metadata, as zarr-python 3.4 writes it: the arguments given ({@code mode}
+     * and its parameter), or none for numcodecs' defaults (the reversible mode).
+     */
+    private static JsonObject zfpyV3(long mode, JsonNumber parameter) {
+        if (parameter == null) {
+            return JsonObject.builder().build();
+        }
+        return JsonObject.builder().put("mode", mode).put(zfpyParameterName(mode), parameter).build();
+    }
+
+    /**
+     * A Zarr v2 {@code zfpy} compressor as numcodecs 0.17's {@code get_config} writes it: every attribute,
+     * {@code compression_kwargs} among them, -1 for each parameter not given.
+     */
+    private static JsonObject zfpyV2(long mode, JsonNumber parameter) {
+        JsonNumber given = parameter != null ? parameter : JsonNumber.of(-1);
+        String name = zfpyParameterName(mode);
+        JsonObject.Builder b = JsonObject.builder().put("id", "zfpy").put("mode", mode)
+                .put("compression_kwargs", JsonObject.builder().put(name, given).build());
+        for (String key : new String[] {"tolerance", "rate", "precision"}) {
+            b.put(key, key.equals(name) ? given : JsonNumber.of(-1));
+        }
+        return b.build();
+    }
+
+    private static String zfpyParameterName(long mode) {
+        return mode == 2 ? "rate" : mode == 3 ? "precision" : "tolerance";
     }
 
     private static JsonValue bytesCodec(DataType dataType, ByteOrder endian) {
@@ -437,6 +467,7 @@ public final class ArraySpec {
             ArrayMetadata parsed = format == 2 ? V2Metadata.parseArray(json, attributes, V2Metadata.ZARRAY)
                     : (ArrayMetadata) Metadata.parse(Json.writeBytes(json), "zarr.json");
             parsed.checkPipelines();
+            parsed.pipeline().checkEncodable(); // zfpy, say, of elements it does not compress
         } catch (ZarrException e) {
             throw new IllegalArgumentException("invalid array spec: " + e.getMessage(), e);
         }
@@ -494,6 +525,8 @@ public final class ArraySpec {
         private int bloscClevel = 5;
         private String bloscShuffle; // null: the byte shuffle for multi-byte elements, else none
         private Integer bz2Level;
+        private Long zfpyMode;         // null: no zfpy
+        private JsonNumber zfpyParameter; // null: numcodecs' defaults, the reversible mode
         private JsonArray reshape;
         private boolean crc32c;
         private long[] subChunkShape;
@@ -713,6 +746,77 @@ public final class ArraySpec {
         }
 
         /**
+         * Compresses chunks with zfp, through numcodecs' zfpy codec, reversibly (lossless), numcodecs' default:
+         * see {@link #zfpyAccuracy}.
+         *
+         * @return this builder
+         */
+        public Builder zfpy() {
+            return zfpy(4, null);
+        }
+
+        /**
+         * Compresses chunks with zfp, through numcodecs' zfpy codec, in fixed-accuracy mode: each value within
+         * {@code tolerance} of the original (a tolerance of 0 codes every bit plane, zfp's expert mode).
+         *
+         * <p>Each chunk is one zfp stream with its full header, written byte for byte as zfpy writes it, which
+         * zarr-python reads. In Zarr v3 the {@code numcodecs.zfpy} codec stands for the {@code bytes} codec,
+         * the chunk compressed in its own shape, inside the shard when {@link #sharding}; the codecs chosen
+         * after it (gzip and the rest) apply to its stream. In Zarr v2 it is the compressor. zfp compresses
+         * {@code int32}, {@code int64}, {@code float32}, and {@code float64} elements (the stored type, after
+         * {@link #castValue}), in chunks of 1 to 4 dimensions, little-endian whatever the {@link #endian};
+         * {@link #build()} refuses anything else.
+         *
+         * @param tolerance the absolute error tolerated, 0 or more
+         * @return this builder
+         * @throws IllegalArgumentException if {@code tolerance} is negative, NaN, or infinite
+         */
+        public Builder zfpyAccuracy(double tolerance) {
+            if (!(tolerance >= 0) || Double.isInfinite(tolerance)) {
+                throw new IllegalArgumentException("zfpy tolerance must be 0 or more and finite, not " + tolerance);
+            }
+            return zfpy(4, JsonNumber.of(tolerance));
+        }
+
+        /**
+         * Compresses chunks with zfp, through numcodecs' zfpy codec, in fixed-rate mode: every block of
+         * 4<sup>d</sup> values takes {@code floor(4^d * rate + 0.5)} bits (zfpy sets the rate without the scalar
+         * type, so a float block may be given fewer bits than its exponent takes; zfpy then overruns its own
+         * buffer, but Falcon writes the stream libzfp means, which zfpy reads). See {@link #zfpyAccuracy}.
+         *
+         * @param rate the bits per value, more than 0
+         * @return this builder
+         * @throws IllegalArgumentException if {@code rate} is not positive and finite
+         */
+        public Builder zfpyRate(double rate) {
+            if (!(rate > 0) || Double.isInfinite(rate)) {
+                throw new IllegalArgumentException("zfpy rate must be positive and finite, not " + rate);
+            }
+            return zfpy(2, JsonNumber.of(rate));
+        }
+
+        /**
+         * Compresses chunks with zfp, through numcodecs' zfpy codec, in fixed-precision mode: {@code precision}
+         * bit planes of each block (0 means all 64, zfp's expert mode). See {@link #zfpyAccuracy}.
+         *
+         * @param precision the bit planes, 0 to 64
+         * @return this builder
+         * @throws IllegalArgumentException if {@code precision} is not 0 to 64
+         */
+        public Builder zfpyPrecision(int precision) {
+            if (precision < 0 || precision > 64) {
+                throw new IllegalArgumentException("zfpy precision must be 0 to 64, not " + precision);
+            }
+            return zfpy(3, JsonNumber.of(precision));
+        }
+
+        private Builder zfpy(long mode, JsonNumber parameter) {
+            this.zfpyMode = mode;
+            this.zfpyParameter = parameter;
+            return this;
+        }
+
+        /**
          * Reshapes each chunk before it is stored, with the {@code reshape} codec (zarr-extensions
          * {@code codecs/reshape}): the elements keep their C order, only the shape the codecs after it see
          * changes, so a {@link #sharding} sub-chunk shape is of the reshaped rank. {@code shape} has one entry
@@ -886,7 +990,8 @@ public final class ArraySpec {
          * {@code "<M8[ns]"}, a struct's list of fields, {@code "|O"} with the {@code vlen-utf8} or
          * {@code vlen-bytes} filter for the variable-length types); the fill value in v2's form; the
          * {@link #order}; the {@link #filters}; one compressor ({@link #gzip}, {@link #zstd}, {@link #blosc()},
-         * {@link #bz2}, or {@link #compressor}); and the chunk {@link #separator} as its
+         * {@link #bz2}, {@link #zfpy()} and its kin, or {@link #compressor}); and the chunk {@link #separator}
+         * as its
          * {@code dimension_separator}. Zarr v2 has no sharding, {@code cast_value}, {@code reshape},
          * {@code crc32c} codec, rectilinear grid, dimension names, or {@code default} chunk key encoding, and
          * no {@code r<N>} data type ({@link DataType#rawBytes} is NumPy's {@code V<n>}): {@link #build()}
@@ -928,8 +1033,8 @@ public final class ArraySpec {
          * byte: {@code delta}, {@code fixedscaleoffset}, {@code quantize}, {@code bitround}, {@code astype},
          * {@code packbits}, {@code shuffle}, the checksums {@code crc32}, {@code crc32c}, {@code adler32},
          * {@code fletcher32}, and {@code jenkins_lookup3}, and the compressors {@code zlib}, {@code lz4},
-         * {@code gzip}, {@code zstd}, {@code blosc}, and {@code bz2}. A variable-length data type's object
-         * codec comes first by itself. Zarr v3 has no filters, and {@link #build()} refuses them for it.
+         * {@code gzip}, {@code zstd}, {@code blosc}, {@code bz2}, and {@code zfpy}. A variable-length data
+         * type's object codec comes first by itself. Zarr v3 has no filters, and {@link #build()} refuses them for it.
          *
          * @param filters the filters' configurations, replacing any set before; none for no filters
          * @return this builder

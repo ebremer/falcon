@@ -210,10 +210,14 @@ public final class ChunkPipeline {
                     }
                     case ZfpyCodec.NAME -> {
                         if (!arrayBytesSet) { // zarr-python 3's array->bytes codec
-                            bytesCodec = ZfpyCodec.parse(config, boundaryType);
+                            bytesCodec = ZfpyCodec.parse(config, boundaryType, boundaryShape);
                         } else { // a Zarr v2 compressor or filter, after the bytes codec
+                            // numcodecs is handed the chunk in its shape, unless a filter before flattened it
+                            boolean shaped = byteCodecs.stream().allMatch(c -> c instanceof AsTypeCodec
+                                    || c instanceof BitRoundCodec);
                             byteCodecs.add(ZfpyCodec.Compressor.parse(config,
-                                    Numcodecs.elementType(boundaryType, bytesCodec, byteCodecs)));
+                                    Numcodecs.elementType(boundaryType, bytesCodec, byteCodecs),
+                                    shaped ? boundaryShape : null));
                         }
                     }
                     default -> {
@@ -510,13 +514,19 @@ public final class ChunkPipeline {
 
     /**
      * Checks that this pipeline can encode chunks, as a write must before it changes anything: every codec
-     * in it, and in a shard's sub-chunk pipeline, has an encoder.
+     * in it, and in a shard's sub-chunk pipeline, can encode them.
      *
-     * @throws ZarrUnsupportedException if a codec only decodes ({@code numcodecs.zfpy})
+     * @throws ZarrUnsupportedException if a codec cannot ({@code numcodecs.zfpy} in a mode numcodecs does not
+     *                                  write, or of elements zfpy does not compress)
      */
     public void checkEncodable() {
-        if (bytesCodec instanceof ZfpyCodec || byteCodecs.stream().anyMatch(ZfpyCodec.Compressor.class::isInstance)) {
-            throw ZfpyCodec.readOnly();
+        if (bytesCodec instanceof ZfpyCodec zfpy) {
+            zfpy.checkWritable();
+        }
+        for (BytesBytesCodec codec : byteCodecs) {
+            if (codec instanceof ZfpyCodec.Compressor zfpy) {
+                zfpy.checkWritable();
+            }
         }
         if (bytesCodec instanceof ShardingCodec sharding) {
             sharding.checkEncodable();

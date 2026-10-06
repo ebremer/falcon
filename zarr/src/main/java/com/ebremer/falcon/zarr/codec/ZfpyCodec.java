@@ -3,6 +3,7 @@ package com.ebremer.falcon.zarr.codec;
 import com.ebremer.falcon.core.compress.CompressionFormatException;
 import com.ebremer.falcon.core.compress.UnsupportedCompressionException;
 import com.ebremer.falcon.core.compress.zfp.ZfpDecoder;
+import com.ebremer.falcon.core.compress.zfp.ZfpEncoder;
 import com.ebremer.falcon.core.compress.zfp.ZfpHeader;
 import com.ebremer.falcon.zarr.ZarrFormatException;
 import com.ebremer.falcon.zarr.ZarrUnsupportedException;
@@ -13,16 +14,18 @@ import java.nio.ByteOrder;
 import java.util.Arrays;
 
 /**
- * The {@code numcodecs.zfpy} array&rarr;bytes codec, read only: numcodecs' {@code ZFPY}, which zarr-python 3
- * runs as an array&rarr;bytes codec in Zarr v3 metadata ({@code zarr.codecs.numcodecs.ZFPY}). A chunk is one
- * zfp stream, {@code zfpy.compress_numpy(chunk, write_header=True)}: the full zfp header (the scalar type,
- * {@code int32}, {@code int64}, {@code float32}, or {@code float64}, and the chunk's shape, the last dimension
- * as zfp's {@code x}), then the chunk compressed whole in whichever mode the configuration chose (fixed rate,
- * precision, or accuracy; numcodecs' defaults leave zfp in its reversible, lossless mode, and a tolerance of 0
- * gives zfp's expert mode). Falcon Core's {@link ZfpDecoder} reads every mode bit for bit as libzfp 1.0.1
- * does. The configuration ({@code mode}, {@code tolerance}, {@code rate}, {@code precision}) only steers the
- * encoder, so decoding goes by the stream's header, which must give the array's data type and the chunk's
- * shape. Falcon has no zfp encoder: writing such an array is refused ({@link #readOnly()}).
+ * The {@code numcodecs.zfpy} array&rarr;bytes codec: numcodecs' {@code ZFPY}, which zarr-python 3 runs as an
+ * array&rarr;bytes codec in Zarr v3 metadata ({@code zarr.codecs.numcodecs.ZFPY}). A chunk is one zfp stream,
+ * {@code zfpy.compress_numpy(chunk, write_header=True)}: the full zfp header (the scalar type, {@code int32},
+ * {@code int64}, {@code float32}, or {@code float64}, and the chunk's shape, the last dimension as zfp's
+ * {@code x}), then the chunk compressed whole. Falcon Core's {@link ZfpDecoder} reads every mode bit for bit
+ * as libzfp 1.0.1 does, going by the stream's header, which must give the array's data type and the chunk's
+ * shape; its {@link ZfpEncoder} writes each chunk as zfpy does, byte for byte.
+ *
+ * <p>The configuration chooses the mode as numcodecs and zfpy choose it ({@link #header}): {@code mode} 4
+ * (fixed accuracy, numcodecs' default) with {@code tolerance}, 2 (fixed rate) with {@code rate}, or 3 (fixed
+ * precision) with {@code precision}; a parameter left at -1 (or out) gives zfp's reversible, lossless mode,
+ * and a tolerance of 0 its expert mode. numcodecs writes no other mode, so Falcon writes none either.
  *
  * <p>A Zarr v2 {@code zfpy} compressor (or filter) is {@link Compressor}, a bytes&rarr;bytes codec after the
  * {@code bytes} codec, as zarr-python 3 reads v2: the stream's elements are handed on as bytes, which must be
@@ -36,28 +39,107 @@ final class ZfpyCodec implements ArrayBytesCodec {
     /** The most bits zfp spends on one block: the header's mode field holds a {@code maxbits} up to 2^15. */
     private static final long MAX_BLOCK_BITS = 1L << 15;
 
-    private final DataType dataType;
+    /** numcodecs' {@code zfpy.mode_fixed_rate}, {@code mode_fixed_precision}, and {@code mode_fixed_accuracy}. */
+    private static final long MODE_FIXED_RATE = 2;
+    private static final long MODE_FIXED_PRECISION = 3;
+    private static final long MODE_FIXED_ACCURACY = 4;
 
-    private ZfpyCodec(DataType dataType) {
+    private final DataType dataType;
+    private final JsonObject configuration;
+    private final ZarrUnsupportedException unwritable; // why chunks of the pipeline's shape cannot be written
+
+    private ZfpyCodec(DataType dataType, JsonObject configuration, int[] shape) {
         this.dataType = dataType;
+        this.configuration = configuration;
+        ZarrUnsupportedException why = null;
+        try {
+            header(configuration, zfpType(dataType), shape, "'" + dataType.name() + "'");
+        } catch (ZarrUnsupportedException e) {
+            why = e;
+        }
+        this.unwritable = why;
     }
 
     /**
-     * Builds the codec for chunks of {@code dataType}. The data type and the chunk's shape are checked
-     * against each stream's header when it is decoded.
+     * Builds the codec for chunks of {@code dataType} and {@code shape}. The data type and the chunk's shape
+     * are checked against each stream's header when it is decoded; whether such chunks can be written, when
+     * a write asks ({@link #checkWritable}).
      *
      * @throws ZarrFormatException if the configuration is malformed, or the data type is variable-length
      */
-    static ZfpyCodec parse(JsonObject configuration, DataType dataType) {
+    static ZfpyCodec parse(JsonObject configuration, DataType dataType, int[] shape) {
         checkConfiguration(configuration);
         if (dataType.isVariableLength()) {
             throw new ZarrFormatException("the '" + dataType.name() + "' data type requires the '"
                     + VlenCodec.of(dataType).codecName() + "' codec, not '" + NAME + "'");
         }
-        return new ZfpyCodec(dataType);
+        return new ZfpyCodec(dataType, configuration, shape.clone());
     }
 
-    /** Checks numcodecs' settings, which only the encoder uses: numbers, where they are given. */
+    /**
+     * Checks that chunks can be written: zfpy compresses their data type, in 1 to 4 dimensions, in a mode
+     * numcodecs writes.
+     *
+     * @throws ZarrUnsupportedException if they cannot be
+     */
+    void checkWritable() {
+        if (unwritable != null) {
+            throw unwritable;
+        }
+    }
+
+    /**
+     * The zfp header numcodecs' zfpy codec writes for an array of {@code shape} {@code type} elements: the
+     * field, its last dimension zfp's {@code x}, and the mode the configuration chooses, as numcodecs hands
+     * zfpy one parameter and zfpy chooses (a tolerance or rate set without the scalar type, a negative
+     * parameter giving the reversible mode).
+     *
+     * @param elements what the elements are, for the message when {@code type} is {@code null}
+     * @throws ZarrUnsupportedException if zfpy would not compress the array, or numcodecs not write the mode
+     */
+    static ZfpHeader header(JsonObject configuration, ZfpHeader.Type type, int[] shape, String elements) {
+        if (type == null) {
+            throw new ZarrUnsupportedException(NAME + ": the elements are " + elements + ", which zfpy does not"
+                    + " compress (little-endian int32, int64, float32, and float64 only)");
+        }
+        if (shape.length < 1 || shape.length > 4) {
+            throw new ZarrUnsupportedException(NAME + ": zfpy compresses arrays of 1 to 4 dimensions, not "
+                    + shape.length);
+        }
+        long[] n = new long[4];
+        for (int i = 0; i < shape.length; i++) {
+            n[i] = shape[shape.length - 1 - i];
+        }
+        ZfpHeader field = ZfpHeader.of(type, n[0], n[1], n[2], n[3]);
+        long mode = Numcodecs.integer(configuration, "mode", MODE_FIXED_ACCURACY);
+        try {
+            ZfpHeader header;
+            if (mode == MODE_FIXED_ACCURACY) {
+                double tolerance = real(configuration, "tolerance");
+                header = tolerance >= 0 ? field.withAccuracy(tolerance) : field.withReversible();
+            } else if (mode == MODE_FIXED_RATE) {
+                double rate = real(configuration, "rate");
+                header = rate >= 0 ? field.withRate(rate, false) : field.withReversible();
+            } else if (mode == MODE_FIXED_PRECISION) {
+                long precision = Numcodecs.integer(configuration, "precision", -1);
+                header = precision >= 0 ? field.withPrecision((int) Math.min(precision, 64)) : field.withReversible();
+            } else {
+                throw new ZarrUnsupportedException(NAME + ": numcodecs' zfpy writes mode 2 (fixed rate), 3 (fixed"
+                        + " precision), or 4 (fixed accuracy), not " + mode);
+            }
+            ZfpEncoder.header(header, 64); // the header can record the field's sizes
+            return header;
+        } catch (IllegalArgumentException e) {
+            throw new ZarrUnsupportedException(NAME + ": " + e.getMessage());
+        }
+    }
+
+    /** A configuration's number, as a double, or -1 (numcodecs' default) if it is absent. */
+    private static double real(JsonObject configuration, String key) {
+        return configuration.find(key).filter(v -> !v.isNull()).map(v -> v.asNumber().doubleValue()).orElse(-1.0);
+    }
+
+    /** Checks numcodecs' settings: numbers, where they are given. */
     static void checkConfiguration(JsonObject configuration) {
         for (String key : new String[] {"mode", "precision"}) {
             configuration.find(key).filter(v -> !v.isNull()).ifPresent(v -> v.asNumber().longValue());
@@ -65,12 +147,6 @@ final class ZfpyCodec implements ArrayBytesCodec {
         for (String key : new String[] {"tolerance", "rate"}) {
             configuration.find(key).filter(v -> !v.isNull()).ifPresent(JsonValue::asNumber);
         }
-    }
-
-    /** The exception for writing through zfpy, which Falcon decodes but cannot encode. */
-    static ZarrUnsupportedException readOnly() {
-        return new ZarrUnsupportedException(NAME + ": Falcon decodes zfp but has no zfp encoder, so an array"
-                + " compressed with zfpy is read-only");
     }
 
     @Override
@@ -119,9 +195,12 @@ final class ZfpyCodec implements ArrayBytesCodec {
         return new ArrayValue(decompress(input, Pipelines.elementCount(shape) * (long) elementSize), shape);
     }
 
+    /** The chunk compressed whole, as {@code zfpy.compress_numpy(chunk, write_header=True)} writes it. */
     @Override
     public byte[] encode(ArrayValue array, int elementSize, byte[] fillElement, boolean writeEmptyChunks) {
-        throw readOnly();
+        checkWritable();
+        ZfpHeader header = header(configuration, zfpType(dataType), array.shape, "'" + dataType.name() + "'");
+        return compress(header, array.data);
     }
 
     // ---- shared with the v2 compressor --------------------------------------------------------------
@@ -186,6 +265,15 @@ final class ZfpyCodec implements ArrayBytesCodec {
         }
     }
 
+    /** The stream zfpy writes: the full header, then the field, in 64-bit words. */
+    private static byte[] compress(ZfpHeader header, byte[] elements) {
+        if (elements.length != header.elements() * header.type().size()) {
+            throw new ZarrFormatException(NAME + ": " + elements.length + " bytes are not the " + header.elements()
+                    + " elements of the zfp field");
+        }
+        return ZfpEncoder.compressWithHeader(header, elements, 0, 64);
+    }
+
     private static byte[] decompress(byte[] input, long maxBytes) {
         try {
             return ZfpDecoder.decompress(input, 0, input.length, maxBytes);
@@ -197,33 +285,63 @@ final class ZfpyCodec implements ArrayBytesCodec {
     }
 
     /**
-     * A Zarr v2 {@code zfpy} compressor (or filter), read only: zarr-python 3 hands numcodecs' {@code ZFPY} the
-     * chunk as an array of the elements the stage before makes (the {@code bytes} codec's data type, or a
-     * filter's output) and reads its decoded array back as those elements' bytes. So the stream must hold
-     * those elements, little-endian {@code int32}, {@code int64}, {@code float32}, or {@code float64} (zfpy
-     * compresses nothing else); its shape is not checked, as zarr-python only reshapes what it decodes, but
-     * the codecs after it check the element count.
+     * A Zarr v2 {@code zfpy} compressor (or filter): zarr-python 3 hands numcodecs' {@code ZFPY} the chunk as an
+     * array of the elements the stage before makes (the {@code bytes} codec's data type, or a filter's output)
+     * and reads its decoded array back as those elements' bytes. So the stream must hold those elements,
+     * little-endian {@code int32}, {@code int64}, {@code float32}, or {@code float64} (zfpy compresses nothing
+     * else); its shape is not checked, as zarr-python only reshapes what it decodes, but the codecs after it
+     * check the element count. A chunk is written in the shape numcodecs is handed it: the chunk's own, or
+     * after a filter that flattens (all but {@code astype} and {@code bitround}), one dimension.
      */
     static final class Compressor implements BytesBytesCodec {
 
         private final NumpyType input;
         private final ZfpHeader.Type type; // null: zfpy would not have taken the elements
+        private final JsonObject configuration;
+        private final int[] shape;         // null: the elements in one dimension
+        private final ZarrUnsupportedException unwritable;
 
-        private Compressor(NumpyType input) {
+        private Compressor(NumpyType input, JsonObject configuration, int[] shape) {
             this.input = input;
             this.type = zfpType(input);
+            this.configuration = configuration;
+            this.shape = shape;
+            ZarrUnsupportedException why = null;
+            try {
+                header(configuration, type, shape != null ? shape : new int[] {1}, elements());
+            } catch (ZarrUnsupportedException e) {
+                why = e;
+            }
+            this.unwritable = why;
         }
 
         /**
          * Builds the compressor for {@code input} elements ({@link Numcodecs#elementType}). Elements zfpy does
          * not compress are refused when a chunk is decoded, so that an array whose chunks are all absent
-         * still reads, as its fill value.
+         * still reads, as its fill value, and when a write asks ({@link #checkWritable}).
          *
+         * @param shape the shape numcodecs hands zfpy a chunk in, or {@code null} for one dimension
          * @throws ZarrFormatException if the configuration is malformed
          */
-        static Compressor parse(JsonObject configuration, NumpyType input) {
+        static Compressor parse(JsonObject configuration, NumpyType input, int[] shape) {
             checkConfiguration(configuration);
-            return new Compressor(input);
+            return new Compressor(input, configuration, shape == null ? null : shape.clone());
+        }
+
+        /**
+         * Checks that chunks can be written: zfpy compresses the elements, in 1 to 4 dimensions, in a mode
+         * numcodecs writes.
+         *
+         * @throws ZarrUnsupportedException if they cannot be
+         */
+        void checkWritable() {
+            if (unwritable != null) {
+                throw unwritable;
+            }
+        }
+
+        private String elements() {
+            return input == null ? "not numbers" : "'" + input + "'";
         }
 
         @Override
@@ -234,9 +352,8 @@ final class ZfpyCodec implements ArrayBytesCodec {
         @Override
         public byte[] decode(byte[] bytes, int maxSize) {
             if (type == null) {
-                throw new ZarrFormatException(NAME + ": the elements before it are " + (input == null ? "not numbers"
-                        : "'" + input + "'") + ", which zfpy does not compress (little-endian int32, int64,"
-                        + " float32, and float64 only)");
+                throw new ZarrFormatException(NAME + ": the elements before it are " + elements() + ", which zfpy"
+                        + " does not compress (little-endian int32, int64, float32, and float64 only)");
             }
             ZfpHeader header = header(bytes);
             if (header.type() != type) {
@@ -248,7 +365,14 @@ final class ZfpyCodec implements ArrayBytesCodec {
 
         @Override
         public byte[] encode(byte[] bytes) {
-            throw readOnly();
+            checkWritable();
+            int count = bytes.length / type.size();
+            int[] fieldShape = shape != null ? shape : new int[] {count};
+            if (Pipelines.elementCount(fieldShape) * type.size() != bytes.length) {
+                throw new ZarrFormatException(NAME + ": " + bytes.length + " bytes are not a chunk of "
+                        + Arrays.toString(fieldShape) + " '" + input + "' elements");
+            }
+            return compress(header(configuration, type, fieldShape, elements()), bytes);
         }
 
         @Override

@@ -52,15 +52,15 @@ class V2CreateTest {
             "v2_slash_2d", "v2_uint8", "v2x_raw_v", "v2x_datetime_ms", "v2x_datetime_10s_be", "v2x_struct",
             "v2x_order_f_str", "v2x_order_f_utf32", "v2x_nc_delta_i8", "v2x_nc_fixedscaleoffset_u2",
             "v2x_nc_astype", "v2x_nc_packbits", "v2x_nc_crc32", "v2x_nc_crc32c", "v2x_nc_fletcher32",
-            "v2x_nc_jenkins", "v2x_nc_crc32_compressor", "v2x_nc_bz2", "v2x_nc_delta_bz2");
+            "v2x_nc_jenkins", "v2x_nc_crc32_compressor", "v2x_nc_bz2", "v2x_nc_delta_bz2",
+            "v2x_nc_zfpy_i8_reversible_3d", "v2x_nc_zfpy_f8_expert", "v2x_nc_delta_zfpy_i4");
 
-    /** zarr-python's v2 arrays Falcon can write: all but those compressed with zfpy, which Falcon only reads. */
+    /** zarr-python's v2 arrays: every one. */
     static Stream<String> fixtures() throws IOException, URISyntaxException {
         Path dir = Path.of(V2CreateTest.class.getResource("/fixtures").toURI());
         try (Stream<Path> s = Files.list(dir)) {
             return s.map(p -> p.getFileName().toString())
                     .filter(n -> (n.startsWith("v2_") || n.startsWith("v2x_")) && !n.contains("."))
-                    .filter(n -> !n.contains("zfpy"))
                     .sorted().toList().stream();
         }
     }
@@ -263,8 +263,7 @@ class V2CreateTest {
                 "dimension names", b -> b.dimensionNames("y", "x"),
                 "default chunk key encoding", b -> b.chunkKeyEncoding("default"),
                 "foo chunk key encoding", b -> b.chunkKeyEncoding("foo"),
-                "one compressor", b -> b.gzip(1).zstd(),
-                "zfpy", b -> b.compressor(JsonObject.builder().put("id", "zfpy").put("mode", 4).build()));
+                "one compressor", b -> b.gzip(1).zfpy());
         v3Only.forEach((what, setting) -> {
             ArraySpec.Builder b = ArraySpec.builder(shape, DataType.FLOAT64).zarrFormat(2);
             setting.accept(b);
@@ -400,10 +399,28 @@ class V2CreateTest {
         assertEquals(3, Zarr.openGroup(v3).consolidate().array("a").zarrFormat());
     }
 
-    @ParameterizedTest
-    @ValueSource(strings = {"v2x_nc_zfpy_f4_rate", "v2x_nc_delta_zfpy_i4"})
-    void zfpyIsReadButNotCreated(String name) {
-        assertThrows(IllegalArgumentException.class, () -> specOf(copy(fixture(name), false)));
+    /**
+     * {@code zfpyRate} and its kin write numcodecs' {@code zfpy} compressor as numcodecs 0.17 configures it,
+     * {@code compression_kwargs} included; zarr-python's values written into it give its chunks byte for byte.
+     */
+    @Test
+    void zfpyIsCreatedAsNumcodecsConfiguresIt() {
+        MemoryStore original = copy(fixture("v2x_nc_zfpy_f4_rate"), true);
+        MemoryStore created = new MemoryStore();
+        ZarrArray a = Zarr.createArray(created, ArraySpec.builder(new long[] {500}, DataType.FLOAT32).zarrFormat(2)
+                .chunkShape(128).zfpyRate(8).build());
+        assertSame(json(original, ".zarray"), json(created, ".zarray"), ".zarray");
+        a.writeDoubles(expected("v2x_nc_zfpy_f4_rate").get("inputs").asArray().values().stream()
+                .mapToDouble(v -> v.asNumber().doubleValue()).toArray());
+        for (String key : chunkKeys(original)) {
+            assertArrayEquals(original.get(key).orElseThrow(), created.get(key).orElseThrow(), "chunk " + key);
+        }
+        JsonObject reversible = zarray(ArraySpec.builder(new long[] {8}, DataType.INT64).zarrFormat(2).zfpy());
+        assertSame(json(copy(fixture("v2x_nc_zfpy_i8_reversible_3d"), false), ".zarray").get("compressor"),
+                reversible.get("compressor"), "the reversible compressor");
+        // zfp compresses only int32, int64, float32, and float64
+        assertThrows(IllegalArgumentException.class,
+                () -> ArraySpec.builder(new long[] {8}, DataType.UINT8).zarrFormat(2).zfpy().build());
     }
 
     // ---- helpers ---------------------------------------------------------------------------------------

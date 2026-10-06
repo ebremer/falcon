@@ -30,7 +30,8 @@ import java.util.function.IntUnaryOperator;
  * written with {@code writeUnsignedLongs}/{@code writeComplex} (F8), the extension data types zarr-python
  * writes (F14: numpy.datetime64, numpy.timedelta64, fixed_length_utf32, null_terminated_bytes, raw_bytes,
  * and struct), rectilinear chunk grids (F14; arrays named {@code *_rectilinear*}, which zarr-python
- * reads with {@code array.rectilinear_chunks}), and numcodecs' bzip2 codec ({@code numcodecs.bz2}). Arrays
+ * reads with {@code array.rectilinear_chunks}), numcodecs' bzip2 codec ({@code numcodecs.bz2}), and numcodecs'
+ * zfp codec ({@code numcodecs.zfpy}, arrays named {@code zfpy_*}, lossy but in its reversible mode). Arrays
  * with the {@code reshape} codec are not among them: zarr-python 3.4 does not read it. Dev-time tool, run with
  * the JDK's source launcher from the repo root, after {@code mvn -pl zarr -am compile}:
  *
@@ -358,6 +359,26 @@ public class WriteZarrCases {
                 writeCast(c, layout);
             }
         }
+
+        // numcodecs' ZFPY (numcodecs.zfpy), by Falcon Core's zfp encoder: each mode, int and float types, under a
+        // shard before crc32c, and partly written. zfp is lossy, so check_zarr_writer.py checks each against
+        // zarr-python's own write of the same values: the same chunks, byte for byte.
+        write(root.createArray("zfpy_float64_reversible", ArraySpec.builder(SHAPE, DataType.FLOAT64).chunkShape(6, 4)
+                .zfpy().build()), "float64", ByteOrder.LITTLE_ENDIAN, null);
+        write(root.createArray("zfpy_float32_rate", ArraySpec.builder(SHAPE, DataType.FLOAT32).chunkShape(6, 4)
+                .zfpyRate(12).build()), "float32", ByteOrder.LITTLE_ENDIAN, null);
+        write(root.createArray("zfpy_float64_precision", ArraySpec.builder(SHAPE, DataType.FLOAT64).chunkShape(6, 4)
+                .zfpyPrecision(20).build()), "float64", ByteOrder.LITTLE_ENDIAN, null);
+        write(root.createArray("zfpy_float64_accuracy", ArraySpec.builder(SHAPE, DataType.FLOAT64).chunkShape(6, 4)
+                .zfpyAccuracy(1e-3).build()), "float64", ByteOrder.LITTLE_ENDIAN, null);
+        write(root.createArray("zfpy_int32_rate", ArraySpec.builder(SHAPE, DataType.INT32).chunkShape(6, 4)
+                .zfpyRate(16).build()), "int32", ByteOrder.LITTLE_ENDIAN, null);
+        write(root.createArray("zfpy_int64_reversible", ArraySpec.builder(SHAPE, DataType.INT64).chunkShape(6, 4)
+                .zfpy().build()), "int64", ByteOrder.LITTLE_ENDIAN, null);
+        write(root.createArray("zfpy_float64_sharded", ArraySpec.builder(SHAPE, DataType.FLOAT64).chunkShape(6, 4)
+                .sharding(3, 2).zfpyAccuracy(1e-2).crc32c().build()), "float64", ByteOrder.LITTLE_ENDIAN, null);
+        write(root.createArray("zfpy_float32_partial", ArraySpec.builder(SHAPE, DataType.FLOAT32).chunkShape(4, 3)
+                .zfpyPrecision(16).build()), "float32", ByteOrder.LITTLE_ENDIAN, PARTIAL);
 
         Files.writeString(out.resolve("manifest.json"), "[\n" + String.join(",\n", MANIFEST) + "\n]\n");
         System.out.println(MANIFEST.size() + " arrays written to " + out);

@@ -44,8 +44,9 @@ import java.util.stream.Stream;
  * </pre>
  *
  * (':' separates the classpath outside Windows). manifest.json lists each copy with every element it
- * should read as, in the sidecars' form (numbers, text, int64 time counts, hex byte strings). Arrays whose
- * codecs Falcon does not have, or only reads (zfpy), are skipped and listed.
+ * should read as, in the sidecars' form (numbers, text, int64 time counts, hex byte strings); a zfpy array
+ * (lossy) lists what Falcon reads back, and its "inputs", the values written. Arrays whose codecs Falcon does
+ * not have are skipped and listed.
  */
 public class WriteZarrV2Cases {
 
@@ -70,7 +71,7 @@ public class WriteZarrV2Cases {
             try {
                 ZarrArray a = Zarr.openArray(copy(src, out.resolve(name)));
                 write(a, values);
-                manifest.add(entry(name, values));
+                manifest.add(entry(name, a, values, null));
                 if (name.equals("v2x_order_f_2d")) {
                     // shrink to 3 x 4 and grow back: what the shrink cut off reads as the fill value, 0
                     ZarrArray b = Zarr.openArray(copy(src, out.resolve(name + "_resized")));
@@ -102,7 +103,7 @@ public class WriteZarrV2Cases {
                     manifest.add(entry(name + "_box", merged));
                 }
             } catch (RuntimeException e) {
-                // a codec Falcon does not have, or one it only reads (zfpy)
+                // a codec Falcon does not have
                 if (!(e instanceof ZarrUnsupportedException) && !String.valueOf(e.getMessage()).contains("unknown codec")) {
                     throw e;
                 }
@@ -112,13 +113,10 @@ public class WriteZarrV2Cases {
                 ArraySpec spec = specOf(src);
                 Path dir = out.resolve("created_" + name);
                 Files.createDirectories(dir);
-                write(Zarr.createArray(FileSystemStore.open(dir), spec, true), values);
-                manifest.add(JsonObject.builder().put("name", "created_" + name).put("like", name)
-                        .put("values", new JsonArray(values)).build().toJson());
+                ZarrArray created = Zarr.createArray(FileSystemStore.open(dir), spec, true);
+                write(created, values);
+                manifest.add(entry("created_" + name, created, values, name));
             } catch (IllegalArgumentException e) {
-                if (!String.valueOf(e.getMessage()).contains("zfpy")) { // Falcon reads zfpy but cannot write it
-                    throw e;
-                }
                 skipped.add("created_" + name + " (" + e.getMessage() + ")");
             }
         }
@@ -233,5 +231,34 @@ public class WriteZarrV2Cases {
 
     static String entry(String name, List<JsonValue> values) {
         return JsonObject.builder().put("name", name).put("values", new JsonArray(values)).build().toJson();
+    }
+
+    /**
+     * The manifest entry of an array Falcon wrote {@code written} into ({@code like}: the fixture it was created
+     * as, or null). zfp's lossy modes keep only an approximation, so a zfpy array lists what Falcon reads back
+     * (libzfp's decoding, bit for bit) and, as "inputs", what it was given, which zarr-python writing them
+     * again must store as the same chunks.
+     */
+    static String entry(String name, ZarrArray a, List<JsonValue> written, String like) {
+        JsonObject.Builder b = JsonObject.builder().put("name", name);
+        if (like != null) {
+            b.put("like", like);
+        }
+        if (a.codecNames().contains("numcodecs.zfpy")) {
+            List<JsonValue> back = new ArrayList<>();
+            if (a.dataType().kind() == com.ebremer.falcon.zarr.datatype.DataTypeKind.FLOAT) {
+                for (double v : a.readDoubles()) {
+                    back.add(JsonNumber.of(v));
+                }
+            } else {
+                for (long v : a.readLongs()) {
+                    back.add(JsonNumber.of(v));
+                }
+            }
+            b.put("values", new JsonArray(back)).put("inputs", new JsonArray(written));
+        } else {
+            b.put("values", new JsonArray(written));
+        }
+        return b.build().toJson();
     }
 }

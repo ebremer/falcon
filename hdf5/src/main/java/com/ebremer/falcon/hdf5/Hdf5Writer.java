@@ -2832,6 +2832,116 @@ public final class Hdf5Writer implements AutoCloseable {
             return thirdParty(Filter.BZIP2, blockSize);
         }
 
+        /**
+         * Compresses chunks with zfp in fixed-rate mode (filter 32013, LLNL's H5Z-ZFP, as
+         * {@code hdf5plugin.Zfp(rate=rate)} sets it up): every block of 4<sup>d</sup> values in
+         * {@code floor(4^d * rate + 0.5)} bits, at least a float block's 9 or a double block's 12.
+         *
+         * <p>zfp is lossy but for {@link #zfpReversible()}. Falcon writes each chunk as libzfp 1.0.1 does, byte
+         * for byte, and the client data H5Z-ZFP stores (its version and zfp's header). zfp compresses 4- and
+         * 8-byte little-endian integers and floats, in chunks with 1 to 4 dimensions longer than 1 (the
+         * others are left out of zfp's field); it must be the first filter. Chunked datasets only.
+         *
+         * @param rate the bits per value, more than 0
+         * @return this dataset's writer
+         * @throws IllegalArgumentException if the rate gives no bits a block, or more than a zfp header records
+         * @throws IllegalStateException    if the dataset's elements or chunks are not ones zfp compresses, or
+         *                                  another filter comes first
+         */
+        public DatasetWriter zfpRate(double rate) {
+            if (!(rate > 0) || Double.isInfinite(rate)) {
+                throw new IllegalArgumentException("zfp rate must be positive and finite, not " + rate);
+            }
+            long bits = Double.doubleToRawLongBits(rate);
+            return zfp(1, 0, (int) bits, (int) (bits >>> 32));
+        }
+
+        /**
+         * Compresses chunks with zfp in fixed-precision mode ({@code hdf5plugin.Zfp(precision=precision)}):
+         * {@code precision} bit planes of each block (64: every plane). See {@link #zfpRate}.
+         *
+         * @param precision the bit planes, 1 to 64
+         * @return this dataset's writer
+         * @throws IllegalArgumentException if {@code precision} is not 1 to 64
+         * @throws IllegalStateException    as {@link #zfpRate} says
+         */
+        public DatasetWriter zfpPrecision(int precision) {
+            if (precision < 1 || precision > 64) {
+                throw new IllegalArgumentException("zfp precision must be 1 to 64, not " + precision);
+            }
+            return zfp(2, 0, precision);
+        }
+
+        /**
+         * Compresses chunks with zfp in fixed-accuracy mode ({@code hdf5plugin.Zfp(accuracy=tolerance)}): each
+         * value within {@code tolerance} of the original (0 codes every bit plane, zfp's expert mode). See
+         * {@link #zfpRate}.
+         *
+         * @param tolerance the absolute error tolerated, 0 or more
+         * @return this dataset's writer
+         * @throws IllegalArgumentException if {@code tolerance} is negative, NaN, or infinite
+         * @throws IllegalStateException    as {@link #zfpRate} says
+         */
+        public DatasetWriter zfpAccuracy(double tolerance) {
+            if (!(tolerance >= 0) || Double.isInfinite(tolerance)) {
+                throw new IllegalArgumentException("zfp tolerance must be 0 or more and finite, not " + tolerance);
+            }
+            long bits = Double.doubleToRawLongBits(tolerance);
+            return zfp(3, 0, (int) bits, (int) (bits >>> 32));
+        }
+
+        /**
+         * Compresses chunks with zfp losslessly ({@code hdf5plugin.Zfp(reversible=True)}): every value, NaN and
+         * the infinities included, comes back bit for bit. See {@link #zfpRate}.
+         *
+         * @return this dataset's writer
+         * @throws IllegalStateException as {@link #zfpRate} says
+         */
+        public DatasetWriter zfpReversible() {
+            return zfp(5, 0);
+        }
+
+        /**
+         * Compresses chunks with zfp in expert mode ({@code hdf5plugin.Zfp(minbits=..., maxbits=..., maxprec=...,
+         * minexp=...)}): each block in {@code minbits} to {@code maxbits} bits, at most {@code maxprec} bit planes,
+         * none below 2<sup>minexp</sup>. See {@link #zfpRate}.
+         *
+         * @param minbits the fewest bits a block takes, 0 to {@code maxbits}
+         * @param maxbits the most bits a block takes, up to 32768
+         * @param maxprec the most bit planes, 1 to 64
+         * @param minexp  the smallest bit plane, as a power of two; below -1074, zfp's reversible mode
+         * @return this dataset's writer
+         * @throws IllegalArgumentException if the parameters are not ones a zfp header records
+         * @throws IllegalStateException    as {@link #zfpRate} says
+         */
+        public DatasetWriter zfpExpert(int minbits, int maxbits, int maxprec, int minexp) {
+            return zfp(4, 0, minbits, maxbits, maxprec, minexp);
+        }
+
+        /** Adds the ZFP filter with H5Z-ZFP's mode values, after checking that H5Z-ZFP would take the dataset. */
+        private DatasetWriter zfp(int... options) {
+            lifecycle.check();
+            requireConfigurable();
+            requireChunked();
+            requireFirst("zfp");
+            int kind = spec.datatype[0] & 0x0F;
+            if (kind != 0 && kind != 1) {
+                throw new IllegalStateException("zfp compresses integers and floats");
+            }
+            if ((spec.datatype[1] & 0x41) != 0) {
+                throw new IllegalStateException("zfp compresses little-endian values (H5Z-ZFP refuses others)");
+            }
+            try {
+                ThirdPartyFilters.zfpClientData(kind == 1, spec.elementSize, spec.chunkShape, options);
+            } catch (IllegalArgumentException e) {
+                if (spec.elementSize != 4 && spec.elementSize != 8 || e.getMessage().startsWith("zfp needs")) {
+                    throw new IllegalStateException(e.getMessage(), e);
+                }
+                throw e;
+            }
+            return thirdParty(Filter.ZFP, options);
+        }
+
         /** Adds third-party filter {@code id} with the values hdf5plugin passes to {@code H5Pset_filter}. */
         private DatasetWriter thirdParty(int id, int... options) {
             lifecycle.check();
@@ -3679,6 +3789,13 @@ public final class Hdf5Writer implements AutoCloseable {
                     filters.add(new FilterSpec(filter.id(), 0, data));
                 }
                 case Filter.LZF, Filter.LZ4, Filter.ZSTD, Filter.BZIP2 -> filters.add(new FilterSpec(filter.id(), 0, data));
+                case Filter.ZFP -> {
+                    if (data.length < 2) { // its version, then the zfp header
+                        throw new HdfFormatException("dataset " + path + " has " + data.length
+                                + " client-data values for filter " + filter.id());
+                    }
+                    filters.add(new FilterSpec(filter.id(), 0, data));
+                }
                 case Filter.BLOSC, Filter.BITSHUFFLE -> {
                     // set_local stores Blosc's type and chunk size (4 values), bitshuffle's element size (3)
                     int needed = filter.id() == Filter.BLOSC ? 4 : 3;
@@ -4945,7 +5062,7 @@ public final class Hdf5Writer implements AutoCloseable {
                 case Filters.SCALEOFFSET -> ScaleOffset.encode(block, scaleOffsetClientData(dataset, filter));
                 case Filters.SZIP -> Szip.encode(block, szipClientData(dataset));
                 // optional filters that return 0 for a chunk (LZF, Blosc that cannot shrink it) skip it
-                case Filter.LZF, Filter.BLOSC, Filter.LZ4, Filter.BITSHUFFLE, Filter.ZSTD, Filter.BZIP2 ->
+                case Filter.LZF, Filter.BLOSC, Filter.LZ4, Filter.BITSHUFFLE, Filter.ZSTD, Filter.BZIP2, Filter.ZFP ->
                         ThirdPartyFilters.encode(filter.id(), thirdPartyClientData(dataset, filter), block);
                 default -> throw new IllegalStateException("unknown filter " + filter.id());
             };
@@ -5039,7 +5156,7 @@ public final class Hdf5Writer implements AutoCloseable {
                 case Filters.SCALEOFFSET -> writeFilter(b, legacy, Filters.SCALEOFFSET, FILTER_OPTIONAL,
                         scaleOffsetClientData(dataset, filter));
                 case Filters.SZIP -> writeFilter(b, legacy, Filters.SZIP, FILTER_OPTIONAL, szipClientData(dataset));
-                case Filter.LZF, Filter.BLOSC, Filter.LZ4, Filter.BITSHUFFLE, Filter.ZSTD, Filter.BZIP2 ->
+                case Filter.LZF, Filter.BLOSC, Filter.LZ4, Filter.BITSHUFFLE, Filter.ZSTD, Filter.BZIP2, Filter.ZFP ->
                         writeFilter(b, legacy, filter.id(), FILTER_OPTIONAL, ThirdPartyFilters.pluginName(filter.id()),
                         thirdPartyClientData(dataset, filter));
                 default -> throw new IllegalStateException("unknown filter " + filter.id());
@@ -5063,7 +5180,9 @@ public final class Hdf5Writer implements AutoCloseable {
      *       base type; above 255, 1), the chunk's bytes, then clevel, shuffle, and compressor;</li>
      *   <li>bitshuffle ({@code bshuf_h5filter.c}): bitshuffle's version 0.4, the element size, then the block
      *       size, compression, and (for zstd) level;</li>
-     *   <li>LZ4, Zstandard and bzip2 (no {@code set_local}): the block size, the level, the block size.</li>
+     *   <li>LZ4, Zstandard and bzip2 (no {@code set_local}): the block size, the level, the block size;</li>
+     *   <li>ZFP ({@code H5Zzfp.c}): H5Z-ZFP's version, then zfp's header of a chunk without its dimensions of
+     *       size 1, in the mode hdf5plugin's values give.</li>
      * </ul>
      *
      * The chunk's bytes are an unsigned 32-bit product, as the plugins compute them.
@@ -5092,6 +5211,8 @@ public final class Hdf5Writer implements AutoCloseable {
                 System.arraycopy(options, 0, data, 3, options.length);
                 yield data;
             }
+            case Filter.ZFP -> ThirdPartyFilters.zfpClientData((dataset.datatype[0] & 0x0F) == 1, dataset.elementSize,
+                    dataset.chunkShape, options);
             default -> options.clone(); // LZ4's block size, Zstandard's level, bzip2's block size
         };
     }

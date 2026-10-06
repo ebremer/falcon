@@ -7,6 +7,9 @@ read every element as written. Where a chunk is blosc-compressed, its header mus
 and shuffle numcodecs would have given c-blosc for that array, and the compressor its cname names; a chunk
 compressed with bz2 must be the bytes numcodecs' BZ2 writes.
 
+A zfpy array (lossy) must read as Falcon reads it back, and zarr-python, writing its "inputs" into a copy of
+its metadata, must store the same chunks, byte for byte.
+
 The arrays Falcon created from scratch (created_NAME, "like" NAME in the manifest) must also hold the .zarray
 and .zattrs zarr-python wrote for NAME, and the v2 hierarchy Falcon created and consolidated (hierarchy_v2)
 must open through its .zmetadata with every group's attributes and every array's elements. Dev-time tool;
@@ -20,6 +23,7 @@ import json
 import math
 import os
 import sys
+import tempfile
 import warnings
 
 import numcodecs
@@ -132,6 +136,32 @@ def itemsize(zarray):
     return size
 
 
+def rewrite_problems(path, zarray, inputs):
+    """zarr-python writing the inputs into a copy of the array's metadata against the chunks Falcon wrote."""
+    import shutil
+    copy = tempfile.mkdtemp(prefix="zarr-rewrite-")
+    try:
+        for key in (".zarray", ".zattrs"):
+            if os.path.exists(os.path.join(path, key)):
+                shutil.copy(os.path.join(path, key), os.path.join(copy, key))
+        a = zarr.open_array(zarr.storage.LocalStore(copy), mode="r+")
+        a[...] = np.asarray(inputs, dtype=a.dtype).reshape(a.shape)
+        problems = []
+        for root, _dirs, files in os.walk(path):
+            for f in files:
+                if f.startswith("."):
+                    continue
+                key = os.path.relpath(os.path.join(root, f), path)
+                theirs = os.path.join(copy, key)
+                if not os.path.exists(theirs):
+                    problems.append(f"chunk {key}: zarr-python wrote none")
+                elif open(theirs, "rb").read() != open(os.path.join(root, f), "rb").read():
+                    problems.append(f"chunk {key}: not the bytes zarr-python writes")
+        return problems
+    finally:
+        shutil.rmtree(copy, ignore_errors=True)
+
+
 def metadata_problems(path, like):
     """The created array's .zarray and .zattrs against those zarr-python wrote for the fixture it recreates."""
     problems = []
@@ -201,6 +231,8 @@ def main(directory):
                 problems.append(f"{len(bad)} elements differ, first [{i}]: read {got[i]!r}, wrote {want[i]!r}")
             problems += blosc_problems(path, zarray)
             problems += bz2_problems(path, zarray)
+            if "inputs" in entry:
+                problems += rewrite_problems(path, zarray, entry["inputs"])
             if "like" in entry:
                 problems += metadata_problems(path, entry["like"])
         except Exception as e:  # noqa: BLE001 - report and go on

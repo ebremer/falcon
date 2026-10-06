@@ -6,6 +6,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.ebremer.falcon.core.compress.bzip2.Bzip2Encoder;
+import com.ebremer.falcon.core.compress.zfp.ZfpEncoder;
+import com.ebremer.falcon.core.compress.zfp.ZfpHeader;
 import com.ebremer.falcon.zarr.ArraySpec;
 import com.ebremer.falcon.zarr.ZarrFormatException;
 import com.ebremer.falcon.zarr.ZarrUnsupportedException;
@@ -209,20 +211,36 @@ class Bz2ZfpyCodecTest {
     }
 
     @Test
-    void zfpyNeverEncodes() {
+    void zfpyEncodesAsZfpy() {
+        // a chunk of 16 x 10 doubles, reversibly: the stream zfpy writes, which decodes to the chunk
+        byte[] chunk = new byte[16 * 10 * 8];
+        ByteBuffer values = ByteBuffer.wrap(chunk).order(ByteOrder.LITTLE_ENDIAN);
+        for (int i = 0; i < 160; i++) {
+            values.putDouble(Math.sin(i * 0.1) * 100);
+        }
         ChunkPipeline p = zfpy(DataType.FLOAT64, 16, 10);
-        ZarrUnsupportedException e = assertThrows(ZarrUnsupportedException.class, () -> p.encode(new byte[1280], new byte[8]));
-        assertTrue(e.getMessage().contains("read-only"), e.getMessage());
-        assertThrows(ZarrUnsupportedException.class, p::checkEncodable);
+        p.checkEncodable();
+        byte[] stream = p.encode(chunk, new byte[8]);
+        ZfpHeader header = ZfpHeader.read(stream, 0, stream.length);
+        assertEquals(ZfpHeader.of(ZfpHeader.Type.DOUBLE, 10, 16, 0, 0).withReversible(), header); // x is the last
+        assertArrayEquals(ZfpEncoder.compressWithHeader(header, chunk, 0, 64), stream);
+        assertArrayEquals(chunk, p.decode(stream));
+        // under a shard, and as a v2 compressor (the chunk's shape, there being no filter before it)
         String shard = "{\"name\":\"sharding_indexed\",\"configuration\":{\"chunk_shape\":[8,5],\"codecs\":["
                 + "{\"name\":\"numcodecs.zfpy\"}],\"index_codecs\":[{\"name\":\"bytes\",\"configuration\":"
                 + "{\"endian\":\"little\"}},{\"name\":\"crc32c\"}]}}";
         ChunkPipeline sharded = ChunkPipeline.of(DataType.FLOAT64, new long[] {16, 10}, List.of(codec(shard)));
-        assertThrows(ZarrUnsupportedException.class, sharded::checkEncodable);
+        sharded.checkEncodable();
+        assertArrayEquals(chunk, sharded.decode(sharded.encode(chunk, new byte[8])));
         ChunkPipeline v2 = ChunkPipeline.of(DataType.FLOAT64, new long[] {16, 10}, List.of(BYTES, ZFPY));
-        assertThrows(ZarrUnsupportedException.class, v2::checkEncodable);
-        assertThrows(ZarrUnsupportedException.class, () -> v2.encode(new byte[1280], new byte[8]));
-        bz2(4, "").checkEncodable(); // every other codec encodes
+        assertArrayEquals(stream, v2.encode(chunk, new byte[8]));
+        // a mode numcodecs does not write, and elements zfpy does not compress, are refused before a write
+        ChunkPipeline expert = ChunkPipeline.of(DataType.FLOAT64, new long[] {16, 10},
+                List.of(codec("{\"name\":\"numcodecs.zfpy\",\"configuration\":{\"mode\":1}}")));
+        assertTrue(assertThrows(ZarrUnsupportedException.class, expert::checkEncodable).getMessage().contains("mode"));
+        ChunkPipeline bytes = ChunkPipeline.of(DataType.UINT8, new long[] {16, 10}, List.of(ZFPY));
+        assertThrows(ZarrUnsupportedException.class, bytes::checkEncodable);
+        assertThrows(ZarrUnsupportedException.class, () -> bytes.encode(new byte[160], new byte[1]));
         // a bound for a codec after it: every block at the most bits a zfp header allows
         ChunkPipeline crc = ChunkPipeline.of(DataType.FLOAT64, new long[] {16, 10},
                 List.of(ZFPY, codec("{\"name\":\"crc32c\"}")));

@@ -105,7 +105,9 @@ public final class ThirdPartyFilters {
      *   <li><b>Zstandard</b> ({@code H5Zzstd.c}): one frame at level {@code cd[0]} (default 3), clamped to
      *       -131072 to 22;</li>
      *   <li><b>bzip2</b> ({@code H5Zbzip2.c}): one stream, {@code BZ2_bzBuffToBuffCompress} in blocks of
-     *       {@code cd[0]} (default 9) times 100,000 bytes, kept even where it is larger than the chunk.</li>
+     *       {@code cd[0]} (default 9) times 100,000 bytes, kept even where it is larger than the chunk;</li>
+     *   <li><b>ZFP</b> ({@code H5Zzfp.c}): {@code zfp_compress} of the field and mode the zfp header in
+     *       {@code cd[1]} onward holds, in 8-bit words, libzfp 1.0.1's stream byte for byte.</li>
      * </ul>
      *
      * @param id         the filter
@@ -125,8 +127,26 @@ public final class ThirdPartyFilters {
                     ? Math.max(ZSTD_MIN_LEVEL, Math.min(ZstdEncoder.MAX_LEVEL, clientData[0]))
                     : ZstdEncoder.DEFAULT_LEVEL, false);
             case BZIP2 -> encodeBzip2(clientData, data);
+            case ZfpFilter.ID -> ZfpFilter.encode(clientData, data);
             default -> throw new IllegalArgumentException("not a third-party filter Falcon writes: " + id);
         };
+    }
+
+    /**
+     * The client data H5Z-ZFP's {@code set_local} stores for a new dataset: its version, then zfp's full
+     * header of a chunk (without its dimensions of size 1) in the mode {@code options} gives, as hdf5plugin
+     * passes it: {@code {1, 0, rate}}, {@code {2, 0, precision}}, {@code {3, 0, tolerance}} (a double as two
+     * values, low first), {@code {4, 0, minbits, maxbits, maxprec, minexp}}, or {@code {5, 0}} (reversible).
+     *
+     * @param floating   whether the elements are floating point (else integers)
+     * @param size       the element size: 4 or 8
+     * @param chunkShape the chunk's shape
+     * @param options    the mode and its parameters
+     * @return the client data
+     * @throws IllegalArgumentException if H5Z-ZFP would refuse the elements, the chunk, or the mode
+     */
+    public static int[] zfpClientData(boolean floating, int size, long[] chunkShape, int[] options) {
+        return ZfpFilter.clientData(floating, size, chunkShape, options);
     }
 
     /**
@@ -144,6 +164,7 @@ public final class ThirdPartyFilters {
             case BITSHUFFLE -> "bitshuffle; see https://github.com/kiyo-masui/bitshuffle";
             case ZSTD -> "HDF5 zstd filter; see " + HDF_GROUP_PLUGINS;
             case BZIP2 -> "bzip2";
+            case ZfpFilter.ID -> ZfpFilter.NAME;
             default -> throw new IllegalArgumentException("not a third-party filter Falcon writes: " + id);
         };
     }

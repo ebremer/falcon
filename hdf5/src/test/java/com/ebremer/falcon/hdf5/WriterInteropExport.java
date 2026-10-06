@@ -433,7 +433,7 @@ class WriterInteropExport {
                         new long[] {500}, new long[] {64}).shuffle().bzip2(1).fletcher32());
                 plugin("/bzip2_noise", noise, w.intChunkedDataset("bzip2_noise", noise, new long[] {640}, new long[] {64})
                         .bzip2(5));
-                String[] filters = {"lzf", "blosc", "lz4", "bitshuffle", "zstd", "bzip2"};
+                String[] filters = {"lzf", "blosc", "lz4", "bitshuffle", "zstd", "bzip2", "zfp"};
                 for (String filter : filters) {
                     Hdf5Writer.DatasetWriter d = w.createDataset("grow_" + filter, Datatype.int32(), 0).chunked(128)
                             .maxShape(Hdf5Writer.UNLIMITED);
@@ -443,6 +443,7 @@ class WriterInteropExport {
                         case "lz4" -> d.lz4(200);
                         case "bitshuffle" -> d.bitshuffle("lz4", 64, 0);
                         case "bzip2" -> d.bzip2(3);
+                        case "zfp" -> d.zfpReversible(); // lossless, so the row the check appends reads back
                         default -> d.zstd(5);
                     }
                     d.append(Arrays.copyOf(smooth, 300));
@@ -479,8 +480,41 @@ class WriterInteropExport {
             }
         }
 
+        // ZFP (P2 S10), lossy but for its reversible mode: libhdf5 must read, through hdf5plugin's H5Z-ZFP, what
+        // Falcon's decoder (libzfp's, bit for bit) reads back
+        Path zfp = begin(dir, "zfp_filters.h5", "latest");
+        Map<String, Boolean> zfpFloats = new LinkedHashMap<>();
+        try (Hdf5Writer w = Hdf5Writer.create(zfp)) {
+            w.doubleChunkedDataset("zfp_rate_1d", waves, new long[] {500}, new long[] {64}).zfpRate(12);
+            w.doubleChunkedDataset("zfp_precision_2d", waves, new long[] {20, 25}, new long[] {8, 10}).zfpPrecision(20);
+            w.doubleChunkedDataset("zfp_accuracy_3d", waves, new long[] {5, 10, 10}, new long[] {2, 4, 5})
+                    .zfpAccuracy(1e-3);
+            w.doubleChunkedDataset("zfp_expert_4d", waves, new long[] {5, 5, 4, 5}, new long[] {2, 3, 4, 5})
+                    .zfpExpert(200, 1200, 48, -40);
+            w.doubleChunkedDataset("zfp_unit_dims", waves, new long[] {5, 1, 100}, new long[] {2, 1, 32}).zfpRate(16);
+            w.doubleChunkedDataset("zfp_rate_fletcher", waves, new long[] {500}, new long[] {100}).zfpRate(20)
+                    .fletcher32();
+            w.intChunkedDataset("zfp_reversible_i4", smooth, new long[] {1000}, new long[] {128}).zfpReversible();
+            w.intChunkedDataset("zfp_rate_i4_2d", smooth, new long[] {40, 25}, new long[] {16, 10}).zfpRate(8);
+            for (String n : List.of("zfp_rate_1d", "zfp_precision_2d", "zfp_accuracy_3d", "zfp_expert_4d",
+                    "zfp_unit_dims", "zfp_rate_fletcher")) {
+                zfpFloats.put(n, true);
+            }
+            zfpFloats.put("zfp_reversible_i4", false);
+            zfpFloats.put("zfp_rate_i4_2d", false);
+        }
+        try (Hdf5File h5 = Hdf5File.open(zfp)) {
+            for (Map.Entry<String, Boolean> e : zfpFloats.entrySet()) {
+                Dataset d = h5.root().dataset(e.getKey());
+                Map<String, Object> o = dataset("/" + e.getKey(), e.getValue() ? d.readDoubles() : d.readLongs());
+                o.put("shape", d.dataspace().dimensions());
+                o.put("plugin", needsPlugin(d));
+                o.put("filters", filterList(d));
+            }
+        }
+
         // the plugins' own files, changed by Falcon: a run in every filtered dataset, the growable ones appended to
-        for (String fixture : List.of("plugin_filters.h5", "plugin_filters_write.h5", "bzip2.h5")) {
+        for (String fixture : List.of("plugin_filters.h5", "plugin_filters_write.h5", "bzip2.h5", "zfp_write.h5")) {
             Path file = fixture(dir, fixture, "edit_" + fixture);
             begin(dir, "edit_" + fixture, "latest");
             files.getLast().put("min_hdf5", "2.0"); // libhdf5 2.0 wrote it with version-5 layouts
