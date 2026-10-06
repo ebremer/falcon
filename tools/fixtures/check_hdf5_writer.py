@@ -33,7 +33,7 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 def export(directory):
     mvn = "mvn.cmd" if os.name == "nt" else "mvn"
-    cmd = [mvn, "-q", "-pl", "hdf5", "test", "-Dtest=WriterInteropExport",
+    cmd = [mvn, "-q", "-pl", "hdf5", "-am", "test", "-Dtest=WriterInteropExport",
            "-Dsurefire.failIfNoSpecifiedTests=false", f"-Dfalcon.interop.dir={directory}"]
     subprocess.run(cmd, cwd=ROOT, check=True)
 
@@ -90,10 +90,38 @@ def check_object(f, obj):
         assert isinstance(item, h5py.Group), "not a group"
         if "children" in obj:
             assert sorted(item.keys()) == sorted(obj["children"]), "children differ"
+        for name, link in obj.get("links", {}).items():
+            actual = item.get(name, getlink=True)
+            if "soft" in link:
+                assert isinstance(actual, h5py.SoftLink) and actual.path == link["soft"], f"link {name}: {actual}"
+            else:
+                file_name, object_path = link["external"]
+                assert isinstance(actual, h5py.ExternalLink), f"link {name}: {actual}"
+                assert (actual.filename, actual.path) == (file_name, object_path), f"link {name}: {actual}"
+        for name, expected in obj.get("follow", {}).items():
+            got = np.asarray(item[name][()]).ravel()
+            assert np.array_equal(got, np.asarray(expected)), f"{name} reaches {got}, not {expected}"
     else:
         assert isinstance(item, h5py.Dataset), "not a dataset"
         if "shape" in obj:
             assert list(item.shape) == obj["shape"], f"shape {item.shape} != {obj['shape']}"
+        if "maxshape" in obj:
+            assert list(item.maxshape) == obj["maxshape"], f"maxshape {item.maxshape} != {obj['maxshape']}"
+        if "chunks" in obj:
+            assert list(item.chunks) == obj["chunks"], f"chunks {item.chunks} != {obj['chunks']}"
+        if "dtype" in obj:
+            assert item.dtype.str == obj["dtype"], f"dtype {item.dtype.str} != {obj['dtype']}"
+        if "opaque_hex" in obj or "time" in obj:
+            # h5py has no numpy type for a tagged opaque or a time type: read the bytes as stored.
+            ftype = item.id.get_type()
+            raw = np.empty(item.shape, dtype=np.dtype(f"V{ftype.get_size()}"))
+            item.id.read(h5py.h5s.ALL, h5py.h5s.ALL, raw, mtype=ftype)
+            if "opaque_hex" in obj:
+                assert raw.tobytes().hex() == obj["opaque_hex"], f"opaque bytes {raw.tobytes().hex()}"
+            else:
+                seconds = np.frombuffer(raw.tobytes(), dtype="<i8").tolist()
+                assert seconds == obj["time"], f"time {seconds} != {obj['time']}"
+            return
         data = szip_values(item) if obj.get("szip") else item[()]
         if "values" in obj:
             expected = obj["values"]
@@ -115,6 +143,15 @@ def check_object(f, obj):
         if "refs" in obj:
             names = [f[r].name if r else None for r in data]
             assert names == obj["refs"], f"references {names} != {obj['refs']}"
+        if "regions" in obj:
+            for ref, expected in zip(data, obj["regions"]):
+                if expected is None:
+                    assert not ref, "a null region reference is not null"
+                    continue
+                target = f[ref]
+                assert target.name == expected["target"], f"region of {target.name}, not {expected['target']}"
+                got = np.asarray(target[ref]).ravel()
+                assert np.array_equal(got, np.asarray(expected["values"])), f"region {got} != {expected['values']}"
         if "fill" in obj:
             assert item.fillvalue == obj["fill"], f"fill value {item.fillvalue} != {obj['fill']}"
         if "enum" in obj:
@@ -122,7 +159,10 @@ def check_object(f, obj):
             assert mapping == obj["enum"], f"enum members {mapping} != {obj['enum']}"
     for name, expected in obj.get("attrs", {}).items():
         actual = np.asarray(item.attrs[name]).ravel()
-        assert np.array_equal(actual, np.asarray(expected, dtype=actual.dtype)), f"attribute {name} differs"
+        if actual.dtype.kind in "SOU" and expected and isinstance(expected[0], str):
+            assert as_text(actual) == expected, f"attribute {name}: {as_text(actual)} != {expected}"
+        else:
+            assert np.array_equal(actual, np.asarray(expected, dtype=actual.dtype)), f"attribute {name} differs"
 
 
 def check(directory):

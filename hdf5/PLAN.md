@@ -362,6 +362,11 @@ Each stage ends with a **milestone** and concrete **acceptance criteria**. "Refe
 - **Acceptance:** for every fixture, `Falcon-write → h5py-read` and `h5py-write → Falcon-read` agree on
   structure + data; property-based random round-trips pass.
 
+- **Streaming writes and datatype breadth ✓** (P2 WF1–WF4): raw data streams to the file as it is
+  written (files past 2 GB); datasets of any datatype (`createDataset`) grow (`maxShape`, `append`,
+  version-1 B-tree index); typed and string attributes; soft and external links; region references.
+  libhdf5 2.0 and 1.14 read all of it (`tools/fixtures/check_hdf5_writer.py`).
+
 ### H9 — API polish, performance, docs  (essentially complete)
 - **Robustness ✓**: a corrupt-input fuzz test truncates and byte-flips 19 fixtures and forces a full
   read, asserting every failure is a typed `HdfException`/`IOException` &mdash; never a raw runtime

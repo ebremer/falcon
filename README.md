@@ -59,7 +59,8 @@ HTTP byte ranges, any channel), which Falcon reads on demand: the metadata and o
 A resolver opens the other files such a file names (external raw data, virtual-dataset sources, the
 files its external links lead to and its references point into).
 
-**Write** — create a file, add groups, datasets (contiguous or chunked + filters), and attributes:
+**Write** — create a file, add groups, datasets of any datatype (contiguous or chunked + filters, fixed
+or growing), attributes, and links; data is streamed to the file as it is written:
 
 ```java
 try (Hdf5Writer w = Hdf5Writer.create(Path.of("out.h5"))) {
@@ -67,16 +68,22 @@ try (Hdf5Writer w = Hdf5Writer.create(Path.of("out.h5"))) {
      .intAttribute("scale", new int[]{100}, new long[]{});           // scalar attribute
 
     Hdf5Writer.GroupWriter run = w.group("run");
+    run.stringAttribute("units", "m/s");
     run.doubleDataset("signal", new double[]{0.5, 1.5, 2.5}, new long[]{3});
-    run.intChunkedDataset("big", data, new long[]{100_000}, new long[]{4096})
-       .shuffle().deflate(6);                                        // chunked + filters
+    Hdf5Writer.DatasetWriter frames = run.createDataset("frames", Datatype.uint16(), 0, 512, 512)
+       .chunked(1, 512, 512).maxShape(Hdf5Writer.UNLIMITED, 512, 512).deflate(6);
+    for (short[] frame : camera) {
+        frames.append(frame);                                        // grows, and goes to the file now
+    }
+    w.softLink("latest", "/run/frames");
 }
 ```
 
 The reader handles every HDF5 structure (all superblock/header/group forms, chunk indexes, filters,
-vlen, references, virtual datasets, external links); the writer covers the common datatypes, all six filters, compact
-and dense storage, and both the modern and earliest on-disk formats. Full walkthrough in the
-**[HDF5 User Guide](hdf5/USER_GUIDE.md)**.
+vlen, references, virtual datasets, external links). The writer covers every datatype, all six filters,
+compact, contiguous and chunked storage (growing ones included), dense groups and attributes, soft and
+external links, object and region references, files past 2 GB, and both the modern and earliest
+on-disk formats. Full walkthrough in the **[HDF5 User Guide](hdf5/USER_GUIDE.md)**.
 
 ## Zarr
 

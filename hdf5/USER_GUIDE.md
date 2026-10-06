@@ -383,14 +383,17 @@ Map<String, Object> columns = (Map<String, Object>) table.read();
 ```java
 try (Hdf5Writer w = Hdf5Writer.create(Path.of("out.h5"))) {
     // ... build the file ...
-}   // written on close()
+}   // completed on close()
 ```
 
-The file is built in memory and written by `close()`. It goes to a temporary file beside the target,
-which is then moved into place, so the path holds either the complete new file or what it held before.
+The file is written to a temporary file beside the target, which `close()` moves into place, so the
+path holds either the complete new file or what it held before. Raw data goes to the temporary file as
+it is written, at 64-bit offsets, so a file may be far larger than memory or 2 GB; `close()` adds the
+metadata (object headers, chunk indexes, groups) after it.
 
-- **When `close()` fails,** for example on a reference to an object never added, nothing is written
-  and the writer stays open: fix the cause and call `close()` again.
+- **When `close()` fails,** for example on a reference to an object never added, the target is not
+  touched and the writer stays open, the data written so far kept in the temporary file: fix the cause
+  and call `close()` again.
 - **`close()` cannot tell that your own code failed.** To discard what was added so far, call
   `abort()`:
 
@@ -406,7 +409,73 @@ which is then moved into place, so the path holds either the complete new file o
   ```
 
 - **After `close()` or `abort()`,** adding to the writer, or to any group or dataset handle it gave out,
-  throws `HdfClosedException`.
+  throws `HdfClosedException`. `abort()` deletes the temporary file.
+- **An I/O error while data is written** (a full disk) surfaces as `java.io.UncheckedIOException` from
+  the call that wrote it; `close()` throws the `IOException` itself.
+
+### Any datatype, written as it comes
+
+`createDataset(name, datatype, shape...)` makes a dataset of any `Datatype`. Configure it, then write
+its data in pieces, in any order:
+
+```java
+DatasetWriter frames = w.createDataset("frames", Datatype.uint16(), 0, 512, 512)
+        .chunked(1, 512, 512)                               // a chunk per frame
+        .maxShape(Hdf5Writer.UNLIMITED, 512, 512)           // it grows along the first dimension
+        .deflate(4);
+for (short[] frame : camera) {
+    frames.append(frame);                                   // grows by one frame, and writes it
+}
+
+DatasetWriter grid = w.createDataset("grid", Datatype.float32(), 1000, 1000).chunked(100, 1000);
+grid.write(new long[]{0, 0}, new long[]{100, 1000}, rows);  // a box: offset, count, values
+grid.write(everything);                                     // or every element at once
+```
+
+- **Datatypes.** `Datatype` has factories for the common types: `int8()` to `int64()`, `uint8()` to
+  `uint64()`, `float16()`, `float32()`, `float64()`, `bool()` (h5py's), `string(size)`,
+  `variableString()`, `sequenceOf(base)`, `arrayOf(base, dims...)`, `complexOf(base)`,
+  `compound(members)`, `opaque(size, tag)`, `bitField(size)`, `unixTime(size)`, `objectReference()`
+  and `regionReference()`. `withByteOrder(ByteOrder.BIG_ENDIAN)` gives an integer, float, bit field or
+  time type in the other byte order, and any `Datatype` record (such as an enumeration's) can be built
+  directly.
+- **Values** are converted to the datatype exactly, and refused if they do not fit: integers in range,
+  whole numbers for an integer type, strings that fit a fixed-length type, enumeration names that are
+  members. A number written to a floating-point type is rounded to the nearest, as libhdf5 converts it.
+  `write` takes the Java values `read()` gives back:
+
+  | Datatype | Values |
+  |---|---|
+  | integer, bit field | `byte[]`, `short[]`, `int[]`, `long[]`, `BigInteger[]`, or whole `double[]` values |
+  | float | any numeric array |
+  | enumeration | member names (`String[]`) or values; `boolean[]` for `bool()` |
+  | time | `Instant[]`, or seconds |
+  | string | `String[]` |
+  | complex | `double[]` or `float[]` (real, imaginary) pairs |
+  | compound | a `Map` of each member's values |
+  | array | the base type's values, flattened |
+  | opaque | `byte[][]`, one array per element |
+  | sequence | rows: `int[][]`, `double[][]`, ..., or `Object[]` |
+  | object reference | absolute paths (`String[]`, `null` for none) |
+  | region reference | `Hdf5Writer.Region[]` |
+
+  `writeRaw(offset, count, bytes)` writes elements' bytes as stored, for types without variable-length
+  data or references.
+- **Where the data goes.** Contiguous data goes to its place in the file at once. A chunk goes to the
+  file, filtered, as soon as all of its elements are written; until then it is kept in memory, so write
+  whole chunks, or whole rows of chunks, to keep memory small. Writing elements again replaces them (a
+  chunk already in the file is read back and written anew). Elements never written read as the fill
+  value.
+- **Growing.** A dataset with a `maxShape` larger than its shape (`Hdf5Writer.UNLIMITED` for no limit)
+  must be chunked; `extend(shape...)` grows it, and `append(values)` grows the first dimension by the
+  rows the values fill and writes them. Such a dataset's chunks are indexed by a version-1 B-tree, which
+  every HDF5 version reads.
+- **Configure first.** The chunk shape, maximum shape, filters, fill value and compact layout must be
+  set before the first write.
+- **Memory.** Besides chunks partly written: the data of datasets given their data whole (below), until
+  `close()`; the current global-heap collection of variable-length data (at most about 1 MiB; full
+  ones go to the file); each chunked dataset's index entries; and the data of reference datasets, whose
+  targets' addresses are known only at the end.
 
 ### Groups, datasets, and attributes
 
@@ -419,9 +488,18 @@ run.doubleDataset("signal", new double[]{0.5, 1.5}, new long[]{2});
 run.group("nested").intDataset("inner", new int[]{7}, new long[]{1});
 ```
 
-Atomic datatypes: `byteDataset` (int8), `shortDataset` (int16), `intDataset` (int32), `longDataset`
-(int64), `floatDataset` (float32), `doubleDataset` (float64), `stringDataset` (variable-length UTF-8),
-and `fixedStringDataset` (fixed-length, UTF-8).
+The per-type methods take the whole data at once, and their configuration (filters, layout, fill)
+follows: `byteDataset` (int8), `shortDataset` (int16), `intDataset` (int32), `longDataset` (int64),
+`floatDataset` (float32), `doubleDataset` (float64), `stringDataset` (variable-length UTF-8),
+`fixedStringDataset` (fixed-length, UTF-8), and those below. Their data is written on `close()`.
+
+Attributes of any datatype, and string attributes:
+
+```java
+run.stringAttribute("units", "m/s");                        // a fixed-length UTF-8 string
+run.attribute("valid_range", Datatype.uint8(), new long[]{2}, new int[]{0, 250});
+run.attribute("tags", Datatype.variableString(), new long[]{2}, new String[]{"raw", "v2"});
+```
 
 **Names and limits.** Each rule is checked when the object is added, so a bad name or size throws at
 that call rather than at `close()`.
@@ -451,6 +529,21 @@ each may be added once. `scaleOffset()` and `nbit(precision)` work on integer da
 `szip()` works on integer or floating-point data and may only follow `shuffle()`. Every filter writes
 the on-disk form libhdf5 reads: scale-offset chunks are byte-identical to libhdf5's, and szip chunks use
 libhdf5's framing (a chunk szip cannot shrink is stored unfiltered, as libhdf5 does).
+
+### Links and references
+
+```java
+w.softLink("latest", "/run/frames");                        // a path in this file (need not exist)
+w.group("other").externalLink("calibration", "cal.h5", "/gain"); // an object in another file
+w.regionReferenceDataset("roi", new long[]{2}, new Hdf5Writer.Region[]{
+    Hdf5Writer.Region.block("/image", new long[]{10, 20}, new long[]{64, 64}),
+    Hdf5Writer.Region.points("/image", new long[][]{{0, 0}, {5, 7}})});
+```
+
+A region is all of a dataset, a block, a regular hyperslab, or points. References' targets are named by
+path and may be added before or after the reference; they are resolved on `close()`. References are
+written to contiguous datasets only, not chunked ones or attributes. External links exist only in the
+modern format.
 
 ### Compound, enum, reference, array, sequence, complex
 
@@ -491,7 +584,8 @@ Hdf5Writer.create(path, Hdf5Writer.Format.EARLIEST);  // original: v0 superblock
 
 In `EARLIEST`:
 - every attribute goes in the version-1 object header (there is no dense storage);
-- chunked datasets, and groups with more than 256 children, are refused when added.
+- chunked datasets are indexed by version-1 B-trees, and their filter pipeline is message version 1;
+- groups with more than 256 children, external links, and complex numbers are refused when added.
 
 `EARLIEST` uses the message versions libhdf5 writes for its own earliest setting:
 - dataspace v1;
@@ -564,5 +658,6 @@ The following are not supported:
 - **Multi-file drivers** (family, multi, split). `driverInfo()` reports them, and Falcon reads only the
   file it opened.
 
-On the write side, the bitfield/opaque/time datatype classes and indirect-block dense storage are not
-yet emitted. See [`PLAN.md`](PLAN.md) for the full roadmap.
+On the write side, indirect-block dense storage (more than about 64 KiB of links or attributes on one
+object), the third-party filters, and changing an existing file are not yet done. See
+[`TODO.md`](TODO.md).

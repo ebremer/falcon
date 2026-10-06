@@ -1,10 +1,10 @@
 # Falcon HDF5 — remaining work (prioritized)
 
-**Status (2026-10-05, after P2 S1–S7, A1–A12, and PF1–PF4):** build green, **692 HDF5 tests** (144 at
-the review, 187 after the top 10, 206 after P0, 228 after P1, 243 after S1–S3, 256 after S4–S7, 439 after
-A2–A6, 610 after PF1–PF4, 677 after A1–A10), plus 38 in the `core` module. The review's top 10, every P1
-item, **P2 S1–S7**, **A1–A12**, **PF1–PF4**, and the P0 zstd fix (Z6/Z7, in `core`) are done (see *Done*
-at the end). Falcon now:
+**Status (2026-10-05, after P2 S1–S7, A1–A12, PF1–PF4, and WF1–WF4):** build green, **707 HDF5 tests**
+(144 at the review, 187 after the top 10, 206 after P0, 228 after P1, 243 after S1–S3, 256 after S4–S7,
+439 after A2–A6, 610 after PF1–PF4, 677 after A1–A10, 692 after A11–A12), plus 38 in the `core` module.
+The review's top 10, every P1 item, **P2 S1–S7**, **A1–A12**, **PF1–PF4**, **WF1–WF4**, and the P0 zstd
+fix (Z6/Z7, in `core`) are done (see *Done* at the end). Falcon now:
 
 - reads the files the review showed it misreading:
   - real libhdf5 szip and scale-offset data;
@@ -41,14 +41,44 @@ at the end). Falcon now:
   - virtual-dataset selections read only the parts of the sources they map to;
   - names are found through the name indexes (see `BENCHMARKS.md`);
 - writes files that **HDF5 2.0 and 1.14 read**, checked by `tools/fixtures/check_hdf5_writer.py`. The
-  final run read 83/83 objects with HDF5 2.0 and 78/78 with 1.14.6. The P0 edge-case files written by
+  final run read 146/146 objects with HDF5 2.0 and 140/140 with 1.14.6. The P0 edge-case files written by
   the previous writer fail 19 objects under each version.
+- streams what it writes: raw data goes to the file as it is written, so files may pass 2 GB and memory;
+  datasets grow (`maxShape`, `append`), and any datatype is written (`createDataset`), with soft and
+  external links and region references;
 - writes atomically (temp file, then move), can be aborted, and validates input when it is added;
 - verifies metadata and fletcher32 checksums, rejects loops and runaway sizes in corrupt files, survives
   fuzzing under a 128 MB heap and 256 KB stack, confines external files to the HDF5 file's directory by
   default, and supports concurrent reads of one open file.
 
 P0 and P1 are empty. What remains is features and API (P2) and docs and build (P3).
+
+**Behaviour and API changes in P2 WF1–WF4** (pre-1.0):
+- **Streaming:** the writer streams raw data into its temporary file as data is written and appends the
+  metadata on `close()`. Files may pass 2 GB.
+  - The temporary file now exists from the first write, not just during `close()`. A failed `close()`
+    leaves it, for the retry; `abort()` deletes it.
+  - An I/O error while writing data is an `UncheckedIOException`.
+- **New: `createDataset(name, Datatype, shape...)`** (on `Hdf5Writer` and `GroupWriter`), with
+  `DatasetWriter.chunked`, `maxShape` (`Hdf5Writer.UNLIMITED`), `write`, `writeRaw`, `append`, `extend`,
+  and `shape`.
+  - The chunk shape, maximum shape, filters, fill value, and compact layout are set before the first
+    write; afterwards they throw `IllegalStateException`.
+  - `write` and the rest are for `createDataset` datasets: one given its data when made throws.
+- **Datatypes:**
+  - new factories on `Datatype` (`int8()` ... `uint64()`, `float16/32/64()`, `bool()`, `string(n)`,
+    `variableString()`, `sequenceOf`, `arrayOf`, `complexOf`, `compound`, `opaque`, `bitField`,
+    `unixTime`, `objectReference`, `regionReference`);
+  - `withByteOrder` on integer, float, bit-field, and time types.
+- **Attributes:** new `attribute(name, Datatype, shape, values)` and `stringAttribute(name, value)` on
+  groups and datasets.
+- **Links and references:**
+  - new `softLink`, `externalLink`, and `regionReferenceDataset`;
+  - the new `Hdf5Writer.Region` (`all`, `block`, `hyperslab`, `points`).
+- **The earliest format** now writes chunked datasets (version-1 B-tree index, filter pipeline version 1)
+  and soft links; it used to refuse chunked datasets.
+- **Scale-offset** now records an unsigned integer type as unsigned (it was always signed); Falcon wrote
+  only signed integer types before.
 
 **Behaviour and API changes in P2 A11, A12** (pre-1.0):
 - **External links are followed.** `children()`, `child`, `group`, `dataset`, and paths follow them, as
@@ -198,21 +228,17 @@ review baseline. Abbreviations: `W` = `Hdf5Writer.java`; other paths are under
 
 ## Next up — top 10
 
-1. **WF1 — streaming writes.** The writer builds the whole file in memory, which caps it at about 2 GB
-   and rules out append and resizable datasets.
-2. **WF2 — datatype breadth:**
-   - string attributes;
-   - unsigned integers;
-   - chunking for every type.
-3. **D1/D3 — docs that overclaim, and a stale PLAN.md.**
-4. **B1/B2 — CI and release plumbing:** a Windows CI leg, source and Javadoc jars, and the enforcer.
+1. **D1/D3 — docs that overclaim, and a stale PLAN.md.**
+2. **B1/B2 — CI and release plumbing:** a Windows CI leg, source and Javadoc jars, and the enforcer.
    New plugins need Erich's approval.
-5. **PF5 — chunk lookups without reading the whole index,** for very large or remote datasets.
-6. **WF3 — a generic `createDataset(Datatype, Dataspace)`,** in place of about 20 per-type methods.
-7. **S8 — writing the third-party filters,** whose encoders core partly has.
+3. **PF5 — chunk lookups without reading the whole index,** for very large or remote datasets.
+4. **S8 — writing the third-party filters,** whose encoders core partly has.
+5. **WF5 — indirect-block fractal heaps,** for more than about 64 KiB of links or attributes on one object.
+6. **WF6 — opening an existing file to change it.**
+7. **WF8 — references in chunked datasets and in attributes.**
 8. **PF8 — selected elements copied a run at a time,** not one by one.
-9. **WF4 — writing links and references:** soft and external links; region references.
-10. **PF6/PF7 — per-file object caches, and virtual mappings that scatter.**
+9. **PF6/PF7 — per-file object caches, and virtual mappings that scatter.**
+10. **D4 — Javadoc lint.**
 
 ---
 
@@ -242,21 +268,14 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
 
 ### Write features & API
 
-- [ ] **WF1 — streaming writes.** Write raw data straight to a `FileChannel` (`long` offsets, positional
-  header patches) instead of building the whole file in memory (see W12). This enables:
-  - files over 2 GB;
-  - append, and resizable datasets with `maxdims` / unlimited dimensions;
-  - chunk-by-chunk writes (`writeChunk` / `Selection.write`).
-- [ ] **WF2 — datatype breadth:**
-  - string attributes (`units`, CF conventions — the most-missed one);
-  - unsigned uint8/16/32/64 (`byteDataset` is signed, which blocks image data);
-  - bool and big-endian types;
-  - chunking for all types, not just int32/float64;
-  - opaque / bitfield / time. (carried over)
-- [ ] **WF3 — a generic `createDataset(Datatype, Dataspace)`** plus a typed writer. Today about 20
-  per-type methods are duplicated across `Hdf5Writer`, `GroupWriter`, and `DatasetWriter`, and the
-  surface grows with every type.
-- [ ] **WF4 — links and references:** soft and external links; region references.
+- WF1–WF4 are done (see *Done — 2026-10-05 (P2: WF1–WF4)*). Still open around them:
+  - [ ] **WF8 — references in chunked datasets and in attributes.** A reference holds its target's
+    address, which is known only when the metadata is laid out at `close()`. In contiguous data it is
+    written in place then; a filtered chunk or a checksummed object header cannot be patched afterwards.
+    Both are refused for now. Fix: lay the metadata out twice, or reserve the objects' headers first.
+  - [ ] **WF9 — the data of datasets given it whole** (the per-type methods) is kept until `close()`,
+    since their filters and layout may still change. Writing it when the next object is added would
+    bound memory by one dataset.
 - [ ] **WF5 — indirect-block fractal heaps** for dense sets beyond one direct block. (carried over; W2
   must come first)
 - [ ] **WF6 — open an existing file for modification:** add, overwrite, and delete.
@@ -315,7 +334,8 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
     and the paths of referenced objects.
   - **Also done (P2 A11, A12):** following external links and references into other files, and time
     values.
-  - **Still to document:** the writer's memory use (WF1).
+  - **Also done (P2 WF1–WF4):** streaming writes and what stays in memory, `createDataset` and its
+    value table, growing datasets, typed and string attributes, links, and region references.
 - [ ] **D3 — PLAN.md is stale.**
   - §6 lists the non-existent `dataspace` and `util` packages, omits `data`, `index`, and `group`, and
     says only one package is exported (`datatype` is exported too).
@@ -368,6 +388,68 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
     (`tools/fixtures/gen_zstd_corrupt_vectors.py` → `zstd_corrupt_vectors.txt`): mutations, several
     frames, skippable frames, and trailing data. The old decoder fails 137 of them.
   - The core fuzzer: 1.5M further mutated frames threw only typed exceptions.
+
+## Done — 2026-10-05 (P2: WF1–WF4)
+
+The writer was rebuilt around streaming. Its serialization of groups, headers, heaps, and filters was
+kept; the new parts are `write/OutputFile`, `write/DatatypeEncoder`, `write/ChunkIndexWriter`,
+`ValueEncoder`, and the writer's `Storage` and `GlobalHeaps`.
+
+- [x] **WF1 — streaming writes.**
+  - **The file:** the superblock's bytes are reserved at offset 0. Raw data is written after them, as it
+    comes, into a sparse temporary file, at 64-bit offsets. On `close()`, the metadata goes after the
+    data (a `GrowBuffer` now starts at a base offset), the superblock is written, and the file is moved
+    into place.
+  - **Contiguous data** is allocated at its first write and written in place; a non-zero fill value is
+    written across it first.
+  - **Chunks** are kept in memory until all of their elements within the dataset's bounds are written,
+    then filtered and written. A chunk written again is read back through the reader's filter pipeline
+    and written anew. Partly written chunks are written on `close()`.
+  - **Variable-length data:** global-heap collections are written as they fill (about 1 MiB or 65,535
+    objects), or when a chunk referring to them is written. An id written before its collection is has
+    its address filled in when it is.
+  - **Growing datasets** (`maxShape`, `extend`, `append`) are indexed by a version-1 B-tree (layout
+    version 3), built bottom-up from 64-entry nodes, as libhdf5 allocates them; fixed-size ones by a fixed
+    array, as before.
+  - **References:** object references and region references' heap objects are filled in once the
+    objects' addresses are known.
+  - **Tests:** `WriteStreamingTest` (10):
+    - a 4 MB dataset is in the temporary file block by block, before `close()`;
+    - appends, a rewritten filtered chunk, extents with unwritten rows, and 5,000 chunks in a 3-level
+      B-tree, in both formats;
+    - 70,000 streamed variable-length strings, across several heap collections;
+    - checks on values, boxes, growth, and configuration order;
+    - a file past 2 GB: a 2 GiB dataset written at its two ends, and a dataset after it.
+- [x] **WF2 — datatype breadth**, through WF3: every datatype class, in either byte order where one
+  applies:
+  - unsigned and big-endian integers, `float16`, `bool`, bit fields, opaque, time;
+  - fixed and variable-length strings, enumerations over any integer type;
+  - compounds with array and variable-length members, sequences of any fixed-size type, and complex
+    numbers (modern format);
+  - chunked, for every type but references.
+
+  Typed and string attributes (`attribute`, `stringAttribute`), including variable-length strings.
+- [x] **WF3 — a generic `createDataset(name, Datatype, shape...)`** and a typed writer (`write`,
+  `append`):
+  - `DatatypeEncoder` writes any `Datatype` record as its message, in the versions libhdf5 writes for
+    each format;
+  - `ValueEncoder` converts the Java values `read()` returns back to elements, refusing values that do
+    not fit.
+
+  The per-type methods remain as conveniences; new types need no new methods.
+- [x] **WF4 — links and references:**
+  - soft and external links, compact and dense, and soft links in the earliest format's symbol tables;
+  - region references to all of a dataset, a block, a regular hyperslab, or points.
+- **Verified by libhdf5:** `WriterInteropExport` gained `streaming.h5`, `datatypes.h5` and `links.h5`,
+  each in both formats (except external links, and complex). libhdf5 2.0 reads all 146 objects, and
+  1.14.6 all 140 (complex numbers are 2.0-only). This includes:
+  - every datatype, with its numpy dtype checked;
+  - unlimited maximum shapes and multi-level B-trees;
+  - links followed by h5py, and region references read through h5py's `dset[regref]`.
+
+  The checker gained those checks, and now runs Maven with `-am`.
+- **Tests:** `WriteTypesAndLinksTest` (5), and two `WriterEdgeCaseTest` cases updated: the earliest format
+  now writes chunked datasets, and a failed `close()` keeps the temporary file.
 
 ## Done — 2026-10-05 (P2: A11, A12)
 

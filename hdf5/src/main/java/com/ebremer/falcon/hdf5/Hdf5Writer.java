@@ -2,18 +2,22 @@ package com.ebremer.falcon.hdf5;
 
 import com.ebremer.falcon.hdf5.checksum.Fletcher32;
 import com.ebremer.falcon.hdf5.checksum.Lookup3;
+import com.ebremer.falcon.hdf5.datatype.Datatype;
+import com.ebremer.falcon.hdf5.filter.FilterPipeline;
+import com.ebremer.falcon.hdf5.filter.FilterPipelineMessage;
 import com.ebremer.falcon.hdf5.filter.Filters;
 import com.ebremer.falcon.hdf5.filter.ScaleOffset;
 import com.ebremer.falcon.hdf5.filter.Szip;
+import com.ebremer.falcon.hdf5.io.HdfBuffer;
+import com.ebremer.falcon.hdf5.write.ChunkIndexWriter;
+import com.ebremer.falcon.hdf5.write.DatatypeEncoder;
 import com.ebremer.falcon.hdf5.write.GrowBuffer;
+import com.ebremer.falcon.hdf5.write.OutputFile;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.AtomicMoveNotSupportedException;
-import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
-import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -24,20 +28,38 @@ import java.util.Set;
 import java.util.zip.Deflater;
 
 /**
- * Writes a valid HDF5 file in the modern format: a version-3 (checksummed) superblock, version-2
- * (checksummed) object headers, and groups whose children are recorded as compact link messages.
- * Supports a nested group tree, contiguous {@code int32} / {@code float64} / string datasets, and
- * attributes on groups and datasets. Fixed-length strings are stored inline; variable-length strings
- * live in a global heap.
+ * Writes an HDF5 file: groups, datasets of any datatype, attributes, soft and external links, and object
+ * and region references, in the modern format (a version-3 superblock and checksummed version-2 object
+ * headers) or the earliest one ({@link Format#EARLIEST}), which every HDF5 version reads.
+ *
+ * <p><b>Two ways to add a dataset.</b> {@link GroupWriter#createDataset} makes a dataset of any
+ * {@link Datatype} whose data is written afterwards, piece by piece ({@link DatasetWriter#write},
+ * {@link DatasetWriter#append}), and may grow ({@link DatasetWriter#maxShape}). The per-type methods
+ * ({@link GroupWriter#intDataset}, {@link GroupWriter#compoundDataset}, ...) take the whole data at once.
  *
  * <pre>{@code
  * try (Hdf5Writer w = Hdf5Writer.create(Path.of("out.h5"))) {
  *     w.intDataset("counts", new int[] {1, 2, 3}, new long[] {3}).intAttribute("scale", new int[] {2}, new long[] {});
  *     GroupWriter g = w.group("run");
- *     g.doubleDataset("signal", new double[] {1.5, 2.5}, new long[] {2});
- *     g.stringDataset("labels", new String[] {"a", "bb"}, new long[] {2});
+ *     g.stringAttribute("units", "m/s");
+ *     DatasetWriter frames = g.createDataset("frames", Datatype.uint16(), 0, 512, 512)
+ *             .chunked(1, 512, 512).maxShape(Hdf5Writer.UNLIMITED, 512, 512).deflate(4);
+ *     for (short[] frame : camera) {
+ *         frames.append(frame);
+ *     }
+ *     g.softLink("latest", "/run/frames");
  * }
  * }</pre>
+ *
+ * <p><b>Streaming.</b> The file is written beside its path under a temporary name and moved into place by
+ * {@link #close()}. Raw data goes to it as it is written (a chunk as soon as all of its elements are),
+ * at 64-bit offsets, so a file may be far larger than memory or 2 GB; the metadata (object headers, chunk
+ * indexes, groups) is written after it, on close. What stays in memory until then: the data of datasets
+ * given it whole (until close), chunks partly written, the current global-heap collection of
+ * variable-length data (at most about 1 MiB), each dataset's chunk index entries, and the data of
+ * reference datasets, whose addresses are known only at the end.
+ *
+ * <p>Not thread-safe: use a writer from one thread.
  */
 public final class Hdf5Writer implements AutoCloseable {
 
@@ -100,17 +122,19 @@ public final class Hdf5Writer implements AutoCloseable {
     // Object reference (class 7, kind 0): an 8-byte object-header address. Verbatim from h5py.
     private static final byte[] DATATYPE_OBJECT_REFERENCE = {0x17, 0, 0, 0, 8, 0, 0, 0};
 
+    /** A maximum dimension with no limit ({@code H5S_UNLIMITED}), for {@link DatasetWriter#maxShape}. */
+    public static final long UNLIMITED = -1L;
+
     private final Path path;
     private final boolean legacy;
     private final GroupSpec root = new GroupSpec();
     private final GroupWriter rootWriter;
-    // Variable-length data lives in global-heap collections shared by every dataset, written last; each
-    // vlen id's collection address is patched in once the collections are placed.
-    private final List<List<byte[]>> heapCollections = new ArrayList<>();
-    private int lastCollectionBytes;
-    private final List<HeapIdPatch> heapIdPatches = new ArrayList<>();
+    private OutputFile output;                 // the temporary file, created when the first bytes are written
+    private final GlobalHeaps heaps = new GlobalHeaps();
+    // Object references (in contiguous data, and in region references' heap objects), patched in the file
+    // once the objects' addresses are known.
+    private final List<FileReference> fileReferences = new ArrayList<>();
     private final Map<String, Long> objectAddresses = new HashMap<>();     // absolute path -> object header address
-    private final List<PendingReference> pendingReferences = new ArrayList<>();
     private long legacyRootBtree = UNDEFINED;  // root group's symbol-table B-tree / local heap (legacy superblock)
     private long legacyRootHeap = UNDEFINED;
     private final Lifecycle lifecycle = new Lifecycle();
@@ -136,10 +160,10 @@ public final class Hdf5Writer implements AutoCloseable {
     private Hdf5Writer(Path path, Format format) {
         this.path = path;
         this.legacy = format == Format.EARLIEST;
-        this.rootWriter = new GroupWriter(root, legacy, lifecycle);
+        this.rootWriter = new GroupWriter(this, root, "", legacy, lifecycle);
     }
 
-    /** Begins writing a new HDF5 file at {@code path} in the modern format (written on {@link #close()}). */
+    /** Begins writing a new HDF5 file at {@code path} in the modern format (completed on {@link #close()}). */
     public static Hdf5Writer create(Path path) {
         return new Hdf5Writer(path, Format.LATEST);
     }
@@ -155,6 +179,12 @@ public final class Hdf5Writer implements AutoCloseable {
     }
 
     // Convenience delegates to the root group.
+
+    /** A dataset of any datatype, written with {@link DatasetWriter#write} (see {@link GroupWriter#createDataset}). */
+    public DatasetWriter createDataset(String name, Datatype type, long... shape) {
+        return rootWriter.createDataset(name, type, shape);
+    }
+
     public DatasetWriter intDataset(String name, int[] data, long[] shape) {
         return rootWriter.intDataset(name, data, shape);
     }
@@ -207,6 +237,11 @@ public final class Hdf5Writer implements AutoCloseable {
         return rootWriter.referenceDataset(name, shape, targets);
     }
 
+    /** A dataset of region references (see {@link GroupWriter#regionReferenceDataset}). */
+    public DatasetWriter regionReferenceDataset(String name, long[] shape, Region[] regions) {
+        return rootWriter.regionReferenceDataset(name, shape, regions);
+    }
+
     public DatasetWriter float32ArrayDataset(String name, long[] shape, int[] arrayDims, float[] data) {
         return rootWriter.float32ArrayDataset(name, shape, arrayDims, data);
     }
@@ -231,13 +266,23 @@ public final class Hdf5Writer implements AutoCloseable {
         return rootWriter.group(name);
     }
 
+    /** A soft link in the root group (see {@link GroupWriter#softLink}). */
+    public GroupWriter softLink(String name, String targetPath) {
+        return rootWriter.softLink(name, targetPath);
+    }
+
+    /** An external link in the root group (see {@link GroupWriter#externalLink}). */
+    public GroupWriter externalLink(String name, String fileName, String objectPath) {
+        return rootWriter.externalLink(name, fileName, objectPath);
+    }
+
     /**
-     * Writes the file and closes the writer. The file is written beside {@code path} under a temporary
-     * name and then moved into place, so {@code path} ends up either as the complete new file or as it
-     * was. If writing fails, nothing is left behind and the writer stays open, so the cause (such as a
-     * reference to an object never added) can be fixed and {@code close()} called again. Once the file
-     * is written, or after {@link #abort()}, further calls do nothing, and adding to the writer throws
-     * {@link HdfClosedException}.
+     * Completes the file and closes the writer. The file is written beside {@code path} under a temporary
+     * name (raw data as it is written, then the metadata here) and moved into place, so {@code path} ends
+     * up either as the complete new file or as it was. If completing it fails, the writer stays open, so
+     * the cause (such as a reference to an object never added) can be fixed and {@code close()} called
+     * again. Once the file is written, or after {@link #abort()}, further calls do nothing, and adding to
+     * the writer throws {@link HdfClosedException}.
      *
      * <p>{@code close()} cannot tell that the code building the file failed: inside
      * try-with-resources, call {@link #abort()} on failure to avoid writing what was added so far.
@@ -247,32 +292,21 @@ public final class Hdf5Writer implements AutoCloseable {
         if (lifecycle.closed) {
             return;
         }
-        byte[] image;
         try {
-            image = build();
-        } catch (HdfException | IllegalArgumentException e) {
+            complete();
+        } catch (UncheckedIOException e) {
+            throw e.getCause();
+        } catch (HdfException | IllegalArgumentException | IllegalStateException e) {
             throw e;
         } catch (RuntimeException e) {
             throw new HdfException("could not write " + path + ": " + e, e);
-        }
-        Path target = path.toAbsolutePath();
-        Path temp = target.resolveSibling("." + target.getFileName() + "." + Long.toHexString(System.nanoTime()) + ".tmp");
-        try {
-            Files.write(temp, image, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
-            try {
-                Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-            } catch (AtomicMoveNotSupportedException e) {
-                Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING);
-            }
-        } finally {
-            Files.deleteIfExists(temp);
         }
         lifecycle.closed = true;
     }
 
     /**
-     * Closes the writer without writing anything: a file already at {@code path} is left as it was.
-     * Use it when building the file failed part-way:
+     * Closes the writer without writing anything: the temporary file is deleted, and a file already at
+     * {@code path} is left as it was. Use it when building the file failed part-way:
      *
      * <pre>{@code
      * Hdf5Writer w = Hdf5Writer.create(path);
@@ -286,7 +320,13 @@ public final class Hdf5Writer implements AutoCloseable {
      * }</pre>
      */
     public void abort() {
+        if (lifecycle.closed) {
+            return;
+        }
         lifecycle.closed = true;
+        if (output != null) {
+            output.discard();
+        }
     }
 
     /** True until the file is written or the writer aborted. */
@@ -294,41 +334,190 @@ public final class Hdf5Writer implements AutoCloseable {
         return !lifecycle.closed;
     }
 
-    /** Serializes the whole file. Repeatable: a failed attempt leaves no state behind. */
-    private byte[] build() {
+    /** The output file, created when first needed: its first bytes are kept for the superblock. */
+    private OutputFile output() {
+        if (output == null) {
+            output = OutputFile.create(path, legacy ? LEGACY_SUPERBLOCK_SIZE : SUPERBLOCK_SIZE);
+        }
+        return output;
+    }
+
+    /**
+     * Completes the file: every dataset's remaining data (the data of datasets made with their values,
+     * and partly written chunks), the variable-length data, then the metadata after it all, the
+     * references, and the superblock. Repeatable: what failed part-way is done again.
+     */
+    private void complete() throws IOException {
         objectAddresses.clear();
-        pendingReferences.clear();
-        heapCollections.clear();
-        heapIdPatches.clear();
-        lastCollectionBytes = 0;
-        GrowBuffer buf = new GrowBuffer();
-        buf.reserve(legacy ? LEGACY_SUPERBLOCK_SIZE : SUPERBLOCK_SIZE);
+        finishData(root, "");
+        heaps.sealAll();
+        resolveAttributeIds(root);
+        OutputFile out = output();
+        GrowBuffer buf = new GrowBuffer((out.end() + 7) & ~7L);
         GroupResult rootResult = writeGroup(buf, root, "");
         long rootAddress = rootResult.headerAddress();
         legacyRootBtree = rootResult.btreeAddress();
         legacyRootHeap = rootResult.heapAddress();
         objectAddresses.put("/", rootAddress);
-        writeGlobalHeaps(buf);
-        resolveReferences(buf);
-        long endOfFile = buf.position();
-        buf.patchBytes(0, legacy
-                ? superblockV0(rootAddress, endOfFile)
-                : superblock(rootAddress, endOfFile));
-        return buf.toByteArray();
+        for (FileReference reference : fileReferences) {
+            Long address = objectAddresses.get(reference.targetPath());
+            if (address == null) {
+                throw new IllegalArgumentException("reference target does not exist: " + reference.targetPath());
+            }
+            out.writeU64(reference.position(), address);
+        }
+        long metadata = out.allocate(buf.size());
+        out.write(metadata, buf.toByteArray());
+        long endOfFile = out.end();
+        out.write(0, legacy ? superblockV0(rootAddress, endOfFile) : superblock(rootAddress, endOfFile));
+        out.commit();
+    }
+
+    /** Writes, for every dataset under {@code group}, the data still to write, and fixes its layout. */
+    private void finishData(GroupSpec group, String groupPath) {
+        for (GroupSpec subgroup : group.groups) {
+            finishData(subgroup, groupPath + "/" + subgroup.name);
+        }
+        for (DatasetSpec dataset : group.datasets) {
+            storage(dataset, groupPath + "/" + dataset.name).finish();
+        }
+    }
+
+    /** Fills in the variable-length ids in attribute values, now that every heap collection is placed. */
+    private void resolveAttributeIds(GroupSpec group) {
+        resolveAttributeIds(group.attributes);
+        for (GroupSpec subgroup : group.groups) {
+            resolveAttributeIds(subgroup);
+        }
+        for (DatasetSpec dataset : group.datasets) {
+            resolveAttributeIds(dataset.attributes);
+        }
+    }
+
+    private void resolveAttributeIds(List<AttributeSpec> attributes) {
+        for (AttributeSpec attribute : attributes) {
+            for (ValueEncoder.IdPatch id : attribute.ids()) {
+                putU64(attribute.data(), (int) id.offset(), heaps.address(id.collection()));
+            }
+        }
+    }
+
+    private static void putU64(byte[] out, int at, long value) {
+        for (int b = 0; b < 8; b++) {
+            out[at + b] = (byte) (value >>> (8 * b));
+        }
+    }
+
+    /** An object reference at file offset {@code position}, to the object at {@code targetPath}. */
+    private record FileReference(long position, String targetPath) {
     }
 
     // --------------------------------------------------------------- API handles
 
     /** Builds a group: datasets, subgroups, and attributes. */
     public static final class GroupWriter {
+        private final Hdf5Writer writer;
         private final GroupSpec spec;
+        private final String path;
         private final boolean legacy;
         private final Lifecycle lifecycle;
 
-        private GroupWriter(GroupSpec spec, boolean legacy, Lifecycle lifecycle) {
+        private GroupWriter(Hdf5Writer writer, GroupSpec spec, String path, boolean legacy, Lifecycle lifecycle) {
+            this.writer = writer;
             this.spec = spec;
+            this.path = path;
             this.legacy = legacy;
             this.lifecycle = lifecycle;
+        }
+
+        /**
+         * A dataset of any datatype and shape, whose data is written afterwards with
+         * {@link DatasetWriter#write}, {@link DatasetWriter#append} and their variants, and streamed to the
+         * file as it is written. Configure it first: its {@linkplain DatasetWriter#chunked chunk shape},
+         * {@linkplain DatasetWriter#maxShape maximum shape} (to grow it), filters, and fill value. Elements
+         * never written read as the fill value.
+         *
+         * <pre>{@code
+         * DatasetWriter images = w.createDataset("images", Datatype.uint16(), 0, 512, 512)
+         *         .chunked(1, 512, 512).maxShape(Hdf5Writer.UNLIMITED, 512, 512).deflate(4);
+         * for (short[] image : source) {
+         *     images.append(image);                      // one 512 x 512 image at a time
+         * }
+         * }</pre>
+         *
+         * @throws IllegalArgumentException if a dimension is negative, or the type cannot be written
+         * @throws HdfUnsupportedException for a type the format does not hold (complex in the earliest format)
+         */
+        public DatasetWriter createDataset(String name, Datatype type, long... shape) {
+            lifecycle.check();
+            java.util.Objects.requireNonNull(type, "type");
+            for (long d : shape) {
+                if (d < 0) {
+                    throw new IllegalArgumentException("dimensions must not be negative: " + java.util.Arrays.toString(shape));
+                }
+            }
+            byte[] datatype = DatatypeEncoder.encode(type, legacy);
+            requireMessageSize(datatype.length, "the datatype of '" + name + "'");
+            DatasetSpec dataset = new DatasetSpec(name, datatype, type.size(), shape.clone(), null, null, null);
+            dataset.type = type;
+            return addDataset(dataset);
+        }
+
+        /**
+         * A dataset of region references: each points at a region of a dataset in this file, by its path
+         * (which may be added before or after this dataset), or is {@code null}.
+         */
+        public DatasetWriter regionReferenceDataset(String name, long[] shape, Region[] regions) {
+            return createDataset(name, Datatype.regionReference(), shape).write(regions);
+        }
+
+        /**
+         * A soft link: a name that stands for the object at {@code targetPath} in this file (absolute, or
+         * relative to this group), which need not exist.
+         */
+        public GroupWriter softLink(String name, String targetPath) {
+            lifecycle.check();
+            requireName(targetPath, "soft link target");
+            claimLinkName(spec, name, legacy);
+            spec.links.add(new LinkSpec(name, targetPath, null));
+            return this;
+        }
+
+        /**
+         * An external link: a name that stands for the object at {@code objectPath} in the file
+         * {@code fileName} (relative names are found next to this file), which need not exist.
+         *
+         * @throws HdfUnsupportedException in the earliest format, which has no external links
+         */
+        public GroupWriter externalLink(String name, String fileName, String objectPath) {
+            lifecycle.check();
+            if (legacy) {
+                throw new HdfUnsupportedException("external links are not written in the earliest format");
+            }
+            requireName(fileName, "external link file");
+            requireName(objectPath, "external link object");
+            claimLinkName(spec, name, legacy);
+            spec.links.add(new LinkSpec(name, objectPath, fileName));
+            return this;
+        }
+
+        /**
+         * An attribute of any datatype: {@code values} as {@link DatasetWriter#write} takes them, for
+         * {@code shape} elements ({@code new long[0]} for a scalar).
+         *
+         * @throws IllegalArgumentException if the values do not fit the type, or the attribute needs more
+         *         than 64 KiB
+         * @throws HdfUnsupportedException for references, which Falcon writes only in datasets
+         */
+        public GroupWriter attribute(String name, Datatype type, long[] shape, Object values) {
+            lifecycle.check();
+            addAttribute(spec.attributes, spec.attributeNames, writer.typedAttribute(name, type, shape, values), legacy);
+            return this;
+        }
+
+        /** A scalar string attribute ({@code units}, a CF convention, ...): fixed-length, UTF-8. */
+        public GroupWriter stringAttribute(String name, String value) {
+            return attribute(name, stringType(value), new long[0], new String[] {value});
         }
 
         public DatasetWriter intDataset(String name, int[] data, long[] shape) {
@@ -575,7 +764,7 @@ public final class Hdf5Writer implements AutoCloseable {
             GroupSpec child = new GroupSpec();
             child.name = name;
             spec.groups.add(child);
-            return new GroupWriter(child, legacy, lifecycle);
+            return new GroupWriter(writer, child, path + "/" + name, legacy, lifecycle);
         }
 
         public GroupWriter intAttribute(String name, int[] data, long[] shape) {
@@ -595,13 +784,17 @@ public final class Hdf5Writer implements AutoCloseable {
         private DatasetWriter addDataset(DatasetSpec dataset) {
             claimLinkName(spec, dataset.name, legacy);
             spec.datasets.add(dataset);
-            return new DatasetWriter(dataset, legacy, lifecycle);
+            return new DatasetWriter(writer, dataset, path + "/" + dataset.name, legacy, lifecycle);
         }
 
         private void requireChunkShape(long[] shape, long[] chunkShape, int elementSize) {
-            if (legacy) {
-                throw new HdfUnsupportedException("chunked datasets are not written in the earliest format");
-            }
+            checkChunkShape(shape, chunkShape, elementSize);
+        }
+    }
+
+    /** Checks a chunk shape against a dataset's shape: the same rank, each dimension at least 1, under 2 GiB. */
+    private static void checkChunkShape(long[] shape, long[] chunkShape, int elementSize) {
+        {
             if (chunkShape == null || chunkShape.length != shape.length) {
                 throw new IllegalArgumentException("chunk shape " + java.util.Arrays.toString(chunkShape)
                         + " must have the dataset's rank " + shape.length);
@@ -680,19 +873,236 @@ public final class Hdf5Writer implements AutoCloseable {
      * be added once.
      */
     public static final class DatasetWriter {
+        private final Hdf5Writer writer;
         private final DatasetSpec spec;
+        private final String path;
         private final boolean legacy;
         private final Lifecycle lifecycle;
 
-        private DatasetWriter(DatasetSpec spec, boolean legacy, Lifecycle lifecycle) {
+        private DatasetWriter(Hdf5Writer writer, DatasetSpec spec, String path, boolean legacy, Lifecycle lifecycle) {
+            this.writer = writer;
             this.spec = spec;
+            this.path = path;
             this.legacy = legacy;
             this.lifecycle = lifecycle;
+        }
+
+        // ------------------------------------------------------------ configuration
+
+        /**
+         * Stores the dataset in chunks of {@code chunkShape} (one per dimension), each written, and
+         * filtered, as soon as all of its elements are. Before any data is written.
+         */
+        public DatasetWriter chunked(long... chunkShape) {
+            lifecycle.check();
+            requireConfigurable();
+            requireStreaming("chunked");
+            if (spec.compact) {
+                throw new IllegalStateException("a compact dataset cannot be chunked");
+            }
+            checkChunkShape(spec.shape, chunkShape, spec.elementSize);
+            spec.chunkShape = chunkShape.clone();
+            return this;
+        }
+
+        /**
+         * The dataset's maximum shape, which {@link #extend} and {@link #append} may grow it to:
+         * {@link Hdf5Writer#UNLIMITED} for a dimension with no limit. A dataset that can grow must be
+         * {@linkplain #chunked chunked}. Before any data is written.
+         */
+        public DatasetWriter maxShape(long... maxShape) {
+            lifecycle.check();
+            requireConfigurable();
+            requireStreaming("maxShape");
+            if (maxShape.length != spec.shape.length) {
+                throw new IllegalArgumentException("maximum shape " + java.util.Arrays.toString(maxShape)
+                        + " must have the dataset's rank " + spec.shape.length);
+            }
+            for (int d = 0; d < maxShape.length; d++) {
+                if (maxShape[d] != UNLIMITED && maxShape[d] < spec.shape[d]) {
+                    throw new IllegalArgumentException("maximum dimension " + maxShape[d] + " is below the shape's "
+                            + spec.shape[d] + " (use Hdf5Writer.UNLIMITED for no limit)");
+                }
+            }
+            spec.maxShape = maxShape.clone();
+            return this;
+        }
+
+        // ------------------------------------------------------------ data
+
+        /** The dataset's current shape. */
+        public long[] shape() {
+            return spec.shape.clone();
+        }
+
+        /**
+         * Writes every element: {@code values} holds the whole dataset's values in row-major order, as
+         * {@link #write(long[], long[], Object)} takes them.
+         */
+        public DatasetWriter write(Object values) {
+            return write(new long[spec.shape.length], spec.shape.clone(), values);
+        }
+
+        /**
+         * Writes the elements of the box {@code [offset, offset + count)}, row-major, converting
+         * {@code values} to the dataset's datatype exactly (a number written to a floating-point type is
+         * rounded to the nearest):
+         * <ul>
+         *   <li>integers (and bit fields): {@code byte[]}, {@code short[]}, {@code int[]}, {@code long[]},
+         *       {@code BigInteger[]}, or whole {@code double[]} values, each in the type's range;</li>
+         *   <li>floats: any numeric array; complex numbers: (real, imaginary) pairs;</li>
+         *   <li>enumerations: member names ({@code String[]}) or values, and {@code boolean[]} for
+         *       {@link Datatype#bool()}; time: {@code Instant[]} or seconds;</li>
+         *   <li>strings: {@code String[]}; opaque data: {@code byte[][]};</li>
+         *   <li>compounds: a {@code Map} of each member's values; arrays: their base type's values,
+         *       flattened; sequences: rows ({@code int[][]}, {@code double[][]}, ...);</li>
+         *   <li>object references: absolute paths ({@code String[]}); region references:
+         *       {@link Region}{@code []} (contiguous datasets only).</li>
+         * </ul>
+         * The data goes to the file now: for contiguous data, at its place; for chunked data, each chunk
+         * once all of its elements are written (until then, it is kept in memory), so write whole chunks,
+         * or whole rows of chunks, to keep memory small. Writing elements again replaces them.
+         *
+         * @throws IllegalArgumentException if the box lies outside the dataset, or the values do not fit
+         */
+        public DatasetWriter write(long[] offset, long[] count, Object values) {
+            lifecycle.check();
+            requireStreaming("write");
+            requireBox(offset, count);
+            long n = elementCount(count);
+            ValueEncoder.Encoded encoded = ValueEncoder.encode(spec.type, n, values, writer.heaps, "dataset " + path);
+            writer.storage(spec, path).write(offset, count, encoded);
+            return this;
+        }
+
+        /**
+         * Writes elements' bytes as stored, in the datatype's byte order, for the box
+         * {@code [offset, offset + count)}: {@code bytes} holds {@code count} elements, row-major. Not for
+         * types that hold variable-length data or references.
+         */
+        public DatasetWriter writeRaw(long[] offset, long[] count, byte[] bytes) {
+            lifecycle.check();
+            requireStreaming("writeRaw");
+            requireBox(offset, count);
+            if (ValueEncoder.isHeapType(spec.type)) {
+                throw new IllegalStateException("writeRaw cannot write variable-length data or references; use write");
+            }
+            long expected = elementCount(count) * spec.elementSize;
+            if (bytes.length != expected) {
+                throw new IllegalArgumentException(bytes.length + " bytes given for " + expected);
+            }
+            writer.storage(spec, path).write(offset, count, new ValueEncoder.Encoded(bytes, List.of(), List.of()));
+            return this;
+        }
+
+        /**
+         * Appends {@code values} along the first dimension: the dataset grows by as many rows as they fill
+         * (each row being every element of the other dimensions), which are then written.
+         *
+         * @throws IllegalStateException if the first dimension cannot grow that far (see {@link #maxShape})
+         * @throws IllegalArgumentException if the values do not fill whole rows
+         */
+        public DatasetWriter append(Object values) {
+            lifecycle.check();
+            requireStreaming("append");
+            if (spec.shape.length == 0) {
+                throw new IllegalStateException("a scalar dataset has no rows to append");
+            }
+            long perRow = 1;
+            for (int d = 1; d < spec.shape.length; d++) {
+                perRow *= spec.shape[d];
+            }
+            long given = ValueEncoder.valueCount(spec.type, values);
+            if (perRow == 0 || given % perRow != 0) {
+                throw new IllegalArgumentException(given + " values do not fill rows of " + perRow + " elements");
+            }
+            long rows = given / perRow;
+            long[] offset = new long[spec.shape.length];
+            offset[0] = spec.shape[0];
+            long[] grown = spec.shape.clone();
+            grown[0] += rows;
+            extend(grown);
+            long[] count = grown.clone();
+            count[0] = rows;
+            return write(offset, count, values);
+        }
+
+        /**
+         * Grows the dataset to {@code shape}, within its {@linkplain #maxShape maximum shape}. New elements
+         * read as the fill value until written.
+         *
+         * @throws IllegalStateException if the dataset cannot grow (it has no larger maximum shape)
+         * @throws IllegalArgumentException if a dimension would shrink or pass its maximum
+         */
+        public DatasetWriter extend(long... shape) {
+            lifecycle.check();
+            requireStreaming("extend");
+            if (shape.length != spec.shape.length) {
+                throw new IllegalArgumentException("shape " + java.util.Arrays.toString(shape) + " must have rank " + spec.shape.length);
+            }
+            if (java.util.Arrays.equals(shape, spec.shape)) {
+                return this;
+            }
+            if (spec.maxShape == null || spec.chunkShape == null) {
+                throw new IllegalStateException("dataset " + path + " cannot grow: give it a chunk shape and a larger maxShape");
+            }
+            for (int d = 0; d < shape.length; d++) {
+                if (shape[d] < spec.shape[d] || (spec.maxShape[d] != UNLIMITED && shape[d] > spec.maxShape[d])) {
+                    throw new IllegalArgumentException("dimension " + d + " of " + path + " can grow from " + spec.shape[d]
+                            + " to " + (spec.maxShape[d] == UNLIMITED ? "any size" : spec.maxShape[d]) + ", not " + shape[d]);
+                }
+            }
+            writer.storage(spec, path); // the extent is fixed from here on, as data is
+            spec.shape = shape.clone();
+            return this;
+        }
+
+        private void requireBox(long[] offset, long[] count) {
+            long[] shape = spec.shape;
+            if (offset.length != shape.length || count.length != shape.length) {
+                throw new IllegalArgumentException("box rank does not match the dataset's rank " + shape.length);
+            }
+            for (int d = 0; d < shape.length; d++) {
+                if (offset[d] < 0 || count[d] < 0 || offset[d] > shape[d] || count[d] > shape[d] - offset[d]) {
+                    throw new IllegalArgumentException("box out of bounds in dimension " + d + ": offset=" + offset[d]
+                            + " count=" + count[d] + " dim=" + shape[d]);
+                }
+            }
+        }
+
+        /** Only a dataset made by {@code createDataset} is written piece by piece. */
+        private void requireStreaming(String op) {
+            if (spec.type == null) {
+                throw new IllegalStateException(op + " is for datasets made with createDataset; '" + spec.name
+                        + "' was given its data when it was made");
+            }
+        }
+
+        /** Its storage is set once data is written to it (or it grows). */
+        private void requireConfigurable() {
+            if (spec.storage != null) {
+                throw new IllegalStateException("configure dataset " + path + " before writing data to it");
+            }
+        }
+
+        /**
+         * An attribute of any datatype, as {@link GroupWriter#attribute} adds one.
+         */
+        public DatasetWriter attribute(String name, Datatype type, long[] shape, Object values) {
+            lifecycle.check();
+            addAttribute(spec.attributes, spec.attributeNames, writer.typedAttribute(name, type, shape, values), legacy);
+            return this;
+        }
+
+        /** A scalar string attribute ({@code units}, a CF convention, ...): fixed-length, UTF-8. */
+        public DatasetWriter stringAttribute(String name, String value) {
+            return attribute(name, stringType(value), new long[0], new String[] {value});
         }
 
         /** Compresses each chunk with deflate (gzip) at the given level (0&ndash;9). Chunked datasets only. */
         public DatasetWriter deflate(int level) {
             lifecycle.check();
+            requireConfigurable();
             requireChunked();
             if (level < 0 || level > 9) {
                 throw new IllegalArgumentException("deflate level must be 0-9, not " + level);
@@ -704,6 +1114,7 @@ public final class Hdf5Writer implements AutoCloseable {
         /** Byte-shuffles each chunk (grouping like-position bytes) to improve compression. Chunked only. */
         public DatasetWriter shuffle() {
             lifecycle.check();
+            requireConfigurable();
             requireChunked();
             addFilter(Filters.SHUFFLE, 0);
             return this;
@@ -712,6 +1123,7 @@ public final class Hdf5Writer implements AutoCloseable {
         /** Appends a Fletcher-32 checksum to each stored chunk. Chunked datasets only. */
         public DatasetWriter fletcher32() {
             lifecycle.check();
+            requireConfigurable();
             requireChunked();
             addFilter(Filters.FLETCHER32, 0);
             return this;
@@ -725,6 +1137,7 @@ public final class Hdf5Writer implements AutoCloseable {
          */
         public DatasetWriter scaleOffset() {
             lifecycle.check();
+            requireConfigurable();
             requireChunked();
             requireInteger("scaleOffset");
             requireFirst("scaleOffset");
@@ -741,6 +1154,7 @@ public final class Hdf5Writer implements AutoCloseable {
          */
         public DatasetWriter nbit(int precision) {
             lifecycle.check();
+            requireConfigurable();
             requireChunked();
             requireInteger("nbit");
             requireFirst("nbit");
@@ -748,7 +1162,7 @@ public final class Hdf5Writer implements AutoCloseable {
                 throw new IllegalArgumentException("n-bit precision must be 1-" + spec.elementSize * 8 + ", not " + precision);
             }
             int size = spec.elementSize;
-            for (int i = 0; i < spec.data.length / size; i++) {
+            for (int i = 0; spec.data != null && i < spec.data.length / size; i++) {
                 long value = littleEndianSigned(spec.data, i * size, size);
                 if (!fitsUnsigned(value, precision)) {
                     throw new IllegalArgumentException("n-bit(" + precision + ") stores unsigned " + precision
@@ -771,6 +1185,7 @@ public final class Hdf5Writer implements AutoCloseable {
          */
         public DatasetWriter szip() {
             lifecycle.check();
+            requireConfigurable();
             requireChunked();
             int typeClass = spec.datatype[0] & 0x0F;
             if (typeClass != 0 && typeClass != 1) {
@@ -797,6 +1212,9 @@ public final class Hdf5Writer implements AutoCloseable {
         private void requireInteger(String filter) {
             if ((spec.datatype[0] & 0x0F) != 0) {
                 throw new IllegalStateException(filter + " requires an integer dataset");
+            }
+            if ((spec.datatype[1] & 0x01) != 0) {
+                throw new IllegalStateException(filter + " requires a little-endian integer dataset");
             }
         }
 
@@ -825,13 +1243,16 @@ public final class Hdf5Writer implements AutoCloseable {
          */
         public DatasetWriter compact() {
             lifecycle.check();
-            if (spec.chunkShape != null || spec.data == null || spec.vlenStrings != null
-                    || spec.referenceTargets != null) {
+            requireConfigurable();
+            boolean references = spec.type != null ? ValueEncoder.holdsReferences(spec.type) : spec.referenceTargets != null;
+            if (spec.chunkShape != null || spec.maxShape != null || spec.vlenStrings != null || references
+                    || (spec.type == null && spec.data == null)) {
                 throw new IllegalStateException("compact layout requires a plain contiguous dataset");
             }
-            if (spec.data.length > MAX_COMPACT_DATA) {
+            long bytes = spec.data != null ? spec.data.length : elementCount(spec.shape) * spec.elementSize;
+            if (bytes > MAX_COMPACT_DATA) {
                 throw new IllegalStateException("compact layout data must be at most " + MAX_COMPACT_DATA
-                        + " bytes, not " + spec.data.length);
+                        + " bytes, not " + bytes);
             }
             spec.compact = true;
             return this;
@@ -847,6 +1268,14 @@ public final class Hdf5Writer implements AutoCloseable {
          */
         public DatasetWriter fillValue(long value) {
             lifecycle.check();
+            requireConfigurable();
+            if (spec.type != null && typeClass() != 0 && typeClass() != 1 && typeClass() != 8) {
+                throw noNumericFill();
+            }
+            if (spec.type != null) {
+                spec.fillValue = ValueEncoder.encode(spec.type, 1, new long[] {value}, writer.heaps, "the fill value").bytes();
+                return this;
+            }
             switch (typeClass()) {
                 case 0, 8 -> spec.fillValue = integerFill(value);
                 case 1 -> spec.fillValue = floatFill(value);
@@ -865,6 +1294,14 @@ public final class Hdf5Writer implements AutoCloseable {
          */
         public DatasetWriter fillValue(double value) {
             lifecycle.check();
+            requireConfigurable();
+            if (spec.type != null && typeClass() != 0 && typeClass() != 1 && typeClass() != 8) {
+                throw noNumericFill();
+            }
+            if (spec.type != null) {
+                spec.fillValue = ValueEncoder.encode(spec.type, 1, new double[] {value}, writer.heaps, "the fill value").bytes();
+                return this;
+            }
             switch (typeClass()) {
                 case 0, 8 -> {
                     if (value != Math.rint(value) || Math.abs(value) >= 0x1p63) {
@@ -990,6 +1427,172 @@ public final class Hdf5Writer implements AutoCloseable {
         return new EnumType();
     }
 
+    /**
+     * A region of a dataset in the file being written, for a region reference ({@code H5R_DATASET_REGION}):
+     * the dataset's absolute path, and a selection of it: all of it, a block, a regular hyperslab, or
+     * points. The dataset may be added before or after the reference.
+     *
+     * <pre>{@code
+     * w.regionReferenceDataset("roi", new long[] {2}, new Hdf5Writer.Region[] {
+     *         Hdf5Writer.Region.block("/image", new long[] {10, 20}, new long[] {64, 64}),
+     *         Hdf5Writer.Region.points("/image", new long[][] {{0, 0}, {5, 7}})});
+     * }</pre>
+     */
+    public static final class Region {
+        private static final int POINTS = 1;
+        private static final int HYPERSLAB = 2;
+        private static final int ALL = 3;
+
+        private final String datasetPath;
+        private final int kind;
+        private final long[][] starts; // points, or blocks' first corners
+        private final long[][] ends;   // blocks' last corners (inclusive)
+
+        private Region(String datasetPath, int kind, long[][] starts, long[][] ends) {
+            requireName(datasetPath, "region reference dataset");
+            this.datasetPath = datasetPath;
+            this.kind = kind;
+            this.starts = starts;
+            this.ends = ends;
+        }
+
+        /** All of the dataset. */
+        public static Region all(String datasetPath) {
+            return new Region(datasetPath, ALL, new long[0][], new long[0][]);
+        }
+
+        /** The block of {@code count} elements in each dimension from {@code offset}. */
+        public static Region block(String datasetPath, long[] offset, long[] count) {
+            return hyperslab(datasetPath, offset, null, count.clone(), null);
+        }
+
+        /**
+         * A regular hyperslab, as {@code Dataset.select(start, stride, count, block)} selects one: in each
+         * dimension, {@code count} blocks of {@code block} indices, {@code stride} apart ({@code null} stride
+         * and block are 1).
+         */
+        public static Region hyperslab(String datasetPath, long[] start, long[] stride, long[] count, long[] block) {
+            int rank = start.length;
+            long[] s = stride != null ? stride : ones(rank);
+            long[] b = block != null ? block : ones(rank);
+            if (count.length != rank || s.length != rank || b.length != rank) {
+                throw new IllegalArgumentException("a hyperslab's arguments must have the same rank");
+            }
+            boolean contiguous = true;
+            long blocks = 1;
+            for (int d = 0; d < rank; d++) {
+                if (start[d] < 0 || count[d] < 1 || s[d] < 1 || b[d] < 1 || (count[d] > 1 && s[d] < b[d])) {
+                    throw new IllegalArgumentException("invalid hyperslab in dimension " + d);
+                }
+                contiguous &= count[d] == 1 || s[d] == b[d];
+                blocks = Math.multiplyExact(blocks, count[d]);
+            }
+            if (contiguous) { // one block
+                long[] end = new long[rank];
+                for (int d = 0; d < rank; d++) {
+                    end[d] = start[d] + count[d] * b[d] - 1;
+                }
+                return new Region(datasetPath, HYPERSLAB, new long[][] {start.clone()}, new long[][] {end});
+            }
+            long[][] starts = new long[Math.toIntExact(blocks)][rank];
+            long[][] ends = new long[starts.length][rank];
+            int[] at = new int[rank];
+            for (int i = 0; i < starts.length; i++) {
+                for (int d = 0; d < rank; d++) {
+                    starts[i][d] = start[d] + at[d] * s[d];
+                    ends[i][d] = starts[i][d] + b[d] - 1;
+                }
+                for (int d = rank - 1; d >= 0 && ++at[d] == count[d]; d--) {
+                    at[d] = 0;
+                }
+            }
+            return new Region(datasetPath, HYPERSLAB, starts, ends);
+        }
+
+        /** Single elements, in the order given. */
+        public static Region points(String datasetPath, long[][] points) {
+            long[][] copy = new long[points.length][];
+            for (int i = 0; i < points.length; i++) {
+                copy[i] = points[i].clone();
+                if (copy[i].length != copy[0].length) {
+                    throw new IllegalArgumentException("every point must have the same rank");
+                }
+            }
+            return new Region(datasetPath, POINTS, copy, null);
+        }
+
+        /** The dataset's absolute path. */
+        public String datasetPath() {
+            return datasetPath;
+        }
+
+        /**
+         * The selection, serialized as libhdf5 writes a region reference's ({@code H5S_SELECT_SERIALIZE},
+         * version 1): "all"; points; or a hyperslab as a list of blocks, coordinates in 4 bytes each.
+         */
+        byte[] serialize() {
+            GrowBuffer b = new GrowBuffer();
+            b.u32(kind);
+            b.u32(1);              // version
+            b.u32(0);              // reserved
+            if (kind == ALL) {
+                b.u32(0);          // length of what follows
+                return b.toByteArray();
+            }
+            int rank = starts.length == 0 ? 0 : starts[0].length;
+            int perItem = kind == POINTS ? rank : 2 * rank;
+            b.u32(8 + 4L * perItem * starts.length);
+            b.u32(rank);
+            b.u32(starts.length);
+            for (int i = 0; i < starts.length; i++) {
+                coordinates(b, starts[i]);
+                if (kind == HYPERSLAB) {
+                    coordinates(b, ends[i]);
+                }
+            }
+            return b.toByteArray();
+        }
+
+        private static void coordinates(GrowBuffer b, long[] values) {
+            for (long v : values) {
+                if (v < 0 || v > 0xFFFFFFFEL) {
+                    throw new IllegalArgumentException("a region reference's coordinates must be below 2^32 - 1: " + v);
+                }
+                b.u32(v);
+            }
+        }
+
+        private static long[] ones(int rank) {
+            long[] ones = new long[rank];
+            java.util.Arrays.fill(ones, 1);
+            return ones;
+        }
+    }
+
+    /** A fixed-length string type that holds {@code value}: UTF-8 if it is not ASCII, null-padded. */
+    private static Datatype.StringType stringType(String value) {
+        byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
+        return new Datatype.StringType(Math.max(1, bytes.length), Datatype.StringPadding.NULL_PAD,
+                isAscii(bytes) ? Datatype.CharacterSet.ASCII : Datatype.CharacterSet.UTF8);
+    }
+
+    /** An attribute of {@code type} holding {@code values}; its variable-length data goes to the heap now. */
+    private AttributeSpec typedAttribute(String name, Datatype type, long[] shape, Object values) {
+        java.util.Objects.requireNonNull(type, "type");
+        if (ValueEncoder.holdsReferences(type)) {
+            throw new HdfUnsupportedException("references are written in datasets, not attributes: '" + name + "'");
+        }
+        for (long d : shape) {
+            if (d < 0) {
+                throw new IllegalArgumentException("dimensions must not be negative: " + java.util.Arrays.toString(shape));
+            }
+        }
+        byte[] datatype = DatatypeEncoder.encode(type, legacy);
+        ValueEncoder.Encoded encoded = ValueEncoder.encode(type, elementCount(shape), values, heaps,
+                "attribute '" + name + "'");
+        return new AttributeSpec(name, datatype, shape.clone(), encoded.bytes(), encoded.ids());
+    }
+
     // --------------------------------------------------------------- serialization
 
     /** A written group: its object-header address, and (legacy only) its symbol-table B-tree and heap. */
@@ -997,7 +1600,8 @@ public final class Hdf5Writer implements AutoCloseable {
     }
 
     /** One child of a legacy (symbol-table) group. */
-    private record SymbolChild(String name, long headerAddress, int cacheType, long btree, long heap) {
+    private record SymbolChild(String name, long headerAddress, int cacheType, long btree, long heap,
+                               String linkValue) {
     }
 
     private GroupResult writeGroup(GrowBuffer buf, GroupSpec group, String groupPath) {
@@ -1009,7 +1613,7 @@ public final class Hdf5Writer implements AutoCloseable {
             objectAddresses.put(groupPath + "/" + subgroup.name, child.headerAddress());
             if (legacy) {
                 symbolChildren.add(new SymbolChild(subgroup.name, child.headerAddress(), 1,
-                        child.btreeAddress(), child.heapAddress()));
+                        child.btreeAddress(), child.heapAddress(), null));
             }
         }
         for (DatasetSpec dataset : group.datasets) {
@@ -1017,77 +1621,38 @@ public final class Hdf5Writer implements AutoCloseable {
             children.put(dataset.name, address);
             objectAddresses.put(groupPath + "/" + dataset.name, address);
             if (legacy) {
-                symbolChildren.add(new SymbolChild(dataset.name, address, 0, UNDEFINED, UNDEFINED));
+                symbolChildren.add(new SymbolChild(dataset.name, address, 0, UNDEFINED, UNDEFINED, null));
             }
         }
         if (legacy) {
+            for (LinkSpec link : group.links) { // soft links only: the earliest format has no external ones
+                symbolChildren.add(new SymbolChild(link.name(), UNDEFINED, 2, UNDEFINED, UNDEFINED, link.target()));
+            }
             return writeSymbolTableGroup(buf, symbolChildren, group.attributes);
         }
-        byte[] linkInfo = children.size() > MAX_COMPACT ? writeDenseLinks(buf, children) : null;
+        List<NamedLink> links = new ArrayList<>();
+        for (Map.Entry<String, Long> child : children.entrySet()) {
+            links.add(new NamedLink(child.getKey(), linkBody(child.getKey(), child.getValue())));
+        }
+        for (LinkSpec link : group.links) {
+            links.add(new NamedLink(link.name(), link.file() == null ? softLinkBody(link.name(), link.target())
+                    : externalLinkBody(link.name(), link.file(), link.target())));
+        }
+        byte[] linkInfo = links.size() > MAX_COMPACT ? writeDenseLinks(buf, links) : null;
         byte[] attributeInfo = group.attributes.size() > MAX_COMPACT
                 ? writeDenseAttributes(buf, group.attributes) : null;
         buf.align(8);
         long headerAddress = buf.position();
-        writeGroupHeader(buf, children, group.attributes, linkInfo, attributeInfo);
+        writeGroupHeader(buf, links, group.attributes, linkInfo, attributeInfo);
         return new GroupResult(headerAddress, UNDEFINED, UNDEFINED);
     }
 
-    /** Patches each pending object reference with the resolved header address of its target object. */
-    private void resolveReferences(GrowBuffer buf) {
-        for (PendingReference reference : pendingReferences) {
-            Long address = objectAddresses.get(reference.targetPath);
-            if (address == null) {
-                throw new IllegalArgumentException("reference target does not exist: " + reference.targetPath);
-            }
-            buf.patchU64(reference.offset, address);
-        }
-    }
-
-    /** Queues each non-null target for address patching; a null target keeps the all-zeros placeholder
-     * (the encoding h5py uses for a null object reference). */
-    private void recordReferences(List<String> targets, int dataAddress) {
-        for (int i = 0; i < targets.size(); i++) {
-            if (targets.get(i) != null) {
-                pendingReferences.add(new PendingReference(dataAddress + i * 8, targets.get(i)));
-            }
-        }
-    }
-
-    private record PendingReference(int offset, String targetPath) {
+    /** A link of a group: its name and its Link message body. */
+    private record NamedLink(String name, byte[] body) {
     }
 
     private long writeDataset(GrowBuffer buf, DatasetSpec dataset) {
-        byte[] layout;
-        if (dataset.compact) {
-            layout = compactLayoutBody(dataset.data); // data stored inline in the header, no data block
-        } else if (dataset.chunkShape != null) {
-            layout = writeChunkedStorage(buf, dataset);
-        } else {
-            byte[] data = dataset.data;
-            HeapSlot[] slots = null;
-            if (dataset.vlenStrings != null) {
-                slots = new HeapSlot[dataset.vlenStrings.size()];
-                for (int i = 0; i < slots.length; i++) {
-                    slots[i] = addHeapObject(dataset.vlenStrings.get(i));
-                }
-                data = vlenIds(dataset.vlenStrings, dataset.vlenElementCounts, slots);
-            }
-            if (data.length == 0) {
-                // An empty dataset has no storage: libhdf5 rejects a defined address with size 0.
-                layout = contiguousLayoutBody(UNDEFINED, 0);
-            } else {
-                buf.align(8);
-                int dataAddress = buf.position();
-                if (dataset.referenceTargets != null) {
-                    recordReferences(dataset.referenceTargets, dataAddress);
-                }
-                for (int i = 0; slots != null && i < slots.length; i++) {
-                    heapIdPatches.add(new HeapIdPatch(dataAddress + i * 16 + 4, slots[i].collection()));
-                }
-                buf.bytes(data);
-                layout = contiguousLayoutBody(dataAddress, data.length);
-            }
-        }
+        byte[] layout = dataset.storage.layout(buf);
         // Dense attribute structures are written before the object header so it can reference them. The
         // earliest format has no dense storage: its version-1 headers hold every attribute.
         byte[] attributeInfo = !legacy && dataset.attributes.size() > MAX_COMPACT
@@ -1098,12 +1663,12 @@ public final class Hdf5Writer implements AutoCloseable {
         byte[] datatype = dataset.nbitPrecision >= 0
                 ? nbitDatatype(dataset.elementSize, dataset.nbitPrecision) : dataset.datatype;
         List<Message> messages = new ArrayList<>();
-        messages.add(new Message(1, 0x00, dataspaceBody(dataset.shape, legacy)));
+        messages.add(new Message(1, 0x00, dataspaceBody(dataset.shape, dataset.maxShape, legacy)));
         messages.add(new Message(3, 0x01, datatype));
         messages.add(new Message(5, 0x01, fillValueBody(dataset.fillValue, legacy)));
         messages.add(new Message(8, 0x00, layout));
         if (!dataset.filters.isEmpty()) {
-            messages.add(new Message(11, 0x00, filterPipelineBody(dataset)));
+            messages.add(new Message(11, 0x00, filterPipelineBody(dataset, legacy)));
         }
         if (attributeInfo != null) {
             messages.add(new Message(21, 0x00, attributeInfo));
@@ -1116,8 +1681,6 @@ public final class Hdf5Writer implements AutoCloseable {
         return headerAddress;
     }
 
-    /** Fixed-array page size, as {@code 2^FA_PAGE_BITS} entries (libhdf5's default page bits). */
-    private static final int FA_PAGE_BITS = 10;
     /** Pixels per szip block: libaec decodes block sizes 8, 16, 32 and 64. */
     private static final int SZIP_PIXELS_PER_BLOCK = 8;
     // Filter flags in the pipeline message: libhdf5 marks every filter optional except fletcher32.
@@ -1128,108 +1691,462 @@ public final class Hdf5Writer implements AutoCloseable {
     private record EncodedChunk(byte[] bytes, int filterMask) {
     }
 
+    // --------------------------------------------------------------- storage
+
     /**
-     * Writes chunked storage: each chunk's (fill-padded, filtered) data, then a fixed-array index
-     * listing chunk addresses in row-major order &mdash; a {@code "FADB"} data block (paged, with a
-     * page-init bitmap and per-page checksums, beyond 1024 chunks) and its {@code "FAHD"} header.
-     * Returns the version-4 chunked data-layout message body, which HDF5 1.10 and later read.
+     * The dataset's storage, made when data is first written to it (or it grows), or when the file is
+     * completed. A dataset given its data when it was made writes it now.
      */
-    private static byte[] writeChunkedStorage(GrowBuffer buf, DatasetSpec dataset) {
-        List<byte[]> chunks = splitChunks(dataset);
-        if (chunks.isEmpty()) {
-            // An empty dataset has no chunks, so no index is allocated (libhdf5's own form).
-            return chunkedLayoutBody(dataset.chunkShape, dataset.elementSize, UNDEFINED);
-        }
-        boolean filtered = !dataset.filters.isEmpty();
-        int chunkBytes = Math.toIntExact(elementCount(dataset.chunkShape) * dataset.elementSize);
-        long[] chunkAddresses = new long[chunks.size()];
-        int[] chunkSizes = new int[chunks.size()];
-        int[] filterMasks = new int[chunks.size()];
-        for (int i = 0; i < chunks.size(); i++) {
-            EncodedChunk encoded = encodeChunk(chunks.get(i), dataset);
-            buf.align(8);
-            chunkAddresses[i] = buf.position();
-            chunkSizes[i] = encoded.bytes().length;
-            filterMasks[i] = encoded.filterMask();
-            buf.bytes(encoded.bytes());
-        }
-
-        int offsets = 8;
-        int clientId = filtered ? 1 : 0;
-        // A filtered entry is address + stored chunk size + filter mask; layout version 4 (HDF5 1.10-1.14)
-        // sizes the chunk-size field to the unfiltered chunk size plus one byte (H5D__farray_crt_context).
-        int sizeWidth = filtered ? chunkSizeWidth(chunkBytes) : 0;
-        int entrySize = offsets + (filtered ? sizeWidth + 4 : 0);
-        int count = chunks.size();
-        int pageEntries = 1 << FA_PAGE_BITS;
-        boolean paged = count > pageEntries;
-        int pages = paged ? (count + pageEntries - 1) / pageEntries : 0;
-        int bitmapBytes = (pages + 7) / 8;
-        long dataBlockSize = paged
-                ? 6 + offsets + bitmapBytes + 4 + (long) count * entrySize + 4L * pages
-                : 6 + offsets + (long) count * entrySize + 4;
-        buf.align(8);
-        int dataBlockAddress = buf.position();
-        long headerAddress = align8(dataBlockAddress + dataBlockSize);
-
-        // Fixed-array data block: signature, version, client id, header address, then either the entries
-        // or (paged) the page-init bitmap; the prefix checksum; then (paged) each page and its checksum.
-        buf.bytes(new byte[] {'F', 'A', 'D', 'B'});
-        buf.u8(0);
-        buf.u8(clientId);
-        buf.u64(headerAddress);
-        if (!paged) {
-            for (int i = 0; i < count; i++) {
-                writeEntry(buf, chunkAddresses[i], chunkSizes[i], filterMasks[i], filtered, sizeWidth);
+    private Storage storage(DatasetSpec spec, String path) {
+        if (spec.storage == null) {
+            boolean grows = spec.maxShape != null && !java.util.Arrays.equals(spec.maxShape, spec.shape);
+            if (grows && spec.chunkShape == null) {
+                throw new IllegalStateException("dataset " + path + " can grow, so it must be chunked");
             }
-            buf.u32(buf.checksum(dataBlockAddress, buf.position()));
-        } else {
-            for (int b = 0; b < bitmapBytes; b++) { // every page is written: one bit per page, MSB first
-                int bits = Math.min(8, pages - 8 * b);
-                buf.u8((0xFF << (8 - bits)) & 0xFF);
+            boolean references = spec.type != null ? ValueEncoder.holdsReferences(spec.type) : spec.referenceTargets != null;
+            if (references && spec.chunkShape != null) {
+                throw new IllegalStateException("references are written to contiguous datasets only: " + path);
             }
-            buf.u32(buf.checksum(dataBlockAddress, buf.position()));
-            for (int page = 0; page < pages; page++) {
-                int pageStart = buf.position();
-                for (int i = page * pageEntries; i < Math.min(count, (page + 1) * pageEntries); i++) {
-                    writeEntry(buf, chunkAddresses[i], chunkSizes[i], filterMasks[i], filtered, sizeWidth);
+            Storage storage = new Storage(spec);
+            spec.storage = storage;
+            if (spec.type == null && elementCount(spec.shape) > 0) {
+                storage.write(new long[spec.shape.length], spec.shape.clone(), givenData(spec));
+            }
+        }
+        return spec.storage;
+    }
+
+    /** The data a dataset was given when it was made, as encoded elements. */
+    private ValueEncoder.Encoded givenData(DatasetSpec spec) {
+        if (spec.vlenStrings != null) {
+            int n = spec.vlenStrings.size();
+            byte[] ids = new byte[n * 16];
+            List<ValueEncoder.IdPatch> patches = new ArrayList<>();
+            for (int i = 0; i < n; i++) {
+                byte[] payload = spec.vlenStrings.get(i);
+                // A vlen ID's length field is the string's byte length or the sequence's element count.
+                writeU32(ids, i * 16, spec.vlenElementCounts != null ? spec.vlenElementCounts[i] : payload.length);
+                if (payload.length > 0) {
+                    long[] slot = heaps.add(payload);
+                    patches.add(new ValueEncoder.IdPatch(i * 16L + 4, (int) slot[0]));
+                    writeU32(ids, i * 16 + 12, slot[1]);
                 }
-                buf.u32(buf.checksum(pageStart, buf.position()));
             }
+            return new ValueEncoder.Encoded(ids, patches, List.of());
         }
-
-        // Fixed-array header: signature, version, client id, entry size, page bits, max entries,
-        // data block address, checksum.
-        buf.align(8);
-        int headerStart = buf.position();
-        buf.bytes(new byte[] {'F', 'A', 'H', 'D'});
-        buf.u8(0);
-        buf.u8(clientId);
-        buf.u8(entrySize);
-        buf.u8(FA_PAGE_BITS);
-        buf.u64(count);                // max entries: one per chunk of the (fixed) chunk grid
-        buf.u64(dataBlockAddress);
-        buf.u32(buf.checksum(headerStart, buf.position()));
-
-        return chunkedLayoutBody(dataset.chunkShape, dataset.elementSize, headerAddress);
+        if (spec.referenceTargets != null) {
+            List<ValueEncoder.RefPatch> refs = new ArrayList<>();
+            for (int i = 0; i < spec.referenceTargets.size(); i++) {
+                if (spec.referenceTargets.get(i) != null) { // a null reference stays all zeros, as h5py writes it
+                    refs.add(new ValueEncoder.RefPatch(i * 8L, spec.referenceTargets.get(i)));
+                }
+            }
+            return new ValueEncoder.Encoded(new byte[spec.referenceTargets.size() * 8], List.of(), refs);
+        }
+        return new ValueEncoder.Encoded(spec.data, List.of(), List.of());
     }
 
-    private static void writeEntry(GrowBuffer buf, long address, int size, int filterMask, boolean filtered,
-                                   int sizeWidth) {
-        buf.u64(address);
-        if (filtered) {
-            buf.uvar(size, sizeWidth);
-            buf.u32(filterMask);
+    private static void writeU32(byte[] out, int at, long value) {
+        for (int b = 0; b < 4; b++) {
+            out[at + b] = (byte) (value >>> (8 * b));
+        }
+    }
+
+    /** A cell of a chunk grid, by its grid coordinates. */
+    private record Cell(long[] scaled) {
+        @Override
+        public boolean equals(Object other) {
+            return other instanceof Cell c && java.util.Arrays.equals(scaled, c.scaled);
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Arrays.hashCode(scaled);
+        }
+    }
+
+    /** A chunk being written: its elements so far (the rest the fill value), and its ids still to fill in. */
+    private static final class Pending {
+        final byte[] data;
+        final java.util.BitSet written;
+        final long needed;                                       // the elements it holds within the extent's bounds
+        final Map<Integer, Integer> ids = new HashMap<>();       // byte offset of an id's address -> collection
+
+        Pending(byte[] data, java.util.BitSet written, long needed) {
+            this.data = data;
+            this.written = written;
+            this.needed = needed;
         }
     }
 
     /**
-     * Bytes for a filtered chunk's stored size in layout version 4: enough for the unfiltered chunk
-     * size plus one more byte, in case a filter grows the chunk ({@code 1 + (log2(size) + 8) / 8}).
+     * Where a dataset's data goes as it is written: a contiguous block, allocated in the file at the first
+     * write; data held for the object header (compact); or chunks, each written and filtered once all of
+     * its elements within the dataset's bounds are (its maximum shape, or its shape if it cannot grow),
+     * held in memory until then. A chunk written again is read back, decoded, and written anew.
      */
-    private static int chunkSizeWidth(int chunkBytes) {
-        int log2 = 31 - Integer.numberOfLeadingZeros(Math.max(1, chunkBytes));
-        return Math.min(8, 1 + (log2 + 8) / 8);
+    private final class Storage {
+        private final DatasetSpec spec;
+        private final int size;
+        private long address = UNDEFINED;                                   // contiguous: the block
+        private byte[] compact;                                             // compact: the data
+        private final Map<Long, Integer> compactIds = new HashMap<>();
+        private final Map<Cell, ChunkIndexWriter.Entry> stored = new HashMap<>();
+        private final Map<Cell, Pending> pending = new HashMap<>();
+        private FilterPipeline decoder;
+
+        Storage(DatasetSpec spec) {
+            this.spec = spec;
+            this.size = spec.elementSize;
+        }
+
+        /** Writes the box {@code [offset, offset + count)} of encoded elements. */
+        void write(long[] offset, long[] count, ValueEncoder.Encoded data) {
+            if (spec.nbitPrecision >= 0) {
+                for (int i = 0; i < data.bytes().length / size; i++) {
+                    long value = littleEndianSigned(data.bytes(), i * size, size);
+                    if (!fitsUnsigned(value, spec.nbitPrecision)) {
+                        throw new IllegalArgumentException("n-bit(" + spec.nbitPrecision + ") stores unsigned "
+                                + spec.nbitPrecision + "-bit values, but element " + i + " is " + value);
+                    }
+                }
+            }
+            if (elementCount(count) == 0) {
+                return;
+            }
+            if (spec.compact) {
+                writeCompact(offset, count, data);
+            } else if (spec.chunkShape == null) {
+                writeContiguous(offset, count, data);
+            } else {
+                writeChunks(offset, count, data);
+            }
+        }
+
+        private void writeCompact(long[] offset, long[] count, ValueEncoder.Encoded data) {
+            if (compact == null) {
+                compact = new byte[Math.toIntExact(elementCount(spec.shape) * size)];
+                tile(compact, spec.fillValue, size);
+            }
+            long[] stride = rowMajorStride(spec.shape);
+            forEachRow(offset, count, (at, index, run) -> System.arraycopy(data.bytes(), (int) (index * size),
+                    compact, (int) (dot(at, stride) * size), (int) (run * size)));
+            for (ValueEncoder.IdPatch id : data.ids()) {
+                compactIds.put(datasetByte(id.offset(), offset, count, stride), id.collection());
+            }
+        }
+
+        private void writeContiguous(long[] offset, long[] count, ValueEncoder.Encoded data) {
+            if (address == UNDEFINED) {
+                long bytes = elementCount(spec.shape) * size;
+                address = output().allocate(bytes);
+                if (spec.fillValue != null && !allZero(spec.fillValue)) {
+                    output().fill(address, bytes, spec.fillValue);
+                }
+            }
+            long[] stride = rowMajorStride(spec.shape);
+            forEachRun(offset, count, spec.shape, (at, index, run) -> output().write(address + dot(at, stride) * size,
+                    data.bytes(), (int) (index * size), (int) (run * size)));
+            for (ValueEncoder.IdPatch id : data.ids()) {
+                heaps.idAt(address + datasetByte(id.offset(), offset, count, stride), id.collection());
+            }
+            for (ValueEncoder.RefPatch ref : data.refs()) {
+                fileReferences.add(new FileReference(address + datasetByte(ref.offset(), offset, count, stride), ref.path()));
+            }
+        }
+
+        /** The byte, from the dataset's start, of byte {@code boxByte} of a box's encoded elements. */
+        private long datasetByte(long boxByte, long[] offset, long[] count, long[] stride) {
+            long element = boxByte / size;
+            long flat = 0;
+            for (int d = count.length - 1; d >= 0; d--) {
+                flat += (offset[d] + element % count[d]) * stride[d];
+                element /= count[d];
+            }
+            return flat * size + boxByte % size;
+        }
+
+        private void writeChunks(long[] offset, long[] count, ValueEncoder.Encoded data) {
+            long[] chunk = spec.chunkShape;
+            int rank = chunk.length;
+            long[] first = new long[rank];
+            long[] last = new long[rank];
+            for (int d = 0; d < rank; d++) {
+                first[d] = offset[d] / chunk[d];
+                last[d] = (offset[d] + count[d] - 1) / chunk[d];
+            }
+            long[] countStride = rowMajorStride(count);
+            long[] chunkStride = rowMajorStride(chunk);
+            List<Cell> touched = new ArrayList<>();
+            long[] cell = first.clone();
+            while (true) {
+                long[] origin = new long[rank];
+                long[] lo = new long[rank];
+                long[] extent = new long[rank];
+                for (int d = 0; d < rank; d++) {
+                    origin[d] = cell[d] * chunk[d];
+                    lo[d] = Math.max(offset[d], origin[d]);
+                    extent[d] = Math.min(offset[d] + count[d], origin[d] + chunk[d]) - lo[d];
+                }
+                Cell key = new Cell(cell.clone());
+                Pending p = pending(key, origin);
+                forEachRow(lo, extent, (at, index, run) -> {
+                    long src = 0;
+                    long dst = 0;
+                    for (int d = 0; d < rank; d++) {
+                        src += (at[d] - offset[d]) * countStride[d];
+                        dst += (at[d] - origin[d]) * chunkStride[d];
+                    }
+                    System.arraycopy(data.bytes(), (int) (src * size), p.data, (int) (dst * size), (int) (run * size));
+                    p.written.set((int) dst, (int) (dst + run));
+                });
+                touched.add(key);
+                int d = rank - 1;
+                while (d >= 0) {
+                    if (++cell[d] <= last[d]) {
+                        break;
+                    }
+                    cell[d] = first[d];
+                    d--;
+                }
+                if (d < 0) {
+                    break;
+                }
+            }
+            for (ValueEncoder.IdPatch id : data.ids()) {
+                long element = id.offset() / size;
+                long[] at = new long[rank];
+                for (int d = rank - 1; d >= 0; d--) {
+                    at[d] = offset[d] + element % count[d];
+                    element /= count[d];
+                }
+                long[] scaled = new long[rank];
+                long dst = 0;
+                for (int d = 0; d < rank; d++) {
+                    scaled[d] = at[d] / chunk[d];
+                    dst += (at[d] - scaled[d] * chunk[d]) * chunkStride[d];
+                }
+                pending.get(new Cell(scaled)).ids.put((int) (dst * size + id.offset() % size), id.collection());
+            }
+            for (Cell key : touched) {
+                Pending p = pending.get(key);
+                if (p != null && p.written.cardinality() >= p.needed) {
+                    flush(key, p);
+                }
+            }
+        }
+
+        /** The chunk being written at {@code cell}: one already pending, or a stored one read back, or a new one. */
+        private Pending pending(Cell cell, long[] origin) {
+            Pending p = pending.get(cell);
+            if (p == null) {
+                int elements = Math.toIntExact(elementCount(spec.chunkShape));
+                java.util.BitSet written = new java.util.BitSet(elements);
+                ChunkIndexWriter.Entry entry = stored.remove(cell);
+                byte[] data;
+                if (entry != null) {
+                    data = readBack(entry, elements * size);
+                    written.set(0, elements);
+                } else {
+                    data = new byte[elements * size];
+                    tile(data, spec.fillValue, size);
+                }
+                long needed = 1;
+                for (int d = 0; d < origin.length; d++) {
+                    long bound = spec.maxShape == null ? spec.shape[d]
+                            : spec.maxShape[d] == UNLIMITED ? Long.MAX_VALUE : spec.maxShape[d];
+                    needed *= Math.max(0, Math.min(spec.chunkShape[d], bound - origin[d]));
+                }
+                p = new Pending(data, written, needed);
+                pending.put(cell, p);
+            }
+            return p;
+        }
+
+        private byte[] readBack(ChunkIndexWriter.Entry entry, int chunkBytes) {
+            byte[] stored = output().read(entry.address(), entry.size());
+            if (spec.filters.isEmpty()) {
+                return stored;
+            }
+            if (decoder == null) {
+                decoder = FilterPipelineMessage.parse(HdfBuffer.of(filterPipelineBody(spec, legacy)), 0);
+            }
+            return java.util.Arrays.copyOf(decoder.decode(stored, entry.filterMask(), size, chunkBytes), chunkBytes);
+        }
+
+        /** Writes a chunk: its ids filled in (placing their heap collections), filtered, at the end of the file. */
+        private void flush(Cell cell, Pending p) {
+            for (Map.Entry<Integer, Integer> id : p.ids.entrySet()) {
+                putU64(p.data, id.getKey(), heaps.address(id.getValue()));
+            }
+            EncodedChunk encoded = spec.filters.isEmpty() ? new EncodedChunk(p.data, 0) : encodeChunk(p.data, spec);
+            long at = output().allocate(encoded.bytes().length);
+            output().write(at, encoded.bytes());
+            stored.put(cell, new ChunkIndexWriter.Entry(cell.scaled(), at, encoded.bytes().length, encoded.filterMask()));
+            pending.remove(cell);
+        }
+
+        /** Writes the chunks still pending, partly written or not: their unwritten elements are the fill value. */
+        void finish() {
+            for (Cell cell : new ArrayList<>(pending.keySet())) {
+                flush(cell, pending.get(cell));
+            }
+            if (compact != null) {
+                for (Map.Entry<Long, Integer> id : compactIds.entrySet()) {
+                    putU64(compact, (int) (long) id.getKey(), heaps.address(id.getValue()));
+                }
+            }
+        }
+
+        /** The Data Layout message body, writing the chunk index (if any) into {@code buf}. */
+        byte[] layout(GrowBuffer buf) {
+            if (spec.compact) {
+                if (compact == null) {
+                    compact = new byte[Math.toIntExact(elementCount(spec.shape) * size)];
+                    tile(compact, spec.fillValue, size);
+                }
+                return compactLayoutBody(compact); // data stored inline in the header, no data block
+            }
+            if (spec.chunkShape == null) {
+                long bytes = elementCount(spec.shape) * size;
+                // Never written: no block yet (libhdf5's late allocation); an empty dataset never has one.
+                return contiguousLayoutBody(bytes == 0 ? UNDEFINED : address, bytes);
+            }
+            long[] chunk = spec.chunkShape;
+            boolean btree = legacy || (spec.maxShape != null && !java.util.Arrays.equals(spec.maxShape, spec.shape));
+            if (stored.isEmpty()) {
+                // No chunk written: no index is allocated (libhdf5's own form), and every element is the fill value.
+                return btree ? btreeLayoutBody(chunk, size, UNDEFINED) : chunkedLayoutBody(chunk, size, UNDEFINED);
+            }
+            if (btree) {
+                List<ChunkIndexWriter.Entry> entries = new ArrayList<>(stored.values());
+                entries.sort((a, b) -> java.util.Arrays.compare(a.scaled(), b.scaled()));
+                return btreeLayoutBody(chunk, size, ChunkIndexWriter.writeBTreeV1(buf, entries, chunk));
+            }
+            long[] grid = new long[chunk.length];
+            long cells = 1;
+            for (int d = 0; d < chunk.length; d++) {
+                grid[d] = (spec.shape[d] + chunk[d] - 1) / chunk[d];
+                cells *= grid[d];
+            }
+            Map<Long, ChunkIndexWriter.Entry> byCell = new HashMap<>();
+            for (ChunkIndexWriter.Entry entry : stored.values()) {
+                long n = 0;
+                for (int d = 0; d < chunk.length; d++) {
+                    n = n * grid[d] + entry.scaled()[d];
+                }
+                byCell.put(n, entry);
+            }
+            int chunkBytes = Math.toIntExact(elementCount(chunk) * size);
+            return chunkedLayoutBody(chunk, size,
+                    ChunkIndexWriter.writeFixedArray(buf, cells, byCell, !spec.filters.isEmpty(), chunkBytes));
+        }
+    }
+
+    /** Receives a run of a box's last dimension: its first element's coordinates, its index in the box, and its length. */
+    @FunctionalInterface
+    private interface RunVisitor {
+        void run(long[] at, long index, long length);
+    }
+
+    /** Calls {@code visitor} for each row (run of the last dimension) of the box {@code [offset, offset + count)}. */
+    private static void forEachRow(long[] offset, long[] count, RunVisitor visitor) {
+        int rank = count.length;
+        if (rank == 0) {
+            visitor.run(new long[0], 0, 1);
+            return;
+        }
+        for (long c : count) {
+            if (c == 0) {
+                return;
+            }
+        }
+        long[] at = offset.clone();
+        long run = count[rank - 1];
+        long index = 0;
+        while (true) {
+            visitor.run(at, index, run);
+            index += run;
+            int d = rank - 2;
+            while (d >= 0) {
+                if (++at[d] < offset[d] + count[d]) {
+                    break;
+                }
+                at[d] = offset[d];
+                d--;
+            }
+            if (d < 0) {
+                return;
+            }
+        }
+    }
+
+    /**
+     * As {@link #forEachRow}, but a run spans every trailing dimension the box covers whole in
+     * {@code shape}, so rows that lie next to each other in the dataset are one run.
+     */
+    private static void forEachRun(long[] offset, long[] count, long[] shape, RunVisitor visitor) {
+        int rank = count.length;
+        int whole = rank;
+        while (whole > 1 && count[whole - 1] == shape[whole - 1]) {
+            whole--;
+        }
+        if (whole == rank) {
+            forEachRow(offset, count, visitor);
+            return;
+        }
+        long inner = 1;
+        for (int d = whole; d < rank; d++) {
+            inner *= shape[d];
+        }
+        long[] full = new long[rank];
+        long innerElements = inner;
+        int folded = whole;
+        forEachRow(java.util.Arrays.copyOf(offset, folded), java.util.Arrays.copyOf(count, folded), (at, index, run) -> {
+            System.arraycopy(at, 0, full, 0, folded);
+            visitor.run(full, index * innerElements, run * innerElements);
+        });
+    }
+
+    private static long dot(long[] at, long[] stride) {
+        long flat = 0;
+        for (int d = 0; d < at.length; d++) {
+            flat += at[d] * stride[d];
+        }
+        return flat;
+    }
+
+    /** Fills {@code out} with copies of {@code fill} (left zero for the default fill value). */
+    private static void tile(byte[] out, byte[] fill, int size) {
+        if (fill == null || allZero(fill)) {
+            return;
+        }
+        for (int at = 0; at + size <= out.length; at += size) {
+            System.arraycopy(fill, 0, out, at, Math.min(size, fill.length));
+        }
+    }
+
+    private static boolean allZero(byte[] bytes) {
+        for (byte b : bytes) {
+            if (b != 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** The Data Layout message (version 3) of a chunked dataset indexed by a version-1 B-tree. */
+    private static byte[] btreeLayoutBody(long[] chunkShape, int elementSize, long btreeAddress) {
+        GrowBuffer b = new GrowBuffer();
+        b.u8(3);                     // version 3: what every HDF5 version reads
+        b.u8(2);                     // layout class: chunked
+        b.u8(chunkShape.length + 1); // dimensionality (chunk dims + element size)
+        b.u64(btreeAddress);
+        for (long c : chunkShape) {
+            b.u32(c);
+        }
+        b.u32(elementSize);
+        return b.toByteArray();
     }
 
     /**
@@ -1249,7 +2166,7 @@ public final class Hdf5Writer implements AutoCloseable {
                 case Filters.NBIT -> filter.parameter() == dataset.elementSize * 8
                         ? block // full precision: libhdf5 flags "no compression needed" and stores it as is
                         : nbitEncode(block, dataset.elementSize, filter.parameter());
-                case Filters.SCALEOFFSET -> ScaleOffset.encodeInteger(block, dataset.elementSize, true,
+                case Filters.SCALEOFFSET -> ScaleOffset.encodeInteger(block, dataset.elementSize, signed(dataset),
                         fillBits(dataset));
                 case Filters.SZIP -> Szip.encode(block, szipClientData(dataset));
                 default -> throw new IllegalStateException("unknown filter " + filter.id());
@@ -1261,6 +2178,11 @@ public final class Hdf5Writer implements AutoCloseable {
             }
         }
         return new EncodedChunk(block, mask);
+    }
+
+    /** True if the dataset's integer type is signed (bit 3 of a fixed-point type's class bits). */
+    private static boolean signed(DatasetSpec dataset) {
+        return (dataset.datatype[1] & 0x08) != 0;
     }
 
     /** The dataset's fill value bits (its custom fill value, or the default 0), little-endian. */
@@ -1279,28 +2201,34 @@ public final class Hdf5Writer implements AutoCloseable {
     }
 
     /**
-     * The filter-pipeline message (version 2), listing the filters in the order they are applied on
-     * write, each with the flags and client data libhdf5 stores for it.
+     * The filter-pipeline message, listing the filters in the order they are applied on write, each with
+     * the flags and client data libhdf5 stores for it: version 2, or for the earliest format version 1
+     * (with reserved bytes, and each filter's client data padded to 8 bytes).
      */
-    private static byte[] filterPipelineBody(DatasetSpec dataset) {
+    private static byte[] filterPipelineBody(DatasetSpec dataset, boolean legacy) {
         GrowBuffer b = new GrowBuffer();
-        b.u8(2); // version
+        b.u8(legacy ? 1 : 2); // version
         b.u8(dataset.filters.size());
+        if (legacy) {
+            for (int i = 0; i < 6; i++) {
+                b.u8(0); // reserved
+            }
+        }
         int chunkElements = Math.toIntExact(elementCount(dataset.chunkShape));
         for (FilterSpec filter : dataset.filters) {
             switch (filter.id()) {
-                case Filters.DEFLATE -> writeFilter(b, Filters.DEFLATE, FILTER_OPTIONAL, filter.parameter());
-                case Filters.SHUFFLE -> writeFilter(b, Filters.SHUFFLE, FILTER_OPTIONAL, dataset.elementSize);
-                case Filters.FLETCHER32 -> writeFilter(b, Filters.FLETCHER32, FILTER_MANDATORY);
+                case Filters.DEFLATE -> writeFilter(b, legacy, Filters.DEFLATE, FILTER_OPTIONAL, filter.parameter());
+                case Filters.SHUFFLE -> writeFilter(b, legacy, Filters.SHUFFLE, FILTER_OPTIONAL, dataset.elementSize);
+                case Filters.FLETCHER32 -> writeFilter(b, legacy, Filters.FLETCHER32, FILTER_MANDATORY);
                 // n-bit client data: total, "no compression needed", nelmts, ATOMIC, size, byte order (0=LE),
                 // precision, offset.
-                case Filters.NBIT -> writeFilter(b, Filters.NBIT, FILTER_OPTIONAL, 8,
+                case Filters.NBIT -> writeFilter(b, legacy, Filters.NBIT, FILTER_OPTIONAL, 8,
                         filter.parameter() == dataset.elementSize * 8 ? 1 : 0, chunkElements, 1,
                         dataset.elementSize, 0, filter.parameter(), 0);
-                case Filters.SCALEOFFSET -> writeFilter(b, Filters.SCALEOFFSET, FILTER_OPTIONAL,
-                        ScaleOffset.integerClientData(chunkElements, dataset.elementSize, true, false,
+                case Filters.SCALEOFFSET -> writeFilter(b, legacy, Filters.SCALEOFFSET, FILTER_OPTIONAL,
+                        ScaleOffset.integerClientData(chunkElements, dataset.elementSize, signed(dataset), false,
                                 fillBits(dataset)));
-                case Filters.SZIP -> writeFilter(b, Filters.SZIP, FILTER_OPTIONAL, szipClientData(dataset));
+                case Filters.SZIP -> writeFilter(b, legacy, Filters.SZIP, FILTER_OPTIONAL, szipClientData(dataset));
                 default -> throw new IllegalStateException("unknown filter " + filter.id());
             }
         }
@@ -1340,12 +2268,18 @@ public final class Hdf5Writer implements AutoCloseable {
         return out;
     }
 
-    private static void writeFilter(GrowBuffer b, int id, int flags, int... clientData) {
+    private static void writeFilter(GrowBuffer b, boolean legacy, int id, int flags, int... clientData) {
         b.u16(id);
+        if (legacy) {
+            b.u16(0); // name length: no name
+        }
         b.u16(flags);
         b.u16(clientData.length);
         for (int value : clientData) {
             b.u32(value);
+        }
+        if (legacy && clientData.length % 2 != 0) {
+            b.u32(0); // version 1 pads the client data to a multiple of 8 bytes
         }
     }
 
@@ -1389,51 +2323,6 @@ public final class Hdf5Writer implements AutoCloseable {
         return out.toByteArray();
     }
 
-    /** Splits a dataset's row-major data into full-size, fill-padded chunks in row-major chunk order. */
-    private static List<byte[]> splitChunks(DatasetSpec dataset) {
-        int rank = dataset.shape.length;
-        int elementSize = dataset.elementSize;
-        int[] grid = new int[rank];
-        int chunkElements = 1;
-        for (int d = 0; d < rank; d++) {
-            grid[d] = (int) ((dataset.shape[d] + dataset.chunkShape[d] - 1) / dataset.chunkShape[d]);
-            chunkElements *= (int) dataset.chunkShape[d];
-        }
-        long[] datasetStride = rowMajorStride(dataset.shape);
-        long[] chunkStride = rowMajorStride(dataset.chunkShape);
-
-        int chunkCount = 1;
-        for (int g : grid) {
-            chunkCount *= g;
-        }
-        List<byte[]> chunks = new ArrayList<>(chunkCount);
-        int[] gridCoord = new int[rank];
-        for (int c = 0; c < chunkCount; c++) {
-            byte[] chunk = new byte[chunkElements * elementSize];
-            int[] local = new int[rank];
-            for (int e = 0; e < chunkElements; e++) {
-                boolean inBounds = true;
-                long globalIndex = 0;
-                for (int d = 0; d < rank; d++) {
-                    long global = gridCoord[d] * dataset.chunkShape[d] + local[d];
-                    if (global >= dataset.shape[d]) {
-                        inBounds = false;
-                        break;
-                    }
-                    globalIndex += global * datasetStride[d];
-                }
-                if (inBounds) {
-                    System.arraycopy(dataset.data, (int) (globalIndex * elementSize),
-                            chunk, e * elementSize, elementSize);
-                }
-                increment(local, dataset.chunkShape);
-            }
-            chunks.add(chunk);
-            increment(gridCoord, grid);
-        }
-        return chunks;
-    }
-
     /** The version-4 chunked data-layout message: chunk dimensions and a fixed-array chunk index. */
     private static byte[] chunkedLayoutBody(long[] chunkShape, int elementSize, long fixedArrayHeaderAddress) {
         int rank = chunkShape.length;
@@ -1453,7 +2342,7 @@ public final class Hdf5Writer implements AutoCloseable {
         }
         b.uvar(elementSize, encodedLength);
         b.u8(3);                     // index type: fixed array
-        b.u8(FA_PAGE_BITS);          // page bits
+        b.u8(ChunkIndexWriter.FA_PAGE_BITS); // page bits
         b.u64(fixedArrayHeaderAddress);
         return b.toByteArray();
     }
@@ -1486,19 +2375,19 @@ public final class Hdf5Writer implements AutoCloseable {
         }
     }
 
-    private static int align8(long n) {
-        return (int) ((n + 7) & ~7L);
+    private static long align8(long n) {
+        return (n + 7) & ~7L;
     }
 
-    private void writeGroupHeader(GrowBuffer buf, Map<String, Long> children,
+    private void writeGroupHeader(GrowBuffer buf, List<NamedLink> links,
                                   List<AttributeSpec> attributes, byte[] linkInfo, byte[] attributeInfo) {
         List<Message> messages = new ArrayList<>();
         // Links: a Link Info message pointing at dense storage, or an empty one plus compact Link messages.
         messages.add(new Message(2, 0x00, linkInfo != null ? linkInfo : linkInfoBody()));
         messages.add(new Message(10, 0x01, new byte[] {0, 0}));
         if (linkInfo == null) {
-            for (Map.Entry<String, Long> child : children.entrySet()) {
-                messages.add(new Message(6, 0x00, linkBody(child.getKey(), child.getValue())));
+            for (NamedLink link : links) {
+                messages.add(new Message(6, 0x00, link.body()));
             }
         }
         if (attributeInfo != null) {
@@ -1535,7 +2424,7 @@ public final class Hdf5Writer implements AutoCloseable {
         }
         byte[] body = framed.toByteArray();
         int sizeBits = body.length <= 0xFF ? 0 : body.length <= 0xFFFF ? 1 : 2;
-        int start = buf.position();
+        long start = buf.position();
         buf.bytes(OHDR_SIGNATURE);
         buf.u8(2);
         buf.u8(sizeBits);
@@ -1584,55 +2473,101 @@ public final class Hdf5Writer implements AutoCloseable {
     private static final int GLOBAL_HEAP_MAX_OBJECTS = 0xFFFF; // object indices are 16-bit; 0 is free space
     private static final int GLOBAL_HEAP_TARGET_SIZE = 1 << 20; // start a new collection beyond this
 
-    /** Where a variable-length element's data lives: a collection (by number) and its 1-based index. */
-    private record HeapSlot(int collection, int index) {
-    }
+    /**
+     * The file's global-heap collections, which hold variable-length data and region references' objects,
+     * shared by every dataset and attribute, as libhdf5 shares them. Objects go into the current
+     * collection, which is written to the file (placed) when it is full (65,535 objects, or about 1 MiB),
+     * when data referring to it must be written in its final form (a chunk being filtered), or when the
+     * file is completed. A variable-length id written before its collection is placed has its collection
+     * address filled in when it is.
+     */
+    private final class GlobalHeaps implements ValueEncoder.Heap {
+        private final List<byte[]> current = new ArrayList<>();
+        private int currentBytes;
+        private final List<Long> addresses = new ArrayList<>();        // each placed collection's address
+        private final List<Long> waiting = new ArrayList<>();          // ids in the file waiting for the current one
+        private final List<String> regionTargets = new ArrayList<>();  // the current collection's region objects'
+        private final List<Integer> regionObjects = new ArrayList<>(); // ... targets, and their indices
 
-    /** A vlen id whose collection address (8 bytes at {@code offset}) is patched once collections are placed. */
-    private record HeapIdPatch(int offset, int collection) {
+        @Override
+        public long[] add(byte[] object) {
+            int footprint = 16 + align8(object.length);
+            if (current.size() == GLOBAL_HEAP_MAX_OBJECTS
+                    || (!current.isEmpty() && (long) currentBytes + footprint > GLOBAL_HEAP_TARGET_SIZE)) {
+                seal();
+            }
+            current.add(object);
+            currentBytes += footprint;
+            return new long[] {addresses.size(), current.size()};
+        }
+
+        @Override
+        public long[] addRegion(String datasetPath, byte[] selection) {
+            byte[] object = new byte[8 + selection.length]; // the dataset's address (filled in later), the selection
+            System.arraycopy(selection, 0, object, 8, selection.length);
+            long[] slot = add(object);
+            regionTargets.add(datasetPath);
+            regionObjects.add((int) slot[1]);
+            return slot;
+        }
+
+        /** The address of collection {@code collection}, placing it first if it is the current one. */
+        long address(int collection) {
+            if (collection == addresses.size()) {
+                seal();
+            }
+            return addresses.get(collection);
+        }
+
+        /** Fills in the collection address of the id whose address field is at file offset {@code position}. */
+        void idAt(long position, int collection) {
+            if (collection < addresses.size()) {
+                output().writeU64(position, addresses.get(collection));
+            } else {
+                waiting.add(position);
+            }
+        }
+
+        /** Places the current collection, if it holds anything. */
+        void sealAll() {
+            if (!current.isEmpty()) {
+                seal();
+            }
+        }
+
+        private void seal() {
+            GrowBuffer collection = new GrowBuffer();
+            int[] dataOffsets = writeGlobalHeap(collection, current);
+            long at = output().allocate(collection.size());
+            output().write(at, collection.toByteArray());
+            addresses.add(at);
+            for (long position : waiting) {
+                output().writeU64(position, at);
+            }
+            for (int i = 0; i < regionTargets.size(); i++) {
+                fileReferences.add(new FileReference(at + dataOffsets[regionObjects.get(i) - 1], regionTargets.get(i)));
+            }
+            current.clear();
+            currentBytes = 0;
+            waiting.clear();
+            regionTargets.clear();
+            regionObjects.clear();
+        }
     }
 
     /**
-     * Places one variable-length element in the current global-heap collection, starting a new one when
-     * it holds 65,535 objects (indices are 16-bit) or would grow past {@link #GLOBAL_HEAP_TARGET_SIZE}.
-     * Collections are shared by every dataset in the file, as libhdf5 shares them.
+     * Writes a global-heap collection holding {@code objects} at indices 1, 2, ..., and returns where each
+     * object's data starts, from the collection's start.
      */
-    private HeapSlot addHeapObject(byte[] object) {
-        int footprint = 16 + align8(object.length);
-        List<byte[]> current = heapCollections.isEmpty() ? null : heapCollections.getLast();
-        if (current == null || current.size() == GLOBAL_HEAP_MAX_OBJECTS
-                || (!current.isEmpty() && (long) lastCollectionBytes + footprint > GLOBAL_HEAP_TARGET_SIZE)) {
-            current = new ArrayList<>();
-            heapCollections.add(current);
-            lastCollectionBytes = 0;
-        }
-        current.add(object);
-        lastCollectionBytes += footprint;
-        return new HeapSlot(heapCollections.size() - 1, current.size());
-    }
-
-    /** Writes every global-heap collection and patches the vlen ids that point into them. */
-    private void writeGlobalHeaps(GrowBuffer buf) {
-        long[] addresses = new long[heapCollections.size()];
-        for (int c = 0; c < addresses.length; c++) {
-            buf.align(8);
-            addresses[c] = buf.position();
-            writeGlobalHeap(buf, heapCollections.get(c));
-        }
-        for (HeapIdPatch patch : heapIdPatches) {
-            buf.patchU64(patch.offset(), addresses[patch.collection()]);
-        }
-    }
-
-    /** Writes a global-heap collection holding {@code objects} at indices 1, 2, ... */
-    private static void writeGlobalHeap(GrowBuffer buf, List<byte[]> objects) {
-        int start = buf.position();
+    private static int[] writeGlobalHeap(GrowBuffer buf, List<byte[]> objects) {
+        long start = buf.position();
         int usedExtents = 0;
         for (byte[] object : objects) {
             usedExtents += 16 + align8(object.length); // object header + padded data
         }
         int total = Math.max(16 + usedExtents + 16, GLOBAL_HEAP_MIN_SIZE);
         int freeExtent = total - 16 - usedExtents; // the trailing free-space object's extent
+        int[] dataOffsets = new int[objects.size()];
 
         buf.bytes(GCOL_SIGNATURE);
         buf.u8(1);
@@ -1645,6 +2580,7 @@ public final class Hdf5Writer implements AutoCloseable {
             buf.u16(1);       // reference count
             buf.u32(0);       // reserved
             buf.u64(objects.get(i).length);
+            dataOffsets[i] = (int) (buf.position() - start);
             buf.bytes(objects.get(i));
             while ((buf.position() - start) % 8 != 0) {
                 buf.u8(0);    // pad object data to an 8-byte boundary
@@ -1657,6 +2593,7 @@ public final class Hdf5Writer implements AutoCloseable {
         while (buf.position() - start < total) {
             buf.u8(0);        // materialize the free space
         }
+        return dataOffsets;
     }
 
     /** A written fractal heap: its header address and the fixed-width heap id of each stored object. */
@@ -1690,13 +2627,13 @@ public final class Hdf5Writer implements AutoCloseable {
         }
 
         buf.align(8);
-        int directBlock = buf.position();
+        long directBlock = buf.position();
         buf.bytes(FHDB_SIGNATURE);
         buf.u8(0);
-        int heapHeaderPatch = buf.position();
+        long heapHeaderPatch = buf.position();
         buf.u64(0);                       // heap header address (patched once the header is written)
         buf.uvar(0, params.offsetSize()); // block offset
-        int checksumPatch = buf.position();
+        long checksumPatch = buf.position();
         buf.u32(0);                       // whole-block checksum (patched below)
         for (byte[] object : objects) {
             buf.bytes(object);
@@ -1706,7 +2643,7 @@ public final class Hdf5Writer implements AutoCloseable {
         }
 
         buf.align(8);
-        int headerAddress = buf.position();
+        long headerAddress = buf.position();
         buf.bytes(FRHP_SIGNATURE);
         buf.u8(0);
         buf.u16(params.idLength());
@@ -1760,7 +2697,7 @@ public final class Hdf5Writer implements AutoCloseable {
         int needed = 4 + 1 + 1 + records.size() * recordSize + 4; // prefix, records, checksum
         int nodeSize = Math.max(BT2_NODE_SIZE, Integer.highestOneBit(needed - 1) << 1);
         buf.align(8);
-        int leaf = buf.position();
+        long leaf = buf.position();
         buf.bytes(BTLF_SIGNATURE);
         buf.u8(0);
         buf.u8(type);
@@ -1775,7 +2712,7 @@ public final class Hdf5Writer implements AutoCloseable {
         }
 
         buf.align(8);
-        int header = buf.position();
+        long header = buf.position();
         buf.bytes(BTHD_SIGNATURE);
         buf.u8(0);
         buf.u8(type);
@@ -1833,12 +2770,12 @@ public final class Hdf5Writer implements AutoCloseable {
      * Writes a group's links densely (fractal heap of Link messages + a name-indexed v2 B-tree, type 5)
      * and returns the Link Info (message 2) body pointing at them.
      */
-    private static byte[] writeDenseLinks(GrowBuffer buf, Map<String, Long> children) {
+    private static byte[] writeDenseLinks(GrowBuffer buf, List<NamedLink> links) {
         List<byte[]> objects = new ArrayList<>();
         List<String> names = new ArrayList<>();
-        for (Map.Entry<String, Long> child : children.entrySet()) {
-            objects.add(linkBody(child.getKey(), child.getValue()));
-            names.add(child.getKey());
+        for (NamedLink link : links) {
+            objects.add(link.body());
+            names.add(link.name());
         }
         FractalHeapResult heap = writeFractalHeap(buf, objects, LINK_HEAP);
 
@@ -1867,24 +2804,13 @@ public final class Hdf5Writer implements AutoCloseable {
         return b.toByteArray();
     }
 
-    private static byte[] vlenIds(List<byte[]> payloads, int[] elementCounts, HeapSlot[] slots) {
-        GrowBuffer b = new GrowBuffer();
-        for (int i = 0; i < payloads.size(); i++) {
-            // A vlen ID's length field is the string's byte length or the sequence's element count.
-            b.u32(elementCounts != null ? elementCounts[i] : payloads.get(i).length);
-            b.u64(0);                     // collection address, patched when the collections are written
-            b.u32(slots[i].index());
-        }
-        return b.toByteArray();
-    }
-
     /**
      * The Attribute message: version 3 (with a character-set field, UTF-8 for a non-ASCII name), or for
      * the earliest format version 1, whose name, datatype, and dataspace are each padded to 8 bytes.
      */
     private static byte[] attributeBody(AttributeSpec attribute, boolean legacy) {
         byte[] name = (attribute.name + "\0").getBytes(StandardCharsets.UTF_8);
-        byte[] dataspace = dataspaceBody(attribute.shape, legacy);
+        byte[] dataspace = dataspaceBody(attribute.shape, null, legacy);
         GrowBuffer b = new GrowBuffer();
         b.u8(legacy ? 1 : 3);
         b.u8(0x00);
@@ -1922,23 +2848,32 @@ public final class Hdf5Writer implements AutoCloseable {
         return true;
     }
 
-    /** The Dataspace message: version 2, or version 1 (with its reserved bytes) for the earliest format. */
-    private static byte[] dataspaceBody(long[] shape, boolean legacy) {
+    /**
+     * The Dataspace message: version 2, or version 1 (with its reserved bytes) for the earliest format;
+     * with the maximum dimensions ({@link #UNLIMITED} as all ones) if they are not the current ones.
+     */
+    private static byte[] dataspaceBody(long[] shape, long[] maxShape, boolean legacy) {
+        boolean max = maxShape != null && !java.util.Arrays.equals(maxShape, shape);
         GrowBuffer b = new GrowBuffer();
         if (legacy) {
             b.u8(1);
             b.u8(shape.length);
-            b.u8(0x00);   // flags: no maximum dimensions (they equal the current ones)
+            b.u8(max ? 0x01 : 0x00); // flags: maximum dimensions present
             b.u8(0);      // reserved
             b.u32(0);     // reserved
         } else {
             b.u8(2);
             b.u8(shape.length);
-            b.u8(0x00);
+            b.u8(max ? 0x01 : 0x00);
             b.u8(shape.length == 0 ? 0 : 1);
         }
         for (long dimension : shape) {
             b.u64(dimension);
+        }
+        if (max) {
+            for (long dimension : maxShape) {
+                b.u64(dimension);
+            }
         }
         return b.toByteArray();
     }
@@ -2005,19 +2940,61 @@ public final class Hdf5Writer implements AutoCloseable {
      * 0-1), and a non-ASCII name carries the UTF-8 character set (flag bit 4).
      */
     private static byte[] linkBody(String name, long targetHeaderAddress) {
+        GrowBuffer b = linkHeader(name, 0);
+        b.u64(targetHeaderAddress);
+        return b.toByteArray();
+    }
+
+    /** A soft-link message: link type 1, then the target path (its length in 2 bytes, no terminator). */
+    private static byte[] softLinkBody(String name, String targetPath) {
+        byte[] target = targetPath.getBytes(StandardCharsets.UTF_8);
+        if (target.length > 0xFFFF) {
+            throw new IllegalArgumentException("a soft link's target is at most 65535 bytes");
+        }
+        GrowBuffer b = linkHeader(name, 1);
+        b.u16(target.length);
+        b.bytes(target);
+        return b.toByteArray();
+    }
+
+    /**
+     * An external-link message: link type 64, then its information (its length in 2 bytes): a version and
+     * flags byte (0), the file name and the object path, each null-terminated.
+     */
+    private static byte[] externalLinkBody(String name, String fileName, String objectPath) {
+        byte[] file = (fileName + "\0").getBytes(StandardCharsets.UTF_8);
+        byte[] object = (objectPath + "\0").getBytes(StandardCharsets.UTF_8);
+        if (1 + file.length + object.length > 0xFFFF) {
+            throw new IllegalArgumentException("an external link's names are at most 65534 bytes together");
+        }
+        GrowBuffer b = linkHeader(name, 64);
+        b.u16(1 + file.length + object.length);
+        b.u8(0);
+        b.bytes(file);
+        b.bytes(object);
+        return b.toByteArray();
+    }
+
+    /**
+     * A Link message's start: version 1, flags (the name length's width, link type and character set
+     * present), the link type unless hard (0), the character set for a non-ASCII name, and the name.
+     */
+    private static GrowBuffer linkHeader(String name, int linkType) {
         byte[] nameBytes = name.getBytes(StandardCharsets.UTF_8);
         int widthCode = nameBytes.length <= 0xFF ? 0 : nameBytes.length <= 0xFFFF ? 1 : 2;
         boolean utf8 = !isAscii(nameBytes);
         GrowBuffer b = new GrowBuffer();
         b.u8(1);
-        b.u8(widthCode | (utf8 ? 0x10 : 0));
+        b.u8(widthCode | (linkType != 0 ? 0x08 : 0) | (utf8 ? 0x10 : 0));
+        if (linkType != 0) {
+            b.u8(linkType);
+        }
         if (utf8) {
             b.u8(1);  // character set: UTF-8
         }
         b.uvar(nameBytes.length, 1 << widthCode);
         b.bytes(nameBytes);
-        b.u64(targetHeaderAddress);
-        return b.toByteArray();
+        return b;
     }
 
     /**
@@ -2032,25 +3009,33 @@ public final class Hdf5Writer implements AutoCloseable {
         // Local heap: 8 reserved bytes (offset 0 = the empty name), then each name, null-terminated and
         // padded to an 8-byte boundary.
         Map<String, Integer> nameOffsets = new LinkedHashMap<>();
+        Map<String, Integer> valueOffsets = new HashMap<>(); // a soft link's target path
+        List<String> strings = new ArrayList<>();
         int dataSize = 8;
         for (SymbolChild child : children) {
             nameOffsets.put(child.name(), dataSize);
+            strings.add(child.name());
             dataSize += align8(child.name().getBytes(StandardCharsets.UTF_8).length + 1);
+            if (child.linkValue() != null) {
+                valueOffsets.put(child.name(), dataSize);
+                strings.add(child.linkValue());
+                dataSize += align8(child.linkValue().getBytes(StandardCharsets.UTF_8).length + 1);
+            }
         }
         buf.align(8);
-        int heapDataAddress = buf.position();
+        long heapDataAddress = buf.position();
         for (int i = 0; i < 8; i++) {
             buf.u8(0);
         }
-        for (SymbolChild child : children) {
-            byte[] name = child.name().getBytes(StandardCharsets.UTF_8);
-            buf.bytes(name);
-            for (int i = name.length; i < align8(name.length + 1); i++) {
+        for (String string : strings) {
+            byte[] bytes = string.getBytes(StandardCharsets.UTF_8);
+            buf.bytes(bytes);
+            for (int i = bytes.length; i < align8(bytes.length + 1); i++) {
                 buf.u8(0);
             }
         }
         buf.align(8);
-        int heapHeaderAddress = buf.position();
+        long heapHeaderAddress = buf.position();
         buf.bytes(HEAP_SIGNATURE);
         buf.u8(0);            // version
         buf.u8(0);
@@ -2068,7 +3053,7 @@ public final class Hdf5Writer implements AutoCloseable {
                 a.name().getBytes(StandardCharsets.UTF_8), b.name().getBytes(StandardCharsets.UTF_8)));
         int nodeCount = Math.max(1, (sorted.size() + perNode - 1) / perNode);
         int snodSize = 8 + perNode * SYMBOL_ENTRY_SIZE;
-        int[] snodAddresses = new int[nodeCount];
+        long[] snodAddresses = new long[nodeCount];
         int[] snodMaxNameOffset = new int[nodeCount]; // heap offset of each node's greatest-by-name entry
         for (int n = 0; n < nodeCount; n++) {
             int from = n * perNode;
@@ -2085,8 +3070,14 @@ public final class Hdf5Writer implements AutoCloseable {
                 buf.u64(child.headerAddress());          // object header address
                 buf.u32(child.cacheType());
                 buf.u32(0);                              // reserved
-                buf.u64(child.cacheType() == 1 ? child.btree() : 0); // scratch pad: B-tree + heap for a group
-                buf.u64(child.cacheType() == 1 ? child.heap() : 0);
+                if (child.cacheType() == 2) {            // scratch pad: a soft link's value in the heap
+                    buf.u32(valueOffsets.get(child.name()));
+                    buf.u32(0);
+                    buf.u64(0);
+                } else {                                 // scratch pad: B-tree + heap for a group
+                    buf.u64(child.cacheType() == 1 ? child.btree() : 0);
+                    buf.u64(child.cacheType() == 1 ? child.heap() : 0);
+                }
             }
             while (buf.position() - snodAddresses[n] < snodSize) {
                 buf.u8(0);
@@ -2097,7 +3088,7 @@ public final class Hdf5Writer implements AutoCloseable {
         // Group version-1 B-tree: a single leaf node with one entry per symbol-table node. Keys are the
         // heap offset of the greatest name to the left of each pointer (key 0 = the empty-name offset).
         buf.align(8);
-        int btreeAddress = buf.position();
+        long btreeAddress = buf.position();
         buf.bytes(TREE_SIGNATURE);
         buf.u8(0);            // node type: group
         buf.u8(0);            // node level: leaf
@@ -2116,7 +3107,7 @@ public final class Hdf5Writer implements AutoCloseable {
 
         // Version-1 object header: a Symbol Table message plus any attributes.
         buf.align(8);
-        int headerAddress = buf.position();
+        long headerAddress = buf.position();
         GrowBuffer symbolTable = new GrowBuffer();
         symbolTable.u64(btreeAddress);
         symbolTable.u64(heapHeaderAddress);
@@ -2407,6 +3398,7 @@ public final class Hdf5Writer implements AutoCloseable {
         String name = "";
         final List<GroupSpec> groups = new ArrayList<>();
         final List<DatasetSpec> datasets = new ArrayList<>();
+        final List<LinkSpec> links = new ArrayList<>();        // soft and external links
         final List<AttributeSpec> attributes = new ArrayList<>();
         final Set<String> linkNames = new HashSet<>();      // groups and datasets share one namespace
         final Set<String> attributeNames = new HashSet<>();
@@ -2416,8 +3408,11 @@ public final class Hdf5Writer implements AutoCloseable {
         final String name;
         final byte[] datatype;
         final int elementSize;
-        final long[] shape;
-        final long[] chunkShape;        // null for contiguous storage
+        long[] shape;                   // grows, for a dataset with a larger maximum shape
+        long[] maxShape;                // null: the shape cannot change
+        long[] chunkShape;              // null for contiguous storage
+        Datatype type;                  // a dataset made by createDataset, written by DatasetWriter.write; else null
+        Storage storage;                // made when data is first written
         final byte[] data;              // inline element bytes, or null for vlen strings/sequences
         final List<byte[]> vlenStrings; // vlen payloads (string bytes or sequence element bytes), or null
         int[] vlenElementCounts;        // per-element sequence lengths (element counts); null for strings
@@ -2441,7 +3436,15 @@ public final class Hdf5Writer implements AutoCloseable {
         }
     }
 
-    private record AttributeSpec(String name, byte[] datatype, long[] shape, byte[] data) {
+    /** An attribute: its value's bytes, and the variable-length ids in them to fill in once their collections are placed. */
+    private record AttributeSpec(String name, byte[] datatype, long[] shape, byte[] data, List<ValueEncoder.IdPatch> ids) {
+        AttributeSpec(String name, byte[] datatype, long[] shape, byte[] data) {
+            this(name, datatype, shape, data, List.of());
+        }
+    }
+
+    /** A soft link (no file), or an external link to {@code target} in {@code file}. */
+    private record LinkSpec(String name, String target, String file) {
     }
 
     /** One filter of a dataset's pipeline: its id and its parameter (deflate level, n-bit precision). */

@@ -1,5 +1,6 @@
 package com.ebremer.falcon.hdf5;
 
+import com.ebremer.falcon.hdf5.datatype.Datatype;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -180,6 +181,62 @@ class WriterInteropExport {
             }
         }
 
+        // --- P2 WF1: data streamed as it is written; datasets that grow (version-1 B-tree index)
+        for (Hdf5Writer.Format format : Hdf5Writer.Format.values()) {
+            String name = format == Hdf5Writer.Format.LATEST ? "streaming.h5" : "streaming_earliest.h5";
+            try (Hdf5Writer w = Hdf5Writer.create(begin(dir, name, format.name().toLowerCase()), format)) {
+                writeStreaming(w);
+            }
+        }
+
+        // --- P2 WF2/WF3: every datatype through createDataset, and typed attributes
+        try (Hdf5Writer w = Hdf5Writer.create(begin(dir, "datatypes.h5", "latest"))) {
+            writeDatatypes(w, false);
+        }
+        try (Hdf5Writer w = Hdf5Writer.create(begin(dir, "datatypes_earliest.h5", "earliest"), Hdf5Writer.Format.EARLIEST)) {
+            writeDatatypes(w, true);
+        }
+
+        // --- P2 WF4: soft and external links (compact and dense), region references
+        try (Hdf5Writer w = Hdf5Writer.create(begin(dir, "links.h5", "latest"))) {
+            w.intDataset("data", range(12), new long[] {3, 4});
+            dataset("/data", range(12));
+            w.group("g").intDataset("x", new int[] {7, 8}, new long[] {2});
+            w.softLink("abs", "/g/x").softLink("rel", "g/x").softLink("dangling", "/nowhere")
+                    .externalLink("ext", "basic.h5", "/counts");
+            Hdf5Writer.GroupWriter many = w.group("many");
+            for (int i = 0; i < 6; i++) {
+                many.intDataset("d" + i, new int[] {i}, new long[] {1});
+            }
+            many.softLink("s", "/data").softLink("t", "/g").externalLink("e", "basic.h5", "/grid").softLink("u", "d3");
+            group("/").put("links", Map.of("abs", Map.of("soft", "/g/x"), "rel", Map.of("soft", "g/x"),
+                    "dangling", Map.of("soft", "/nowhere"), "ext", Map.of("external", List.of("basic.h5", "/counts"))));
+            group("/").put("follow", Map.of("abs", new int[] {7, 8}, "rel", new int[] {7, 8},
+                    "ext", new int[] {10, 20, 30, 40, 50}));
+            group("/many").put("links", Map.of("s", Map.of("soft", "/data"), "t", Map.of("soft", "/g"),
+                    "e", Map.of("external", List.of("basic.h5", "/grid")), "u", Map.of("soft", "d3")));
+            group("/many").put("follow", Map.of("s", range(12), "e", range(6), "u", new int[] {3}));
+            w.regionReferenceDataset("regions", new long[] {5}, new Hdf5Writer.Region[] {
+                Hdf5Writer.Region.block("/data", new long[] {1, 1}, new long[] {2, 2}),
+                Hdf5Writer.Region.points("/data", new long[][] {{2, 3}, {0, 0}, {1, 2}}),
+                Hdf5Writer.Region.hyperslab("/data", new long[] {0, 0}, new long[] {2, 2}, new long[] {2, 2}, null),
+                Hdf5Writer.Region.all("/g/x"),
+                null});
+            dataset("/regions", null).put("regions", java.util.Arrays.asList(
+                    Map.of("target", "/data", "values", new int[] {5, 6, 9, 10}),
+                    Map.of("target", "/data", "values", new int[] {11, 0, 6}),
+                    Map.of("target", "/data", "values", new int[] {0, 2, 8, 10}),
+                    Map.of("target", "/g/x", "values", new int[] {7, 8}),
+                    null));
+        }
+        try (Hdf5Writer w = Hdf5Writer.create(begin(dir, "links_earliest.h5", "earliest"), Hdf5Writer.Format.EARLIEST)) {
+            w.group("g").intDataset("x", new int[] {7, 8}, new long[] {2});
+            w.softLink("abs", "/g/x").softLink("rel", "g/x").softLink("dangling", "/nowhere");
+            group("/").put("links", Map.of("abs", Map.of("soft", "/g/x"), "rel", Map.of("soft", "g/x"),
+                    "dangling", Map.of("soft", "/nowhere")));
+            group("/").put("follow", Map.of("abs", new int[] {7, 8}, "rel", new int[] {7, 8}));
+        }
+
         Files.writeString(dir.resolve("manifest.json"), json(Map.of("files", files)), StandardCharsets.UTF_8);
     }
 
@@ -262,6 +319,138 @@ class WriterInteropExport {
             attrs.put("wide", mid);
             dataset("/dense_wide", new int[] {1}).put("attrs", attrs);
         }
+    }
+
+    /** Datasets written piece by piece, grown, rewritten in part, and left partly unwritten. */
+    private void writeStreaming(Hdf5Writer w) {
+        // 2-D uint16, chunked and deflated, written a block of rows at a time (chunks completed as they fill).
+        Hdf5Writer.DatasetWriter image = w.createDataset("image", Datatype.uint16(), 40, 30).chunked(8, 16).deflate(4);
+        int[] pixels = new int[1200];
+        for (int i = 0; i < pixels.length; i++) {
+            pixels[i] = (i * 53) % 65536;
+        }
+        for (int row = 0; row < 40; row += 5) {
+            image.write(new long[] {row, 0}, new long[] {5, 30}, java.util.Arrays.copyOfRange(pixels, row * 30, row * 30 + 150));
+        }
+        dataset("/image", pixels).put("dtype", "<u2");
+        objects.getLast().put("chunks", new long[] {8, 16});
+        // Appended rows of an unlimited dataset, with a fill value and one chunk written twice.
+        Hdf5Writer.DatasetWriter rows = w.createDataset("rows", Datatype.int32(), 0, 4).chunked(3, 4)
+                .maxShape(Hdf5Writer.UNLIMITED, 4).fillValue(-1).shuffle().deflate(1);
+        rows.append(range(8));             // rows 0-1
+        rows.append(new int[] {8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19}); // rows 2-4
+        rows.write(new long[] {1, 1}, new long[] {1, 2}, new int[] {-5, -6}); // into the first, stored chunk
+        rows.extend(7, 4);                 // rows 5-6 never written: the fill value
+        int[] expected = new int[28];
+        for (int i = 0; i < 20; i++) {
+            expected[i] = i;
+        }
+        expected[5] = -5;
+        expected[6] = -6;
+        java.util.Arrays.fill(expected, 20, 28, -1);
+        dataset("/rows", expected).put("shape", new long[] {7, 4});
+        objects.getLast().put("maxshape", java.util.Arrays.asList(null, 4));
+        objects.getLast().put("fill", -1);
+        // Contiguous float64 with a fill value, written in two pieces, one gap.
+        Hdf5Writer.DatasetWriter line = w.createDataset("line", Datatype.float64(), 10).fillValue(2.5);
+        line.write(new long[] {0}, new long[] {3}, new double[] {0.5, 1.5, -1});
+        line.write(new long[] {7}, new long[] {3}, new double[] {7, 8, 9});
+        dataset("/line", new double[] {0.5, 1.5, -1, 2.5, 2.5, 2.5, 2.5, 7, 8, 9});
+        // Variable-length strings appended to a chunked dataset; their heap collections placed as chunks fill.
+        Hdf5Writer.DatasetWriter names = w.createDataset("names", Datatype.variableString(), 0).chunked(4)
+                .maxShape(Hdf5Writer.UNLIMITED);
+        List<String> all = new ArrayList<>();
+        for (int i = 0; i < 11; i++) {
+            String[] batch = {"n" + i, "é" + i};
+            names.append(batch);
+            all.addAll(List.of(batch));
+        }
+        dataset("/names", all.toArray(new String[0])).put("maxshape", java.util.Arrays.asList((Object) null));
+        // A 3-D dataset that grows in two dimensions, written in boxes.
+        Hdf5Writer.DatasetWriter cube = w.createDataset("cube", Datatype.int64(), 2, 2, 3).chunked(2, 2, 2)
+                .maxShape(Hdf5Writer.UNLIMITED, Hdf5Writer.UNLIMITED, 3);
+        cube.extend(3, 5, 3);
+        long[] cubeValues = new long[45];
+        for (int i = 0; i < 45; i++) {
+            cubeValues[i] = i * 1_000_000_007L;
+        }
+        cube.write(cubeValues);
+        dataset("/cube", cubeValues).put("shape", new long[] {3, 5, 3});
+        objects.getLast().put("maxshape", java.util.Arrays.asList(null, null, 3));
+        // Multi-level B-tree indexes: 300 chunks (2 levels of 64-entry nodes) and 5000 (3 levels).
+        for (int chunk : new int[] {10, 1}) {
+            int n = chunk == 10 ? 3000 : 5000;
+            Hdf5Writer.DatasetWriter many = w.createDataset("chunks_" + n / chunk, Datatype.int32(), 0).chunked(chunk)
+                    .maxShape(Hdf5Writer.UNLIMITED);
+            for (int start = 0; start < n; start += 500) {
+                many.append(java.util.Arrays.copyOfRange(range(n), start, start + 500));
+            }
+            dataset("/chunks_" + n / chunk, range(n)).put("maxshape", java.util.Arrays.asList((Object) null));
+        }
+    }
+
+    /** One dataset per datatype class (and order and sign), through createDataset, plus typed attributes. */
+    private void writeDatatypes(Hdf5Writer w, boolean earliest) {
+        w.createDataset("u8", Datatype.uint8(), 3).write(new int[] {0, 128, 255});
+        dataset("/u8", new int[] {0, 128, 255}).put("dtype", "|u1");
+        w.createDataset("u16", Datatype.uint16(), 2).write(new int[] {0, 65535});
+        dataset("/u16", new int[] {0, 65535}).put("dtype", "<u2");
+        w.createDataset("u32", Datatype.uint32(), 2).write(new long[] {0, 4294967295L});
+        dataset("/u32", new long[] {0, 4294967295L}).put("dtype", "<u4");
+        w.createDataset("u64", Datatype.uint64(), 2).write(new java.math.BigInteger[] {
+            java.math.BigInteger.ZERO, new java.math.BigInteger("18446744073709551615")});
+        dataset("/u64", List.of(0, new java.math.BigInteger("18446744073709551615"))).put("dtype", "<u8");
+        w.createDataset("i8", Datatype.int8(), 2).write(new byte[] {-128, 127});
+        dataset("/i8", new int[] {-128, 127}).put("dtype", "|i1");
+        w.createDataset("be_i32", Datatype.int32().withByteOrder(java.nio.ByteOrder.BIG_ENDIAN), 3).write(new int[] {-2, 0, 70000});
+        dataset("/be_i32", new int[] {-2, 0, 70000}).put("dtype", ">i4");
+        w.createDataset("be_f64", Datatype.float64().withByteOrder(java.nio.ByteOrder.BIG_ENDIAN), 2).write(new double[] {1.25, -3e300});
+        dataset("/be_f64", new double[] {1.25, -3e300}).put("dtype", ">f8");
+        w.createDataset("f16", Datatype.float16(), 3).write(new float[] {0.5f, -2f, 65504f});
+        dataset("/f16", new double[] {0.5, -2, 65504}).put("dtype", "<f2");
+        w.createDataset("f32", Datatype.float32(), 2).write(new int[] {3, -16777217});
+        dataset("/f32", new double[] {3, -16777216}).put("dtype", "<f4");
+        w.createDataset("bool", Datatype.bool(), 3).write(new boolean[] {true, false, true});
+        dataset("/bool", new int[] {1, 0, 1}).put("dtype", "|b1");
+        w.createDataset("bits", Datatype.bitField(2), 2).write(new int[] {0x8001, 7});
+        dataset("/bits", new int[] {0x8001, 7}).put("dtype", "<u2");
+        w.createDataset("opaque", Datatype.opaque(3, "falcon"), 2).write(new byte[][] {{1, 2, 3}, {-1, 0, 9}});
+        dataset("/opaque", null).put("opaque_hex", "010203ff0009");
+        w.createDataset("time", Datatype.unixTime(8), 2).write(new java.time.Instant[] {
+            java.time.Instant.EPOCH, java.time.Instant.parse("2023-11-14T22:13:20Z")});
+        dataset("/time", null).put("time", new long[] {0, 1_700_000_000L});
+        w.createDataset("fixed", Datatype.string(6), 2).write(new String[] {"abc", "été"});
+        dataset("/fixed", new String[] {"abc", "été"});
+        w.createDataset("vstr", Datatype.variableString(), 2).write(new String[] {"one", ""});
+        dataset("/vstr", new String[] {"one", ""});
+        Datatype.Enumeration color = new Datatype.Enumeration(2, Datatype.int16(), List.of(
+                new Datatype.Enumeration.Member("RED", -1), new Datatype.Enumeration.Member("BLUE", 300)));
+        w.createDataset("enum", color, 3).write(new String[] {"BLUE", "RED", "BLUE"});
+        dataset("/enum", new int[] {300, -1, 300}).put("enum", Map.of("RED", -1, "BLUE", 300));
+        Map<String, Datatype> members = new LinkedHashMap<>();
+        members.put("id", Datatype.uint32());
+        members.put("pos", Datatype.arrayOf(Datatype.float32(), 2));
+        members.put("name", Datatype.string(4));
+        w.createDataset("records", Datatype.compound(members), 2).write(Map.of(
+                "id", new long[] {1, 4000000000L}, "pos", new float[] {0.5f, 1.5f, -2, 3}, "name", new String[] {"ab", "cdef"}));
+        dataset("/records", null).put("fields", Map.of("id", new long[] {1, 4000000000L}));
+        w.createDataset("seq", Datatype.sequenceOf(Datatype.int16()), 2).write(new short[][] {{1, -2}, {}});
+        dataset("/seq", null).put("rows", List.of(new int[] {1, -2}, new int[0]));
+        w.createDataset("chunked_strings", Datatype.string(3), 5).chunked(2).deflate(2)
+                .write(new String[] {"a", "bb", "ccc", "", "e"});
+        dataset("/chunked_strings", new String[] {"a", "bb", "ccc", "", "e"});
+        if (!earliest) {
+            w.createDataset("complex64", Datatype.complexOf(Datatype.float32()), 2).write(new double[] {1, -2, 0.5, 4});
+            dataset("/complex64", new double[] {1, -2, 0.5, 4}).put("complex", true);
+            objects.getLast().put("min_hdf5", "2.0");
+        }
+        Hdf5Writer.GroupWriter root = w.root();
+        root.stringAttribute("title", "Falcon").stringAttribute("units", "m/s²")
+                .attribute("u8s", Datatype.uint8(), new long[] {3}, new int[] {1, 200, 255})
+                .attribute("vlen", Datatype.variableString(), new long[] {2}, new String[] {"x", "yz"})
+                .attribute("f32", Datatype.float32(), new long[0], new double[] {0.25});
+        group("/").put("attrs", Map.of("title", new String[] {"Falcon"}, "units", new String[] {"m/s²"},
+                "u8s", new int[] {1, 200, 255}, "vlen", new String[] {"x", "yz"}, "f32", new double[] {0.25}));
     }
 
     private void writeTypes(Hdf5Writer w) {

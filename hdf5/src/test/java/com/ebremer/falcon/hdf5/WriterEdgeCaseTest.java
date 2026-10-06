@@ -281,11 +281,15 @@ class WriterEdgeCaseTest {
         assertThrows(IllegalArgumentException.class, w::close); // the target does not exist yet
         assertTrue(w.isOpen());
         try (var listing = Files.list(dir)) {
-            assertEquals(List.of(), listing.toList());         // no partial file, no temporary file
+            // No file at the target; the data written so far stays in a hidden temporary file, for the retry.
+            assertTrue(listing.allMatch(p -> p.getFileName().toString().startsWith(".retry.h5.")), "only the temporary file");
         }
         w.intDataset("later", new int[] {5}, new long[] {1});
         w.close();
         w.close();                                             // idempotent
+        try (var listing = Files.list(dir)) {
+            assertEquals(List.of(file), listing.toList());     // the temporary file became the target
+        }
         assertTrue(!w.isOpen());
         assertThrows(HdfClosedException.class, () -> w.intDataset("more", new int[] {1}, new long[] {1}));
         try (Hdf5File h5 = Hdf5File.open(file)) {
@@ -321,9 +325,12 @@ class WriterEdgeCaseTest {
                     () -> w.intChunkedDataset("huge", data, new long[] {6}, new long[] {1L << 30}));
             w.intChunkedDataset("bigger_than_data", data, new long[] {6}, new long[] {8}); // libhdf5 reads this
         }
+        // The earliest format writes chunked datasets too, indexed by a version-1 B-tree.
         try (Hdf5Writer w = Hdf5Writer.create(dir.resolve("chunks_old.h5"), Hdf5Writer.Format.EARLIEST)) {
-            assertThrows(HdfUnsupportedException.class,
-                    () -> w.intChunkedDataset("c", new int[] {1}, new long[] {1}, new long[] {1}));
+            w.intChunkedDataset("c", new int[] {1, 2, 3}, new long[] {3}, new long[] {2}).deflate(3);
+        }
+        try (Hdf5File h5 = Hdf5File.open(dir.resolve("chunks_old.h5"))) {
+            assertArrayEquals(new int[] {1, 2, 3}, h5.root().dataset("c").readInts());
         }
     }
 
