@@ -193,6 +193,16 @@ public final class ChunkPipeline {
         return bytesCodec instanceof ShardingCodec;
     }
 
+    /**
+     * The shape of the sub-chunks a shard holds, when the array&rarr;bytes codec is {@code sharding_indexed}
+     * and no array&rarr;array codec comes before it, so that a read fetches and decodes only the sub-chunks
+     * it overlaps; otherwise {@code null} (a chunk is decoded whole).
+     */
+    public int[] subChunkShape() {
+        return bytesCodec instanceof ShardingCodec sharding && arrayCodecs.isEmpty()
+                ? sharding.subChunkShape() : null;
+    }
+
     /** The element data type. */
     public DataType dataType() {
         return dataType;
@@ -333,6 +343,15 @@ public final class ChunkPipeline {
         Pipelines.copyBox(chunk, chunkShape, regionOrigin, out, regionShape, new int[regionShape.length],
                 regionShape, elementSize);
         return out;
+    }
+
+    /**
+     * Whether a read of part of a chunk fetches and decodes only the parts it needs: the chunk is a shard
+     * with no codec before or after the sharding codec. A shard nested in another is then read through a
+     * {@link ChunkBytes#slice} of the outer one.
+     */
+    boolean readsPartially() {
+        return bytesCodec instanceof ShardingCodec && arrayCodecs.isEmpty() && byteCodecs.isEmpty();
     }
 
     /**

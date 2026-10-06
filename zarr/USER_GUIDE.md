@@ -48,11 +48,21 @@ double[] all = array.readDoubles();       // any numeric type -> double[]
 int[]    ints = array.readInts();         // integer types that fit an int
 long[]   longs = array.readLongs();
 float[]  floats = array.readFloats();     // float types
-byte[]   raw   = array.readRawBytes();    // C-order element bytes, for complex/raw or manual decoding
+long[]   bits  = array.readUnsignedLongs(); // unsigned types exactly, uint64 included
+double[] cplx  = array.readComplex();     // complex types: real, imaginary, real, imaginary, ...
+byte[]   raw   = array.readRawBytes();    // C-order element bytes, for raw types or manual decoding
 ```
 
 Values are returned in **C (row-major) order**. A whole-array read must fit in one Java array (about
 2&nbsp;GB); for larger arrays, read [in blocks](#selections-and-streaming).
+
+Whether a type fits a reader is decided by the type, not by the values stored: `readInts` refuses every
+uint32 array, and `readLongs` every uint64 one, since some values could not fit. `readUnsignedLongs` reads
+any unsigned type exactly: uint8 to uint32 as their values, and uint64 as its 64 bits, so a value of
+2<sup>63</sup> or more comes back as a negative `long` that `Long.toUnsignedString`, `Long.compareUnsigned`,
+and `Long.divideUnsigned` read correctly (`readDoubles` would round it). `readComplex` returns a complex
+array's parts interleaved, as numpy lays them out: element `i` is `(v[2i], v[2i + 1])`, and a complex64's
+float parts widen exactly. The writers `writeUnsignedLongs` and `writeComplex` take the same forms back.
 
 ## Selections and streaming
 
@@ -60,6 +70,12 @@ A **selection** is a rectangular region `[offset, offset+shape)`. Reading one to
 overlaps, so a small window into a large array is cheap. In a sharded array it fetches only the shard's
 index and the sub-chunks it overlaps, and allocates no more than the window (the index at the end of a
 shard is read with one suffix request, without asking the shard's size).
+
+Shards may nest, as zarr-python writes them: a sub-chunk can itself be a shard, to any depth. A read of
+part of a nested shard fetches the outer index, the inner index, and only the inner sub-chunks it needs,
+as byte ranges, unless a codec such as `crc32c` follows the inner shard, which is then read whole. A write
+to part of one re-encodes only the inner sub-chunks it touches, and `withWriteEmptyChunks` applies at
+every level.
 
 ```java
 // rows 100..199, columns 0..49
@@ -77,6 +93,13 @@ array.blocks().forEach(block -> {
     // ... process this tile ...
 });
 ```
+
+`blocks(blockShape...)` tiles the array in blocks of any shape instead, in C order. In a sharded array a
+chunk is a whole shard, which can be hundreds of megabytes; `innerChunkShape()` is the shape of the
+sub-chunks the shards hold (zarr-python's `chunks`, where `chunkShape()` is its `shards`), and
+`blocks(array.innerChunkShape())` reads one sub-chunk at a time, fetching nothing else but the shard's
+index. Read through a cached handle (below), so each shard's index is fetched once rather than once per
+block. For an array that is not sharded, `innerChunkShape()` is the chunk shape.
 
 Every read goes to the store, so it sees every write made before it, through any handle. For overlapping
 or repeated selections of a compressed array, ask for a handle with a **decoded-chunk cache**, which
@@ -164,8 +187,8 @@ Zarr.createGroup(store, attributes, true);                    // root: delete ev
   beyond its range (`1e40` into `float32`); NaN and the infinities are stored as they are;
 - `bool` stores any nonzero value, NaN included, as true, as numpy does.
 
-`ArraySpec.builder` also offers `endian`, `gzip(level)`, `zstd()`, `blosc()`, `crc32c()`,
-`sharding(subChunkShape)`, `dimensionNames(...)`, and `chunkKeyEncoding("default"|"v2")`. The `zstd` and
+`ArraySpec.builder` also offers `endian`, `gzip(level)`, `zstd()` / `zstd(level)`, `blosc()`,
+`crc32c()`, `sharding(subChunkShape)`, `dimensionNames(...)`, and `chunkKeyEncoding("default"|"v2")`. The `zstd` and
 `blosc` compressors are written by Falcon's own pure-Java encoders (libzstd / c-blosc read the output).
 
 ## Groups and hierarchy
@@ -187,6 +210,19 @@ g.createGroup("model").createArray("weights", spec).writeFloats(...);
 Navigation reads the store on demand, so a group reflects the store's current contents, unless it answers
 from consolidated metadata (below). Opening a node fetches its metadata directly, without probing first:
 one request for a v3 node. Creating a node where one exists needs `overwrite` (see [Writing](#writing)).
+
+A node deeper down is reached by its path, from a group or from the store:
+
+```java
+ZarrArray w = root.array("model/layers/weights");          // or root.child(...), root.group(...)
+ZarrArray same = Zarr.openArray(store, "model/layers/weights");
+ZarrGroup sub = Zarr.openGroup(store, "/model");           // a leading '/' is allowed here
+```
+
+The node's own metadata is fetched directly, one request whatever the depth, as zarr-python does: the
+groups along the path are not opened. A consolidated group finds the node in its snapshot instead, with no
+request. `Zarr.open(store, path)` opens a group with its own consolidated metadata, if it has any, and a
+path to nothing throws `NoSuchElementException`.
 
 `children()`, `arrays()`, and `groups()` leave out a child Falcon cannot open (malformed metadata, or a
 feature it does not implement); `childNames()` still lists it, and `child(name)` throws the reason. A new
@@ -299,19 +335,29 @@ Falcon implements the Zarr v3 codec pipeline `(array→array)* (array→bytes) (
 | `transpose` (axis order) | ✅ | ✅ |
 | `gzip` | ✅ | ✅ |
 | `crc32c` (checksum) | ✅ | ✅ |
-| `sharding_indexed` | ✅ (byte-range) | ✅ |
-| `zstd` | ✅ | ✅ (pure-Java LZ77+FSE, with the content checksum when configured; libzstd reads it) |
-| `blosc` (blosclz/lz4/lz4hc/zlib/zstd/snappy + byte/bit shuffle) | ✅ | ✅ (no, byte, or bit shuffle, the configured block size and type size, c-blosc-sized blocks; zstd internally; c-blosc reads it) |
+| `sharding_indexed` | ✅ (byte-range; nested to any depth) | ✅ (nested too) |
+| `zstd` | ✅ | ✅ (pure Java, levels 1–22, the content checksum when configured; libzstd reads it) |
+| `blosc` (blosclz/lz4/lz4hc/zlib/zstd/snappy + byte/bit shuffle) | ✅ | ✅ (no, byte, or bit shuffle, the configured block size, type size, and clevel, c-blosc-sized blocks; zstd internally; c-blosc reads it) |
 
-`zstd` and `blosc` are read *and* written by pure-Java implementations (zarr-python compresses with zstd by default; libzstd reads Falcon's
-zstd frames). All compression codecs are hand-written in pure Java. All of blosc's internal codecs (blosclz/lz4/lz4hc/zlib/zstd/snappy) and both shuffle filters are
+`zstd` and `blosc` are read *and* written by pure-Java implementations (zarr-python compresses with zstd
+by default; libzstd reads Falcon's zstd frames). All compression codecs are hand-written in pure Java.
+All of blosc's internal codecs (blosclz/lz4/lz4hc/zlib/zstd/snappy) and both shuffle filters are
 supported on the read side.
 
-Writing into an array follows its codecs' configuration, whoever created it: a zstd `checksum`, and a
-blosc `shuffle`, `typesize`, `blocksize`, and `clevel`. Two settings have no effect: the zstd `level`
-(Falcon's encoder has one level) and a blosc `cname` other than `zstd` (Falcon compresses with zstd
-inside Blosc whatever the name; the result is valid Blosc, which every reader decodes from its own
-header, but not the compressor the metadata names).
+Writing into an array follows its codecs' configuration, whoever created it: a zstd `level` (libzstd's
+scale, 1 to 22; 0 or none means the default, 3) and `checksum`, and a blosc `shuffle`, `typesize`,
+`blocksize`, and `clevel`, which also sets the zstd level inside Blosc as c-blosc does (`2 × clevel − 1`,
+and 22 at 9). `ArraySpec.Builder.zstd(level)` picks the level. One setting has no effect: a blosc `cname`
+other than `zstd` (Falcon compresses with zstd inside Blosc whatever the name; the result is valid Blosc,
+which every reader decodes from its own header, but not the compressor the metadata names).
+
+Falcon's zstd encoder works as libzstd's lazy strategies do: Huffman-coded literals, FSE tables fitted to
+each block, repeat offsets, matches across blocks within the level's window (512 KiB at level 1 to 8 MiB
+at 17 and up), and blocks split where the data's statistics change. At levels 1–9 its ratios are close
+to libzstd 1.5.7's, better on some inputs and worse on others by up to about 10% (at level 3: noisy
+float32 0.883, as libzstd; Java source text 0.215 against 0.228). At 16 and up it trails slightly, having
+no optimal parsing. It is slower than libzstd: about 30–90 MB/s at levels 1–3 depending on the data,
+15–40 MB/s at 9, and 3–11 MB/s at 19.
 
 ## Stores
 
@@ -412,18 +458,20 @@ nothing else writes to that part of the hierarchy.
 ## What is and isn't supported
 
 **Supported:** Zarr v3 read *and* write; Zarr v2 read; all core data types plus variable-length `string`
-and `variable_length_bytes`; resizing, and zarr-python's `write_empty_chunks`;
-the regular chunk grid; both chunk key encodings; every codec in the table above (including `zstd` and
-`blosc` written by Falcon's own encoders, and all of blosc's internal codecs + both shuffle filters on
-read); sharding with efficient byte-range reads and writes, for strings too; selections and block
-streaming; consolidated metadata, read and written; changing attributes and deleting nodes; the memory,
-filesystem, ZIP, HTTP, and S3-compatible stores.
+and `variable_length_bytes`, with exact uint64 and complex accessors; the regular chunk grid; both chunk
+key encodings; every codec in the table above (including `zstd` and `blosc` written by Falcon's own
+encoders, and all of blosc's internal codecs + both shuffle filters on read); sharding, nested too, with
+efficient byte-range reads and writes, for strings too; selections, navigation by path, and block
+streaming (by chunk, sub-chunk, or any block shape); resizing, and zarr-python's `write_empty_chunks`;
+consolidated metadata, read and written; changing attributes and deleting nodes; the memory, filesystem,
+ZIP, HTTP, and S3-compatible stores.
 
 **Not supported** (see [`TODO.md`](TODO.md)): Zarr v2 *writing*, Fortran
 (`"F"`) order, and v2 filters; extension metadata that must be understood, non-`regular` chunk grids,
 extension data types, and storage transformers; consolidating a v2 hierarchy; Azure Shared Key and GCS
-OAuth (implement the `Store` SPI yourself, or use SAS URLs and bearer tokens on `HttpStore`). The
-`zstd`/`blosc` encoders are correct and interoperable but single-level (not tuned for ratio).
+OAuth (implement the `Store` SPI yourself, or use SAS URLs and bearer tokens on `HttpStore`); zstd
+dictionaries and optimal parsing (so Falcon's highest zstd levels trail libzstd's slightly); and a blosc
+`cname` other than `zstd` on write.
 
 Corrupt input (bad metadata, truncated or damaged chunks, malformed compressed streams) fails with a typed
 exception — `ZarrFormatException`, `ZarrUnsupportedException`, or `ZarrException`. Decompression is bounded

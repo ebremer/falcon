@@ -14,23 +14,26 @@ import com.ebremer.falcon.zarr.json.JsonValue;
  * zarr-python compresses with zstd by default, so most Zarr v3 stores in the wild need it.
  *
  * <p>Both directions are implemented in pure Java: {@link ZstdDecoder} reads and {@link ZstdEncoder}
- * writes. The encoder is a real LZ77 + FSE compressor using the format's predefined tables and raw
- * literals; its frames are read by libzstd (zarr-python).
+ * writes. The encoder works as libzstd's lazy strategies do (Huffman-coded literals, FSE tables fitted to
+ * each block, repeat offsets); its frames are read by libzstd (zarr-python).
  *
- * <p>Writing honours the configuration's {@code checksum}: each frame then carries its content checksum,
- * which readers verify (I9). The {@code level} is read but has no effect, since the encoder has one level.
+ * <p>Writing honours the configuration: the {@code level} (libzstd's scale, 1 to 22; 0, or none, the
+ * default 3; a negative level the fastest settings; above 22, 22), and the {@code checksum}, which puts the
+ * content checksum in each frame for readers to verify (I9).
  */
 final class ZstdCodec implements BytesBytesCodec {
 
+    private final int level;
     private final boolean checksum;
 
-    private ZstdCodec(boolean checksum) {
+    private ZstdCodec(int level, boolean checksum) {
+        this.level = level;
         this.checksum = checksum;
     }
 
     static ZstdCodec parse(JsonObject configuration) {
-        configuration.find("level").ifPresent(v -> v.asNumber().intValue()); // must be an integer
-        return new ZstdCodec(configuration.find("checksum").map(JsonValue::asBoolean).orElse(false));
+        int level = configuration.find("level").map(v -> v.asNumber().intValue()).orElse(0); // an integer
+        return new ZstdCodec(level, configuration.find("checksum").map(JsonValue::asBoolean).orElse(false));
     }
 
     @Override
@@ -59,6 +62,6 @@ final class ZstdCodec implements BytesBytesCodec {
 
     @Override
     public byte[] encode(byte[] input) {
-        return ZstdEncoder.compress(input, checksum);
+        return ZstdEncoder.compress(input, level, checksum);
     }
 }

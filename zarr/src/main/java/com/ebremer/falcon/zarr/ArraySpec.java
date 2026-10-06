@@ -103,7 +103,7 @@ public final class ArraySpec {
             inner.add(named("gzip", JsonObject.builder().put("level", b.gzipLevel).build()));
         }
         if (b.zstd) {
-            inner.add(named("zstd", JsonObject.builder().put("level", 0).put("checksum", false).build()));
+            inner.add(named("zstd", JsonObject.builder().put("level", b.zstdLevel).put("checksum", false).build()));
         }
         if (b.blosc) {
             int typeSize = Math.max(b.dataType.byteCount(), 1); // variable-length elements have no fixed size
@@ -209,6 +209,7 @@ public final class ArraySpec {
         private ByteOrder endian = ByteOrder.LITTLE_ENDIAN;
         private Integer gzipLevel;
         private boolean zstd;
+        private int zstdLevel;
         private boolean blosc;
         private boolean crc32c;
         private long[] subChunkShape;
@@ -271,9 +272,26 @@ public final class ArraySpec {
             return this;
         }
 
-        /** Compresses chunks with {@code zstd} (Falcon's pure-Java encoder; libzstd/zarr-python read it). */
+        /**
+         * Compresses chunks with {@code zstd} at the default level (Falcon's pure-Java encoder;
+         * libzstd/zarr-python read it).
+         */
         public Builder zstd() {
+            return zstd(0);
+        }
+
+        /**
+         * Compresses chunks with {@code zstd} at {@code level}, on libzstd's scale: 1 (fastest) to 22
+         * (smallest), 0 for the default (3), a negative level for the fastest settings.
+         *
+         * @throws IllegalArgumentException if {@code level} is outside libzstd's range, -131072 to 22
+         */
+        public Builder zstd(int level) {
+            if (level < -131072 || level > 22) {
+                throw new IllegalArgumentException("zstd level must be -131072 to 22, not " + level);
+            }
             this.zstd = true;
+            this.zstdLevel = level;
             return this;
         }
 

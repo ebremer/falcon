@@ -71,6 +71,29 @@ public final class Selection {
         return Elements.toInts(readRawBytes(), dataType(), order(), intCount());
     }
 
+    /**
+     * The selected elements of an unsigned integer type, exactly: uint8, uint16, and uint32 as their values,
+     * and uint64 as its 64 bits, so a value of 2<sup>63</sup> or more is a negative {@code long} that
+     * {@link Long#toUnsignedString(long)} and {@link Long}'s other unsigned methods read correctly.
+     * ({@link #readLongs()} refuses uint64, whose values may not fit a {@code long}.)
+     *
+     * @throws ZarrException if the data type is not an unsigned integer type
+     */
+    public long[] readUnsignedLongs() {
+        return Elements.toUnsignedLongs(readRawBytes(), dataType(), order(), intCount());
+    }
+
+    /**
+     * The selected elements of a complex type as {@code double}s, two per element: the real part, then the
+     * imaginary, as numpy lays them out. Element {@code i} is {@code (result[2i], result[2i + 1])}; a
+     * complex64's float parts widen exactly.
+     *
+     * @throws ZarrException if the data type is not complex64 or complex128
+     */
+    public double[] readComplex() {
+        return Elements.toComplex(readRawBytes(), dataType(), order(), intCount());
+    }
+
     /** Writes raw element bytes (C order, the array's byte order) into this region. */
     public void writeRawBytes(byte[] elements) {
         requireFixedSize();
@@ -100,6 +123,37 @@ public final class Selection {
     public void writeInts(int[] values) {
         checkLength(values.length);
         writeRawBytes(Elements.fromInts(values, dataType(), order()));
+    }
+
+    /**
+     * Writes {@code values} into this region of an unsigned integer array, each {@code long} taken as an
+     * unsigned 64-bit value, as {@link #readUnsignedLongs()} gives them: uint64 stores every value exactly,
+     * and a narrower type refuses one above its maximum.
+     *
+     * @throws IllegalArgumentException if a value is too large for the type (nothing is written)
+     * @throws ZarrException            if the data type is not an unsigned integer type
+     */
+    public void writeUnsignedLongs(long[] values) {
+        checkLength(values.length);
+        writeRawBytes(Elements.fromUnsignedLongs(values, dataType(), order()));
+    }
+
+    /**
+     * Writes complex values into this region, two {@code double}s per element (the real part, then the
+     * imaginary). A complex64 rounds each part to the nearest float and refuses a finite part beyond float's
+     * range.
+     *
+     * @throws IllegalArgumentException if {@code values} does not hold two doubles per selected element, or a
+     *                                  part is out of range (nothing is written)
+     * @throws ZarrException            if the data type is not complex64 or complex128
+     */
+    public void writeComplex(double[] values) {
+        if (values.length % 2 != 0) {
+            throw new IllegalArgumentException("complex values come in pairs (real, imaginary), but got "
+                    + values.length + " doubles");
+        }
+        checkLength(values.length / 2);
+        writeRawBytes(Elements.fromComplex(values, dataType(), order()));
     }
 
     /**

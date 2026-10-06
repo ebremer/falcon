@@ -7,7 +7,6 @@ import com.ebremer.falcon.zarr.datatype.DataType;
 import com.ebremer.falcon.zarr.json.JsonObject;
 import com.ebremer.falcon.zarr.json.JsonString;
 import com.ebremer.falcon.zarr.store.FileSystemStore;
-import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -23,8 +22,9 @@ import java.util.function.IntUnaryOperator;
 /**
  * Writes one Zarr v3 array per data type and codec layout with Falcon, for check_zarr_writer.py to read
  * back with zarr-python (P1 T1), plus P2's variable-length bytes (F5), arrays written with
- * {@code withWriteEmptyChunks} (F7), and resized arrays (F6). Dev-time tool, run with the JDK's source
- * launcher from the repo root, after {@code mvn -pl zarr -am compile}:
+ * {@code withWriteEmptyChunks} (F7), resized arrays (F6), nested shards (F11), and uint64 and complex values
+ * written with {@code writeUnsignedLongs}/{@code writeComplex} (F8). Dev-time tool, run with the JDK's
+ * source launcher from the repo root, after {@code mvn -pl zarr -am compile}:
  *
  * <pre>
  *     java -cp "zarr/target/classes;core/target/classes" tools/fixtures/WriteZarrCases.java OUT_DIR
@@ -166,6 +166,31 @@ public class WriteZarrCases {
         handMade("bytes_transpose", "bytes",
                 "[{\"name\":\"transpose\",\"configuration\":{\"order\":[1,0]}},{\"name\":\"vlen-bytes\",\"configuration\":{}},"
                         + "{\"name\":\"zstd\",\"configuration\":{\"level\":0,\"checksum\":false}}]");
+        // P2 F11: shards nested in shards (ArraySpec builds one level, so the metadata is hand-made).
+        String bytes = "{\"name\":\"bytes\",\"configuration\":{\"endian\":\"little\"}}";
+        handMade("int32_nested", "int32", "[" + shard("[3,2]", "[" + shard("[1,2]", "[" + bytes + "]") + "]") + "]");
+        handMade("float64_nested_zstd_crc32c", "float64", "[" + shard("[3,4]", "[" + shard("[3,2]", "[" + bytes
+                + ",{\"name\":\"zstd\",\"configuration\":{\"level\":0,\"checksum\":false}}]")
+                + ",{\"name\":\"crc32c\"}]") + "]");
+        handMade("int8_nested_three", "int8", "[" + shard("[6,4]", "[" + shard("[3,2]", "["
+                + shard("[1,1]", "[" + bytes + "]") + "]") + "]") + "]", "[12,4]", null);
+        handMade("int16_nested_partial", "int16", "[" + shard("[3,2]", "[" + shard("[1,2]", "[" + bytes + "]") + "]")
+                + "]", "[6,4]", PARTIAL);
+        handMade("string_nested", "string",
+                "[" + shard("[3,2]", "[" + shard("[1,2]", "[{\"name\":\"vlen-utf8\",\"configuration\":{}}]")
+                        + "]") + "]");
+        handMade("bytes_nested", "bytes",
+                "[" + shard("[3,2]", "[" + shard("[1,2]", "[{\"name\":\"vlen-bytes\",\"configuration\":{}}]")
+                        + "]") + "]");
+        // P2 F8: uint64 values over the whole range, most with no exact double (writeUnsignedLongs); the
+        // complex arrays above are written with writeComplex.
+        for (String layout : new String[] {"plain", "sharded_zstd"}) {
+            ArraySpec.Builder b = ArraySpec.builder(SHAPE, DataType.UINT64).chunkShape(6, 4);
+            if (layout.equals("sharded_zstd")) {
+                b.sharding(3, 2).zstd();
+            }
+            write(root.createArray("uint64x_" + layout, b.build()), "uint64x", ByteOrder.LITTLE_ENDIAN, null);
+        }
         handMade("int16_blosc_lz4", "int16",
                 "[" + BYTES_LE + ",{\"name\":\"blosc\",\"configuration\":{\"cname\":\"lz4\",\"clevel\":5,"
                         + "\"shuffle\":\"shuffle\",\"typesize\":2,\"blocksize\":0}}]", "[13,7]");
@@ -181,6 +206,11 @@ public class WriteZarrCases {
 
     /** An array of 13 x 7 with the given chunk shape, fill 0 (or ""), with hand-written codecs. */
     static void handMade(String name, String dtype, String codecs, String chunks) throws Exception {
+        handMade(name, dtype, codecs, chunks, null);
+    }
+
+    /** {@link #handMade(String, String, String, String)}, written only in {@code written} if it is given. */
+    static void handMade(String name, String dtype, String codecs, String chunks, long[] written) throws Exception {
         String fill = dtype.equals("string") || dtype.equals("bytes") ? "\"\"" : "0";
         String dataType = dtype.equals("bytes") ? DataType.BYTES.name() : dtype;
         String json = "{\"zarr_format\":3,\"node_type\":\"array\",\"shape\":[13,7],\"data_type\":\"" + dataType + "\","
@@ -188,7 +218,14 @@ public class WriteZarrCases {
                 + "\"chunk_key_encoding\":{\"name\":\"default\"},\"fill_value\":" + fill + ",\"codecs\":" + codecs
                 + ",\"attributes\":{}}";
         store.set(name + "/zarr.json", json.getBytes(StandardCharsets.UTF_8));
-        write(root.array(name), dtype, ByteOrder.LITTLE_ENDIAN, null);
+        write(root.array(name), dtype, ByteOrder.LITTLE_ENDIAN, written);
+    }
+
+    /** A sharding_indexed codec of {@code chunkShape} sub-chunks with the given codecs, as zarr-python writes it. */
+    static String shard(String chunkShape, String codecs) {
+        return "{\"name\":\"sharding_indexed\",\"configuration\":{\"chunk_shape\":" + chunkShape + ",\"codecs\":"
+                + codecs + ",\"index_codecs\":[{\"name\":\"bytes\",\"configuration\":{\"endian\":\"little\"}},"
+                + "{\"name\":\"crc32c\"}],\"index_location\":\"end\"}}";
     }
 
     /** Writes element i = value(dtype, i) everywhere, or only in rows [w0, w1) x columns [w2, w3). */
@@ -220,17 +257,14 @@ public class WriteZarrCases {
                     : i % 19 == 7 ? Double.NEGATIVE_INFINITY : (i - 45) * 0.5));
             case "float32" -> s.writeDoubles(mapDouble(index, i -> i % 23 == 3 ? Double.NaN : i * 0.1));
             case "float64" -> s.writeDoubles(mapDouble(index, i -> i * 0.1 - 3));
+            case "uint64x" -> s.writeUnsignedLongs(mapLong(index, i -> i * 0x9E3779B97F4A7C15L + 0xFFFFL));
             case "complex64", "complex128" -> {
-                boolean wide = dtype.equals("complex128");
-                ByteBuffer b = ByteBuffer.allocate(n * (wide ? 16 : 8)).order(order);
-                for (int i : index) {
-                    if (wide) {
-                        b.putDouble(i).putDouble(-i * 0.5);
-                    } else {
-                        b.putFloat(i).putFloat(-i * 0.5f);
-                    }
+                double[] parts = new double[2 * n]; // F8: real, imaginary, ...
+                for (int k = 0; k < n; k++) {
+                    parts[2 * k] = index[k];
+                    parts[2 * k + 1] = -index[k] * 0.5;
                 }
-                s.writeRawBytes(b.array());
+                s.writeComplex(parts);
             }
             default -> throw new IllegalArgumentException(dtype);
         }

@@ -30,6 +30,11 @@ import java.util.List;
  * fixed-size elements or variable-length ones (an inner {@code vlen-utf8} or {@code vlen-bytes} pipeline,
  * as zarr-python writes for sharded string arrays). {@link #update} re-encodes only the sub-chunks a write
  * touches.
+ *
+ * <p>A sub-chunk may itself be a shard (nested sharding, which zarr-python writes), to any depth. A read
+ * that needs only part of such a sub-chunk reads it through a {@link ChunkBytes#slice} of the outer source,
+ * so it fetches the inner index and the inner sub-chunks it needs, not the whole sub-chunk; and a write to
+ * part of one re-encodes only the inner sub-chunks it touches.
  */
 final class ShardingCodec implements ArrayBytesCodec {
 
@@ -97,10 +102,7 @@ final class ShardingCodec implements ArrayBytesCodec {
                 })
                 .orElse(false);
 
-        ChunkPipeline inner = ChunkPipeline.of(dataType, toLong(sub), innerCodecs);
-        if (inner.isSharded()) {
-            throw new ZarrUnsupportedException("nested sharding is not supported");
-        }
+        ChunkPipeline inner = ChunkPipeline.of(dataType, toLong(sub), innerCodecs); // may itself be sharded
 
         long[] indexShape = new long[grid.length + 1];
         for (int i = 0; i < grid.length; i++) {
@@ -120,6 +122,11 @@ final class ShardingCodec implements ArrayBytesCodec {
     @Override
     public String name() {
         return "sharding_indexed";
+    }
+
+    /** The shape of each sub-chunk (a copy). */
+    int[] subChunkShape() {
+        return subChunkShape.clone();
     }
 
     @Override
@@ -148,9 +155,11 @@ final class ShardingCodec implements ArrayBytesCodec {
         byte[] out = new byte[Pipelines.elementCount(shape) * elementSize];
         Pipelines.tile(out, fillElement);
         int[] zero = new int[shape.length];
-        forEachSubChunk(source, entries, regionOrigin, regionShape, (origin, stored) ->
-                Pipelines.copyBox(inner.decode(stored), subChunkShape, zero, out, shape, origin, subChunkShape,
-                        elementSize));
+        forEachSubChunk(source, entries, regionOrigin, regionShape, (origin, sub, local, extent) -> {
+            // Outside the region a nested shard may leave fill; the caller reads only the region.
+            byte[] decoded = present(inner.decodeChunk(sub, fillElement, local, extent));
+            Pipelines.copyBox(decoded, subChunkShape, zero, out, shape, origin, subChunkShape, elementSize);
+        });
         return new ArrayValue(out, shape);
     }
 
@@ -168,10 +177,10 @@ final class ShardingCodec implements ArrayBytesCodec {
         }
         byte[] out = new byte[Pipelines.elementCount(regionShape) * elementSize];
         Pipelines.tile(out, fillElement);
-        forEachSubChunk(source, entries, regionOrigin, regionShape, (origin, stored) -> {
-            int[][] overlap = Pipelines.intersect(origin, subChunkShape, regionOrigin, regionShape);
-            Pipelines.copyBox(inner.decode(stored), subChunkShape, Pipelines.minus(overlap[0], origin),
-                    out, regionShape, Pipelines.minus(overlap[0], regionOrigin), overlap[1], elementSize);
+        forEachSubChunk(source, entries, regionOrigin, regionShape, (origin, sub, local, extent) -> {
+            byte[] part = present(inner.decodeRegion(sub, fillElement, local, extent));
+            Pipelines.copyBox(part, extent, new int[extent.length], out, regionShape,
+                    Pipelines.minus(Pipelines.plus(origin, local), regionOrigin), extent, elementSize);
         });
         return out;
     }
@@ -190,11 +199,19 @@ final class ShardingCodec implements ArrayBytesCodec {
         Object[] out = inner.vlenCodec().newArray(Pipelines.elementCount(shape));
         Arrays.fill(out, fill);
         int[] zero = new int[shape.length];
-        forEachSubChunk(source, entries, regionOrigin, regionShape, (origin, stored) -> {
-            Object[] sub = inner.decodeVlenChunk(ChunkBytes.of(stored), fill, zero, subChunkShape);
-            Pipelines.copyBox(sub, subChunkShape, zero, out, shape, origin, subChunkShape);
+        forEachSubChunk(source, entries, regionOrigin, regionShape, (origin, sub, local, extent) -> {
+            Object[] decoded = present(inner.decodeVlenChunk(sub, fill, local, extent));
+            Pipelines.copyBox(decoded, subChunkShape, zero, out, shape, origin, subChunkShape);
         });
         return out;
+    }
+
+    /** A sub-chunk the index lists, decoded: present, or the shard changed or broke between reads. */
+    private static <T> T present(T decoded) {
+        if (decoded == null) {
+            throw new ZarrFormatException("shard sub-chunk bytes are missing");
+        }
+        return decoded;
     }
 
     /**
@@ -235,13 +252,20 @@ final class ShardingCodec implements ArrayBytesCodec {
         return entries;
     }
 
-    /** Receives one fetched sub-chunk: its origin in the shard and its stored bytes. */
+    /**
+     * Receives one sub-chunk the region overlaps: its origin in the shard, its stored bytes (fetched, or a
+     * slice of the shard to read from), and the part of it the region covers, in the sub-chunk's own
+     * coordinates.
+     */
     private interface SubChunkSink {
-        void accept(int[] origin, byte[] stored);
+        void accept(int[] origin, ChunkBytes stored, int[] localOrigin, int[] localShape);
     }
 
-    /** A non-empty sub-chunk to fetch: its byte range in the shard and where its elements land. */
-    private record SubChunk(long offset, long length, int[] origin) {
+    /**
+     * A non-empty sub-chunk to fetch: its byte range in the shard, where its elements land, and the part of
+     * it the region covers.
+     */
+    private record SubChunk(long offset, long length, int[] origin, int[] localOrigin, int[] localShape) {
     }
 
     /**
@@ -250,6 +274,10 @@ final class ShardingCodec implements ArrayBytesCodec {
      * gap) are merged into one {@link ChunkBytes#readRange} and then sliced apart. A shard packs its
      * sub-chunks contiguously, so a run of them usually needs a single fetch, which matters most over
      * HTTP, where each fetch is a round trip.
+     *
+     * <p>A sub-chunk that is itself a shard read in part ({@link ChunkPipeline#readsPartially}), and that the
+     * region covers only in part, is not fetched: the sink gets a {@link ChunkBytes#slice} of the source,
+     * through which the inner shard reads its own index and the inner sub-chunks it needs.
      */
     private void forEachSubChunk(ChunkBytes source, long[] entries, int[] regionOrigin, int[] regionShape,
                                  SubChunkSink sink) {
@@ -265,6 +293,7 @@ final class ShardingCodec implements ArrayBytesCodec {
             first[i] = regionOrigin[i] / subChunkShape[i];
             last[i] = (regionOrigin[i] + regionShape[i] - 1) / subChunkShape[i];
         }
+        boolean partialInner = inner.readsPartially();
         List<SubChunk> needed = new ArrayList<>();
         int[] coord = first.clone();
         while (true) {
@@ -279,7 +308,13 @@ final class ShardingCodec implements ArrayBytesCodec {
                 for (int i = 0; i < rank; i++) {
                     origin[i] = coord[i] * subChunkShape[i];
                 }
-                needed.add(new SubChunk(offset, length, origin));
+                int[][] overlap = Pipelines.intersect(origin, subChunkShape, regionOrigin, regionShape);
+                int[] local = Pipelines.minus(overlap[0], origin);
+                if (partialInner && !Arrays.equals(overlap[1], subChunkShape)) {
+                    sink.accept(origin, source.slice(offset, length), local, overlap[1]);
+                } else {
+                    needed.add(new SubChunk(offset, length, origin, local, overlap[1]));
+                }
             }
             int d = rank - 1;
             for (; d >= 0; d--) {
@@ -319,8 +354,9 @@ final class ShardingCodec implements ArrayBytesCodec {
             for (int k = i; k < j; k++) {
                 SubChunk s = needed.get(k);
                 int localOffset = (int) (s.offset - groupStart);
-                sink.accept(s.origin, j == i + 1 ? group // a lone sub-chunk is the whole fetch
-                        : Arrays.copyOfRange(group, localOffset, localOffset + (int) s.length));
+                byte[] stored = j == i + 1 ? group // a lone sub-chunk is the whole fetch
+                        : Arrays.copyOfRange(group, localOffset, localOffset + (int) s.length);
+                sink.accept(s.origin, ChunkBytes.of(stored), s.localOrigin, s.localShape);
             }
             i = j;
         }
@@ -342,7 +378,7 @@ final class ShardingCodec implements ArrayBytesCodec {
             byte[] sub = new byte[emptySub.length];
             Pipelines.copyBox(array.data, array.shape, origin, sub, subChunkShape, zero, subChunkShape, elementSize);
             return !writeEmptyChunks && Arrays.equals(sub, emptySub) ? null // all fill: omitted
-                    : inner.encode(sub, fillElement);
+                    : inner.encode(sub, fillElement, writeEmptyChunks);
         });
         return shard != null ? shard : assembleEmpty();
     }
@@ -357,7 +393,8 @@ final class ShardingCodec implements ArrayBytesCodec {
         byte[] shard = assemble((linear, origin) -> {
             Object[] sub = vlen.newArray(Pipelines.elementCount(subChunkShape));
             Pipelines.copyBox(chunk, shape, origin, sub, subChunkShape, zero, subChunkShape);
-            return !writeEmptyChunks && vlen.isAllFill(sub, fill) ? null : inner.encodeVlen(sub, fill, false);
+            return !writeEmptyChunks && vlen.isAllFill(sub, fill) ? null
+                    : inner.encodeVlen(sub, fill, writeEmptyChunks);
         });
         return shard != null ? shard : assembleEmpty();
     }
@@ -366,7 +403,8 @@ final class ShardingCodec implements ArrayBytesCodec {
      * Rewrites a shard after a write to {@code [regionOrigin, regionOrigin + regionShape)} of it (PF2).
      * {@code chunk} holds the new elements in that region; outside it, it is ignored. A sub-chunk the
      * region does not touch keeps its stored bytes; one it covers is encoded from {@code chunk}; one it
-     * covers partly is decoded, updated, and encoded. Nothing else is decoded or encoded.
+     * covers partly is decoded, updated, and encoded, or, if it is itself a shard, updated the same way,
+     * one level down. Nothing else is decoded or encoded.
      *
      * @param oldShard         the shard's stored bytes, or {@code null} if it is absent
      * @param writeEmptyChunks whether a touched sub-chunk that holds only the fill value is stored rather
@@ -395,15 +433,25 @@ final class ShardingCodec implements ArrayBytesCodec {
             if (overlap == null) {
                 return stored; // untouched: keep its bytes (or its absence)
             }
-            byte[] sub;
-            if (Arrays.equals(overlap[1], subChunkShape)) {
-                sub = new byte[emptySub.length]; // wholly rewritten
-            } else {
-                sub = stored == null ? emptySub.clone() : inner.decode(stored);
+            int[] local = Pipelines.minus(overlap[0], origin);
+            boolean whole = Arrays.equals(overlap[1], subChunkShape);
+            if (!whole && inner.canUpdateShard()) {
+                // A nested shard: rewrite only the inner sub-chunks the write touches.
+                byte[] part = new byte[emptySub.length]; // read only inside the written region
+                Pipelines.copyBox(chunk, shape, overlap[0], part, subChunkShape, local, overlap[1], elementSize);
+                return inner.updateShard(stored, part, fillElement, local, overlap[1], writeEmptyChunks);
             }
-            Pipelines.copyBox(chunk, shape, overlap[0], sub, subChunkShape, Pipelines.minus(overlap[0], origin),
-                    overlap[1], elementSize);
-            return !writeEmptyChunks && Arrays.equals(sub, emptySub) ? null : inner.encode(sub, fillElement);
+            byte[] sub;
+            if (whole) {
+                sub = new byte[emptySub.length]; // wholly rewritten
+            } else if (stored == null) {
+                sub = emptySub.clone();
+            } else {
+                sub = present(inner.decodeChunk(ChunkBytes.of(stored), fillElement, zero, subChunkShape));
+            }
+            Pipelines.copyBox(chunk, shape, overlap[0], sub, subChunkShape, local, overlap[1], elementSize);
+            return !writeEmptyChunks && Arrays.equals(sub, emptySub) ? null
+                    : inner.encode(sub, fillElement, writeEmptyChunks);
         });
     }
 

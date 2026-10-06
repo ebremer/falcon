@@ -6,9 +6,10 @@ every codec Falcon writes, sharding with the index at either end, partial writes
 configurations Falcon must honour in arrays it did not create (for those, the stored bytes are checked to
 follow the configuration as well: zstd checksums, Blosc shuffle modes). P2 added variable-length bytes
 (F5), arrays written with write_empty_chunks (F7: every chunk, and every sub-chunk of a shard, must be
-stored), and resized arrays (F6: what a shrink cut off must read as fill after growing back, and the chunks
-outside the smaller shape must be gone). Dev-time tool; zarr-python is not a Falcon dependency. Run it
-before every release:
+stored), resized arrays (F6: what a shrink cut off must read as fill after growing back, and the chunks
+outside the smaller shape must be gone), nested shards (F11), and uint64 and complex values written with
+the exact writers (F8). Dev-time tool; zarr-python is not a Falcon dependency. Run it before every
+release:
 
     mvn -pl zarr -am compile
     java -cp "zarr/target/classes;core/target/classes" tools/fixtures/WriteZarrCases.java OUT_DIR
@@ -60,6 +61,8 @@ def value(dtype, i):
         return math.nan if i % 23 == 3 else float(np.float32(i * 0.1))
     if dtype == "float64":
         return i * 0.1 - 3
+    if dtype == "uint64x":  # F8's writeUnsignedLongs: the whole range, most values with no exact double
+        return (i * 0x9E3779B97F4A7C15 + 0xFFFF) % 2**64
     if dtype in ("complex64", "complex128"):
         return complex(i, -i * 0.5)
     raise ValueError(dtype)
@@ -118,6 +121,12 @@ def layout_problem(directory, name):
                 for k in range(4):
                     if index[16 * k:16 * k + 16] == b"\xff" * 16:
                         return f"{os.path.basename(path)}: sub-chunk {k} omitted, though written as fill"
+    if "_nested" in name:  # F11: the metadata must really nest a shard in a shard
+        meta = json.load(open(os.path.join(directory, name, "zarr.json"), encoding="utf-8"))
+        outer = meta["codecs"][0]
+        if outer["name"] != "sharding_indexed" or not any(
+                c["name"] == "sharding_indexed" for c in outer["configuration"]["codecs"]):
+            return "not a shard nested in a shard"
     if "_resized" in name:
         left = [f for f in chunk_files(directory, name)
                 if os.path.relpath(f, os.path.join(directory, name, "c")).split(os.sep)[0] == "2"]

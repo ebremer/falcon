@@ -17,9 +17,11 @@ import java.nio.ShortBuffer;
  *
  * <p>Each reader widens where it can and refuses where it cannot: {@code readDoubles} accepts any numeric
  * type (integers and floats), {@code readLongs}/{@code readInts} accept the integer types that fit, and
- * {@code readFloats} accepts the float types. Types that do not fit (for example {@code uint64} as
- * {@code long}, or {@code complex}/{@code r*} as any primitive) raise {@link ZarrException}; use the raw
- * element bytes for those.
+ * {@code readFloats} accepts the float types. Types that do not fit raise {@link ZarrException}: whether a
+ * type fits is decided by the type, not by the values stored. Two readers cover the rest exactly (F8):
+ * {@code readUnsignedLongs} gives any unsigned type's values, {@code uint64}'s as its 64 bits, and
+ * {@code readComplex} gives a complex type's parts as {@code double}s. The raw element bytes cover
+ * {@code r*}.
  */
 public final class Elements {
 
@@ -83,7 +85,7 @@ public final class Elements {
                     default -> bb.asDoubleBuffer().get(out);
                 }
             }
-            case COMPLEX, RAW, STRING -> throw cannotRead(dt, "double");
+            case COMPLEX, RAW, STRING, BYTES -> throw cannotRead(dt, "double");
         }
         return out;
     }
@@ -117,10 +119,11 @@ public final class Elements {
         switch (dt.kind()) {
             case BOOL, INT, UINT -> {
                 if (unsigned && dt.byteCount() == 8) {
-                    throw new ZarrException("uint64 values may exceed long; read as double or raw bytes");
+                    throw new ZarrException("uint64 values may exceed long; use readUnsignedLongs() for exact"
+                            + " values, or readDoubles()");
                 }
             }
-            case FLOAT, COMPLEX, RAW, STRING -> throw cannotRead(dt, "long");
+            case FLOAT, COMPLEX, RAW, STRING, BYTES -> throw cannotRead(dt, "long");
         }
         ByteBuffer bb = ByteBuffer.wrap(buf).order(order);
         long[] out = new long[count];
@@ -163,7 +166,7 @@ public final class Elements {
                     throw new ZarrException("uint32/uint64 may exceed int; read as long or double");
                 }
             }
-            case FLOAT, COMPLEX, RAW, STRING -> throw cannotRead(dt, "int");
+            case FLOAT, COMPLEX, RAW, STRING, BYTES -> throw cannotRead(dt, "int");
         }
         ByteBuffer bb = ByteBuffer.wrap(buf).order(order);
         int[] out = new int[count];
@@ -181,6 +184,45 @@ public final class Elements {
                 }
             }
             default -> bb.asIntBuffer().get(out);
+        }
+        return out;
+    }
+
+    /**
+     * The elements of an unsigned integer type as {@code long}s holding their values exactly: uint8, uint16,
+     * and uint32 zero-extended, and uint64 as its 64 bits, so that a value of 2<sup>63</sup> or more is a
+     * negative {@code long} which {@link Long#toUnsignedString(long)}, {@link Long#compareUnsigned}, and
+     * {@link Long#divideUnsigned} read correctly.
+     */
+    public static long[] toUnsignedLongs(byte[] buf, DataType dt, ByteOrder order, int count) {
+        if (dt.kind() != DataTypeKind.UINT) {
+            throw cannotRead(dt, "unsigned long");
+        }
+        if (dt.byteCount() < 8) {
+            return toLongs(buf, dt, order, count); // zero-extended
+        }
+        long[] out = new long[count];
+        ByteBuffer.wrap(buf).order(order).asLongBuffer().get(out);
+        return out;
+    }
+
+    /**
+     * The elements of a complex type as {@code double}s, two per element: the real part, then the imaginary,
+     * as numpy lays complex numbers out. A complex64's float parts widen exactly.
+     */
+    public static double[] toComplex(byte[] buf, DataType dt, ByteOrder order, int count) {
+        if (dt.kind() != DataTypeKind.COMPLEX) {
+            throw cannotRead(dt, "complex");
+        }
+        ByteBuffer bb = ByteBuffer.wrap(buf).order(order);
+        double[] out = new double[2 * count]; // an element is at least 8 bytes, so this fits
+        if (dt.byteCount() == 8) {
+            FloatBuffer v = bb.asFloatBuffer();
+            for (int i = 0; i < out.length; i++) {
+                out[i] = v.get(i);
+            }
+        } else {
+            bb.asDoubleBuffer().get(out);
         }
         return out;
     }
@@ -229,6 +271,54 @@ public final class Elements {
     }
 
     /**
+     * Encodes {@code values}, each taken as an unsigned 64-bit value (as {@link #toUnsignedLongs} gives
+     * them), into an unsigned integer type: uint64 stores the bits as they are, and a narrower type takes a
+     * value up to its maximum and refuses a larger one.
+     *
+     * @throws IllegalArgumentException if a value is too large for the type
+     * @throws ZarrException            if the data type is not an unsigned integer type
+     */
+    public static byte[] fromUnsignedLongs(long[] values, DataType dt, ByteOrder order) {
+        if (dt.kind() != DataTypeKind.UINT) {
+            throw new ZarrException("writeUnsignedLongs needs an unsigned integer data type, not '" + dt.name()
+                    + "'; use writeLongs()");
+        }
+        int es = dt.byteCount();
+        ByteBuffer bb = allocate(values.length, es, order);
+        for (int i = 0; i < values.length; i++) {
+            if (es < 8 && Long.compareUnsigned(values[i], max(dt)) > 0) {
+                throw cannotStore(Long.toUnsignedString(values[i]), i, dt, range(dt));
+            }
+            putInteger(bb, i * es, es, values[i]);
+        }
+        return bb.array();
+    }
+
+    /**
+     * Encodes complex values given as {@code double}s, two per element (the real part, then the imaginary),
+     * into a complex type. A complex64 rounds each part to the nearest float, as {@link #fromDoubles} does
+     * for float32, and refuses a finite part beyond float's range.
+     *
+     * @throws IllegalArgumentException if the count is odd, or a part is out of range
+     * @throws ZarrException            if the data type is not a complex type
+     */
+    public static byte[] fromComplex(double[] values, DataType dt, ByteOrder order) {
+        if (dt.kind() != DataTypeKind.COMPLEX) {
+            throw new ZarrException("writeComplex needs a complex data type, not '" + dt.name() + "'");
+        }
+        if (values.length % 2 != 0) {
+            throw new IllegalArgumentException("complex values come in pairs (real, imaginary), but got "
+                    + values.length + " doubles");
+        }
+        int part = dt.byteCount() / 2;
+        ByteBuffer bb = allocate(values.length / 2, dt.byteCount(), order);
+        for (int i = 0; i < values.length; i++) {
+            putFloat(bb, i * part, dt, part, values[i], i / 2);
+        }
+        return bb.array();
+    }
+
+    /**
      * One element's bytes holding {@code value}, under the same rules as {@link #fromDoubles}.
      *
      * @throws IllegalArgumentException if the data type cannot hold {@code value}
@@ -257,7 +347,9 @@ public final class Elements {
     private static int requireNumeric(DataType dt) {
         return switch (dt.kind()) {
             case BOOL, INT, UINT, FLOAT -> dt.byteCount();
-            case COMPLEX, RAW -> throw new ZarrException(
+            case COMPLEX -> throw new ZarrException(dt.name()
+                    + " cannot be written from a primitive array; use writeComplex() or the raw element bytes");
+            case RAW -> throw new ZarrException(
                     dt.name() + " cannot be written from a primitive array; use the raw element bytes");
             case STRING -> throw new ZarrException(
                     "the '" + dt.name() + "' data type is variable-length; use writeStrings()");
@@ -395,6 +487,12 @@ public final class Elements {
     }
 
     private static ZarrException cannotRead(DataType dt, String as) {
-        return new ZarrException(dt.name() + " cannot be read as " + as + "; use the raw element bytes");
+        String instead = switch (dt.kind()) {
+            case COMPLEX -> "readComplex() or the raw element bytes";
+            case STRING -> "readStrings()";
+            case BYTES -> "readByteArrays()";
+            default -> "the raw element bytes";
+        };
+        return new ZarrException(dt.name() + " cannot be read as " + as + "; use " + instead);
     }
 }

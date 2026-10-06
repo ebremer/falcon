@@ -5,8 +5,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.ebremer.falcon.core.compress.zstd.ZstdEncoder;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.Random;
 import org.junit.jupiter.api.Test;
 
@@ -172,5 +175,32 @@ class BloscEncoderTest {
         assertThrows(IllegalArgumentException.class, () -> BloscEncoder.compress(new byte[8], 4, 3, 0));
         assertThrows(IllegalArgumentException.class, () -> BloscEncoder.compress(new byte[8], 4, 1, -1));
         assertThrows(IllegalArgumentException.class, () -> BloscEncoder.compress(new byte[8], 4, 1, 0, 10));
+    }
+
+    /**
+     * clevel sets the zstd level inside Blosc as c-blosc 1.x sets it: {@code 2 * clevel - 1}, and zstd's
+     * highest for 9. Measured against numcodecs 0.17's c-blosc, whose zstd frames for clevels 1 and 3 to 9
+     * are libzstd's at exactly those levels. Before F12 Falcon's encoder had one level.
+     */
+    @Test
+    void clevelSetsTheZstdLevelAsCBloscDoes() {
+        int[] expected = {-1, 1, 3, 5, 7, 9, 11, 13, 15, 22};
+        for (int clevel = 1; clevel <= 9; clevel++) {
+            assertEquals(expected[clevel], BloscEncoder.zstdLevel(clevel), "clevel " + clevel);
+        }
+        StringBuilder sb = new StringBuilder();
+        Random random = new Random(4);
+        while (sb.length() < 60_000) {
+            sb.append("chunk").append(random.nextInt(500)).append(random.nextBoolean() ? " shard " : " array ");
+        }
+        byte[] data = sb.toString().getBytes(StandardCharsets.US_ASCII);
+        for (int clevel : new int[] {1, 5, 9}) {
+            // One block, not shuffled: the stream at byte 24 is the zstd frame of the data itself.
+            byte[] buffer = BloscEncoder.compress(data, 1, BloscEncoder.NOSHUFFLE, data.length, clevel);
+            byte[] frame = Arrays.copyOfRange(buffer, 24, 24 + le32(buffer, 20));
+            assertArrayEquals(ZstdEncoder.compress(data, BloscEncoder.zstdLevel(clevel), false), frame,
+                    "clevel " + clevel);
+            assertArrayEquals(data, BloscDecoder.decompress(buffer));
+        }
     }
 }

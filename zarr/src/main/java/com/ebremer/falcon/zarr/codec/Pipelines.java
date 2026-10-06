@@ -144,4 +144,13 @@ final class Pipelines {
         }
         return out;
     }
+
+    /** {@code a + b}, element by element. */
+    static int[] plus(int[] a, int[] b) {
+        int[] out = new int[a.length];
+        for (int i = 0; i < a.length; i++) {
+            out[i] = a[i] + b[i];
+        }
+        return out;
+    }
 }

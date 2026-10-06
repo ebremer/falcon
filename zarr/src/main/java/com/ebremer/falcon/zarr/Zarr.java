@@ -6,13 +6,15 @@ import com.ebremer.falcon.zarr.store.FileSystemStore;
 import com.ebremer.falcon.zarr.store.Store;
 import java.nio.file.Path;
 import java.util.Map;
+import java.util.NoSuchElementException;
 
 /**
  * Entry point for reading a Zarr v3 hierarchy.
  *
  * <p>{@link #open(Store)} reads the root {@code zarr.json} and returns the root {@link ZarrNode} &mdash;
  * a {@link ZarrGroup} or a {@link ZarrArray}. From a group, navigate to children with
- * {@link ZarrGroup#child}, {@link ZarrGroup#group}, {@link ZarrGroup#array}, and the listing accessors.
+ * {@link ZarrGroup#child}, {@link ZarrGroup#group}, {@link ZarrGroup#array}, and the listing accessors, or
+ * open a node deeper down by its path with {@link #open(Store, String)}.
  */
 public final class Zarr {
 
@@ -55,6 +57,62 @@ public final class Zarr {
     public static ZarrNode open(Store store, boolean useConsolidated) {
         return ZarrNode.tryOpen(store, "", useConsolidated, true).orElseThrow(() -> new ZarrFormatException(
                 "no root zarr.json, .zarray, or .zgroup found: not a Zarr store"));
+    }
+
+    /**
+     * Opens the node at {@code path} in {@code store} (F9): {@code ""} or {@code "/"} for the root, else
+     * names joined by {@code '/'}, with or without a leading {@code '/'} ({@code "model/weights"}). The node's
+     * metadata is read directly, one request (for a v3 node) whatever the depth, as zarr-python's
+     * {@code open(store, path=...)} does; the groups above it are not opened, so their consolidated metadata
+     * is not consulted. A group opened here uses its own consolidated metadata, if it has any:
+     * {@code open(store, path, true)}.
+     *
+     * @throws NoSuchElementException   if there is no node at a non-root {@code path}
+     * @throws IllegalArgumentException if the path has an empty name, or a {@code "."} or {@code ".."}
+     * @throws ZarrFormatException      if there is no root node (for the root path), or the node's metadata is
+     *                                  malformed
+     * @throws ZarrUnsupportedException if the node uses an unimplemented feature
+     */
+    public static ZarrNode open(Store store, String path) {
+        return open(store, path, true);
+    }
+
+    /**
+     * Opens the node at {@code path} in {@code store}, as {@link #open(Store, String)} does, with a group
+     * using its consolidated metadata only if {@code useConsolidated} (see {@link #open(Store, boolean)}).
+     *
+     * @throws NoSuchElementException   if there is no node at a non-root {@code path}
+     * @throws IllegalArgumentException if the path has an empty name, or a {@code "."} or {@code ".."}
+     * @throws ZarrFormatException      if there is no root node (for the root path), or the node's metadata or
+     *                                  its consolidated metadata is malformed
+     * @throws ZarrUnsupportedException if the node uses an unimplemented feature
+     */
+    public static ZarrNode open(Store store, String path, boolean useConsolidated) {
+        String nodePath = path.startsWith("/") ? path.substring(1) : path;
+        if (nodePath.isEmpty()) {
+            return open(store, useConsolidated);
+        }
+        String relative = ZarrNode.relativePath(nodePath);
+        return ZarrNode.tryOpen(store, relative, useConsolidated, true).orElseThrow(() ->
+                new NoSuchElementException("no node at '" + relative + "': no zarr.json, .zarray, or .zgroup"));
+    }
+
+    /**
+     * Opens the group at {@code path} in {@code store}; see {@link #open(Store, String)}.
+     *
+     * @throws IllegalStateException if the node there is an array
+     */
+    public static ZarrGroup openGroup(Store store, String path) {
+        return open(store, path).asGroup();
+    }
+
+    /**
+     * Opens the array at {@code path} in {@code store}; see {@link #open(Store, String)}.
+     *
+     * @throws IllegalStateException if the node there is a group
+     */
+    public static ZarrArray openArray(Store store, String path) {
+        return open(store, path).asArray();
     }
 
     /** Opens the root node of the hierarchy in the store directory at {@code directory} (read-only). */

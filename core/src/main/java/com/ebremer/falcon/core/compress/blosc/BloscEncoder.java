@@ -68,8 +68,9 @@ public final class BloscEncoder {
     /**
      * Compresses {@code data} into a Blosc buffer.
      *
-     * <p>Falcon's zstd encoder has one level, so {@code clevel} only picks the automatic block size, as in
-     * c-blosc, except that clevel 0 stores the data uncompressed, as c-blosc does. A type size above 255
+     * <p>{@code clevel} picks the automatic block size and the zstd level, as c-blosc does: clevel
+     * {@code c} below 9 compresses at zstd level {@code 2c - 1}, and 9 at zstd's highest, 22
+     * ({@link #zstdLevel}); clevel 0 stores the data uncompressed. A type size above 255
      * is written as 1 and not shuffled. Bit-shuffled data whose length is not a whole number of elements
      * is byte-shuffled instead: c-blosc cannot restore the partial element at the end of a bit-shuffled
      * block.
@@ -114,7 +115,7 @@ public final class BloscEncoder {
             int start = b * blocksize;
             int length = Math.min(blocksize, nbytes - start);
             byte[] block = filterBlock(data, start, length, ts, filter, filtered, tmp);
-            byte[] payload = ZstdEncoder.compress(block);
+            byte[] payload = ZstdEncoder.compress(block, zstdLevel(clevel), false);
             // A stream whose length equals the block's size is stored raw (c-blosc's rule, both ways).
             streams[b] = payload.length < length ? payload : block;
             cbytes += 4 + streams[b].length;
@@ -134,6 +135,15 @@ public final class BloscEncoder {
             position += 4 + streams[b].length;
         }
         return out;
+    }
+
+    /**
+     * The zstd level c-blosc 1.x compresses at for {@code clevel} 1 to 9: {@code 2 * clevel - 1}, and zstd's
+     * highest (22) for 9. Measured against numcodecs 0.17's c-blosc: for clevels 1 and 3 to 9, the zstd
+     * frame in its buffer is byte for byte libzstd's at that level.
+     */
+    static int zstdLevel(int clevel) {
+        return clevel < 9 ? 2 * clevel - 1 : ZstdEncoder.MAX_LEVEL;
     }
 
     /**

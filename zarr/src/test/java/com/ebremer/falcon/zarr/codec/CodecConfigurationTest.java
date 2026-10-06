@@ -3,21 +3,27 @@ package com.ebremer.falcon.zarr.codec;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.ebremer.falcon.core.compress.zstd.ZstdEncoder;
+import com.ebremer.falcon.zarr.ArraySpec;
 import com.ebremer.falcon.zarr.ZarrFormatException;
 import com.ebremer.falcon.zarr.datatype.DataType;
 import com.ebremer.falcon.zarr.json.Json;
 import com.ebremer.falcon.zarr.json.JsonObject;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Random;
 import org.junit.jupiter.api.Test;
 
 /**
  * Writing honours a codec's configuration (P1 I9). Falcon ignored it: zstd frames never carried the
  * checksum a {@code "checksum": true} array asks for, and Blosc always byte-shuffled with automatic blocks,
  * whatever {@code shuffle}, {@code typesize}, {@code blocksize}, or {@code clevel} said. The output was
- * still readable, but not what the metadata describes.
+ * still readable, but not what the metadata describes. The zstd {@code level}, and the zstd level Blosc's
+ * {@code clevel} implies, took effect with P2 F12, when the encoder gained levels.
  */
 class CodecConfigurationTest {
 
@@ -94,5 +100,70 @@ class CodecConfigurationTest {
                 () -> pipeline(DataType.INT32, 16, "{\"name\":\"zstd\",\"configuration\":{\"checksum\":\"yes\"}}"));
         assertThrows(ZarrFormatException.class,
                 () -> pipeline(DataType.INT32, 16, "{\"name\":\"zstd\",\"configuration\":{\"level\":1.5}}"));
+    }
+
+    /** Text-like bytes, which every level compresses, and higher levels further. */
+    private static byte[] words() {
+        Random random = new Random(9);
+        StringBuilder sb = new StringBuilder();
+        String[] w = {"zarr", "chunk", "shard", "float", "array", "index", "codec", "level", "the", "of"};
+        while (sb.length() < 300_000) {
+            sb.append(w[random.nextInt(w.length)]).append(random.nextInt(50)).append(' ');
+        }
+        return sb.toString().getBytes(StandardCharsets.US_ASCII);
+    }
+
+    private static ChunkPipeline zstd(String configuration, int n) {
+        return ChunkPipeline.of(DataType.UINT8, new long[] {n},
+                List.of(Json.parse("{\"name\":\"bytes\"}").asObject(),
+                        Json.parse("{\"name\":\"zstd\",\"configuration\":" + configuration + "}").asObject()));
+    }
+
+    /** The zstd {@code level} takes effect (F12): it had none, since the encoder had one level. */
+    @Test
+    void zstdWritesAtItsConfiguredLevel() {
+        byte[] data = words();
+        byte[] one = zstd("{\"level\":1,\"checksum\":false}", data.length).encode(data, new byte[1]);
+        byte[] nineteen = zstd("{\"level\":19,\"checksum\":false}", data.length).encode(data, new byte[1]);
+        assertTrue(nineteen.length < one.length, nineteen.length + " at level 19, " + one.length + " at level 1");
+        assertArrayEquals(ZstdEncoder.compress(data, 19, false), nineteen);
+        // Level 0, or none, is the default, as for libzstd.
+        byte[] defaulted = zstd("{\"checksum\":false}", data.length).encode(data, new byte[1]);
+        assertArrayEquals(ZstdEncoder.compress(data, ZstdEncoder.DEFAULT_LEVEL, false), defaulted);
+        assertArrayEquals(defaulted, zstd("{\"level\":0,\"checksum\":false}", data.length).encode(data, new byte[1]));
+        for (byte[] frame : new byte[][] {one, nineteen, defaulted}) {
+            assertArrayEquals(data, zstd("{}", data.length).decode(frame));
+        }
+    }
+
+    /** Blosc's {@code clevel} picks the zstd level inside it as c-blosc does (F12). */
+    @Test
+    void bloscClevelSetsTheZstdLevel() {
+        byte[] data = words();
+        ChunkPipeline low = ChunkPipeline.of(DataType.UINT8, new long[] {data.length}, List.of(
+                Json.parse("{\"name\":\"bytes\"}").asObject(),
+                Json.parse("{\"name\":\"blosc\",\"configuration\":{\"cname\":\"zstd\",\"clevel\":1,"
+                        + "\"shuffle\":\"noshuffle\",\"typesize\":1,\"blocksize\":0}}").asObject()));
+        ChunkPipeline high = ChunkPipeline.of(DataType.UINT8, new long[] {data.length}, List.of(
+                Json.parse("{\"name\":\"bytes\"}").asObject(),
+                Json.parse("{\"name\":\"blosc\",\"configuration\":{\"cname\":\"zstd\",\"clevel\":9,"
+                        + "\"shuffle\":\"noshuffle\",\"typesize\":1,\"blocksize\":0}}").asObject()));
+        byte[] a = low.encode(data, new byte[1]);
+        byte[] b = high.encode(data, new byte[1]);
+        assertTrue(b.length < a.length, b.length + " at clevel 9, " + a.length + " at clevel 1");
+        assertArrayEquals(data, low.decode(b));
+    }
+
+    /** {@code ArraySpec.zstd(level)} records the level; libzstd's range is checked. */
+    @Test
+    void anArraySpecRecordsItsZstdLevel() {
+        ArraySpec spec = ArraySpec.builder(new long[] {10}, DataType.INT32).zstd(7).build();
+        assertEquals(7, spec.toJson().get("codecs").asArray().get(1).asObject().get("configuration").asObject()
+                .get("level").asNumber().intValue());
+        assertEquals(0, ArraySpec.builder(new long[] {10}, DataType.INT32).zstd().build().toJson().get("codecs")
+                .asArray().get(1).asObject().get("configuration").asObject().get("level").asNumber().intValue());
+        assertThrows(IllegalArgumentException.class, () -> ArraySpec.builder(new long[] {1}, DataType.INT8).zstd(23));
+        assertThrows(IllegalArgumentException.class,
+                () -> ArraySpec.builder(new long[] {1}, DataType.INT8).zstd(-131073));
     }
 }

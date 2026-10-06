@@ -1,5 +1,6 @@
 package com.ebremer.falcon.zarr;
 
+import com.ebremer.falcon.zarr.chunk.RegularChunkGrid;
 import com.ebremer.falcon.zarr.data.ChunkAssembler;
 import com.ebremer.falcon.zarr.data.ChunkCache;
 import com.ebremer.falcon.zarr.data.Resize;
@@ -20,6 +21,8 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.stream.LongStream;
+import java.util.stream.Stream;
 
 /**
  * An array in a Zarr hierarchy: an N-dimensional grid of elements of one data type, stored in chunks.
@@ -88,6 +91,29 @@ public final class ZarrArray extends ZarrNode {
     /** The chunk shape (a defensive copy); same rank as {@link #shape()}. */
     public long[] chunkShape() {
         return metadata.chunkShape();
+    }
+
+    /**
+     * The shape of the pieces a read fetches and decodes on its own (a defensive copy). For a sharded array
+     * these are the sub-chunks its shards are made of (zarr-python's {@code chunks}, where
+     * {@link #chunkShape()} is its {@code shards}): a read decodes only the sub-chunks it overlaps, so
+     * {@code blocks(innerChunkShape())} reads a sharded array one sub-chunk at a time (F10). For any other
+     * array, and for one whose shards are transposed before they are sharded (which are decoded whole), it
+     * is the chunk shape. In a nested shard, the sub-chunks are the outer shard's.
+     *
+     * @throws ZarrFormatException      if the array's codecs are malformed
+     * @throws ZarrUnsupportedException if they use an unimplemented codec
+     */
+    public long[] innerChunkShape() {
+        int[] sub = metadata.pipeline().subChunkShape();
+        if (sub == null) {
+            return metadata.chunkShape();
+        }
+        long[] out = new long[sub.length];
+        for (int i = 0; i < sub.length; i++) {
+            out[i] = sub[i];
+        }
+        return out;
     }
 
     /** The number of chunks along each dimension (a defensive copy): {@code ceil(shape / chunkShape)}. */
@@ -195,6 +221,22 @@ public final class ZarrArray extends ZarrNode {
         return selectAll().readInts();
     }
 
+    /**
+     * Reads the whole array of an unsigned integer type exactly, uint64 as its 64 bits; see
+     * {@link Selection#readUnsignedLongs()}.
+     */
+    public long[] readUnsignedLongs() {
+        return selectAll().readUnsignedLongs();
+    }
+
+    /**
+     * Reads the whole complex array as {@code double}s, two per element (real, imaginary); see
+     * {@link Selection#readComplex()}.
+     */
+    public double[] readComplex() {
+        return selectAll().readComplex();
+    }
+
     /** Reads the whole array's raw decoded element bytes, in C order, in the array's byte order. */
     public byte[] readRawBytes() {
         return selectAll().readRawBytes();
@@ -242,6 +284,22 @@ public final class ZarrArray extends ZarrNode {
         selectAll().writeInts(values);
     }
 
+    /**
+     * Writes the whole unsigned integer array from {@code values}, each taken as an unsigned 64-bit value;
+     * see {@link Selection#writeUnsignedLongs(long[])}.
+     */
+    public void writeUnsignedLongs(long[] values) {
+        selectAll().writeUnsignedLongs(values);
+    }
+
+    /**
+     * Writes the whole complex array from {@code values}, two per element (real, imaginary); see
+     * {@link Selection#writeComplex(double[])}.
+     */
+    public void writeComplex(double[] values) {
+        selectAll().writeComplex(values);
+    }
+
     /** Writes the whole array from raw element bytes (C order, this array's byte order). */
     public void writeRawBytes(byte[] elements) {
         selectAll().writeRawBytes(elements);
@@ -251,11 +309,29 @@ public final class ZarrArray extends ZarrNode {
      * A selection per chunk, each covering that chunk's in-bounds region (edge chunks are clamped to the
      * array bound). Reading one block at a time streams an array whose whole contents would not fit in a
      * single Java array (a whole-array {@code readDoubles()} is capped near 2&nbsp;GB); the stream is lazy,
-     * so blocks are produced without materializing them all.
+     * so blocks are produced without materializing them all. A chunk of a sharded array is a whole shard,
+     * which may be large: {@code blocks(innerChunkShape())} goes sub-chunk by sub-chunk.
      */
-    public java.util.stream.Stream<Selection> blocks() {
-        var grid = metadata.grid();
-        return java.util.stream.LongStream.range(0, grid.chunkCount()).mapToObj(i -> {
+    public Stream<Selection> blocks() {
+        return blocks(metadata.chunkShape());
+    }
+
+    /**
+     * Selections tiling the array in blocks of {@code blockShape}, laid from the origin, in C order over the
+     * blocks; a block at the array's far edge is cut to the array. The stream is lazy, as {@link #blocks()}'s
+     * is.
+     *
+     * <p>A block shape that divides the chunk shape lets each block read part of one chunk; in a sharded
+     * array, a block of {@link #innerChunkShape()} fetches and decodes exactly one sub-chunk (F10). Each such
+     * read also fetches the shard's index unless the handle caches it: read through
+     * {@link #withChunkCache(long)} to fetch each shard's index once.
+     *
+     * @param blockShape the block extent in each dimension, of this array's rank, each at least 1
+     * @throws IllegalArgumentException if the rank differs or an extent is not positive
+     */
+    public Stream<Selection> blocks(long... blockShape) {
+        RegularChunkGrid grid = new RegularChunkGrid(metadata.shape(), blockShape);
+        return LongStream.range(0, grid.chunkCount()).mapToObj(i -> {
             long[] coords = grid.chunkCoordsAt(i);
             return new Selection(this, grid.chunkOrigin(coords), grid.validExtent(coords));
         });

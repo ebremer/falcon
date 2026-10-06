@@ -130,16 +130,22 @@ public final class ZarrGroup extends ZarrNode {
     }
 
     /**
-     * The direct child with the given name, if present.
+     * The node at {@code relativePath} below this group, if present: a direct child's name ({@code "temp"})
+     * or a path through child groups ({@code "model/layers/weights"}, F9).
      *
-     * @throws IllegalArgumentException if the name cannot name a child (empty, containing {@code '/'},
-     *                                  or {@code "."} / {@code ".."})
-     * @throws ZarrFormatException      if the child's metadata is malformed
-     * @throws ZarrUnsupportedException if the child uses an unimplemented feature
+     * <p>A consolidated group finds the node in its snapshot, as it finds a direct child. Any other group
+     * opens the node's metadata directly, one request whatever the depth, as zarr-python does: the groups
+     * along the path are not opened, so a path through something that is not a group is not noticed.
+     *
+     * @throws IllegalArgumentException if the path is not one or more names joined by {@code '/'} (no empty
+     *                                  name, and no {@code "."} or {@code ".."})
+     * @throws ZarrFormatException      if the node's metadata is malformed
+     * @throws ZarrUnsupportedException if the node uses an unimplemented feature
      */
-    public Optional<ZarrNode> child(String childName) {
-        String childPath = childPath(childName);
-        return snapshot != null ? fromSnapshot(childName, childPath)
+    public Optional<ZarrNode> child(String relativePath) {
+        String relative = ZarrNode.relativePath(relativePath);
+        String childPath = path.isEmpty() ? relative : path + "/" + relative;
+        return snapshot != null ? fromSnapshot(relative, childPath)
                 : ZarrNode.tryOpen(store, childPath, useConsolidated, false);
     }
 
@@ -210,27 +216,29 @@ public final class ZarrGroup extends ZarrNode {
     }
 
     /**
-     * The direct child group with the given name.
+     * The group at {@code relativePath} below this one: a direct child's name, or a path through child
+     * groups, as {@link #child(String)} takes it.
      *
-     * @throws NoSuchElementException   if there is no child of that name
-     * @throws IllegalArgumentException if the child is an array, or the name cannot name a child
+     * @throws NoSuchElementException   if there is no node there
+     * @throws IllegalArgumentException if the node is an array, or the path is invalid
      * @throws ZarrFormatException      if the child's metadata is malformed
      * @throws ZarrUnsupportedException if the child uses an unimplemented feature
      */
-    public ZarrGroup group(String name) {
-        return requireChild(name, ZarrGroup.class, "group");
+    public ZarrGroup group(String relativePath) {
+        return requireChild(relativePath, ZarrGroup.class, "group");
     }
 
     /**
-     * The direct child array with the given name.
+     * The array at {@code relativePath} below this group: a direct child's name, or a path through child
+     * groups, as {@link #child(String)} takes it.
      *
-     * @throws NoSuchElementException   if there is no child of that name
-     * @throws IllegalArgumentException if the child is a group, or the name cannot name a child
+     * @throws NoSuchElementException   if there is no node there
+     * @throws IllegalArgumentException if the node is a group, or the path is invalid
      * @throws ZarrFormatException      if the child's metadata is malformed
      * @throws ZarrUnsupportedException if the child uses an unimplemented feature
      */
-    public ZarrArray array(String name) {
-        return requireChild(name, ZarrArray.class, "array");
+    public ZarrArray array(String relativePath) {
+        return requireChild(relativePath, ZarrArray.class, "array");
     }
 
     private <T extends ZarrNode> T requireChild(String childName, Class<T> kind, String label) {

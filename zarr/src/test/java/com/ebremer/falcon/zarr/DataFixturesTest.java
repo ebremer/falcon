@@ -119,6 +119,55 @@ class DataFixturesTest {
         assertArrayEquals(hexes(expected("bytes_transposed")), open("bytes_transposed").readByteArrays());
     }
 
+    /**
+     * zarr-python's nested shards (F11, {@code gen_zarr_nested_fixtures.py}): two levels of int32, a partial
+     * write with absent inner shards and inner sub-chunks (read as the fill value), zstd inside and a crc32c
+     * after the inner shard, three levels, and strings. Each is read whole and in regions that cut through
+     * every level.
+     */
+    @Test
+    void nestedSharding() {
+        for (String name : new String[] {"nested_2d", "nested_partial", "nested_three"}) {
+            long[] want = longs(expected(name));
+            ZarrArray a = open(name);
+            assertArrayEquals(want, a.readLongs(), name);
+            long[] shape = a.shape();
+            int rank = shape.length;
+            for (long start = 0; start < shape[0]; start += 3) {
+                long[] offset = new long[rank];
+                long[] extent = new long[rank];
+                offset[0] = start;
+                extent[0] = Math.min(2, shape[0] - start);
+                if (rank == 2) {
+                    offset[1] = start % shape[1];
+                    extent[1] = Math.min(5, shape[1] - offset[1]);
+                }
+                long[] got = a.select(offset, extent).readLongs();
+                int k = 0;
+                for (long r = offset[0]; r < offset[0] + extent[0]; r++) {
+                    if (rank == 1) {
+                        assertEquals(want[(int) r], got[k++], name + " at " + r);
+                        continue;
+                    }
+                    for (long c = offset[1]; c < offset[1] + extent[1]; c++) {
+                        assertEquals(want[(int) (r * shape[1] + c)], got[k++], name + " at " + r + "," + c);
+                    }
+                }
+            }
+        }
+        double[] doubles = expected("nested_compressed").get("values").asArray().values().stream()
+                .mapToDouble(v -> v.asNumber().doubleValue()).toArray();
+        assertArrayEquals(doubles, open("nested_compressed").readDoubles());
+        assertArrayEquals(new double[] {doubles[5 * 8 + 3], doubles[5 * 8 + 4], doubles[6 * 8 + 3], doubles[6 * 8 + 4]},
+                open("nested_compressed").select(new long[] {5, 3}, new long[] {2, 2}).readDoubles());
+
+        String[] strings = strings(expected("nested_string"));
+        ZarrArray s = open("nested_string");
+        assertArrayEquals(strings, s.readStrings());
+        assertArrayEquals(new String[] {strings[4 + 1], strings[4 + 2], strings[8 + 1], strings[8 + 2]},
+                s.select(new long[] {1, 1}, new long[] {2, 2}).readStrings());
+    }
+
     /** A 140 MB chunk: more than one libzstd block, and well past any small fixed buffer. */
     @Test
     void aChunkOver128Megabytes() {

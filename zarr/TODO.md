@@ -78,6 +78,20 @@ New API: `S3Store`, `HttpStore.builder(url).header(...)`/`requestHeaders(...)` (
 `ZarrNode.setAttributes`/`updateAttributes`, `ZarrGroup.delete` (F6); `ZarrArray.withWriteEmptyChunks`
 (F7). What remains is P2's F3, F4, and F8–F14, and P3's D3, D4, and B1.
 
+**Update (2026-10-06): P2's F8–F12 are done too.** 465 Zarr tests, 16 more under a small heap, and 63
+core tests pass; zarr-python 3.4 reads all 197 arrays `check_zarr_writer.py` checks, libzstd all 101
+frames `check_zstd_encoder.py` checks, and c-blosc 240 Blosc buffers. Behaviour changes worth knowing:
+- Falcon's zstd output is smaller and slower to make than before, and follows the configured `level`
+  (F12); Blosc's `clevel` now sets its zstd level;
+- `group.child("a/b")` is a path lookup where it used to be refused (F9);
+- nested shards open (F11).
+
+New API: `readUnsignedLongs`/`writeUnsignedLongs`, `readComplex`/`writeComplex` (F8);
+`Zarr.open(store, path)`, `openGroup`/`openArray(store, path)`, paths in `child`/`group`/`array` (F9);
+`ZarrArray.blocks(long...)`, `innerChunkShape()` (F10); `ArraySpec.Builder.zstd(level)`, and in core
+`ZstdEncoder.compress(data, level, checksum)` (F12). What remains is P2's F3, F4, F13, and F14, and P3's
+D3, D4, and B1.
+
 ## Do these first — top 10
 
 1. ~~**Z1/Z2 — node replacement destroys or corrupts data.**~~ Done 2026-10-05 (below).
@@ -840,8 +854,8 @@ Zarr's main use case is sharded data in object storage, so these matter more tha
 
 ## P2 — features & API
 
-Items 1–5 of the previous TODO's top-5 are F1–F5 below. F1, F2, F5, F6, and F7 are done (2026-10-06);
-each says what was done, then gives the original finding.
+Items 1–5 of the previous TODO's top-5 are F1–F5 below. F1, F2, and F5–F12 are done (2026-10-06); each
+says what was done, then gives the original finding.
 
 - [x] **F1 — cloud object stores (S3 / GCS / Azure).** The primary Zarr use case. First add `HttpStore`
   hooks (auth and custom headers, the missing-status policy, presigned URLs; see I7) so `HttpStore` can
@@ -969,16 +983,114 @@ each says what was done, then gives the original finding.
     - Tests: `WriteEmptyChunksTest`.
 
   The original finding follows.
-- [ ] **F8 — exact unsigned and complex reads.**
+- [x] **F8 — exact unsigned and complex reads.**
+  **Done 2026-10-06.**
+    Both, without changing what the existing readers accept (whether a type fits is still decided
+    by the type, as `readInts` refuses every uint32 array):
+    - `readUnsignedLongs()` / `writeUnsignedLongs(long[])` on `ZarrArray` and `Selection`: any unsigned type
+      exactly, uint64 as its 64 bits (a value of 2^63 or more is a negative `long` that `Long`'s unsigned
+      methods read). A narrower type refuses a value above its maximum, naming it in unsigned decimal.
+      `readLongs` on uint64 still throws, now pointing to `readUnsignedLongs`.
+    - `readComplex()` / `writeComplex(double[])`: complex64 and complex128 as interleaved (real, imaginary)
+      doubles, as numpy lays them out; a complex64 part rounds once to float and a finite part beyond its
+      range is refused, as Z4 has it. The numeric readers' messages point to these for complex arrays.
+    - zarr-python 3.4's uint64 values up to 2^64 − 1 (most with no exact double) and complex64/complex128
+      arrays, NaN and infinite parts, big-endian, and sharded, read exactly (the new
+      `gen_zarr_exact_fixtures.py`).
+    - Tests: `ExactAccessorsTest`.
+
+  The original finding follows.
   - `readLongs` on uint64 always throws (it's honest, but there's no exact path short of raw bytes).
     Offer `readUnsignedLongs` (raw bits) or allow `readLongs` when all values fit.
   - Add complex helpers.
-- [ ] **F9 — path-based navigation:** `Zarr.open(store, "a/b/c")` and `child("a/b")`. Today every level
+- [x] **F9 — path-based navigation:** `Zarr.open(store, "a/b/c")` and `child("a/b")`. Today every level
   must be chained.
-- [ ] **F10 — sharded `blocks()`.** It yields whole-shard selections, which can be hundreds of MB each.
+  **Done 2026-10-06.**
+    `ZarrGroup.child`, `group`, and `array` take a path through child groups
+    (`root.array("model/layers/weights")`), and `Zarr.open(store, path)` (with `openGroup`/`openArray` and a
+    `useConsolidated` form) opens a node by its path from the store's root; `""` or `"/"` is the root.
+    - The node's metadata is fetched directly, one request whatever the depth, as zarr-python's
+      `open(store, path=...)` does: the groups along the path are not opened. A consolidated group finds the
+      node in its snapshot, with no request. A group opened by path uses its own consolidated metadata.
+    - A path with an empty name, `.`, or `..` is an `IllegalArgumentException`; `Zarr.open` of a path to
+      nothing is a `NoSuchElementException`. Creating and deleting still take one name.
+    - Tests: `PathNavigationTest` (exact request counts), and `ZarrHierarchyTest`, whose check that
+      `child("a/b")` is refused now expects a path lookup.
+
+  The original finding follows.
+- [x] **F10 — sharded `blocks()`.** It yields whole-shard selections, which can be hundreds of MB each.
   Offer inner-chunk iteration.
-- [ ] **F11 — nested sharding.** It is written by zarr-python, and Falcon refuses it today.
-- [ ] **F12 — zstd encoder ratio.**
+  **Done 2026-10-06.**
+    `ZarrArray.blocks(long... blockShape)` tiles the array in blocks of any shape (C order, edges
+    cut to the array), and `innerChunkShape()` is the shape of a sharded array's sub-chunks (zarr-python's
+    `chunks`; `chunkShape()` is its `shards`), or the chunk shape when there are none to read alone (no
+    sharding, or a transpose before it). `blocks(innerChunkShape())` reads one sub-chunk at a time.
+    - A plain handle fetches, per block, the shard's index and that sub-chunk; a cached handle fetches each
+      shard's index once, and then exactly the shard's bytes, a sub-chunk at a time.
+    - Tests: `BlocksTest` (the request log of a 16-sub-chunk shard read block by block).
+
+  The original finding follows.
+- [x] **F11 — nested sharding.** It is written by zarr-python, and Falcon refuses it today.
+  **Done 2026-10-06.**
+    Nested sharding reads and writes, to any depth, fixed-size and variable-length alike; index
+    codecs still may not be sharded.
+    - A read of part of a nested shard reads it through a slice of the outer source (`ChunkBytes.slice`),
+      fetching only the inner index and the inner sub-chunks it needs: one element of a 16×12 → 8×6 → 4×3
+      shard is 184 bytes in 3 requests, and five levels deep a 3-element read is 6 requests. An inner shard
+      with a codec after it (`crc32c`, say) is read whole.
+    - Writes recurse: PF2's `update` goes through `inner.updateShard`, and `writeEmptyChunks` applies at
+      every level. H1's decode limits and H2's index checks hold at every level.
+    - Empty inner sub-chunks read as the fill value (the region and fill are passed down; they read as zeros
+      before), and `ChunkBytes.of(...).readRange` past the end is empty, as `Store.getRange` is.
+    - zarr-python 3.4's nested arrays read (`gen_zarr_nested_fixtures.py`: 2-D, partial, zstd inside with
+      `crc32c` after the inner shard, three levels, strings); zarr-python reads Falcon's (6
+      `check_zarr_writer.py` cases, each checked to be stored nested).
+    - **Not done:** inner shard indexes are not cached, so a cached handle refetches them.
+    - Tests: `NestedShardingTest` (request counts, a random write/read model, PF2 at both levels,
+      `writeEmptyChunks`, strings and bytes, a damaged inner index), `DataFixturesTest.nestedSharding`,
+      `RobustnessTest.corruptNestedShardsWithoutIndexChecksumsAreRejected`, the nested fixtures in the
+      bit-flip fuzz.
+
+  The original finding follows.
+- [x] **F12 — zstd encoder ratio.**
+  **Done 2026-10-06.**
+    The encoder (core) now works as libzstd's lazy strategies do:
+    - Huffman-coded literals (1 or 4 streams; weights FSE-compressed or direct, each description checked
+      by reading it back), or raw or RLE when that is smaller;
+    - FSE sequence tables fitted to each block, or RLE, predefined, or repeat, by estimated size;
+    - the three repeat offsets, tracked as the decoder tracks them;
+    - a hash-chain match finder with greedy, lazy, and lazy2 evaluation, matching across blocks within the
+      window;
+    - blocks split at 8 KiB steps where byte statistics change, as libzstd's splitter does.
+    - **Levels** follow libzstd's table for large inputs: 1 to 22, 0 meaning 3, negative the fastest
+      settings. Windows run from 512 KiB (level 1) to 8 MiB (17 and up), so libzstd's streaming API reads
+      every frame. `ZstdEncoder.compress(data, level, checksum)`; Zarr's `zstd` `level` takes effect;
+      `ArraySpec.Builder.zstd(level)`. Blosc's `clevel` sets its zstd level as c-blosc does, 2c − 1 and 22 at
+      9 (for clevels 1 and 3–9, c-blosc's frames are byte-identical to libzstd's at those levels).
+    - **Ratios** (frame / input), Falcon / libzstd 1.5.7, with Falcon's before F12 in parentheses:
+
+      | Input | L1 | L3 | L9 | L19 |
+      |---|---|---|---|---|
+      | noisy float32 (1.000) | 0.883 / 0.897 | 0.883 / 0.883 | 0.883 / 0.896 | 0.886 / 0.894 |
+      | smooth float64 (1.000) | 0.933 / 0.951 | 0.933 / 0.932 | 0.933 / 0.953 | 0.937 / 0.923 |
+      | 2 MB of Java source (0.371) | 0.242 / 0.249 | 0.215 / 0.227 | 0.198 / 0.196 | 0.190 / 0.177 |
+      | a sharded float32 chunk (0.669) | 0.451 / 0.507 | 0.367 / 0.357 | 0.304 / 0.296 | 0.291 / 0.273 |
+
+    - **Speed:** it is slower than before, as the price of the ratio: 30–90 MB/s at levels 1–3 by input
+      (before: 65–154), 14–40 at 9, 3–11 at 19. No input found is pathological: 32 MB of zeros, short
+      periods, near-repeats, and random bytes encode at 9 MB/s or more at level 19 and 88 MB/s or more at
+      level 3.
+    - Oracles: libzstd reads 101 of 101 frames one-shot and streaming, every level from −5 to 22 and a 150
+      MB frame (`WriteZstdCases.java` + `check_zstd_encoder.py`, which prints the ratio table); c-blosc
+      reads 240 of 240 Blosc buffers (clevel 0–9, three shuffles); zarr-python reads every
+      `check_zarr_writer.py` array.
+    - **Not done:** optimal parsing and binary-tree match finding (levels 16 and up trail libzstd by
+      0.01–0.02), treeless literals, dictionaries.
+    - Tests: `ZstdEncoderTest` (every level, 3,000 seeded random inputs, Huffman literals, fitted tables,
+      repeat offsets, block splits, windows), `BloscEncoderTest.clevelSetsTheZstdLevelAsCBloscDoes`,
+      `CodecConfigurationTest` (`level` and `clevel` take effect, `zstd(level)`).
+
+  The original finding follows.
   - **Gap:** there are no Huffman-coded literals, no repeat offsets, and no cross-block matching. Noisy
     float32 stays at ratio 1.000 (libzstd level 3: 0.896), and text compresses to 0.648 (libzstd: 0.365).
   - **Also:** no clevel or window tuning. (carried over)

@@ -192,6 +192,25 @@ public abstract sealed class ZarrNode permits ZarrGroup, ZarrArray {
         return key(path, "zarr.json");
     }
 
+    /**
+     * {@code relativePath} checked as a path below a node: one or more names joined by {@code '/'}, none
+     * empty, {@code "."}, or {@code ".."} (F9).
+     *
+     * @throws IllegalArgumentException if it is not such a path
+     */
+    static String relativePath(String relativePath) {
+        if (relativePath.isEmpty()) {
+            throw new IllegalArgumentException("invalid path: it is empty");
+        }
+        for (String name : relativePath.split("/", -1)) {
+            if (name.isEmpty() || name.equals(".") || name.equals("..")) {
+                throw new IllegalArgumentException("invalid path '" + relativePath + "': "
+                        + (name.isEmpty() ? "an empty name" : "'" + name + "' cannot name a node"));
+            }
+        }
+        return relativePath;
+    }
+
     /** A store key {@code name} beneath {@code path} ({@code name} itself for the root). */
     static String key(String path, String name) {
         return path.isEmpty() ? name : path + "/" + name;

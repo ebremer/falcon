@@ -329,10 +329,11 @@ class ZarrHierarchyTest {
         for (String name : new String[] {"a.b", "_x", "x__", ".hidden", "with space", "ünïcode", "c"}) {
             assertEquals(name, root.createGroup(name).name());
         }
-        // a lookup only needs a single path segment
-        for (String name : new String[] {"", "a/b", ".", ".."}) {
+        // a lookup only needs valid path segments; "a/b" is a path to a grandchild (F9), here absent
+        for (String name : new String[] {"", ".", "..", "a//b", "a/"}) {
             assertThrows(IllegalArgumentException.class, () -> root.child(name), "'" + name + "'");
         }
+        assertTrue(root.child("a/b").isEmpty());
         assertTrue(root.child("__meta").isEmpty());
         put(store, "__meta/zarr.json", PLAIN_GROUP); // written by another tool
         assertTrue(root.child("__meta").isPresent());
