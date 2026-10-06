@@ -9,7 +9,7 @@ work list:
 
 | Phase | Module | Package | Scope | State | Plan | TODO |
 |---|---|---|---|---|---|---|
-| **1** | `hdf5` | `com.ebremer.falcon.hdf5` | Read + write HDF5 File Format Spec **v4.0** (HDF5 2.0) | **1.0-ready** — read-complete (H0–H6), write-broad (H7–H8), hardened (H9) | [`hdf5/PLAN.md`](hdf5/PLAN.md) | [`hdf5/TODO.md`](hdf5/TODO.md) |
+| **1** | `hdf5` | `com.ebremer.falcon.hdf5` | Read + write HDF5 File Format Spec **v4.0** (HDF5 2.0) | **Pre-1.0** — read-complete (H0–H6), write-broad (H7–H8), hardened (H9); the API may still change | [`hdf5/PLAN.md`](hdf5/PLAN.md) | [`hdf5/TODO.md`](hdf5/TODO.md) |
 | **2** | `zarr` | `com.ebremer.falcon.zarr` | Read Zarr **v2 + v3**, write **v3** | **Built** — v3 core, every common codec, verified vs zarr-python / libzstd / c-blosc | [`zarr/PLAN.md`](zarr/PLAN.md) | [`zarr/TODO.md`](zarr/TODO.md) |
 | — | `core` | `com.ebremer.falcon.core` | Compression codecs both formats share: zstd, Blosc (BloscLZ, Snappy, shuffles), LZ4, LZF, bitshuffle | **Built** (2026-10-05) — exported only to `hdf5` and `zarr` | [`zarr/PLAN.md`](zarr/PLAN.md) §10 | the module TODOs |
 

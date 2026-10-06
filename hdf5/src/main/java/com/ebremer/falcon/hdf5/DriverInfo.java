@@ -13,11 +13,21 @@ import java.util.Arrays;
  */
 public record DriverInfo(String driverId, byte[] information) {
 
+    /**
+     * The driver information, copying {@code information}.
+     *
+     * @param driverId    the driver's 8-character identifier
+     * @param information the driver's own encoding of its settings
+     */
     public DriverInfo {
         information = information.clone();
     }
 
-    /** A copy of the driver's settings. */
+    /**
+     * A copy of the driver's settings.
+     *
+     * @return the driver's own encoding of its settings, copied
+     */
     @Override
     public byte[] information() {
         return information.clone();

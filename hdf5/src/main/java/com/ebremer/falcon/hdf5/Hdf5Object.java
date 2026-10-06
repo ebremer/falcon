@@ -53,6 +53,8 @@ public abstract sealed class Hdf5Object permits Group, Dataset, CommittedDatatyp
     /**
      * The object's local link name: the last component of its {@link #path()} ({@code ""} for the root
      * group, and for an object no path reaches).
+     *
+     * @return the link name
      */
     public String name() {
         String result = name;
@@ -70,6 +72,8 @@ public abstract sealed class Hdf5Object permits Group, Dataset, CommittedDatatyp
      * {@code H5Iget_name} finds one: the first path to the object in a depth-first walk of the file's hard
      * links, each group's in its native order; {@code ""} if no path reaches it. So an object with several
      * paths is named by the one libhdf5 names it by.
+     *
+     * @return the absolute path, or {@code ""}
      */
     public String path() {
         String result = path;
@@ -86,7 +90,12 @@ public abstract sealed class Hdf5Object permits Group, Dataset, CommittedDatatyp
         return known != null ? known : "the object at address " + objectHeaderAddress;
     }
 
-    /** The file address of this object's header. */
+    /**
+     * The file address of this object's header, which identifies the object within its file.
+     *
+     * @return the header's address, relative to the file's base address (after any user block), as HDF5
+     *         stores addresses
+     */
     public long objectHeaderAddress() {
         return objectHeaderAddress;
     }
@@ -94,6 +103,8 @@ public abstract sealed class Hdf5Object permits Group, Dataset, CommittedDatatyp
     /**
      * This object's attributes (compact header messages and/or dense fractal-heap storage), read on first
      * use and then kept (for every handle of the object). The list is unmodifiable.
+     *
+     * @return the attributes; empty if there are none
      */
     public List<Attribute> attributes() {
         ctx.checkOpen();
@@ -157,6 +168,9 @@ public abstract sealed class Hdf5Object permits Group, Dataset, CommittedDatatyp
      * The attribute with the given name, if present. Once {@link #attributes()} has been read it is
      * searched; otherwise dense storage is searched through its name index, as libhdf5 does: the records
      * whose name hash matches, so one lookup reads a few nodes rather than every attribute.
+     *
+     * @param name the attribute's name
+     * @return the attribute, or empty if this object has none of that name
      */
     public Optional<Attribute> attribute(String name) {
         ctx.checkOpen();
@@ -206,20 +220,37 @@ public abstract sealed class Hdf5Object permits Group, Dataset, CommittedDatatyp
                 | (record[offset + 3] & 0xff) << 24;
     }
 
+    /**
+     * Whether this object is a group.
+     *
+     * @return true for a {@link Group}; false for a {@link Dataset} or a {@link CommittedDatatype}
+     */
     public abstract boolean isGroup();
 
-    /** The number of hard links to this object (at least 1). */
+    /**
+     * The number of hard links to this object (at least 1).
+     *
+     * @return the header's reference count
+     */
     public int referenceCount() {
         return header().referenceCount();
     }
 
-    /** This object's modification time, if the file tracks object times. */
+    /**
+     * This object's modification time, if the file tracks object times.
+     *
+     * @return the time, to the second, or empty if the header records none
+     */
     public Optional<Instant> modificationTime() {
         var seconds = header().modificationTimeSeconds();
         return seconds.isPresent() ? Optional.of(Instant.ofEpochSecond(seconds.getAsLong())) : Optional.empty();
     }
 
-    /** This object's comment (object-comment message), if it has one. */
+    /**
+     * This object's comment (object-comment message), if it has one.
+     *
+     * @return the comment, or empty if there is none
+     */
     public Optional<String> comment() {
         HeaderMessage message = header().find(MessageType.OBJECT_COMMENT);
         if (message == null) {

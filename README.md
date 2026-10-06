@@ -5,7 +5,7 @@ formats — no native libraries, no third-party dependencies.
 
 | Module | Package | What it is | Status |
 |---|---|---|---|
-| [`hdf5`](hdf5) | `com.ebremer.falcon.hdf5` | HDF5 reader/writer implementing the [HDF5 File Format Specification v4.0](https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html) (HDF5 2.0) | Read-complete, write-broad — 1.0-ready |
+| [`hdf5`](hdf5) | `com.ebremer.falcon.hdf5` | HDF5 reader/writer implementing the [HDF5 File Format Specification v4.0](https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html) (HDF5 2.0) | Read-complete, write-broad; pre-1.0 |
 | [`zarr`](zarr) | `com.ebremer.falcon.zarr` | [Zarr](https://zarr.dev/) reader/writer (v3 core; v2 read) | Built |
 | [`core`](core) | `com.ebremer.falcon.core` | Pure-Java compression codecs both formats share (zstd, Blosc, LZ4, LZF, bitshuffle); exported only to Falcon's modules | Built |
 
@@ -80,8 +80,9 @@ try (Hdf5Writer w = Hdf5Writer.create(Path.of("out.h5"))) {
 }
 ```
 
-The reader handles every HDF5 structure (all superblock/header/group forms, chunk indexes, filters,
-vlen, references, virtual datasets, external links). The writer covers every datatype, all six filters
+The reader handles every superblock, object-header, and group form, every chunk index, the built-in and
+the common third-party filters, vlen data, references, virtual datasets, and external links (not files
+split across several by the family, multi, or split drivers). The writer covers every datatype, all six filters
 (szip in both codings, byte for byte libaec's), compact, contiguous and chunked storage (growing ones
 included), dense groups and attributes of any size, hard, soft and external links, object and region
 references (in datasets and attributes), user blocks, files past 2 GB, and both the modern and earliest
@@ -126,7 +127,9 @@ Stores: in-memory, filesystem, ZIP, and read-only HTTP (byte-range). Full walkth
 - **JPMS modules** exporting only their public API.
 - **Foreign Function & Memory API** (`MemorySegment`) for memory-mapped access to files beyond 2 GB; HDF5
   files elsewhere are read on demand through a `RangeReader`.
-- **Typed exceptions** carrying byte offsets; corrupt input never crashes the JVM or returns wrong data.
+- **Typed exceptions** carrying byte offsets. Corrupt input fails with one, never crashing the JVM or
+  hanging, and every checksum a file stores is verified; bytes that no checksum covers (HDF5 raw data
+  without `fletcher32`, say) can be corrupted without Falcon noticing.
 
 ## License
 

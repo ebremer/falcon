@@ -711,8 +711,15 @@ Every failure Falcon raises is an unchecked `HdfException`:
 - `HdfFormatException` — bytes on disk violate the spec (bad signature/checksum, out-of-range address,
   truncated or corrupt input). Corrupt input fails this way rather than as a raw runtime exception, a
   JVM crash, or an infinite loop: every checksummed metadata structure (object headers, B-trees,
-  fractal heaps, chunk indexes), every `fletcher32` chunk, and every zstd frame's checksum is verified, loops and over-deep nesting in
-  the file's structure are detected, and decompression is bounded by the chunk size.
+  fractal heaps, chunk indexes), every `fletcher32` chunk, and every zstd frame's checksum is verified,
+  loops and over-deep nesting in the file's structure are detected, and decompression is bounded by the
+  chunk size.
+
+  Bytes that no checksum covers cannot be checked: raw data without `fletcher32`, the global heap
+  (variable-length data), the direct blocks of a fractal heap that does not checksum them, and the
+  earliest format's metadata (version-0 and 1 superblocks, version-1 object headers and B-trees,
+  symbol-table nodes, local heaps). Corrupted, they read as whatever they now hold, unless that breaks
+  the file's structure.
 - `HdfUnsupportedException` — a valid but not-yet-implemented structure, or another file the
   `ExternalFileAccess` policy refuses.
 - `HdfClosedException` — a closed `Hdf5File` or `Hdf5Writer` was used.

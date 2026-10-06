@@ -21,22 +21,47 @@ package com.ebremer.falcon.hdf5;
  */
 public sealed interface Link permits Link.Hard, Link.Soft, Link.External, Link.UserDefined {
 
-    /** The link's name within its group. */
+    /**
+     * The link's name within its group.
+     *
+     * @return the name
+     */
     String name();
 
-    /** A hard link to the object whose header is at {@code objectHeaderAddress} in this file. */
+    /**
+     * A hard link to the object whose header is at {@code objectHeaderAddress} in this file.
+     *
+     * @param name                the link's name within its group
+     * @param objectHeaderAddress the address of the object's header (see {@link Hdf5Object#objectHeaderAddress()})
+     */
     record Hard(String name, long objectHeaderAddress) implements Link {
     }
 
-    /** A soft (symbolic) link to a path in this file; the path may not exist. */
+    /**
+     * A soft (symbolic) link to a path in this file; the path may not exist.
+     *
+     * @param name       the link's name within its group
+     * @param targetPath the path the link holds: absolute, or relative to the link's group
+     */
     record Soft(String name, String targetPath) implements Link {
     }
 
-    /** An external link to the object at {@code objectPath} in the file {@code fileName}. */
+    /**
+     * An external link to the object at {@code objectPath} in the file {@code fileName}.
+     *
+     * @param name       the link's name within its group
+     * @param fileName   the other file's name, as written (resolved as {@link ExternalFileAccess} allows)
+     * @param objectPath the object's path in that file
+     */
     record External(String name, String fileName, String objectPath) implements Link {
     }
 
-    /** A user-defined link class (type 65&ndash;255) that Falcon does not interpret. */
+    /**
+     * A user-defined link class (type 65&ndash;255) that Falcon does not interpret.
+     *
+     * @param name the link's name within its group
+     * @param type the link class, 65&ndash;255
+     */
     record UserDefined(String name, int type) implements Link {
     }
 }

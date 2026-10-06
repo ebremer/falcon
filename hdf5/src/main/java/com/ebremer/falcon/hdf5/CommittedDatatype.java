@@ -28,7 +28,12 @@ public final class CommittedDatatype extends Hdf5Object {
         return false;
     }
 
-    /** The committed datatype definition. */
+    /**
+     * The committed datatype definition.
+     *
+     * @return the datatype this object stores
+     * @throws HdfFormatException if the object header has no datatype message
+     */
     public Datatype datatype() {
         Datatype result = state.datatype;
         if (result == null) {

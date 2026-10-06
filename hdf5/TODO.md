@@ -1,11 +1,12 @@
 # Falcon HDF5 — remaining work (prioritized)
 
-**Status (2026-10-05, after P2 S1–S7, A1–A12, PF1–PF8, and WF1–WF11):** build green, **855 HDF5 tests**
+**Status (2026-10-05, after P2 S1–S7, A1–A12, PF1–PF8, WF1–WF11, and P3 D1, D3, D4):** build green,
+**855 HDF5 tests**
 (144 at the review, 187 after the top 10, 206 after P0, 228 after P1, 243 after S1–S3, 256 after S4–S7,
 439 after A2–A6, 610 after PF1–PF4, 677 after A1–A10, 692 after A11–A12, 707 after WF1–WF4, 743 after
 WF5–WF9, 782 after WF7 and WF10, 850 after WF11 and PF5–PF7), plus 38 in the `core` module. The review's
-top 10, every P1 item, **P2 S1–S7**, **A1–A12**, **PF1–PF8**, **WF1–WF11**, and the P0 zstd fix (Z6/Z7, in
-`core`) are done (see *Done* at the end). Falcon now:
+top 10, every P1 item, **P2 S1–S7**, **A1–A12**, **PF1–PF8**, **WF1–WF11**, **P3 D1, D3, D4**, and the P0 zstd
+fix (Z6/Z7, in `core`) are done (see *Done* at the end). Falcon now:
 
 - reads the files the review showed it misreading:
   - real libhdf5 szip and scale-offset data;
@@ -67,6 +68,10 @@ top 10, every P1 item, **P2 S1–S7**, **A1–A12**, **PF1–PF8**, **WF1–WF11
   default, and supports concurrent reads of one open file.
 
 P0 and P1 are empty. What remains is features and API (P2) and docs and build (P3).
+
+**P3 D1, D3, D4** change no behaviour or API. The module's build now fails on a public or protected
+member of an exported package without complete Javadoc (javac's doclint, with `-Werror`, in the `hdf5`
+POM's `default-compile`).
 
 **P2 PF8** changes no behaviour or API: strided and point selections of chunked data read faster.
 
@@ -312,15 +317,13 @@ review baseline. Abbreviations: `W` = `Hdf5Writer.java`; other paths are under
 
 ## Next up — top 10
 
-1. **D1/D3 — docs that overclaim, and a stale PLAN.md.**
-2. **B1/B2 — CI and release plumbing:** a Windows CI leg, source and Javadoc jars, and the enforcer.
+1. **B1/B2 — CI and release plumbing:** a Windows CI leg, source and Javadoc jars, and the enforcer.
    New plugins need Erich's approval.
-3. **S8 — writing the third-party filters,** whose encoders core partly has. It would also let `open()`
+2. **S8 — writing the third-party filters,** whose encoders core partly has. It would also let `open()`
    write into datasets so filtered, the last filters it refuses.
-4. **D4 — Javadoc lint.**
-5. **S9 — more registered filters:** Blosc2, bzip2, ZFP, SZ.
-6. **B3 — housekeeping:** committed `__pycache__`.
-7. **D6 — repo-wide staleness:** `CLAUDE.md` and the root `pom.xml` still call Zarr planned.
+3. **S9 — more registered filters:** Blosc2, bzip2, ZFP, SZ.
+4. **B3 — housekeeping:** committed `__pycache__`.
+5. **D6 — repo-wide staleness:** `CLAUDE.md` and the root `pom.xml` still call Zarr planned.
 
 ---
 
@@ -373,12 +376,7 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
 
 ## P3 — docs, build, housekeeping
 
-- [ ] **D1 — fix docs that overclaim.**
-  - `PLAN.md`: "1.0-ready", "read back identically … by h5py", "szip verified via libaec", and "every
-    structure on a read path is covered".
-  - README: "corrupt input never … returns wrong data".
-  - ~~USER_GUIDE.md:125 "filters apply in call order"~~ — now true (W11).
-  - ~~Javadoc of `readRawBytes`: says "not yet de-filtered"~~ — fixed.
+- D1, D3, and D4 are done (see *Done — 2026-10-05 (P3: D1, D3, D4)*).
 - [ ] **D2 — USER_GUIDE gaps.**
   - **Done:** thread safety, filter rules, the writer's HDF5 1.10+ compatibility, and checksum
     verification are now documented.
@@ -407,14 +405,8 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
     (`objectCacheSize`), and what virtual reads read; `BENCHMARKS.md` has the bytes a small read reads.
   - **Also done (P2 PF8):** the performance note on selections, and the selection rows in
     `BENCHMARKS.md`.
-- [ ] **D3 — PLAN.md is stale.**
-  - §6 lists the non-existent `dataspace` and `util` packages, omits `data`, `index`, and `group`, and
-    says only one package is exported (`datatype` is exported too).
-  - §7's API sketch uses the old method names.
-  - §2 still anticipates promoting code to `falcon.core`, contradicting the deferral.
-  - ~~§5 claims a ByteBuffer fallback~~ — §5 now describes the `RangeReader` sources (A6).
-- [ ] **D4 — Javadoc lint:** 318 `-Xdoclint:all` warnings, including 78 undocumented public members
-  (28 in `Hdf5Writer`). 0 errors.
+  - **Also done (P3 D1):** *Error handling* says which bytes no checksum covers, and that corrupting them
+    goes unnoticed.
 - [ ] **B1 — CI: add a `windows-latest` leg** (mmap and file-deletion semantics differ). Repo-wide.
 - [ ] **B2 — release plumbing.**
   - **Add:** source and Javadoc jars, `maven-enforcer` (JDK 25 / Maven 3.9 / banned dependencies),
@@ -459,6 +451,56 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
     (`tools/fixtures/gen_zstd_corrupt_vectors.py` → `zstd_corrupt_vectors.txt`): mutations, several
     frames, skippable frames, and trailing data. The old decoder fails 137 of them.
   - The core fuzzer: 1.5M further mutated frames threw only typed exceptions.
+
+## Done — 2026-10-05 (P3: D1, D3, D4)
+
+- [x] **D1 — docs that overclaim.** Each claim now says what is true:
+  - **"1.0-ready"** (`hdf5/PLAN.md` status and H9, the root `README.md` and `PLAN.md`): pre-1.0. The API
+    may still change, CI builds on Linux only (B1), and there is no release plumbing (B2).
+  - **"read back identically … by h5py"**: Falcon's tests read back what it writes, and the dev-time
+    `check_hdf5_writer.py` (not part of the build) has libhdf5 2.0 and 1.14 read every value against a
+    manifest, then change each file.
+  - **"szip verified via libaec"**: true, and now says it is libaec alone. Falcon's szip chunks are
+    decoded and re-encoded byte for byte by libaec, and `szip.h5`'s chunks come from libaec's SZ layer;
+    no libhdf5 build with szip has read or written them, since h5py ships szip disabled.
+  - **"every structure on a read path is covered"**: the structures that lead to groups, attributes, and
+    data are read. The status names what is not: filtered fractal heaps, the family/multi/split drivers'
+    files, and the free-space section lists and shared-message index, which nothing read needs.
+  - **README "corrupt input never … returns wrong data"**: corrupt input fails with a typed exception,
+    never a crash or a hang, and every stored checksum is verified; bytes no checksum covers can be
+    corrupted unnoticed. The README's "every HDF5 structure" lists what the reader handles instead.
+    `USER_GUIDE.md`'s *Error handling* lists those bytes (raw data without fletcher32, the global heap,
+    unchecksummed fractal-heap direct blocks, the earliest format's metadata), as do `PLAN.md` §11 and
+    `RobustnessTest`'s Javadoc, which had promised "never … silently-wrong data" though the test accepts a
+    mutation that reads.
+  - **Also corrected:** `PLAN.md` §11 promised a JSON sidecar of expected values per fixture (the tests
+    assert the generator's values, and `storage_metadata.txt` holds libhdf5's storage report) and
+    property-based round-trips (seeded randomized checks exist; generated round-trips over random types,
+    shapes, chunkings, and filters do not).
+- [x] **D3 — PLAN.md is stale.**
+  - **§6** lists the packages there are (`data`, `index`, `group`, and `write` among them; no `dataspace`
+    or `util`), and says both `com.ebremer.falcon.hdf5` and `…hdf5.datatype` are exported.
+  - **§7's** sketch uses today's names (`readFloats`, `dimensions()`, a path from the group) and says how
+    `Hdf5Writer` writes.
+  - **§2** shows the `core` module and the docs, and says what `core` holds and that a shared data model
+    was not made (`zarr/PLAN.md` §10).
+  - **Elsewhere:** the status (H0–H9 and P2 done, 855 tests, pre-1.0, what is read and written and how
+    it is checked); §3's deferred write datatypes (done in WF1–WF4) and what is open (S8, S9); §5's
+    compression row (the third-party filters through `core`); H5 marked done; H4's deferrals, H7's
+    "remains", and H8's "still throw" as since done or not planned (the free-space manager); H6's signed
+    szip (libaec's SZ layer has no signed option); §9's szip status; §11's 1.14 oracle; §13's Zarr
+    (built).
+- [x] **D4 — Javadoc lint.** `-Xdoclint:all` over the exported packages: **0 warnings**, from 595 (318 at
+  the review; the API grew). `-Xdoclint:all,-missing -package`: 0 too.
+  - Every public and protected member has a comment, with `@param`, `@return` (or `{@return}` for a
+    one-line description), and `@throws` where it throws a checked exception or doclint asks; record
+    components and enum constants are documented. `Hdf5Writer.EnumType` has an explicit, documented
+    constructor (the implicit one was public too).
+  - Corrected on the way: `Format.EARLIEST` said "every HDF5 version reads" it (the guide says 1.10 and
+    later); now "the original format, libhdf5's default".
+  - **Kept so:** the `hdf5` POM's `default-compile` runs javac with `-Xdoclint:all/protected`, limited to
+    the two exported packages, and `-Werror`, with `showWarnings` on, so a missing tag fails the build
+    and names the file and line. Tests and internal packages are not checked.
 
 ## Done — 2026-10-05 (P2: PF8)
 

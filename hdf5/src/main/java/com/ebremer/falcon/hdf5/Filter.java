@@ -40,12 +40,24 @@ public record Filter(int id, String name, boolean optional, int[] clientData) {
     /** Zstandard compression. */
     public static final int ZSTD = 32015;
 
+    /**
+     * A filter, copying {@code clientData}.
+     *
+     * @param id         the registered filter identifier
+     * @param name       the filter's name, or empty; not null
+     * @param optional   true if a chunk may have skipped the filter
+     * @param clientData the filter's parameters
+     */
     public Filter {
         Objects.requireNonNull(name, "name");
         clientData = clientData.clone();
     }
 
-    /** A copy of the filter's parameters. */
+    /**
+     * A copy of the filter's parameters.
+     *
+     * @return the filter's parameters ({@code cd_values}), copied
+     */
     @Override
     public int[] clientData() {
         return clientData.clone();

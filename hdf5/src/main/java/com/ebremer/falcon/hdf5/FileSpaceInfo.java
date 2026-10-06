@@ -29,7 +29,13 @@ public record FileSpaceInfo(Strategy strategy, boolean persistingFreeSpace, long
         /** No free-space tracking: freed space is never reclaimed. */
         NONE;
 
-        /** Maps the on-disk strategy code (0–3) to a {@link Strategy}. */
+        /**
+         * Maps the on-disk strategy code (0–3) to a {@link Strategy}.
+         *
+         * @param code the strategy as the File Space Info message stores it
+         * @return the strategy
+         * @throws HdfFormatException if {@code code} is not 0–3
+         */
         public static Strategy fromCode(int code) {
             Strategy[] values = values();
             if (code < 0 || code >= values.length) {

@@ -30,16 +30,22 @@ import java.util.Map;
  */
 public sealed interface Datatype {
 
-    /** The datatype class. */
+    /** {@return the datatype class} */
     DatatypeClass typeClass();
 
-    /** The on-disk size of one element, in bytes. */
+    /** {@return the on-disk size of one element, in bytes} */
     int size();
 
     /**
      * Integer type (class 0): a two's-complement or unsigned integer. The value is the
      * {@code bitPrecision} bits starting {@code bitOffset} bits above the least significant bit of the
      * {@code size}-byte element; the remaining bits are padding.
+     *
+     * @param size         the bytes of one element
+     * @param byteOrder    the order of the element's bytes
+     * @param signed       true for two's complement, false for unsigned
+     * @param bitOffset    the bit the value starts at, counted from the element's least significant bit
+     * @param bitPrecision the bits of the value
      */
     record FixedPoint(int size, ByteOrder byteOrder, boolean signed, int bitOffset, int bitPrecision)
             implements Datatype {
@@ -47,7 +53,11 @@ public sealed interface Datatype {
             return DatatypeClass.FIXED_POINT;
         }
 
-        /** This type in another byte order. */
+        /**
+         * {@return this type in another byte order}
+         *
+         * @param order the byte order of the type returned
+         */
         public FixedPoint withByteOrder(ByteOrder order) {
             return new FixedPoint(size, order, signed, bitOffset, bitPrecision);
         }
@@ -61,6 +71,19 @@ public sealed interface Datatype {
      * <p>{@code vaxOrder} marks VAX byte order (datatype version 3+): the element's 16-bit words are
      * stored most significant first, each little-endian; {@code byteOrder} is then big-endian, as the
      * message's byte-order bit says.
+     *
+     * @param size             the bytes of one element
+     * @param byteOrder        the order of the element's bytes (big-endian in VAX order)
+     * @param bitOffset        the bit the value starts at, counted from the element's least significant bit
+     * @param bitPrecision     the bits of the value
+     * @param exponentLocation the bit the exponent starts at (its least significant bit)
+     * @param exponentSize     the bits of the exponent
+     * @param mantissaLocation the bit the mantissa starts at (its least significant bit)
+     * @param mantissaSize     the bits of the mantissa
+     * @param exponentBias     what is subtracted from the stored exponent (127 for binary32)
+     * @param signLocation     the bit that holds the sign
+     * @param normalization    how the mantissa is normalized
+     * @param vaxOrder         true for VAX byte order (see above)
      */
     record FloatingPoint(int size, ByteOrder byteOrder, int bitOffset, int bitPrecision,
                          int exponentLocation, int exponentSize, int mantissaLocation, int mantissaSize,
@@ -68,7 +91,21 @@ public sealed interface Datatype {
                          boolean vaxOrder)
             implements Datatype {
 
-        /** A floating-point type in plain big- or little-endian order. */
+        /**
+         * A floating-point type in plain big- or little-endian order.
+         *
+         * @param size             the bytes of one element
+         * @param byteOrder        the order of the element's bytes
+         * @param bitOffset        the bit the value starts at, counted from the element's least significant bit
+         * @param bitPrecision     the bits of the value
+         * @param exponentLocation the bit the exponent starts at (its least significant bit)
+         * @param exponentSize     the bits of the exponent
+         * @param mantissaLocation the bit the mantissa starts at (its least significant bit)
+         * @param mantissaSize     the bits of the mantissa
+         * @param exponentBias     what is subtracted from the stored exponent (127 for binary32)
+         * @param signLocation     the bit that holds the sign
+         * @param normalization    how the mantissa is normalized
+         */
         public FloatingPoint(int size, ByteOrder byteOrder, int bitOffset, int bitPrecision,
                              int exponentLocation, int exponentSize, int mantissaLocation, int mantissaSize,
                              long exponentBias, int signLocation, MantissaNormalization normalization) {
@@ -80,7 +117,11 @@ public sealed interface Datatype {
             return DatatypeClass.FLOATING_POINT;
         }
 
-        /** This type in another (plain) byte order. */
+        /**
+         * {@return this type in another (plain) byte order}
+         *
+         * @param order the byte order of the type returned, which is not VAX order
+         */
         public FloatingPoint withByteOrder(ByteOrder order) {
             return new FloatingPoint(size, order, bitOffset, bitPrecision, exponentLocation, exponentSize,
                     mantissaLocation, mantissaSize, exponentBias, signLocation, normalization, false);
@@ -103,63 +144,116 @@ public sealed interface Datatype {
      * Time type (class 2): a Unix {@code time_t}, the signed number of seconds since
      * 1970-01-01T00:00:00Z, in its low {@code bitPrecision} bits. HDF5's only time types are
      * {@code H5T_UNIX_D32BE/LE} and {@code H5T_UNIX_D64BE/LE}.
+     *
+     * @param size         the bytes of one element: 4 or 8
+     * @param byteOrder    the order of the element's bytes
+     * @param bitPrecision the bits of the value, from the element's least significant bit
      */
     record Time(int size, ByteOrder byteOrder, int bitPrecision) implements Datatype {
         @Override public DatatypeClass typeClass() {
             return DatatypeClass.TIME;
         }
 
-        /** This type in another byte order. */
+        /**
+         * {@return this type in another byte order}
+         *
+         * @param order the byte order of the type returned
+         */
         public Time withByteOrder(ByteOrder order) {
             return new Time(size, order, bitPrecision);
         }
     }
 
-    /** Fixed-length string type (class 3). */
+    /**
+     * Fixed-length string type (class 3).
+     *
+     * @param size         the bytes of each string, its padding included
+     * @param padding      how a string shorter than {@code size} ends
+     * @param characterSet how the bytes encode characters
+     */
     record StringType(int size, StringPadding padding, CharacterSet characterSet) implements Datatype {
         @Override public DatatypeClass typeClass() {
             return DatatypeClass.STRING;
         }
     }
 
-    /** Bit field type (class 4). */
+    /**
+     * Bit field type (class 4).
+     *
+     * @param size         the bytes of one element
+     * @param byteOrder    the order of the element's bytes
+     * @param bitOffset    the bit the field starts at, counted from the element's least significant bit
+     * @param bitPrecision the bits of the field
+     */
     record BitField(int size, ByteOrder byteOrder, int bitOffset, int bitPrecision) implements Datatype {
         @Override public DatatypeClass typeClass() {
             return DatatypeClass.BIT_FIELD;
         }
 
-        /** This type in another byte order. */
+        /**
+         * {@return this type in another byte order}
+         *
+         * @param order the byte order of the type returned
+         */
         public BitField withByteOrder(ByteOrder order) {
             return new BitField(size, order, bitOffset, bitPrecision);
         }
     }
 
-    /** Opaque type (class 5): raw bytes with an application-defined ASCII tag. */
+    /**
+     * Opaque type (class 5): raw bytes with an application-defined ASCII tag.
+     *
+     * @param size the bytes of one element
+     * @param tag  the application's ASCII description of the bytes, without its null padding; may be empty
+     */
     record Opaque(int size, String tag) implements Datatype {
         @Override public DatatypeClass typeClass() {
             return DatatypeClass.OPAQUE;
         }
     }
 
-    /** Compound (record/struct) type (class 6). */
+    /**
+     * Compound (record/struct) type (class 6).
+     *
+     * @param size    the bytes of one record, its members and any padding between and after them
+     * @param members the members, in the order the file lists them
+     */
     record Compound(int size, List<Member> members) implements Datatype {
         @Override public DatatypeClass typeClass() {
             return DatatypeClass.COMPOUND;
         }
 
-        /** A named field at a byte offset within the compound. */
+        /**
+         * A named field at a byte offset within the compound.
+         *
+         * @param name   the member's name
+         * @param offset the byte the member starts at, within the record
+         * @param type   the member's datatype
+         */
         public record Member(String name, int offset, Datatype type) {
         }
     }
 
-    /** Reference type (class 7): a pointer to an object or dataset region. */
+    /**
+     * Reference type (class 7): a pointer to an object or dataset region.
+     *
+     * @param size the bytes of one element in the file (8 for an object reference and 12 for a region
+     *             reference, in a file of 8-byte offsets)
+     * @param kind which reference it is
+     */
     record Reference(int size, ReferenceKind kind) implements Datatype {
         @Override public DatatypeClass typeClass() {
             return DatatypeClass.REFERENCE;
         }
     }
 
-    /** Enumerated type (class 8): named values over an integer base type. */
+    /**
+     * Enumerated type (class 8): named values over an integer base type.
+     *
+     * @param size    the bytes of one element: the base type's size
+     * @param base    the integer type the values are stored as
+     * @param members the named values, in the order the file lists them
+     */
     record Enumeration(int size, Datatype base, List<Member> members) implements Datatype {
         @Override public DatatypeClass typeClass() {
             return DatatypeClass.ENUMERATED;
@@ -169,12 +263,24 @@ public sealed interface Datatype {
          * A named enum constant. {@code value} is the integer its elements hold, read as the base type
          * stores it (its byte order and sign); a {@code uint64} value of 2<sup>63</sup> or more is its bit
          * pattern.
+         *
+         * @param name  the constant's name
+         * @param value the integer the constant's elements hold
          */
         public record Member(String name, long value) {
         }
     }
 
-    /** Variable-length type (class 9): a sequence or a variable-length string. */
+    /**
+     * Variable-length type (class 9): a sequence or a variable-length string.
+     *
+     * @param size         the bytes of one element in the file: a length and a global-heap ID (16 in a file
+     *                     of 8-byte offsets)
+     * @param kind         a sequence or a string
+     * @param base         the type of one element of the sequence (of a string, a one-byte character type)
+     * @param padding      how a string ends; null for a sequence
+     * @param characterSet how a string's bytes encode characters; null for a sequence
+     */
     record VariableLength(int size, VlenKind kind, Datatype base, StringPadding padding,
                           CharacterSet characterSet) implements Datatype {
         @Override public DatatypeClass typeClass() {
@@ -182,14 +288,20 @@ public sealed interface Datatype {
         }
     }
 
-    /** Array type (class 10): a fixed multidimensional array of a base type. */
+    /**
+     * Array type (class 10): a fixed multidimensional array of a base type.
+     *
+     * @param size       the bytes of one element: the base type's size times {@link #elementCount()}
+     * @param dimensions the array's shape, slowest-varying dimension first
+     * @param base       the type of each array element
+     */
     record Array(int size, int[] dimensions, Datatype base) implements Datatype {
         @Override public DatatypeClass typeClass() {
             return DatatypeClass.ARRAY;
         }
 
         /**
-         * The number of array elements (product of the dimensions).
+         * {@return the number of array elements (product of the dimensions)}
          *
          * @throws ArithmeticException if the product does not fit in an {@code int}
          */
@@ -202,7 +314,12 @@ public sealed interface Datatype {
         }
     }
 
-    /** Complex number type (class 11, new in datatype message version 5): a pair of floats. */
+    /**
+     * Complex number type (class 11, new in datatype message version 5): a pair of floats.
+     *
+     * @param size the bytes of one element: twice the base type's size
+     * @param base the floating-point type of the real part and of the imaginary part, which follows it
+     */
     record Complex(int size, Datatype base) implements Datatype {
         @Override public DatatypeClass typeClass() {
             return DatatypeClass.COMPLEX;
@@ -211,42 +328,42 @@ public sealed interface Datatype {
 
     // ------------------------------------------------------------------ factories
 
-    /** A signed 8-bit integer ({@code H5T_STD_I8LE}). */
+    /** {@return a signed 8-bit integer type ({@code H5T_STD_I8LE})} */
     static FixedPoint int8() {
         return integer(1, true);
     }
 
-    /** A signed 16-bit little-endian integer ({@code H5T_STD_I16LE}). */
+    /** {@return a signed 16-bit little-endian integer type ({@code H5T_STD_I16LE})} */
     static FixedPoint int16() {
         return integer(2, true);
     }
 
-    /** A signed 32-bit little-endian integer ({@code H5T_STD_I32LE}). */
+    /** {@return a signed 32-bit little-endian integer type ({@code H5T_STD_I32LE})} */
     static FixedPoint int32() {
         return integer(4, true);
     }
 
-    /** A signed 64-bit little-endian integer ({@code H5T_STD_I64LE}). */
+    /** {@return a signed 64-bit little-endian integer type ({@code H5T_STD_I64LE})} */
     static FixedPoint int64() {
         return integer(8, true);
     }
 
-    /** An unsigned 8-bit integer ({@code H5T_STD_U8LE}), as image data usually is. */
+    /** {@return an unsigned 8-bit integer type ({@code H5T_STD_U8LE}), as image data usually is} */
     static FixedPoint uint8() {
         return integer(1, false);
     }
 
-    /** An unsigned 16-bit little-endian integer ({@code H5T_STD_U16LE}). */
+    /** {@return an unsigned 16-bit little-endian integer type ({@code H5T_STD_U16LE})} */
     static FixedPoint uint16() {
         return integer(2, false);
     }
 
-    /** An unsigned 32-bit little-endian integer ({@code H5T_STD_U32LE}). */
+    /** {@return an unsigned 32-bit little-endian integer type ({@code H5T_STD_U32LE})} */
     static FixedPoint uint32() {
         return integer(4, false);
     }
 
-    /** An unsigned 64-bit little-endian integer ({@code H5T_STD_U64LE}). */
+    /** {@return an unsigned 64-bit little-endian integer type ({@code H5T_STD_U64LE})} */
     static FixedPoint uint64() {
         return integer(8, false);
     }
@@ -255,37 +372,52 @@ public sealed interface Datatype {
         return new FixedPoint(size, ByteOrder.LITTLE_ENDIAN, signed, 0, 8 * size);
     }
 
-    /** An IEEE 754 binary16 float, little-endian ({@code H5T_IEEE_F16LE}). */
+    /** {@return an IEEE 754 binary16 float type, little-endian ({@code H5T_IEEE_F16LE})} */
     static FloatingPoint float16() {
         return new FloatingPoint(2, ByteOrder.LITTLE_ENDIAN, 0, 16, 10, 5, 0, 10, 15, 15, MantissaNormalization.IMPLIED);
     }
 
-    /** An IEEE 754 binary32 float, little-endian ({@code H5T_IEEE_F32LE}). */
+    /** {@return an IEEE 754 binary32 float type, little-endian ({@code H5T_IEEE_F32LE})} */
     static FloatingPoint float32() {
         return new FloatingPoint(4, ByteOrder.LITTLE_ENDIAN, 0, 32, 23, 8, 0, 23, 127, 31, MantissaNormalization.IMPLIED);
     }
 
-    /** An IEEE 754 binary64 float, little-endian ({@code H5T_IEEE_F64LE}). */
+    /** {@return an IEEE 754 binary64 float type, little-endian ({@code H5T_IEEE_F64LE})} */
     static FloatingPoint float64() {
         return new FloatingPoint(8, ByteOrder.LITTLE_ENDIAN, 0, 64, 52, 11, 0, 52, 1023, 63, MantissaNormalization.IMPLIED);
     }
 
-    /** A fixed-length UTF-8 string of {@code size} bytes, null-padded. */
+    /**
+     * {@return a fixed-length UTF-8 string type of {@code size} bytes, null-padded}
+     *
+     * @param size the bytes of each string, its padding included
+     */
     static StringType string(int size) {
         return new StringType(size, StringPadding.NULL_PAD, CharacterSet.UTF8);
     }
 
-    /** A variable-length UTF-8 string, as h5py writes a Python {@code str}. */
+    /** {@return a variable-length UTF-8 string type, as h5py writes a Python {@code str}} */
     static VariableLength variableString() {
         return new VariableLength(16, VlenKind.STRING, uint8(), StringPadding.NULL_TERMINATE, CharacterSet.UTF8);
     }
 
-    /** A variable-length sequence (a ragged row) of {@code base} elements. */
+    /**
+     * {@return a variable-length sequence type (a ragged row) of {@code base} elements}
+     *
+     * @param base the type of the sequence's elements
+     */
     static VariableLength sequenceOf(Datatype base) {
         return new VariableLength(16, VlenKind.SEQUENCE, base, null, null);
     }
 
-    /** A fixed-shape array of {@code base} elements, as an element type. */
+    /**
+     * {@return a fixed-shape array of {@code base} elements, as an element type}
+     *
+     * @param base       the type of each array element
+     * @param dimensions the array's shape, slowest-varying dimension first
+     * @throws IllegalArgumentException if there are no dimensions, or an element would take more than
+     *         2 GiB
+     */
     static Array arrayOf(Datatype base, int... dimensions) {
         long size = base.size();
         for (int d : dimensions) {
@@ -297,19 +429,26 @@ public sealed interface Datatype {
         return new Array((int) size, dimensions.clone(), base);
     }
 
-    /** A complex number of two {@code base} floats (HDF5 2.0). */
+    /**
+     * {@return a complex number type of two {@code base} floats (HDF5 2.0)}
+     *
+     * @param base the type of the real part and of the imaginary part
+     */
     static Complex complexOf(FloatingPoint base) {
         return new Complex(2 * base.size(), base);
     }
 
-    /** h5py's boolean: an 8-bit enumeration of {@code FALSE = 0} and {@code TRUE = 1}. */
+    /** {@return h5py's boolean: an 8-bit enumeration of {@code FALSE = 0} and {@code TRUE = 1}} */
     static Enumeration bool() {
         return new Enumeration(1, int8(), List.of(new Enumeration.Member("FALSE", 0), new Enumeration.Member("TRUE", 1)));
     }
 
     /**
-     * A compound of {@code members}, packed in iteration order without gaps (pass a
-     * {@link java.util.LinkedHashMap} for a chosen order).
+     * {@return a compound of {@code members}, packed in iteration order without gaps}
+     *
+     * @param members each member's name and datatype (pass a {@link java.util.LinkedHashMap} for a chosen
+     *                order)
+     * @throws IllegalArgumentException if a record would take more than 2 GiB
      */
     static Compound compound(Map<String, ? extends Datatype> members) {
         List<Compound.Member> list = new ArrayList<>();
@@ -324,39 +463,66 @@ public sealed interface Datatype {
         return new Compound((int) offset, List.copyOf(list));
     }
 
-    /** Opaque elements of {@code size} bytes, with an application-defined ASCII {@code tag}. */
+    /**
+     * {@return an opaque type: elements of {@code size} bytes, with an application-defined ASCII {@code tag}}
+     *
+     * @param size the bytes of one element
+     * @param tag  the application's ASCII description of the bytes
+     */
     static Opaque opaque(int size, String tag) {
         return new Opaque(size, tag);
     }
 
-    /** A bit field of {@code size} bytes, little-endian ({@code H5T_STD_B8LE} for 1). */
+    /**
+     * {@return a bit field type of {@code size} bytes, little-endian ({@code H5T_STD_B8LE} for 1)}
+     *
+     * @param size the bytes of one element
+     */
     static BitField bitField(int size) {
         return new BitField(size, ByteOrder.LITTLE_ENDIAN, 0, 8 * size);
     }
 
-    /** A Unix time, seconds since 1970, of 4 or 8 bytes, little-endian ({@code H5T_UNIX_D32LE}, {@code D64LE}). */
+    /**
+     * {@return a Unix time type, seconds since 1970, little-endian ({@code H5T_UNIX_D32LE}, {@code D64LE})}
+     *
+     * @param size the bytes of one element: 4 or 8
+     */
     static Time unixTime(int size) {
         return new Time(size, ByteOrder.LITTLE_ENDIAN, 8 * size);
     }
 
-    /** An object reference ({@code H5R_OBJECT1}): an object's header address. */
+    /** {@return an object reference type ({@code H5R_OBJECT1}): an object's header address} */
     static Reference objectReference() {
         return new Reference(8, ReferenceKind.OBJECT);
     }
 
-    /** A dataset-region reference ({@code H5R_DATASET_REGION1}): a dataset and a selection of it. */
+    /**
+     * {@return a dataset-region reference type ({@code H5R_DATASET_REGION1}): a dataset and a selection of it}
+     */
     static Reference regionReference() {
         return new Reference(12, ReferenceKind.DATASET_REGION);
     }
 
     /** String padding convention. */
     enum StringPadding {
-        NULL_TERMINATE, NULL_PAD, SPACE_PAD, RESERVED
+        /** A null byte ends a string shorter than its size, and the bytes after it are padding (C). */
+        NULL_TERMINATE,
+        /** Null bytes pad a string shorter than its size; a string of the full size has none. */
+        NULL_PAD,
+        /** Spaces pad a string shorter than its size (Fortran). */
+        SPACE_PAD,
+        /** A reserved code. */
+        RESERVED
     }
 
     /** Character set. */
     enum CharacterSet {
-        ASCII, UTF8, RESERVED
+        /** US-ASCII. */
+        ASCII,
+        /** UTF-8. */
+        UTF8,
+        /** A reserved code. */
+        RESERVED
     }
 
     /**
@@ -380,6 +546,9 @@ public sealed interface Datatype {
 
     /** Variable-length flavour. */
     enum VlenKind {
-        SEQUENCE, STRING
+        /** A sequence of elements of the base type (a ragged row). */
+        SEQUENCE,
+        /** A string of characters. */
+        STRING
     }
 }

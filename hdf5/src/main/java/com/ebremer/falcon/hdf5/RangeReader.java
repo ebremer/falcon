@@ -27,13 +27,20 @@ import java.util.Objects;
  */
 public interface RangeReader {
 
-    /** The file's size in bytes. Falcon asks once, when the file is opened. */
+    /**
+     * The file's size in bytes. Falcon asks once, when the file is opened.
+     *
+     * @return the size in bytes
+     * @throws IOException if the size cannot be found; the open fails with it
+     */
     long size() throws IOException;
 
     /**
      * Reads the bytes starting at {@code position} into {@code destination} until it is full
      * ({@code destination.remaining()} bytes).
      *
+     * @param position    the offset of the first byte, from the start of the file
+     * @param destination the buffer to fill, from its position to its limit
      * @throws EOFException if the file ends first
      * @throws IOException  if the bytes cannot be read; Falcon reports it as an
      *                      {@link java.io.UncheckedIOException} from the read that needed them
@@ -44,6 +51,9 @@ public interface RangeReader {
      * A reader over {@code channel}, which must stay open while the file is read. Concurrent reads of a
      * {@link FileChannel} use its positional reads; any other channel's reads are serialized, since each
      * moves the channel's position.
+     *
+     * @param channel the file's bytes; Falcon never closes it
+     * @return a reader of {@code channel}
      */
     static RangeReader of(SeekableByteChannel channel) {
         Objects.requireNonNull(channel, "channel");

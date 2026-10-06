@@ -5,27 +5,29 @@ writer for the [HDF5 File Format Specification v4.0](https://support.hdfgroup.or
 (HDF5 2.0). It is **Falcon Phase 1** and the template for the Zarr module (Phase 2, `../zarr/PLAN.md`).
 See the root [`../PLAN.md`](../PLAN.md) for the umbrella roadmap.
 
-> **Status: read complete (H0–H6); write through H8; H9 essentially complete (robustness, >2 GB, perf,
-> streaming API, CI, docs) — the HDF5 module is 1.0-ready. 144 tests green.** **Read (H0–H6):**
-> every superblock/header/group form, all datatype classes, compact / contiguous / **external-file** /
-> chunked storage with **every** chunk index at any scale (v1 B-tree, single-chunk, **implicit**, fixed
-> array, extensible array, v2 B-tree), all six filters (incl. pure-Java szip), hyperslabs, dense
-> links/attributes, vlen strings & sequences, committed datatypes, the large-set structures, object +
-> region references, virtual datasets (external-source assembly incl. **strided / multi-block**
-> mappings), the **superblock extension** (**File Space Info** + **free-space managers**), and **every**
-> object-header message type. **Write (H7–H8):** `Hdf5Writer` emits a valid modern-format file — v3
-> (checksummed) superblock, v2 (checksummed) object headers, a **nested group tree**, contiguous
-> **every common atomic width (int8/16/32/64, float32/64, fixed-length string) / vlen string / compound
-> / enum / object-reference / array / vlen-sequence / native complex** datasets (vlen via a global heap;
-> references resolved across objects, forward refs included), **chunked** datasets (fixed-array index)
-> with **all six built-in filters encoded** (deflate, shuffle, fletcher32, scale-offset, n-bit, and
-> pure-Java **szip**), **compact or contiguous** layout, **custom fill values**, and scalar/array
-> **attributes**, switching groups and objects to **dense storage** (fractal heap + v2 B-tree) past 8
-> links/attributes, and optionally the **earliest on-disk format** (v0 superblock, symbol-table groups,
-> v1 headers) — read back identically by Falcon *and h5py* (szip verified via libaec, since h5py's szip
-> is disabled here). Remaining: a couple of niche write datatypes (bitfield / opaque / time). The read
-> edge cases once deferred (SOHM shared messages, unlimited-pattern VDS, the revised reference encoding)
-> are done, from fixtures made through h5py's bundled libhdf5 (see [`TODO.md`](TODO.md)).
+> **Status (2026-10-05): stages H0–H9 are done, and the P2 features since; 855 tests. Pre-1.0** (version
+> `0.1.0-SNAPSHOT`): the API may still change (`TODO.md` records each change), CI builds on Linux only
+> (B1), and there is no release plumbing yet (B2).
+>
+> **Read:** every superblock, object-header, and group form; every datatype class; compact, contiguous,
+> external, and chunked storage with every chunk index at any scale; the six built-in filters (szip in
+> pure Java) and the third-party LZF, Blosc, LZ4, bitshuffle, and Zstandard; dense links and attributes,
+> shared messages, committed datatypes, variable-length data; object, region, and revised references;
+> virtual datasets (every mapping, unlimited and printf-style ones included) and external links; strided
+> and point selections. Not read: filtered fractal heaps (libhdf5 makes none for groups or attributes),
+> files split by the family, multi, and split drivers (a non-goal, §3), and the free-space section lists
+> and shared-message index, which nothing read needs.
+>
+> **Write:** new files in the modern or the earliest format, and existing files (Falcon's or libhdf5's)
+> changed in place: every datatype, the six built-in filters, compact, contiguous, and chunked storage
+> (growing ones included), dense storage of any size, hard, soft, and external links, references, user
+> blocks, and writes through virtual datasets, streamed to the file. Falcon's tests read back what it
+> writes; the dev-time `tools/fixtures/check_hdf5_writer.py` (not part of the build) has libhdf5 2.0 and
+> 1.14, through h5py, read every value back against what was written, then change each file and read it
+> again. szip chunks are checked with libaec instead (decoded, and re-encoded byte for byte), since h5py
+> ships szip disabled: no libhdf5 build with szip has read Falcon's szip output.
+>
+> What remains is in [`TODO.md`](TODO.md).
 
 This document is the **HDF5 module roadmap**, organized as stages **H0–H9** (§8). The sibling Zarr
 module has its own [`../zarr/PLAN.md`](../zarr/PLAN.md); the umbrella phase table lives in the root
@@ -52,18 +54,22 @@ each step gated by conformance tests against files produced by **h5py** (the ref
 falcon/                              parent aggregator POM (packaging: pom) — shared config only
 ├── pom.xml
 ├── LICENSE  CLAUDE.md  PLAN.md  README.md
-├── hdf5/                            Falcon Phase 1 — built now
+├── core/                            shared compression codecs (com.ebremer.falcon.core)
+├── hdf5/                            Falcon Phase 1 (com.ebremer.falcon.hdf5)
 │   ├── pom.xml                      parent = com.ebremer:falcon
 │   ├── PLAN.md                      this document
+│   ├── TODO.md  USER_GUIDE.md  BENCHMARKS.md
 │   └── src/{main,test}/java/
 │       ├── module-info.java         module com.ebremer.falcon.hdf5
 │       └── com/ebremer/falcon/hdf5/…
-└── zarr/                            Falcon Phase 2 — built (com.ebremer.falcon.zarr)
+└── zarr/                            Falcon Phase 2 (com.ebremer.falcon.zarr)
 ```
 
-Shared machinery (byte I/O, checksums, the array/datatype/chunk data model) starts inside the `hdf5`
-module and may be **promoted to a `com.ebremer.falcon.core` module** when Zarr lands, so both formats
-share one in-memory model. Until then, no premature abstraction.
+The `core` module holds the compression codecs both formats use (zstd, Blosc, LZ4, LZF, bitshuffle): the
+HDF5 module's third-party filters needed Zarr's zstd and Blosc, so they moved there rather than being
+copied. `core` exports them only to Falcon's own modules. A shared data model was considered when Zarr
+landed and not made: byte I/O, checksums, datatypes, and chunk indexing stay in each format's module (see
+[`../zarr/PLAN.md`](../zarr/PLAN.md) §10).
 
 ## 3. Goals & non-goals
 
@@ -111,10 +117,12 @@ round-trip conformance** against h5py. Every non-goal falls out of that boundary
   test is semantic round-trip — h5py reads what Falcon writes and vice versa — which Falcon does across
   the whole fixture matrix.
 
-**Not a non-goal — deferred.** Distinct from the above (which are out of scope *by design*), a few
-in-scope features are simply not done yet: the bitfield/opaque/time datatype classes on write. (SOHM
-shared-message deduplication, the revised `H5R_ref_t` reference encoding, and unlimited-pattern (printf)
-VDS mappings are read since P2, from fixtures made through h5py's bundled libhdf5.) See the stage roadmap (§8) and [`TODO.md`](TODO.md). **Zarr** is Falcon Phase 2 (§12).
+**Not a non-goal — open.** Distinct from the above (which are out of scope *by design*), a few in-scope
+features are not done yet: writing the third-party filters (S8), and more registered filters (Blosc2,
+bzip2, ZFP, SZ: S9). What was once deferred here is done: the bit-field, opaque, and time datatypes are
+written since P2 WF1–WF4; shared messages (SOHM), the revised `H5R_ref_t` reference encoding, and
+unlimited (printf-style) VDS mappings are read since P2. See the stage roadmap (§8) and
+[`TODO.md`](TODO.md). **Zarr** is Falcon Phase 2 (§12).
 
 > **szip is IN scope** (changed from the draft): implemented from scratch in pure Java (§9).
 
@@ -139,52 +147,62 @@ VDS mappings are read since P2, from fixtures made through h5py's bundled libhdf
 | Metadata endianness | Little-endian readers/writers | HDF5 metadata is little-endian; datatype *data* order is per-datatype. |
 | Addresses/lengths | Widths from superblock ("size of offsets"/"size of lengths"); undefined = all-1s | Matches the format's parameterized addressing. |
 | Checksums | Hand-written Jenkins lookup3 (+ fletcher32) | Not in the JDK. |
-| Compression | `java.util.zip` for `deflate`; hand-written `shuffle`/`fletcher32`/`nbit`/`scaleoffset`; hand-written **szip** (§9) | All pure-JDK; zero deps. |
+| Compression | `java.util.zip` for `deflate`; hand-written `shuffle`/`fletcher32`/`nbit`/`scaleoffset`; hand-written **szip** (§9); the third-party filters (LZF, Blosc, LZ4, bitshuffle, zstd) through `core`'s codecs | All pure-JDK; zero deps. |
 | Error model | Typed exceptions (`HdfFormatException`, `HdfUnsupportedException`) carrying byte offsets | Precise diagnostics against a binary format. |
 
 ## 6. HDF5 module — package layout (`com.ebremer.falcon.hdf5.*`)
 
 ```
-com.ebremer.falcon.hdf5             Public API: Hdf5File, Group, Dataset, Attribute, Datatype, Dataspace, …
-        …hdf5.io                    HdfBuffer over a MemorySegment or a paged RangeReader, little-endian reads,
-                                    address/length primitives, undefined-address handling
-        …hdf5.checksum              Jenkins lookup3 (+ fletcher32 helper)
-        …hdf5.superblock            Superblock v0–v3 parse/write; superblock extension; file-space info
-        …hdf5.header                Object header v1/v2 prefix + message framing, continuation
-        …hdf5.message               The 24 header-message types (parse/serialize)
-        …hdf5.datatype              Datatype classes 0–11, message versions 1–5; encode/decode to Java
-        …hdf5.dataspace             Dataspace v1/v2 (scalar/simple/null), hyperslab selection
-        …hdf5.layout                Data layout v1–v4; contiguous/compact/chunked/virtual; chunk indices
-        …hdf5.btree                 Version 1 B-trees (types 0,1); version 2 B-trees (types 0–11)
-        …hdf5.heap                  Local heap, global heap, fractal heap; global-heap VDS block
-        …hdf5.filter                Filter pipeline SPI + deflate/shuffle/fletcher32/nbit/scaleoffset/szip
-        …hdf5.write                 File-space allocation, free-space manager, serialization orchestration
-        …hdf5.util                  Shared small utilities
+com.ebremer.falcon.hdf5             Public API: Hdf5File, Group, Dataset, Attribute, Selection, Dataspace,
+                                    Hdf5Writer, OpenOptions, RangeReader, Link, Filter, the exceptions, …
+        …hdf5.datatype              Public datatype model: the sealed Datatype (a record per class 0–11)
+                                    and DatatypeClass
+        …hdf5.io                    HdfBuffer over a MemorySegment or a paged RangeReader, little-endian
+                                    reads, address/length primitives; the file context; the chunk cache
+        …hdf5.checksum              Jenkins lookup3, fletcher32, metadata checksum verification
+        …hdf5.superblock            Superblock v0–v3; free-space managers
+        …hdf5.header                Object header v1/v2, message framing, continuation; shared messages
+                                    and the shared-message table
+        …hdf5.message               Header-message bodies (dataspace, datatype, fill value, links, …)
+        …hdf5.layout                Data layout message v1–v5; contiguous/compact/chunked/virtual; chunk
+                                    records and lookups
+        …hdf5.index                 Chunk indexes: implicit, fixed array, extensible array, v2 B-tree
+        …hdf5.btree                 Version-1 B-trees (groups, chunks); version-2 B-trees
+        …hdf5.heap                  Local, global, and fractal heaps
+        …hdf5.group                 Symbol-table nodes and entries
+        …hdf5.data                  Element decoding, selections, chunked reads, variable-length data
+        …hdf5.filter                Filter pipeline; deflate/shuffle/fletcher32/nbit/scaleoffset/szip and
+                                    the third-party filters
+        …hdf5.write                 The writer's machinery: output file, chunk indexes, fractal heaps,
+                                    v2 B-trees, datatype encoding, object-header editing
 ```
 
-Only `com.ebremer.falcon.hdf5` is exported by `module-info.java`.
+`module-info.java` exports `com.ebremer.falcon.hdf5` and `com.ebremer.falcon.hdf5.datatype`; the rest
+is encapsulated.
 
-## 7. Public API sketch (read side; illustrative, will evolve)
+## 7. Public API sketch
 
 ```java
-try (Hdf5File h5 = Hdf5File.open(Path.of("data.h5"))) {    // AutoCloseable; mmaps the file
+try (Hdf5File h5 = Hdf5File.open(Path.of("data.h5"))) {    // AutoCloseable; maps the file
     Group root = h5.root();
     for (String name : root.childNames()) { ... }
 
-    Dataset ds = root.dataset("/measurements/temperature");
-    Datatype  dt = ds.datatype();                          // class, size, byte order, members…
-    Dataspace sp = ds.dataspace();                         // rank, dims, maxDims
-    long[]  dims = sp.dims();
+    Dataset ds = root.dataset("measurements/temperature");  // a path from the group
+    Datatype  dt = ds.datatype();                           // class, size, byte order, members…
+    Dataspace sp = ds.dataspace();                          // rank, dimensions, maximum dimensions
+    long[]  dims = sp.dimensions();
 
-    float[] all  = ds.readAllFloat();                      // whole dataset, decoded + de-filtered
-    float[] slab = ds.select(offset, count).readFloat();   // hyperslab (partial) read
+    float[] all  = ds.readFloats();                         // whole dataset, decoded + de-filtered
+    float[] slab = ds.select(offset, count).readFloats();   // a hyperslab
 
     for (Attribute a : ds.attributes()) { Object v = a.read(); }
 }
 ```
 
-The write API mirrors this (`Hdf5File.create`, `createGroup`, `createDataset(name, dt, sp)`,
-`ds.write(array)`, filter/chunk configuration) and is designed at stage H7.
+Writing goes through `Hdf5Writer`: `Hdf5Writer.create(path)` makes a file and `Hdf5Writer.open(path)`
+changes one; `group(name)` adds a group, and `createDataset(name, datatype, shape...)` a dataset,
+configured with `chunked`, `maxShape`, and its filters, then given data with `write` or `append`. The
+[user guide](USER_GUIDE.md) covers both sides.
 
 ## 8. HDF5 module roadmap — stages H0–H9
 
@@ -248,9 +266,9 @@ Each stage ends with a **milestone** and concrete **acceptance criteria**. "Refe
 - **Acceptance met:** matches h5py for chunked (1-D/2-D) + deflate/shuffle/fletcher32/scaleoffset/nbit
   fixtures; szip validated against libaec vectors; hyperslab reads equal full-read subsets.
 - Deferred: chunk-cache and touch-only-needed-chunks optimization (H9); float scaleoffset, compound
-  nbit, signed szip, szip **encode** (H8).
+  nbit, signed szip, szip **encode** (H8). All since done.
 
-### H5 — New-style groups, links, attributes, fractal heap, v2 B-trees
+### H5 — New-style groups, links, attributes, fractal heap, v2 B-trees  ✅ **done**
 - **Link Info (2)**, **Link (6)**, **Group Info (10)**; **fractal heap**; **v2 B-trees** types 5/6
   (link name/creation-order) and 8/9 (attribute name/creation-order); types 1–4 (huge fractal-heap
   objects).
@@ -300,25 +318,29 @@ Each stage ends with a **milestone** and concrete **acceptance criteria**. "Refe
   `Hdf5File.btreeKValues()` / `driverInfo()` (also from a version 0–1 superblock's fields and driver
   information block), tested on files libhdf5 writes with `H5Pset_sym_k`/`H5Pset_istore_k` and the family
   driver. File Space Info version 0 is read since P2 S5.
-- **Milestone met:** every object-header message type parses; every structure on a read path is covered.
+- **Milestone met:** every object-header message type parses, and the structures that lead to groups,
+  attributes, and data are read (what is not is listed in the status at the top).
 - **Filter edge cases done ✓**: **float (decimal-scaling) scale-offset** and **compound n-bit** decode,
   and **signed AEC/szip** decode (sign-extended reference/raw samples + signed unmap bounds, validated
-  against libaec signed vectors). Threading the datatype's signedness into the szip *filter* to reach
-  the signed AEC path on a real file remains (untestable here — szip is disabled in this h5py).
+  against libaec signed vectors). The szip *filter* never takes the signed path: libhdf5's szip goes
+  through libaec's SZ layer, which has no signed option, so a file's szip chunks are coded unsigned.
 - **Deferred read edge cases:** multi-file drivers (family/multi/split, a non-goal). SOHM shared-message
   dedup (msg 15), unlimited-pattern (printf-style) VDS mappings, and the revised `H5R_ref_t` reference
   encoding, once deferred here, are done (P2).
 
 ### H7 — Write path foundations
 - **File-space allocation**: end-of-file bump allocator ✓ (`write.GrowBuffer`, append + patch +
-  lookup3); free-space manager + aggregators and the File Space Info strategy remain.
+  lookup3). Not planned: a free-space manager, aggregators, and a File Space Info strategy. A session
+  writes only after the file's end, which is what lets `abort()` leave a changed file as it was (see
+  [`TODO.md`](TODO.md), *Write features & API*).
 - **Superblock (v3, checksummed) ✓**, **object header v2 (checksummed) ✓**, message serialization ✓
   (dataspace, datatype, fill value, contiguous data layout, link info, group info, link, attribute),
-  **global-heap writer ✓** (for variable-length strings). Dense-storage heap / B-tree writers remain.
+  **global-heap writer ✓** (for variable-length strings). Dense-storage heap / B-tree writers: done in H8.
 - **Milestone ✓ (exceeded):** `Hdf5Writer` writes a nested group tree with contiguous
   **int32 / float64 / vlen-string** datasets and group/dataset attributes; **verified read-identical by
   Falcon and by h5py**.
-- Remaining write breadth: chunked storage + filter *encode*, more datatypes, and old-style formats.
+- Remaining write breadth: chunked storage + filter *encode*, more datatypes, and old-style formats (all
+  done in H8).
 
 ### H8 — Write path breadth (incl. szip encode)  ✅ **all six filters encode**
 - **Chunked write ✓** (fixed-array index; boundary chunks fill-padded) + **filter encode ✓** for
@@ -343,15 +365,15 @@ Each stage ends with a **milestone** and concrete **acceptance criteria**. "Refe
   to dense storage &mdash; a fractal heap (single checksummed direct block) of Link/Attribute message
   bodies plus a name-indexed v2 B-tree (type 5 links / type 8 attributes), referenced from a Link Info
   or Attribute Info message. Generic `writeFractalHeap` / `writeV2BTree` helpers; h5py-verified
-  (listing, iteration, and lookup-by-name). Indirect-block heaps (very large sets) still throw.
+  (listing, iteration, and lookup-by-name). Indirect-block heaps (very large sets) followed in P2 WF5.
 - **Earliest-format write ✓** (`create(path, Format.EARLIEST)`): the original pre-1.8 format &mdash; a
   version-0 superblock reaching the root through a symbol-table entry, symbol-table groups (local heap
   of names + version-1 group B-tree + symbol-table node sorted by name), and version-1 object headers
   (the datatype/dataspace/layout/fill/attribute message bodies are reused unchanged). Object-header
   writing is a shared `List<Message>` framed as v1 or v2 by format; node structures are allocated at
   their fixed sizes. Scope: contiguous datasets, compact attributes, nested groups, **multi-node
-  symbol-table groups** (name-sorted children across &le; 256 per group); chunked/filtered/dense throw.
-  h5py-verified.
+  symbol-table groups** (name-sorted children across &le; 256 per group). h5py-verified. Since P2,
+  chunked and filtered datasets (version-1 B-tree index) and groups of any size are written too.
 - **More atomics / layout / fill ✓**: signed **int8/16/64**, **float32**, and **fixed-length string**
   datasets; **compact** layout (`.compact()`, data inline in the header); **custom fill values**
   (`.fillValue(long|double)`, exposed on read via `Dataset.fillValueBytes()`). All h5py-verified.
@@ -384,10 +406,11 @@ Each stage ends with a **milestone** and concrete **acceptance criteria**. "Refe
   same file and in others (each changed in a session of its own); elements no mapping covers are
   refused before anything is written.
 
-### H9 — API polish, performance, docs  (essentially complete)
+### H9 — API polish, performance, docs  ✅ **done** (short of 1.0: see the milestone)
 - **Robustness ✓**: a corrupt-input fuzz test truncates and byte-flips 19 fixtures and forces a full
   read, asserting every failure is a typed `HdfException`/`IOException` &mdash; never a raw runtime
-  exception, JVM crash, or hang. Fixes it drove: bounds-checked `HdfBuffer.segmentSlice` (+ overflow-safe
+  exception, JVM crash, or hang. (A mutation may also read without failing: a byte no checksum covers
+  reads as whatever it now holds.) Fixes it drove: bounds-checked `HdfBuffer.segmentSlice` (+ overflow-safe
   `checkRange`); `Elements.checkedInt`/`checkedByteCount` reject overflowing/oversized element counts
   before allocating; filter-decode failures on a corrupt chunk are wrapped as `HdfFormatException`, and a
   short decoded chunk is rejected explicitly.
@@ -408,12 +431,14 @@ Each stage ends with a **milestone** and concrete **acceptance criteria**. "Refe
   (compound members by name, enumeration names, complex pairs, bit fields, opaque bytes, time as
   `Instant`), and strided and
   point selections read only the chunks they touch, with every reader a dataset has.
-- **CI ✓**: GitHub Actions builds + tests the reactor on **JDK 25** (fixtures are committed and hermetic,
-  so no HDF5/h5py at build time). **Docs ✓**: README usage examples + a standalone
-  [user guide](USER_GUIDE.md).
-- Remaining (optional polish): mmap-tuning benchmarks / a perf-regression harness.
-- **Milestone essentially met:** the module is 1.0-ready &mdash; read-complete, write-broad, hardened
-  against corrupt input, >2 GB-capable, documented, and CI-gated.
+- **CI ✓**: GitHub Actions builds + tests the reactor on **JDK 25**, on Linux (fixtures are committed and
+  hermetic, so no HDF5/h5py at build time). **Docs ✓**: README usage examples + a standalone
+  [user guide](USER_GUIDE.md), and [`BENCHMARKS.md`](BENCHMARKS.md).
+- Remaining (optional polish): mmap tuning, and a performance-regression gate (the benchmarks in
+  [`BENCHMARKS.md`](BENCHMARKS.md) are run by hand).
+- **Milestone met, short of 1.0:** read-complete, write-broad, failing on corrupt input with typed
+  exceptions, >2 GB-capable, documented, and CI-gated. Before 1.0: a Windows CI leg (B1), release
+  plumbing (B2), and an API settled enough to promise.
 
 ## 9. SZIP filter plan (in scope, pure Java)
 
@@ -440,6 +465,11 @@ zero-dependency, pure-JDK guarantee intact.
   signed-integer szip (libaec `DATA_SIGNED`) and the szip **encoder** (H8) remain. Reference vectors
   are regenerated by `tools/fixtures/gen_aec_vectors.py`; the codec was reverse-engineered and
   validated against libaec because this environment's HDF5/h5py build ships szip disabled.
+- **Status since:** signed decoding (H6), the encoder (H8), and in P2 WF7 an encoder ported from
+  libaec's, whose chunks are libaec's byte for byte, in both codings. Everything is checked against
+  libaec alone: `szip.h5`'s chunks come from libaec's SZ layer (as libhdf5 with libaec would write
+  them), and `check_hdf5_writer.py` decodes Falcon's with libaec and re-encodes them. No libhdf5 build
+  with szip has read or written them here.
 
 ## 10. Coverage matrices  (Stage = HDF5 roadmap stage)
 
@@ -499,18 +529,26 @@ v1–v4 · v1 & v2 B-trees · Reference encoding (revised + backward-compat).
 1. **Unit tests** for every parser/serializer against hand-built byte buffers with spec-cited field
    offsets, plus known-answer vectors (Jenkins lookup3, fletcher32, szip).
 2. **Read conformance** against a checked-in corpus of reference `.h5` files
-   (`hdf5/src/test/resources/fixtures/`) generated by h5py, spanning §10. Each fixture ships with an
-   expected-values sidecar (JSON) so tests are hermetic — no HDF5 tooling needed at build time.
-3. **Write conformance / round-trip:** Falcon writes → reopen with Falcon (self-consistency) and
-   re-read with h5py; also h5py-writes → Falcon-reads. If `h5check` is later installed, add structural
-   validation.
-4. **Property-based round-trips:** random datatypes/shapes/chunkings/filters, assert lossless.
+   (`hdf5/src/test/resources/fixtures/`) generated by h5py, spanning §10. The tests assert the values
+   `tools/fixtures/gen_fixtures.py` wrote, and `storage_metadata.txt` holds libhdf5's own report of every
+   dataset's storage, so tests are hermetic — no HDF5 tooling needed at build time.
+3. **Write conformance / round-trip:** Falcon writes → reopen with Falcon (self-consistency, in the
+   build) and re-read with h5py (`tools/fixtures/check_hdf5_writer.py`, at dev time: libhdf5 2.0 and
+   1.14 read every value against a manifest, then change the file and read it again); also h5py-writes →
+   Falcon-reads. If `h5check` is later installed, add structural validation.
+4. **Randomized checks**, seeded: random selections of the fixtures against the same elements of a whole
+   read, selections visited a run at a time against element by element, random data streamed through
+   the writer and read back. Not done: generated round-trips over random datatypes, shapes, chunkings,
+   and filters.
 5. **Robustness/fuzz:** truncated/corrupt inputs raise typed exceptions with offsets — never crash the
-   JVM or return silently-wrong data.
+   JVM, exhaust the stack, or hang. Every checksum the format has is verified; bytes no checksum covers
+   (raw data without `fletcher32`, the global heap, the earliest format's metadata) can be corrupted
+   without Falcon noticing.
 
 **Reference oracle (confirmed available):** **h5py 3.16.0 bundling HDF5 2.0.0** — an exact match for
-the Format v4.0 target — is installed locally. A small committed Python + h5py script generates all
-fixtures offline. The `h5dump`/`h5ls`/`h5check` CLIs are absent from `PATH` (optional, not required).
+the Format v4.0 target — is installed locally, with an HDF5 1.14.6 h5py beside it for the writer's
+interoperability check. A small committed Python + h5py script generates all fixtures offline. The
+`h5dump`/`h5ls`/`h5check` CLIs are absent from `PATH` (optional, not required).
 
 ## 12. Falcon Phase 2 — Zarr (built)
 
@@ -530,7 +568,7 @@ checksums, and chunk indexing are all format-specific); it is deferred — see `
 4. **License:** Apache-2.0 (`LICENSE` added; POMs declare it). ✅
 5. **SZIP:** in scope — pure-Java CCSDS 121.0 decoder (H4) + encoder (H8). ✅
 6. **Priority:** reader before writer. ✅
-7. **Zarr:** Falcon Phase 2, pinned. ✅
+7. **Zarr:** Falcon Phase 2 — built since (§12). ✅
 8. **Conformance oracle:** h5py 3.16.0 / HDF5 2.0.0 (installed). ✅
 9. **I/O backend:** FFM `MemorySegment`; bytes in memory and on-demand `RangeReader` sources since P2 A6. ✅
 10. **JUnit 5 test-only:** artifacts stay pure-JDK. (Default; say the word for a hand-rolled harness.)

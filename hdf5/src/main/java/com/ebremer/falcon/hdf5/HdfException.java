@@ -8,10 +8,21 @@ package com.ebremer.falcon.hdf5;
  */
 public class HdfException extends RuntimeException {
 
+    /**
+     * An exception with the given message.
+     *
+     * @param message what failed
+     */
     public HdfException(String message) {
         super(message);
     }
 
+    /**
+     * An exception with the given message and cause.
+     *
+     * @param message what failed
+     * @param cause   the underlying failure
+     */
     public HdfException(String message, Throwable cause) {
         super(message, cause);
     }

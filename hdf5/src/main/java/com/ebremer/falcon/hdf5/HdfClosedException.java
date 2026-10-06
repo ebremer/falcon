@@ -6,6 +6,11 @@ package com.ebremer.falcon.hdf5;
  */
 public class HdfClosedException extends HdfException {
 
+    /**
+     * An exception with the given message.
+     *
+     * @param message what was used after it was closed
+     */
     public HdfClosedException(String message) {
         super(message);
     }

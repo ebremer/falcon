@@ -202,14 +202,18 @@ public final class Hdf5Writer implements AutoCloseable {
      * suits smooth data). libhdf5's {@code H5_SZIP_EC_OPTION_MASK} and {@code H5_SZIP_NN_OPTION_MASK}.
      */
     public enum SzipCoding {
+        /** Entropy coding alone: libhdf5's {@code H5_SZIP_EC_OPTION_MASK}, h5py's "ec". */
         ENTROPY,
+        /** Entropy coding after nearest-neighbour preprocessing: {@code H5_SZIP_NN_OPTION_MASK}, h5py's "nn". */
         NEAREST_NEIGHBOUR
     }
 
     /** On-disk format version: {@link #EARLIEST} writes the original (v0 superblock, symbol-table
      * groups, v1 object headers); {@link #LATEST} the modern checksummed format. */
     public enum Format {
+        /** The original format, libhdf5's default: a version-0 superblock and symbol-table groups. */
         EARLIEST,
+        /** The modern format: a version-3 superblock and checksummed version-2 object headers. */
         LATEST
     }
 
@@ -229,12 +233,23 @@ public final class Hdf5Writer implements AutoCloseable {
         this.rootWriter = new GroupWriter(this, root, "", legacy, lifecycle);
     }
 
-    /** Begins writing a new HDF5 file at {@code path} in the modern format (completed on {@link #close()}). */
+    /**
+     * Begins writing a new HDF5 file at {@code path} in the modern format (completed on {@link #close()}).
+     *
+     * @param path where the file goes; a file already there is replaced when the writer closes
+     * @return the writer
+     */
     public static Hdf5Writer create(Path path) {
         return new Hdf5Writer(path, Format.LATEST, null, new byte[0]);
     }
 
-    /** Begins writing a new HDF5 file at {@code path} in the given on-disk {@link Format}. */
+    /**
+     * Begins writing a new HDF5 file at {@code path} in the given on-disk {@link Format}.
+     *
+     * @param path   where the file goes; a file already there is replaced when the writer closes
+     * @param format the on-disk format
+     * @return the writer
+     */
     public static Hdf5Writer create(Path path, Format format) {
         return new Hdf5Writer(path, format, null, new byte[0]);
     }
@@ -250,6 +265,10 @@ public final class Hdf5Writer implements AutoCloseable {
      * try (Hdf5Writer w = Hdf5Writer.create(Path.of("data.mat"), Hdf5Writer.Format.LATEST, header)) { ... }
      * }</pre>
      *
+     * @param path      where the file goes; a file already there is replaced when the writer closes
+     * @param format    the on-disk format
+     * @param userBlock the user block's content, at most 2^30 bytes
+     * @return the writer
      * @throws IllegalArgumentException if the block holds the HDF5 signature at offset 0, 512, 1024, ...
      *         (where readers look for the superblock), or is larger than 2^30 bytes
      */
@@ -295,6 +314,8 @@ public final class Hdf5Writer implements AutoCloseable {
      * once, which {@link #abort()} cannot undo; anything else is undone by it. The file must not be open
      * elsewhere while it is changed.
      *
+     * @param path the file to change
+     * @return the writer, which writes the changes over the file on {@link #close()}
      * @throws IOException if the file cannot be read or opened for writing
      * @throws HdfUnsupportedException for a file Falcon does not change: with 4-byte addresses, of a file
      *         driver other than the default (family, multi, ...), tracking its free space, or marked as open
@@ -314,125 +335,336 @@ public final class Hdf5Writer implements AutoCloseable {
         }
     }
 
-    /** The root group writer, on which the same operations are available as any subgroup. */
+    /**
+     * The root group writer, on which the same operations are available as any subgroup.
+     *
+     * @return the root group's writer
+     */
     public GroupWriter root() {
         return rootWriter;
     }
 
     // Convenience delegates to the root group.
 
-    /** A dataset of any datatype, written with {@link DatasetWriter#write} (see {@link GroupWriter#createDataset}). */
+    /**
+     * A dataset of any datatype, written with {@link DatasetWriter#write} (see {@link GroupWriter#createDataset}).
+     *
+     * @param name  the dataset's name in the root group
+     * @param type  its datatype
+     * @param shape its dimensions now (none for a scalar), which it may grow within its maximum shape
+     * @return the dataset's writer
+     */
     public DatasetWriter createDataset(String name, Datatype type, long... shape) {
         return rootWriter.createDataset(name, type, shape);
     }
 
+    /**
+     * A signed 32-bit integer dataset in the root group (see {@link GroupWriter#intDataset}).
+     *
+     * @param name  the dataset's name in the root group
+     * @param data  its values, row-major
+     * @param shape its dimensions; their product must be {@code data.length}
+     * @return the dataset's writer, to configure it before the next dataset or group is added
+     */
     public DatasetWriter intDataset(String name, int[] data, long[] shape) {
         return rootWriter.intDataset(name, data, shape);
     }
 
+    /**
+     * A 64-bit floating-point dataset in the root group (see {@link GroupWriter#doubleDataset}).
+     *
+     * @param name  the dataset's name in the root group
+     * @param data  its values, row-major
+     * @param shape its dimensions; their product must be {@code data.length}
+     * @return the dataset's writer, to configure it before the next dataset or group is added
+     */
     public DatasetWriter doubleDataset(String name, double[] data, long[] shape) {
         return rootWriter.doubleDataset(name, data, shape);
     }
 
+    /**
+     * A variable-length UTF-8 string dataset in the root group (see {@link GroupWriter#stringDataset}).
+     *
+     * @param name  the dataset's name in the root group
+     * @param data  its strings, row-major
+     * @param shape its dimensions; their product must be {@code data.length}
+     * @return the dataset's writer, to configure it before the next dataset or group is added
+     */
     public DatasetWriter stringDataset(String name, String[] data, long[] shape) {
         return rootWriter.stringDataset(name, data, shape);
     }
 
+    /**
+     * A signed 8-bit integer dataset in the root group (see {@link GroupWriter#byteDataset}).
+     *
+     * @param name  the dataset's name in the root group
+     * @param data  its values, row-major
+     * @param shape its dimensions; their product must be {@code data.length}
+     * @return the dataset's writer, to configure it before the next dataset or group is added
+     */
     public DatasetWriter byteDataset(String name, byte[] data, long[] shape) {
         return rootWriter.byteDataset(name, data, shape);
     }
 
+    /**
+     * A signed 16-bit integer dataset in the root group (see {@link GroupWriter#shortDataset}).
+     *
+     * @param name  the dataset's name in the root group
+     * @param data  its values, row-major
+     * @param shape its dimensions; their product must be {@code data.length}
+     * @return the dataset's writer, to configure it before the next dataset or group is added
+     */
     public DatasetWriter shortDataset(String name, short[] data, long[] shape) {
         return rootWriter.shortDataset(name, data, shape);
     }
 
+    /**
+     * A signed 64-bit integer dataset in the root group (see {@link GroupWriter#longDataset}).
+     *
+     * @param name  the dataset's name in the root group
+     * @param data  its values, row-major
+     * @param shape its dimensions; their product must be {@code data.length}
+     * @return the dataset's writer, to configure it before the next dataset or group is added
+     */
     public DatasetWriter longDataset(String name, long[] data, long[] shape) {
         return rootWriter.longDataset(name, data, shape);
     }
 
+    /**
+     * A 32-bit floating-point dataset in the root group (see {@link GroupWriter#floatDataset}).
+     *
+     * @param name  the dataset's name in the root group
+     * @param data  its values, row-major
+     * @param shape its dimensions; their product must be {@code data.length}
+     * @return the dataset's writer, to configure it before the next dataset or group is added
+     */
     public DatasetWriter floatDataset(String name, float[] data, long[] shape) {
         return rootWriter.floatDataset(name, data, shape);
     }
 
+    /**
+     * A fixed-length string dataset in the root group (see
+     * {@link GroupWriter#fixedStringDataset(String, String[], long[])}).
+     *
+     * @param name  the dataset's name in the root group
+     * @param data  its strings, row-major
+     * @param shape its dimensions; their product must be {@code data.length}
+     * @return the dataset's writer, to configure it before the next dataset or group is added
+     */
     public DatasetWriter fixedStringDataset(String name, String[] data, long[] shape) {
         return rootWriter.fixedStringDataset(name, data, shape);
     }
 
+    /**
+     * A chunked {@code int32} dataset in the root group (see {@link GroupWriter#intChunkedDataset}).
+     *
+     * @param name       the dataset's name in the root group
+     * @param data       its values, row-major
+     * @param shape      its dimensions; their product must be {@code data.length}
+     * @param chunkShape its chunks' dimensions: the same rank, each at least 1
+     * @return the dataset's writer, to configure it before the next dataset or group is added
+     */
     public DatasetWriter intChunkedDataset(String name, int[] data, long[] shape, long[] chunkShape) {
         return rootWriter.intChunkedDataset(name, data, shape, chunkShape);
     }
 
+    /**
+     * A chunked {@code float64} dataset in the root group (see {@link GroupWriter#doubleChunkedDataset}).
+     *
+     * @param name       the dataset's name in the root group
+     * @param data       its values, row-major
+     * @param shape      its dimensions; their product must be {@code data.length}
+     * @param chunkShape its chunks' dimensions: the same rank, each at least 1
+     * @return the dataset's writer, to configure it before the next dataset or group is added
+     */
     public DatasetWriter doubleChunkedDataset(String name, double[] data, long[] shape, long[] chunkShape) {
         return rootWriter.doubleChunkedDataset(name, data, shape, chunkShape);
     }
 
+    /**
+     * A compound (record) dataset in the root group (see {@link GroupWriter#compoundDataset}).
+     *
+     * @param name   the dataset's name in the root group
+     * @param shape  its dimensions; their product must be each field's count of values
+     * @param fields its members, in order
+     * @return the dataset's writer, to configure it before the next dataset or group is added
+     */
     public DatasetWriter compoundDataset(String name, long[] shape, CompoundField... fields) {
         return rootWriter.compoundDataset(name, shape, fields);
     }
 
+    /**
+     * An enumerated dataset in the root group (see {@link GroupWriter#enumDataset}).
+     *
+     * @param name   the dataset's name in the root group
+     * @param shape  its dimensions; their product must be {@code values.length}
+     * @param type   the enumeration
+     * @param values each element's code, row-major
+     * @return the dataset's writer, to configure it before the next dataset or group is added
+     */
     public DatasetWriter enumDataset(String name, long[] shape, EnumType type, int[] values) {
         return rootWriter.enumDataset(name, shape, type, values);
     }
 
+    /**
+     * An object-reference dataset in the root group (see {@link GroupWriter#referenceDataset}).
+     *
+     * @param name    the dataset's name in the root group
+     * @param shape   its dimensions; their product must be {@code targets.length}
+     * @param targets each element's target, an absolute path, or {@code null}; row-major
+     * @return the dataset's writer, to configure it before the next dataset or group is added
+     */
     public DatasetWriter referenceDataset(String name, long[] shape, String[] targets) {
         return rootWriter.referenceDataset(name, shape, targets);
     }
 
-    /** A dataset of region references (see {@link GroupWriter#regionReferenceDataset}). */
+    /**
+     * A dataset of region references (see {@link GroupWriter#regionReferenceDataset}).
+     *
+     * @param name    the dataset's name in the root group
+     * @param shape   its dimensions; their product must be {@code regions.length}
+     * @param regions each element's region, or {@code null}; row-major
+     * @return the dataset's writer
+     */
     public DatasetWriter regionReferenceDataset(String name, long[] shape, Region[] regions) {
         return rootWriter.regionReferenceDataset(name, shape, regions);
     }
 
+    /**
+     * A dataset of fixed-shape {@code float32} arrays in the root group (see {@link GroupWriter#float32ArrayDataset}).
+     *
+     * @param name      the dataset's name in the root group
+     * @param shape     its dimensions
+     * @param arrayDims each element's array dimensions
+     * @param data      every element's array, one after another, row-major
+     * @return the dataset's writer, to configure it before the next dataset or group is added
+     */
     public DatasetWriter float32ArrayDataset(String name, long[] shape, int[] arrayDims, float[] data) {
         return rootWriter.float32ArrayDataset(name, shape, arrayDims, data);
     }
 
+    /**
+     * A dataset of fixed-shape {@code int32} arrays in the root group (see {@link GroupWriter#int32ArrayDataset}).
+     *
+     * @param name      the dataset's name in the root group
+     * @param shape     its dimensions
+     * @param arrayDims each element's array dimensions
+     * @param data      every element's array, one after another, row-major
+     * @return the dataset's writer, to configure it before the next dataset or group is added
+     */
     public DatasetWriter int32ArrayDataset(String name, long[] shape, int[] arrayDims, int[] data) {
         return rootWriter.int32ArrayDataset(name, shape, arrayDims, data);
     }
 
+    /**
+     * A native complex-number dataset in the root group (see {@link GroupWriter#complexDataset}).
+     *
+     * @param name      the dataset's name in the root group
+     * @param shape     its dimensions; their product must be {@code real.length}
+     * @param real      each element's real part, row-major
+     * @param imaginary each element's imaginary part, as many as {@code real}
+     * @return the dataset's writer, to configure it before the next dataset or group is added
+     */
     public DatasetWriter complexDataset(String name, long[] shape, double[] real, double[] imaginary) {
         return rootWriter.complexDataset(name, shape, real, imaginary);
     }
 
+    /**
+     * A variable-length {@code int32} sequence dataset in the root group (see {@link GroupWriter#intSequenceDataset}).
+     *
+     * @param name  the dataset's name in the root group
+     * @param shape its dimensions; their product must be {@code rows.length}
+     * @param rows  each element's values, row-major; rows may differ in length
+     * @return the dataset's writer, to configure it before the next dataset or group is added
+     */
     public DatasetWriter intSequenceDataset(String name, long[] shape, int[][] rows) {
         return rootWriter.intSequenceDataset(name, shape, rows);
     }
 
+    /**
+     * A variable-length {@code float64} sequence dataset in the root group (see
+     * {@link GroupWriter#doubleSequenceDataset}).
+     *
+     * @param name  the dataset's name in the root group
+     * @param shape its dimensions; their product must be {@code rows.length}
+     * @param rows  each element's values, row-major; rows may differ in length
+     * @return the dataset's writer, to configure it before the next dataset or group is added
+     */
     public DatasetWriter doubleSequenceDataset(String name, long[] shape, double[][] rows) {
         return rootWriter.doubleSequenceDataset(name, shape, rows);
     }
 
+    /**
+     * A group in the root group: added, or in a file being changed opened (see {@link GroupWriter#group}).
+     *
+     * @param name the group's name in the root group
+     * @return the group's writer
+     */
     public GroupWriter group(String name) {
         return rootWriter.group(name);
     }
 
-    /** A dataset of the root group (see {@link GroupWriter#dataset}). */
+    /**
+     * A dataset of the root group (see {@link GroupWriter#dataset}).
+     *
+     * @param name the dataset's name in the root group
+     * @return the dataset's writer
+     */
     public DatasetWriter dataset(String name) {
         return rootWriter.dataset(name);
     }
 
-    /** Deletes a link of the root group (see {@link GroupWriter#delete}). */
+    /**
+     * Deletes a link of the root group (see {@link GroupWriter#delete}).
+     *
+     * @param name the link's name in the root group
+     * @return the root group's writer
+     */
     public GroupWriter delete(String name) {
         return rootWriter.delete(name);
     }
 
-    /** A soft link in the root group (see {@link GroupWriter#softLink}). */
+    /**
+     * A soft link in the root group (see {@link GroupWriter#softLink}).
+     *
+     * @param name       the link's name in the root group
+     * @param targetPath the path it stands for
+     * @return the root group's writer
+     */
     public GroupWriter softLink(String name, String targetPath) {
         return rootWriter.softLink(name, targetPath);
     }
 
-    /** An external link in the root group (see {@link GroupWriter#externalLink}). */
+    /**
+     * An external link in the root group (see {@link GroupWriter#externalLink}).
+     *
+     * @param name       the link's name in the root group
+     * @param fileName   the file the object is in (a relative name is found next to this file)
+     * @param objectPath the object's path in that file
+     * @return the root group's writer
+     */
     public GroupWriter externalLink(String name, String fileName, String objectPath) {
         return rootWriter.externalLink(name, fileName, objectPath);
     }
 
-    /** A hard link in the root group (see {@link GroupWriter#hardLink}). */
+    /**
+     * A hard link in the root group (see {@link GroupWriter#hardLink}).
+     *
+     * @param name       the link's name in the root group
+     * @param targetPath the object's absolute path
+     * @return the root group's writer
+     */
     public GroupWriter hardLink(String name, String targetPath) {
         return rootWriter.hardLink(name, targetPath);
     }
 
-    /** Moves (or renames) a link of the root group (see {@link GroupWriter#move}). */
+    /**
+     * Moves (or renames) a link of the root group (see {@link GroupWriter#move}).
+     *
+     * @param name    the link to move: its name in the root group, or its path
+     * @param newPath its new path, absolute or relative to the root group
+     * @return the root group's writer
+     */
     public GroupWriter move(String name, String newPath) {
         return rootWriter.move(name, newPath);
     }
@@ -546,7 +778,11 @@ public final class Hdf5Writer implements AutoCloseable {
         }
     }
 
-    /** True until the file is written or the writer aborted. */
+    /**
+     * True until the file is written or the writer aborted.
+     *
+     * @return whether the writer still accepts additions
+     */
     public boolean isOpen() {
         return !lifecycle.closed;
     }
@@ -1106,6 +1342,11 @@ public final class Hdf5Writer implements AutoCloseable {
          * }
          * }</pre>
          *
+         * @param name  the dataset's name in this group
+         * @param type  its datatype
+         * @param shape its dimensions now (none for a scalar), which it may grow within its
+         *              {@linkplain DatasetWriter#maxShape maximum shape}
+         * @return the dataset's writer
          * @throws IllegalArgumentException if a dimension is negative, or the type cannot be written
          * @throws HdfUnsupportedException for a type the format does not hold (complex in the earliest format)
          */
@@ -1127,6 +1368,11 @@ public final class Hdf5Writer implements AutoCloseable {
         /**
          * A dataset of region references: each points at a region of a dataset in this file, by its path
          * (which may be added before or after this dataset), or is {@code null}.
+         *
+         * @param name    the dataset's name in this group
+         * @param shape   its dimensions; their product must be {@code regions.length}
+         * @param regions each element's region, or {@code null}; row-major
+         * @return the dataset's writer, its data written
          */
         public DatasetWriter regionReferenceDataset(String name, long[] shape, Region[] regions) {
             return createDataset(name, Datatype.regionReference(), shape).write(regions);
@@ -1135,6 +1381,10 @@ public final class Hdf5Writer implements AutoCloseable {
         /**
          * A soft link: a name that stands for the object at {@code targetPath} in this file (absolute, or
          * relative to this group), which need not exist.
+         *
+         * @param name       the link's name in this group
+         * @param targetPath the path it stands for: absolute, or relative to this group
+         * @return this group's writer
          */
         public GroupWriter softLink(String name, String targetPath) {
             lifecycle.check();
@@ -1150,6 +1400,11 @@ public final class Hdf5Writer implements AutoCloseable {
          * original format (a symbol table, which holds hard and soft links only) is written in the new one
          * instead, as libhdf5 converts it: link messages, in its version-1 object header; HDF5 1.8 and later
          * read it.
+         *
+         * @param name       the link's name in this group
+         * @param fileName   the file the object is in (a relative name is found next to this file)
+         * @param objectPath the object's path in that file
+         * @return this group's writer
          */
         public GroupWriter externalLink(String name, String fileName, String objectPath) {
             lifecycle.check();
@@ -1166,6 +1421,9 @@ public final class Hdf5Writer implements AutoCloseable {
          * as libhdf5's {@code H5Lcreate_hard} requires. The object is then reached by either name, and its
          * hard-link count is one more; deleting one name leaves it to the other.
          *
+         * @param name       the new link's name in this group
+         * @param targetPath the object's absolute path, followed through hard links
+         * @return this group's writer
          * @throws IllegalArgumentException if the name is taken or invalid, or nothing is at {@code targetPath}
          */
         public GroupWriter hardLink(String name, String targetPath) {
@@ -1193,6 +1451,10 @@ public final class Hdf5Writer implements AutoCloseable {
          * <p>Paths are resolved as the session leaves the file: references by path, resolved on
          * {@link Hdf5Writer#close()}, name an object's new place.
          *
+         * @param name    the link to move: its name in this group, or its path (absolute, or relative to this
+         *                group)
+         * @param newPath its new path (absolute, or relative to this group), whose last component is its new name
+         * @return this group's writer
          * @throws IllegalArgumentException if there is no such link, the new name is taken or invalid, there is
          *         no group to move it into, or a group would move into itself
          * @throws HdfUnsupportedException for a link of a user-defined type
@@ -1272,6 +1534,11 @@ public final class Hdf5Writer implements AutoCloseable {
          * {@code shape} elements ({@code new long[0]} for a scalar). An object or region reference's
          * target may be added before or after it.
          *
+         * @param name   the attribute's name; one the group has in a file being changed is replaced
+         * @param type   its datatype
+         * @param shape  its dimensions ({@code new long[0]} for a scalar)
+         * @param values its values, as {@link DatasetWriter#write} takes them
+         * @return this group's writer
          * @throws IllegalArgumentException if the values do not fit the type, or the attribute needs more
          *         than 64 KiB
          */
@@ -1281,45 +1548,95 @@ public final class Hdf5Writer implements AutoCloseable {
             return this;
         }
 
-        /** A scalar string attribute ({@code units}, a CF convention, ...): fixed-length, UTF-8. */
+        /**
+         * A scalar string attribute ({@code units}, a CF convention, ...): fixed-length, UTF-8.
+         *
+         * @param name  the attribute's name; one the group has in a file being changed is replaced
+         * @param value its value
+         * @return this group's writer
+         */
         public GroupWriter stringAttribute(String name, String value) {
             return attribute(name, stringType(value), new long[0], new String[] {value});
         }
 
+        /**
+         * A signed 32-bit integer dataset.
+         *
+         * @param name  the dataset's name in this group
+         * @param data  its values, row-major
+         * @param shape its dimensions; their product must be {@code data.length}
+         * @return the dataset's writer, to configure it before the next dataset or group is added
+         */
         public DatasetWriter intDataset(String name, int[] data, long[] shape) {
             lifecycle.check();
             requireElementCount(shape, data.length);
             return addDataset(new DatasetSpec(name, DATATYPE_INT32, 4, shape, null, intBytes(data), null));
         }
 
+        /**
+         * A 64-bit floating-point dataset.
+         *
+         * @param name  the dataset's name in this group
+         * @param data  its values, row-major
+         * @param shape its dimensions; their product must be {@code data.length}
+         * @return the dataset's writer, to configure it before the next dataset or group is added
+         */
         public DatasetWriter doubleDataset(String name, double[] data, long[] shape) {
             lifecycle.check();
             requireElementCount(shape, data.length);
             return addDataset(new DatasetSpec(name, DATATYPE_FLOAT64, 8, shape, null, doubleBytes(data), null));
         }
 
-        /** A signed 8-bit integer dataset. */
+        /**
+         * A signed 8-bit integer dataset.
+         *
+         * @param name  the dataset's name in this group
+         * @param data  its values, row-major
+         * @param shape its dimensions; their product must be {@code data.length}
+         * @return the dataset's writer, to configure it before the next dataset or group is added
+         */
         public DatasetWriter byteDataset(String name, byte[] data, long[] shape) {
             lifecycle.check();
             requireElementCount(shape, data.length);
             return addDataset(new DatasetSpec(name, DATATYPE_INT8, 1, shape, null, data.clone(), null));
         }
 
-        /** A signed 16-bit integer dataset. */
+        /**
+         * A signed 16-bit integer dataset.
+         *
+         * @param name  the dataset's name in this group
+         * @param data  its values, row-major
+         * @param shape its dimensions; their product must be {@code data.length}
+         * @return the dataset's writer, to configure it before the next dataset or group is added
+         */
         public DatasetWriter shortDataset(String name, short[] data, long[] shape) {
             lifecycle.check();
             requireElementCount(shape, data.length);
             return addDataset(new DatasetSpec(name, DATATYPE_INT16, 2, shape, null, shortBytes(data), null));
         }
 
-        /** A signed 64-bit integer dataset. */
+        /**
+         * A signed 64-bit integer dataset.
+         *
+         * @param name  the dataset's name in this group
+         * @param data  its values, row-major
+         * @param shape its dimensions; their product must be {@code data.length}
+         * @return the dataset's writer, to configure it before the next dataset or group is added
+         */
         public DatasetWriter longDataset(String name, long[] data, long[] shape) {
             lifecycle.check();
             requireElementCount(shape, data.length);
             return addDataset(new DatasetSpec(name, DATATYPE_INT64, 8, shape, null, longBytes(data), null));
         }
 
-        /** A 32-bit floating-point dataset. */
+        /**
+         * A 32-bit floating-point dataset.
+         *
+         * @param name  the dataset's name in this group
+         * @param data  its values, row-major
+         * @param shape its dimensions; their product must be {@code data.length}
+         * @return the dataset's writer, to configure it before the next dataset or group is added
+         */
         public DatasetWriter floatDataset(String name, float[] data, long[] shape) {
             lifecycle.check();
             requireElementCount(shape, data.length);
@@ -1330,6 +1647,11 @@ public final class Hdf5Writer implements AutoCloseable {
          * A fixed-length string dataset. Each element is stored, UTF-8 encoded, in {@code length} bytes
          * (the longest string's byte length if not given), null-padded. The datatype's character set is
          * UTF-8 if any string is non-ASCII, else ASCII.
+         *
+         * @param name  the dataset's name in this group
+         * @param data  its strings, row-major
+         * @param shape its dimensions; their product must be {@code data.length}
+         * @return the dataset's writer, to configure it before the next dataset or group is added
          */
         public DatasetWriter fixedStringDataset(String name, String[] data, long[] shape) {
             lifecycle.check();
@@ -1343,6 +1665,12 @@ public final class Hdf5Writer implements AutoCloseable {
         /**
          * A fixed-length string dataset with an explicit per-element byte {@code length}. A string whose
          * UTF-8 encoding is longer is truncated at the last whole character that fits.
+         *
+         * @param name   the dataset's name in this group
+         * @param data   its strings, row-major
+         * @param shape  its dimensions; their product must be {@code data.length}
+         * @param length each element's size in bytes, at least 1
+         * @return the dataset's writer, to configure it before the next dataset or group is added
          */
         public DatasetWriter fixedStringDataset(String name, String[] data, long[] shape, int length) {
             lifecycle.check();
@@ -1366,7 +1694,15 @@ public final class Hdf5Writer implements AutoCloseable {
             return addDataset(new DatasetSpec(name, fixedStringDatatype(length, utf8), length, shape, null, bytes, null));
         }
 
-        /** A chunked {@code int32} dataset (fixed-array index). */
+        /**
+         * A chunked {@code int32} dataset (fixed-array index).
+         *
+         * @param name       the dataset's name in this group
+         * @param data       its values, row-major
+         * @param shape      its dimensions; their product must be {@code data.length}
+         * @param chunkShape its chunks' dimensions: the same rank, each at least 1
+         * @return the dataset's writer, to configure it before the next dataset or group is added
+         */
         public DatasetWriter intChunkedDataset(String name, int[] data, long[] shape, long[] chunkShape) {
             lifecycle.check();
             requireElementCount(shape, data.length);
@@ -1374,7 +1710,15 @@ public final class Hdf5Writer implements AutoCloseable {
             return addDataset(new DatasetSpec(name, DATATYPE_INT32, 4, shape, chunkShape.clone(), intBytes(data), null));
         }
 
-        /** A chunked {@code float64} dataset (fixed-array index). */
+        /**
+         * A chunked {@code float64} dataset (fixed-array index).
+         *
+         * @param name       the dataset's name in this group
+         * @param data       its values, row-major
+         * @param shape      its dimensions; their product must be {@code data.length}
+         * @param chunkShape its chunks' dimensions: the same rank, each at least 1
+         * @return the dataset's writer, to configure it before the next dataset or group is added
+         */
         public DatasetWriter doubleChunkedDataset(String name, double[] data, long[] shape, long[] chunkShape) {
             lifecycle.check();
             requireElementCount(shape, data.length);
@@ -1382,7 +1726,14 @@ public final class Hdf5Writer implements AutoCloseable {
             return addDataset(new DatasetSpec(name, DATATYPE_FLOAT64, 8, shape, chunkShape.clone(), doubleBytes(data), null));
         }
 
-        /** A variable-length UTF-8 string dataset (values stored in a global heap). */
+        /**
+         * A variable-length UTF-8 string dataset (values stored in a global heap).
+         *
+         * @param name  the dataset's name in this group
+         * @param data  its strings, row-major
+         * @param shape its dimensions; their product must be {@code data.length}
+         * @return the dataset's writer, to configure it before the next dataset or group is added
+         */
         public DatasetWriter stringDataset(String name, String[] data, long[] shape) {
             lifecycle.check();
             requireElementCount(shape, data.length);
@@ -1397,6 +1748,11 @@ public final class Hdf5Writer implements AutoCloseable {
          * A compound (record) dataset. Each {@link CompoundField} supplies one named, typed column;
          * fields are packed in order (no alignment gaps) and every column must have one value per
          * element.
+         *
+         * @param name   the dataset's name in this group
+         * @param shape  its dimensions; their product must be each field's count of values
+         * @param fields its members, in order
+         * @return the dataset's writer, to configure it before the next dataset or group is added
          */
         public DatasetWriter compoundDataset(String name, long[] shape, CompoundField... fields) {
             lifecycle.check();
@@ -1427,7 +1783,15 @@ public final class Hdf5Writer implements AutoCloseable {
             return addDataset(new DatasetSpec(name, datatype, recordSize, shape, null, data, null));
         }
 
-        /** An enumerated dataset over a 32-bit base type: each value must be one of {@code type}'s codes. */
+        /**
+         * An enumerated dataset over a 32-bit base type: each value must be one of {@code type}'s codes.
+         *
+         * @param name   the dataset's name in this group
+         * @param shape  its dimensions; their product must be {@code values.length}
+         * @param type   the enumeration
+         * @param values each element's code, row-major
+         * @return the dataset's writer, to configure it before the next dataset or group is added
+         */
         public DatasetWriter enumDataset(String name, long[] shape, EnumType type, int[] values) {
             lifecycle.check();
             requireElementCount(shape, values.length);
@@ -1439,6 +1803,12 @@ public final class Hdf5Writer implements AutoCloseable {
         /**
          * A dataset whose every element is a fixed-shape {@code float32} array. {@code data} holds all
          * elements' sub-arrays concatenated row-major (element count &times; {@code prod(arrayDims)} values).
+         *
+         * @param name      the dataset's name in this group
+         * @param shape     its dimensions
+         * @param arrayDims each element's array dimensions
+         * @param data      every element's array, one after another, row-major
+         * @return the dataset's writer, to configure it before the next dataset or group is added
          */
         public DatasetWriter float32ArrayDataset(String name, long[] shape, int[] arrayDims, float[] data) {
             lifecycle.check();
@@ -1448,7 +1818,15 @@ public final class Hdf5Writer implements AutoCloseable {
                     perElement * 4, shape, null, float32Bytes(data), null));
         }
 
-        /** A dataset whose every element is a fixed-shape {@code int32} array (see {@link #float32ArrayDataset}). */
+        /**
+         * A dataset whose every element is a fixed-shape {@code int32} array (see {@link #float32ArrayDataset}).
+         *
+         * @param name      the dataset's name in this group
+         * @param shape     its dimensions
+         * @param arrayDims each element's array dimensions
+         * @param data      every element's array, one after another, row-major
+         * @return the dataset's writer, to configure it before the next dataset or group is added
+         */
         public DatasetWriter int32ArrayDataset(String name, long[] shape, int[] arrayDims, int[] data) {
             lifecycle.check();
             int perElement = product(arrayDims);
@@ -1457,7 +1835,15 @@ public final class Hdf5Writer implements AutoCloseable {
                     perElement * 4, shape, null, intBytes(data), null));
         }
 
-        /** A native complex-number dataset (128-bit: {@code float64} real and imaginary parts). */
+        /**
+         * A native complex-number dataset (128-bit: {@code float64} real and imaginary parts).
+         *
+         * @param name      the dataset's name in this group
+         * @param shape     its dimensions; their product must be {@code real.length}
+         * @param real      each element's real part, row-major
+         * @param imaginary each element's imaginary part, as many as {@code real}
+         * @return the dataset's writer, to configure it before the next dataset or group is added
+         */
         public DatasetWriter complexDataset(String name, long[] shape, double[] real, double[] imaginary) {
             lifecycle.check();
             requireElementCount(shape, real.length);
@@ -1472,7 +1858,14 @@ public final class Hdf5Writer implements AutoCloseable {
             return addDataset(new DatasetSpec(name, complex128Datatype(), 16, shape, null, data, null));
         }
 
-        /** A variable-length {@code int32} sequence (ragged array) dataset; {@code rows[i]} is element i. */
+        /**
+         * A variable-length {@code int32} sequence (ragged array) dataset; {@code rows[i]} is element i.
+         *
+         * @param name  the dataset's name in this group
+         * @param shape its dimensions; their product must be {@code rows.length}
+         * @param rows  each element's values, row-major; rows may differ in length
+         * @return the dataset's writer, to configure it before the next dataset or group is added
+         */
         public DatasetWriter intSequenceDataset(String name, long[] shape, int[][] rows) {
             lifecycle.check();
             requireElementCount(shape, rows.length);
@@ -1485,7 +1878,14 @@ public final class Hdf5Writer implements AutoCloseable {
             return addVlenSequence(name, shape, DATATYPE_INT32, payloads, counts);
         }
 
-        /** A variable-length {@code float64} sequence (ragged array) dataset; {@code rows[i]} is element i. */
+        /**
+         * A variable-length {@code float64} sequence (ragged array) dataset; {@code rows[i]} is element i.
+         *
+         * @param name  the dataset's name in this group
+         * @param shape its dimensions; their product must be {@code rows.length}
+         * @param rows  each element's values, row-major; rows may differ in length
+         * @return the dataset's writer, to configure it before the next dataset or group is added
+         */
         public DatasetWriter doubleSequenceDataset(String name, long[] shape, double[][] rows) {
             lifecycle.check();
             requireElementCount(shape, rows.length);
@@ -1510,6 +1910,11 @@ public final class Hdf5Writer implements AutoCloseable {
          * {@code "/group/name"}) to another object in this file, or {@code null} for a null reference.
          * Targets may be defined before or after this dataset; addresses are resolved when the file is
          * written (an unresolved target path is an error).
+         *
+         * @param name    the dataset's name in this group
+         * @param shape   its dimensions; their product must be {@code targets.length}
+         * @param targets each element's target, an absolute path, or {@code null}; row-major
+         * @return the dataset's writer, to configure it before the next dataset or group is added
          */
         public DatasetWriter referenceDataset(String name, long[] shape, String[] targets) {
             lifecycle.check();
@@ -1526,6 +1931,8 @@ public final class Hdf5Writer implements AutoCloseable {
          * ({@link Hdf5Writer#open}), a group this one already holds (by a hard link) is opened, to add to it
          * and change it.
          *
+         * @param name the subgroup's name
+         * @return the subgroup's writer
          * @throws IllegalArgumentException if the name is taken by a dataset or link, or is invalid
          */
         public GroupWriter group(String name) {
@@ -1569,6 +1976,8 @@ public final class Hdf5Writer implements AutoCloseable {
          * this writer closes). A write must cover only elements a mapping whose source exists covers, each
          * once, or it is refused before anything is written.
          *
+         * @param name the dataset's name in this group
+         * @return the dataset's writer
          * @throws IllegalArgumentException if the group has no dataset of that name (a soft or external link
          *         is not followed: open the dataset where it is)
          */
@@ -1597,6 +2006,8 @@ public final class Hdf5Writer implements AutoCloseable {
          * changed, one the group holds. The object it led to stays in the file, unreachable unless another
          * link leads to it (its hard-link count is lowered); a new link may then take the name.
          *
+         * @param name the link's name in this group
+         * @return this group's writer
          * @throws IllegalArgumentException if the group has no link of that name
          */
         public GroupWriter delete(String name) {
@@ -1629,6 +2040,8 @@ public final class Hdf5Writer implements AutoCloseable {
          * Deletes the attribute {@code name}: one added in this session, or one the group has in a file being
          * changed.
          *
+         * @param name the attribute's name
+         * @return this group's writer
          * @throws IllegalArgumentException if the group has no attribute of that name
          */
         public GroupWriter deleteAttribute(String name) {
@@ -1637,6 +2050,14 @@ public final class Hdf5Writer implements AutoCloseable {
             return this;
         }
 
+        /**
+         * A signed 32-bit integer attribute.
+         *
+         * @param name  the attribute's name; one the group has in a file being changed is replaced
+         * @param data  its values, row-major
+         * @param shape its dimensions ({@code new long[0]} for a scalar); their product must be {@code data.length}
+         * @return this group's writer
+         */
         public GroupWriter intAttribute(String name, int[] data, long[] shape) {
             lifecycle.check();
             requireElementCount(shape, data.length);
@@ -1644,6 +2065,14 @@ public final class Hdf5Writer implements AutoCloseable {
             return this;
         }
 
+        /**
+         * A 64-bit floating-point attribute.
+         *
+         * @param name  the attribute's name; one the group has in a file being changed is replaced
+         * @param data  its values, row-major
+         * @param shape its dimensions ({@code new long[0]} for a scalar); their product must be {@code data.length}
+         * @return this group's writer
+         */
         public GroupWriter doubleAttribute(String name, double[] data, long[] shape) {
             lifecycle.check();
             requireElementCount(shape, data.length);
@@ -1787,6 +2216,9 @@ public final class Hdf5Writer implements AutoCloseable {
         /**
          * Stores the dataset in chunks of {@code chunkShape} (one per dimension), each written, and
          * filtered, as soon as all of its elements are. Before any data is written.
+         *
+         * @param chunkShape the chunks' dimensions: the dataset's rank, each at least 1, a chunk under 2 GiB
+         * @return this dataset's writer
          */
         public DatasetWriter chunked(long... chunkShape) {
             lifecycle.check();
@@ -1804,6 +2236,9 @@ public final class Hdf5Writer implements AutoCloseable {
          * The dataset's maximum shape, which {@link #extend} and {@link #append} may grow it to:
          * {@link Hdf5Writer#UNLIMITED} for a dimension with no limit. A dataset that can grow must be
          * {@linkplain #chunked chunked}. Before any data is written.
+         *
+         * @param maxShape each dimension's limit, none below its size now, or {@link Hdf5Writer#UNLIMITED}
+         * @return this dataset's writer
          */
         public DatasetWriter maxShape(long... maxShape) {
             lifecycle.check();
@@ -1825,7 +2260,11 @@ public final class Hdf5Writer implements AutoCloseable {
 
         // ------------------------------------------------------------ data
 
-        /** The dataset's current shape. */
+        /**
+         * The dataset's current shape.
+         *
+         * @return its dimensions now (a copy)
+         */
         public long[] shape() {
             return spec.shape.clone();
         }
@@ -1833,6 +2272,9 @@ public final class Hdf5Writer implements AutoCloseable {
         /**
          * Writes every element: {@code values} holds the whole dataset's values in row-major order, as
          * {@link #write(long[], long[], Object)} takes them.
+         *
+         * @param values every element's values, row-major
+         * @return this dataset's writer
          */
         public DatasetWriter write(Object values) {
             return write(new long[spec.shape.length], spec.shape.clone(), values);
@@ -1860,6 +2302,10 @@ public final class Hdf5Writer implements AutoCloseable {
          * of a dataset of object references are kept until {@link Hdf5Writer#close()}, which learns where
          * their targets are.
          *
+         * @param offset the box's first corner
+         * @param count  its size in each dimension
+         * @param values its elements' values, row-major
+         * @return this dataset's writer
          * @throws IllegalArgumentException if the box lies outside the dataset, or the values do not fit
          */
         public DatasetWriter write(long[] offset, long[] count, Object values) {
@@ -1882,6 +2328,11 @@ public final class Hdf5Writer implements AutoCloseable {
          * Writes elements' bytes as stored, in the datatype's byte order, for the box
          * {@code [offset, offset + count)}: {@code bytes} holds {@code count} elements, row-major. Not for
          * types that hold variable-length data or references.
+         *
+         * @param offset the box's first corner
+         * @param count  its size in each dimension
+         * @param bytes  its elements, row-major: as many as {@code count} holds, times the element size
+         * @return this dataset's writer
          */
         public DatasetWriter writeRaw(long[] offset, long[] count, byte[] bytes) {
             lifecycle.check();
@@ -1923,6 +2374,8 @@ public final class Hdf5Writer implements AutoCloseable {
          * Appends {@code values} along the first dimension: the dataset grows by as many rows as they fill
          * (each row being every element of the other dimensions), which are then written.
          *
+         * @param values whole rows of values, row-major, as {@link #write(Object)} takes them
+         * @return this dataset's writer
          * @throws IllegalStateException if the first dimension cannot grow that far (see {@link #maxShape})
          * @throws IllegalArgumentException if the values do not fill whole rows
          */
@@ -1955,6 +2408,8 @@ public final class Hdf5Writer implements AutoCloseable {
          * Grows the dataset to {@code shape}, within its {@linkplain #maxShape maximum shape}. New elements
          * read as the fill value until written.
          *
+         * @param shape the new dimensions, none smaller than now
+         * @return this dataset's writer
          * @throws IllegalStateException if the dataset cannot grow (it has no larger maximum shape)
          * @throws IllegalArgumentException if a dimension would shrink or pass its maximum
          */
@@ -2009,6 +2464,8 @@ public final class Hdf5Writer implements AutoCloseable {
          * Deletes the attribute {@code name}: one added in this session, or one the dataset has in a file
          * being changed.
          *
+         * @param name the attribute's name
+         * @return this dataset's writer
          * @throws IllegalArgumentException if the dataset has no attribute of that name
          */
         public DatasetWriter deleteAttribute(String name) {
@@ -2030,6 +2487,12 @@ public final class Hdf5Writer implements AutoCloseable {
 
         /**
          * An attribute of any datatype, as {@link GroupWriter#attribute} adds one.
+         *
+         * @param name   the attribute's name; one the dataset has in a file being changed is replaced
+         * @param type   its datatype
+         * @param shape  its dimensions ({@code new long[0]} for a scalar)
+         * @param values its values, as {@link #write} takes them
+         * @return this dataset's writer
          */
         public DatasetWriter attribute(String name, Datatype type, long[] shape, Object values) {
             lifecycle.check();
@@ -2037,12 +2500,23 @@ public final class Hdf5Writer implements AutoCloseable {
             return this;
         }
 
-        /** A scalar string attribute ({@code units}, a CF convention, ...): fixed-length, UTF-8. */
+        /**
+         * A scalar string attribute ({@code units}, a CF convention, ...): fixed-length, UTF-8.
+         *
+         * @param name  the attribute's name; one the dataset has in a file being changed is replaced
+         * @param value its value
+         * @return this dataset's writer
+         */
         public DatasetWriter stringAttribute(String name, String value) {
             return attribute(name, stringType(value), new long[0], new String[] {value});
         }
 
-        /** Compresses each chunk with deflate (gzip) at the given level (0&ndash;9). Chunked datasets only. */
+        /**
+         * Compresses each chunk with deflate (gzip) at the given level (0&ndash;9). Chunked datasets only.
+         *
+         * @param level the compression level: 0 (none) to 9 (smallest)
+         * @return this dataset's writer
+         */
         public DatasetWriter deflate(int level) {
             lifecycle.check();
             requireConfigurable();
@@ -2054,7 +2528,11 @@ public final class Hdf5Writer implements AutoCloseable {
             return this;
         }
 
-        /** Byte-shuffles each chunk (grouping like-position bytes) to improve compression. Chunked only. */
+        /**
+         * Byte-shuffles each chunk (grouping like-position bytes) to improve compression. Chunked only.
+         *
+         * @return this dataset's writer
+         */
         public DatasetWriter shuffle() {
             lifecycle.check();
             requireConfigurable();
@@ -2063,7 +2541,11 @@ public final class Hdf5Writer implements AutoCloseable {
             return this;
         }
 
-        /** Appends a Fletcher-32 checksum to each stored chunk. Chunked datasets only. */
+        /**
+         * Appends a Fletcher-32 checksum to each stored chunk. Chunked datasets only.
+         *
+         * @return this dataset's writer
+         */
         public DatasetWriter fletcher32() {
             lifecycle.check();
             requireConfigurable();
@@ -2077,6 +2559,8 @@ public final class Hdf5Writer implements AutoCloseable {
          * automatic minbits: elements equal to the fill value get a reserved code, the rest are stored
          * as their offset from the chunk minimum in as few bits as the range needs. Chunked integer
          * datasets only, as the first filter.
+         *
+         * @return this dataset's writer
          */
         public DatasetWriter scaleOffset() {
             lifecycle.check();
@@ -2093,6 +2577,8 @@ public final class Hdf5Writer implements AutoCloseable {
          * integer datatype of that precision). Chunked integer datasets only, as the first filter; every
          * value (and the fill value, if set) must be non-negative and fit in {@code precision} bits.
          *
+         * @param precision the bits kept of each element: 1 to the element's size in bits
+         * @return this dataset's writer
          * @throws IllegalArgumentException if a value does not fit
          */
         public DatasetWriter nbit(int precision) {
@@ -2120,7 +2606,11 @@ public final class Hdf5Writer implements AutoCloseable {
             return this;
         }
 
-        /** Compresses chunks with szip's entropy coding, 8 pixels per block: {@code szip(SzipCoding.ENTROPY, 8)}. */
+        /**
+         * Compresses chunks with szip's entropy coding, 8 pixels per block: {@code szip(SzipCoding.ENTROPY, 8)}.
+         *
+         * @return this dataset's writer
+         */
         public DatasetWriter szip() {
             return szip(SzipCoding.ENTROPY, 8);
         }
@@ -2135,6 +2625,7 @@ public final class Hdf5Writer implements AutoCloseable {
          *                       smooth data); h5py's {@code "ec"} and {@code "nn"}
          * @param pixelsPerBlock elements coded together: even, 2 to 32 (libaec's standard sizes are 8, 16
          *                       and 32), and at most a chunk's elements
+         * @return this dataset's writer
          */
         public DatasetWriter szip(SzipCoding coding, int pixelsPerBlock) {
             lifecycle.check();
@@ -2197,6 +2688,8 @@ public final class Hdf5Writer implements AutoCloseable {
          * Stores the element data inline in the object header (compact layout) rather than in a separate
          * block. For small contiguous datasets only; the data must be at most 65524 bytes (an object-header
          * message holds under 64 KiB).
+         *
+         * @return this dataset's writer
          */
         public DatasetWriter compact() {
             lifecycle.check();
@@ -2218,6 +2711,8 @@ public final class Hdf5Writer implements AutoCloseable {
          * integer dataset stores it exactly (it must be in range), a floating-point one as the nearest
          * value. Integer, enum, and floating-point datasets only.
          *
+         * @param value the fill value
+         * @return this dataset's writer
          * @throws IllegalArgumentException if the value is out of range for an integer dataset
          * @throws IllegalStateException if the dataset's type has no numeric fill value
          */
@@ -2244,6 +2739,8 @@ public final class Hdf5Writer implements AutoCloseable {
          * floating-point dataset stores it (rounded to float32 if that is the type), an integer one only a
          * whole number in range.
          *
+         * @param value the fill value
+         * @return this dataset's writer
          * @throws IllegalArgumentException if an integer dataset is given a fraction or an out-of-range value
          * @throws IllegalStateException if the dataset's type has no numeric fill value
          */
@@ -2300,6 +2797,14 @@ public final class Hdf5Writer implements AutoCloseable {
             return spec.elementSize == 8 ? doubleBytes(new double[] {value}) : float32Bytes(new float[] {(float) value});
         }
 
+        /**
+         * A signed 32-bit integer attribute.
+         *
+         * @param name  the attribute's name; one the dataset has in a file being changed is replaced
+         * @param data  its values, row-major
+         * @param shape its dimensions ({@code new long[0]} for a scalar); their product must be {@code data.length}
+         * @return this dataset's writer
+         */
         public DatasetWriter intAttribute(String name, int[] data, long[] shape) {
             lifecycle.check();
             requireElementCount(shape, data.length);
@@ -2307,6 +2812,14 @@ public final class Hdf5Writer implements AutoCloseable {
             return this;
         }
 
+        /**
+         * A 64-bit floating-point attribute.
+         *
+         * @param name  the attribute's name; one the dataset has in a file being changed is replaced
+         * @param data  its values, row-major
+         * @param shape its dimensions ({@code new long[0]} for a scalar); their product must be {@code data.length}
+         * @return this dataset's writer
+         */
         public DatasetWriter doubleAttribute(String name, double[] data, long[] shape) {
             lifecycle.check();
             requireElementCount(shape, data.length);
@@ -2344,13 +2857,25 @@ public final class Hdf5Writer implements AutoCloseable {
             this.count = count;
         }
 
-        /** An {@code int32} field. Field names must be non-empty, without NUL, and unique in the record. */
+        /**
+         * An {@code int32} field. Field names must be non-empty, without NUL, and unique in the record.
+         *
+         * @param name   the field's name
+         * @param values its value in each element, row-major
+         * @return the field
+         */
         public static CompoundField int32(String name, int[] values) {
             requireName(name, "compound field");
             return new CompoundField(name, DATATYPE_INT32, 4, intBytes(values), values.length);
         }
 
-        /** A {@code float64} field. */
+        /**
+         * A {@code float64} field.
+         *
+         * @param name   the field's name
+         * @param values its value in each element, row-major
+         * @return the field
+         */
         public static CompoundField float64(String name, double[] values) {
             requireName(name, "compound field");
             return new CompoundField(name, DATATYPE_FLOAT64, 8, doubleBytes(values), values.length);
@@ -2362,9 +2887,17 @@ public final class Hdf5Writer implements AutoCloseable {
         private final List<String> names = new ArrayList<>();
         private final List<Integer> values = new ArrayList<>();
 
+        /** An enumeration with no members yet, as {@link Hdf5Writer#enumType()} makes. */
+        public EnumType() {
+        }
+
         /**
          * Adds a member; returns {@code this} for chaining. Names must be non-empty and without NUL, and
          * names and values unique, as libhdf5 requires.
+         *
+         * @param name  the member's name
+         * @param value its code
+         * @return this enumeration
          */
         public EnumType add(String name, int value) {
             requireName(name, "enum member");
@@ -2377,7 +2910,11 @@ public final class Hdf5Writer implements AutoCloseable {
         }
     }
 
-    /** Starts building an {@link EnumType}. */
+    /**
+     * Starts building an {@link EnumType}.
+     *
+     * @return an enumeration with no members yet
+     */
     public static EnumType enumType() {
         return new EnumType();
     }
@@ -2411,12 +2948,24 @@ public final class Hdf5Writer implements AutoCloseable {
             this.ends = ends;
         }
 
-        /** All of the dataset. */
+        /**
+         * All of the dataset.
+         *
+         * @param datasetPath the dataset's absolute path
+         * @return the region
+         */
         public static Region all(String datasetPath) {
             return new Region(datasetPath, ALL, new long[0][], new long[0][]);
         }
 
-        /** The block of {@code count} elements in each dimension from {@code offset}. */
+        /**
+         * The block of {@code count} elements in each dimension from {@code offset}.
+         *
+         * @param datasetPath the dataset's absolute path
+         * @param offset      the block's first corner
+         * @param count       its size in each dimension
+         * @return the region
+         */
         public static Region block(String datasetPath, long[] offset, long[] count) {
             return hyperslab(datasetPath, offset, null, count.clone(), null);
         }
@@ -2425,6 +2974,13 @@ public final class Hdf5Writer implements AutoCloseable {
          * A regular hyperslab, as {@code Dataset.select(start, stride, count, block)} selects one: in each
          * dimension, {@code count} blocks of {@code block} indices, {@code stride} apart ({@code null} stride
          * and block are 1).
+         *
+         * @param datasetPath the dataset's absolute path
+         * @param start       the first block's first corner
+         * @param stride      the distance from one block's start to the next in each dimension, or {@code null}
+         * @param count       the blocks in each dimension
+         * @param block       each block's size in each dimension, or {@code null}
+         * @return the region
          */
         public static Region hyperslab(String datasetPath, long[] start, long[] stride, long[] count, long[] block) {
             int rank = start.length;
@@ -2464,7 +3020,13 @@ public final class Hdf5Writer implements AutoCloseable {
             return new Region(datasetPath, HYPERSLAB, starts, ends);
         }
 
-        /** Single elements, in the order given. */
+        /**
+         * Single elements, in the order given.
+         *
+         * @param datasetPath the dataset's absolute path
+         * @param points      each element's coordinates, all of the dataset's rank
+         * @return the region
+         */
         public static Region points(String datasetPath, long[][] points) {
             long[][] copy = new long[points.length][];
             for (int i = 0; i < points.length; i++) {
@@ -2476,7 +3038,11 @@ public final class Hdf5Writer implements AutoCloseable {
             return new Region(datasetPath, POINTS, copy, null);
         }
 
-        /** The dataset's absolute path. */
+        /**
+         * The dataset's absolute path.
+         *
+         * @return the path the region was made with
+         */
         public String datasetPath() {
             return datasetPath;
         }

@@ -80,7 +80,11 @@ public final class Group extends Hdf5Object {
         return true;
     }
 
-    /** Every link in this group, of every kind, in the order the group indexes them. */
+    /**
+     * Every link in this group, of every kind, in the order the group indexes them.
+     *
+     * @return the links, unmodifiable; empty for an empty group
+     */
     public List<Link> links() {
         ctx.checkOpen();
         List<Link> result = state.links;
@@ -102,6 +106,8 @@ public final class Group extends Hdf5Object {
      * {@link ExternalFileAccess} policy refuses or that cannot be read, and user-defined links. An object
      * reached through a soft link is named by the link; one reached through an external link, by its path
      * in that link's file.
+     *
+     * @return the objects reached, unmodifiable
      */
     public List<Hdf5Object> children() {
         ctx.checkOpen();
@@ -126,7 +132,11 @@ public final class Group extends Hdf5Object {
         return result;
     }
 
-    /** The name of every link in this group (including links that reach nothing). */
+    /**
+     * The name of every link in this group (including links that reach nothing).
+     *
+     * @return the link names, in link order, unmodifiable
+     */
     public List<String> childNames() {
         return links().stream().map(Link::name).toList();
     }
@@ -136,6 +146,9 @@ public final class Group extends Hdf5Object {
      * rest of the path reaches (see <b>Paths</b> above). For a plain name, this group's link of that name.
      * Empty if there is no such link, or if the path ends in {@code .} or is {@code /}, which no link
      * names.
+     *
+     * @param path a link name, or a path whose last component names the link
+     * @return the link, or empty
      */
     public Optional<Link> link(String path) {
         String trimmed = trimTrailingSlashes(path);
@@ -209,6 +222,8 @@ public final class Group extends Hdf5Object {
      * or more than 16 such links in a row), or is not a group but is followed by more of the path; and for
      * an empty path.
      *
+     * @param path a link name, or a path relative to this group or (starting with {@code /}) the root
+     * @return the object reached, or empty
      * @throws HdfUnsupportedException if the path crosses an external link to a file the
      *         {@link ExternalFileAccess} policy refuses
      */
@@ -219,6 +234,8 @@ public final class Group extends Hdf5Object {
     /**
      * The group at {@code path} (see <b>Paths</b> above).
      *
+     * @param path a link name, or a path relative to this group or (starting with {@code /}) the root
+     * @return the group, named by {@code path}
      * @throws NoSuchElementException if no object is there
      * @throws HdfUnsupportedException if the path crosses a user-defined link, or an external link to a
      *         file the {@link ExternalFileAccess} policy refuses
@@ -231,6 +248,8 @@ public final class Group extends Hdf5Object {
     /**
      * The dataset at {@code path} (see <b>Paths</b> above).
      *
+     * @param path a link name, or a path relative to this group or (starting with {@code /}) the root
+     * @return the dataset, named by {@code path}
      * @throws NoSuchElementException if no object is there
      * @throws HdfUnsupportedException if the path crosses a user-defined link, or an external link to a
      *         file the {@link ExternalFileAccess} policy refuses
@@ -243,6 +262,8 @@ public final class Group extends Hdf5Object {
     /**
      * The committed (named) datatype at {@code path} (see <b>Paths</b> above).
      *
+     * @param path a link name, or a path relative to this group or (starting with {@code /}) the root
+     * @return the committed datatype, named by {@code path}
      * @throws NoSuchElementException if no object is there
      * @throws HdfUnsupportedException if the path crosses a user-defined link, or an external link to a
      *         file the {@link ExternalFileAccess} policy refuses

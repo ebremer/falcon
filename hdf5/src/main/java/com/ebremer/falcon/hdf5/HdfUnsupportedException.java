@@ -7,6 +7,11 @@ package com.ebremer.falcon.hdf5;
  */
 public class HdfUnsupportedException extends HdfException {
 
+    /**
+     * An exception with the given message.
+     *
+     * @param message what is not supported, or refused
+     */
     public HdfUnsupportedException(String message) {
         super(message);
     }

@@ -70,7 +70,14 @@ public final class Hdf5File implements AutoCloseable {
         this.root = root;
     }
 
-    /** Opens and memory-maps an HDF5 file for reading, with the {@linkplain OpenOptions#defaults() default options}. */
+    /**
+     * Opens and memory-maps an HDF5 file for reading, with the {@linkplain OpenOptions#defaults() default options}.
+     *
+     * @param path the file
+     * @return the open file, to be closed by the caller
+     * @throws IOException if the file cannot be opened, mapped, or read
+     * @throws HdfFormatException if it holds no HDF5 superblock, or its first metadata is corrupt
+     */
     public static Hdf5File open(Path path) throws IOException {
         return open(path, OpenOptions.defaults());
     }
@@ -78,6 +85,12 @@ public final class Hdf5File implements AutoCloseable {
     /**
      * Opens and memory-maps an HDF5 file for reading; {@code externalFileAccess} decides which other
      * files (external raw data, virtual-dataset sources) it may make Falcon open.
+     *
+     * @param path               the file
+     * @param externalFileAccess the policy for the other files it names
+     * @return the open file, to be closed by the caller
+     * @throws IOException if the file cannot be opened, mapped, or read
+     * @throws HdfFormatException if it holds no HDF5 superblock, or its first metadata is corrupt
      */
     public static Hdf5File open(Path path, ExternalFileAccess externalFileAccess) throws IOException {
         return open(path, OpenOptions.defaults().externalFileAccess(externalFileAccess));
@@ -88,6 +101,12 @@ public final class Hdf5File implements AutoCloseable {
      * cannot map it is read on demand through a channel instead, as through a {@link RangeReader}
      * ({@link OpenOptions#readerPageSize} and {@link OpenOptions#readerCacheSize} apply); the channel is
      * closed with the file.
+     *
+     * @param path    the file
+     * @param options the policy for other files, and the cache sizes
+     * @return the open file, to be closed by the caller
+     * @throws IOException if the file cannot be opened, mapped, or read
+     * @throws HdfFormatException if it holds no HDF5 superblock, or its first metadata is corrupt
      */
     public static Hdf5File open(Path path, OpenOptions options) throws IOException {
         Objects.requireNonNull(options, "options");
@@ -123,6 +142,10 @@ public final class Hdf5File implements AutoCloseable {
     /**
      * Opens an HDF5 file held in memory, with the {@linkplain OpenOptions#defaults() default options}. The
      * array is read in place, not copied, so it must not change while the file is open.
+     *
+     * @param bytes the whole file
+     * @return the open file
+     * @throws HdfFormatException if it holds no HDF5 superblock, or its first metadata is corrupt
      */
     public static Hdf5File open(byte[] bytes) {
         return open(bytes, OpenOptions.defaults());
@@ -132,6 +155,11 @@ public final class Hdf5File implements AutoCloseable {
      * Opens an HDF5 file held in memory, as {@code options} say. The array is read in place, not copied,
      * so it must not change while the file is open. The file has no directory of its own, so the default
      * {@link ExternalFileAccess} policy opens no other file (see {@link ExternalFileAccess}).
+     *
+     * @param bytes   the whole file
+     * @param options the policy for other files, and the cache sizes
+     * @return the open file
+     * @throws HdfFormatException if it holds no HDF5 superblock, or its first metadata is corrupt
      */
     public static Hdf5File open(byte[] bytes, OpenOptions options) {
         Objects.requireNonNull(options, "options");
@@ -146,6 +174,8 @@ public final class Hdf5File implements AutoCloseable {
      * Opens an HDF5 file read through {@code reader} on demand, with the
      * {@linkplain OpenOptions#defaults() default options}.
      *
+     * @param reader the file's bytes, read a range at a time
+     * @return the open file, to be closed by the caller (which does not close the reader)
      * @throws IOException if the reader cannot report the size or read the file's first metadata
      */
     public static Hdf5File open(RangeReader reader) throws IOException {
@@ -157,6 +187,9 @@ public final class Hdf5File implements AutoCloseable {
      * stay usable while the file is open; Falcon does not close it. The file has no directory of its own,
      * so the default {@link ExternalFileAccess} policy opens no other file (see {@link ExternalFileAccess}).
      *
+     * @param reader  the file's bytes, read a range at a time
+     * @param options the policy for other files, the reader's page and cache sizes, and the other caches
+     * @return the open file, to be closed by the caller (which does not close the reader)
      * @throws IOException if the reader cannot report the size or read the file's first metadata
      */
     public static Hdf5File open(RangeReader reader, OpenOptions options) throws IOException {
@@ -191,7 +224,11 @@ public final class Hdf5File implements AutoCloseable {
         }
     }
 
-    /** The root group ({@code "/"}). */
+    /**
+     * The root group ({@code "/"}).
+     *
+     * @return the root group, from which every path is found
+     */
     public Group root() {
         return root;
     }
@@ -201,12 +238,20 @@ public final class Hdf5File implements AutoCloseable {
         return ctx;
     }
 
-    /** The file's path, or {@code null} if it was opened from bytes or a {@link RangeReader}. */
+    /**
+     * The file's path, or {@code null} if it was opened from bytes or a {@link RangeReader}.
+     *
+     * @return the path given to {@link #open(Path)}, or null
+     */
     public Path path() {
         return ctx.path();
     }
 
-    /** The HDF5 superblock format version (0–3) of this file. */
+    /**
+     * The HDF5 superblock format version (0–3) of this file.
+     *
+     * @return 0 or 1 for the original format, 2 or 3 for the checksummed one of HDF5 1.8 and later
+     */
     public int superblockVersion() {
         return superblock.version();
     }
@@ -215,6 +260,8 @@ public final class Hdf5File implements AutoCloseable {
      * This file's free-space management settings, if it records them (a File Space Info message in the
      * superblock extension). Empty for the common case of a file written with the default strategy and
      * no superblock extension.
+     *
+     * @return the settings, or empty if the file records none
      */
     public Optional<FileSpaceInfo> fileSpaceInfo() {
         ctx.checkOpen();
@@ -233,6 +280,8 @@ public final class Hdf5File implements AutoCloseable {
      * The 'K' values of this file's version-1 B-trees: those a version 0&ndash;1 superblock stores, or a
      * B-tree K Values message in the superblock extension; otherwise libhdf5's
      * {@linkplain BTreeKValues#DEFAULTS defaults}.
+     *
+     * @return the K values, never null
      */
     public BTreeKValues btreeKValues() {
         ctx.checkOpen();
@@ -249,6 +298,8 @@ public final class Hdf5File implements AutoCloseable {
      * family driver, whose files are each one member of a set): from a version 0&ndash;1 superblock's
      * driver information block, or a Driver Info message in the superblock extension. Falcon reads the
      * file it opened only, not the other members.
+     *
+     * @return the driver's identifier and its stored settings, or empty for the default driver
      */
     public Optional<DriverInfo> driverInfo() {
         ctx.checkOpen();
@@ -266,7 +317,11 @@ public final class Hdf5File implements AutoCloseable {
         return extension == HdfBuffer.UNDEFINED_ADDRESS ? null : ObjectHeader.parse(ctx, extension).find(type);
     }
 
-    /** True until {@link #close()} is called. */
+    /**
+     * True until {@link #close()} is called.
+     *
+     * @return whether the file is still open
+     */
     public boolean isOpen() {
         return !ctx.isClosed();
     }

@@ -53,7 +53,11 @@ public final class Dataset extends Hdf5Object {
         return false;
     }
 
-    /** This dataset's element datatype (resolving a committed/shared type if referenced). */
+    /**
+     * This dataset's element datatype (resolving a committed/shared type if referenced).
+     *
+     * @return the datatype every element has
+     */
     public Datatype datatype() {
         ctx.checkOpen();
         Datatype result = state.datatype;
@@ -69,6 +73,8 @@ public final class Dataset extends Hdf5Object {
      * This dataset's shape. A virtual dataset with unlimited mappings takes its extent from its sources,
      * as libhdf5 does when it opens one: so finding it may open the source files (as the file's
      * {@link ExternalFileAccess} policy allows).
+     *
+     * @return the dataspace: its kind, current dimensions, and maximum dimensions
      */
     public Dataspace dataspace() {
         ctx.checkOpen();
@@ -102,7 +108,11 @@ public final class Dataset extends Hdf5Object {
         VIRTUAL
     }
 
-    /** How this dataset's raw data is stored. */
+    /**
+     * How this dataset's raw data is stored.
+     *
+     * @return compact, contiguous, chunked, or virtual
+     */
     public Layout layout() {
         ctx.checkOpen();
         return switch (dataLayout()) {
@@ -113,7 +123,12 @@ public final class Dataset extends Hdf5Object {
         };
     }
 
-    /** The shape of each chunk, in elements per dimension, if the dataset is {@linkplain Layout#CHUNKED chunked}. */
+    /**
+     * The shape of each chunk, in elements per dimension, if the dataset is {@linkplain Layout#CHUNKED chunked}.
+     *
+     * @return the elements a chunk spans in each dimension (one per dataset dimension), or empty if the
+     *         dataset is not chunked
+     */
     public java.util.Optional<long[]> chunkShape() {
         ctx.checkOpen();
         if (!(dataLayout() instanceof DataLayout.Chunked chunked)) {
@@ -127,6 +142,8 @@ public final class Dataset extends Hdf5Object {
      * The filters this dataset's chunks pass through on writing, in that order (Falcon undoes them in
      * reverse on reading). Empty if there are none. A filter Falcon cannot decode is listed too; reading
      * the data then throws {@link HdfUnsupportedException}.
+     *
+     * @return the filters in the order they were applied, or an empty list
      */
     public java.util.List<Filter> filters() {
         ctx.checkOpen();
@@ -146,6 +163,8 @@ public final class Dataset extends Hdf5Object {
      * its size once allocated (also when it lives in external files); for compact data, its size; and 0
      * for a virtual dataset, whose data lives in its sources. For chunked data this reads the whole
      * chunk index.
+     *
+     * @return the stored bytes; 0 for data never written
      */
     public long storageSize() {
         ctx.checkOpen();
@@ -188,6 +207,7 @@ public final class Dataset extends Hdf5Object {
      * of its bits, a time value as its seconds since 1970, and an array type as its base elements, every
      * element's in turn.
      *
+     * @return every value, flattened row-major
      * @throws HdfUnsupportedException if the datatype is not an integer type or a value does not fit
      */
     public int[] readInts() {
@@ -200,6 +220,7 @@ public final class Dataset extends Hdf5Object {
      * {@code BigInteger[]} for {@code uint64}). Enumerations, bit fields and arrays read as for
      * {@link #readInts()}.
      *
+     * @return every value, flattened row-major
      * @throws HdfUnsupportedException if the datatype is not an integer type or a value does not fit
      */
     public long[] readLongs() {
@@ -212,6 +233,7 @@ public final class Dataset extends Hdf5Object {
      * bits, is rounded to the nearest {@code float}, and a complex number gives its real part.
      * Enumerations, bit fields and arrays read as for {@link #readInts()}.
      *
+     * @return every value, flattened row-major
      * @throws HdfUnsupportedException if the datatype is neither floating-point, complex, nor an integer type
      */
     public float[] readFloats() {
@@ -225,6 +247,7 @@ public final class Dataset extends Hdf5Object {
      * number gives its real part ({@link #readComplexDoubles()} reads both). Enumerations, bit fields and
      * arrays read as for {@link #readInts()}.
      *
+     * @return every value, flattened row-major
      * @throws HdfUnsupportedException if the datatype is neither floating-point, complex, nor an integer type
      */
     public double[] readDoubles() {
@@ -237,13 +260,19 @@ public final class Dataset extends Hdf5Object {
      * Reads HDF5 2.0's complex type, h5py's complex compound (floating-point members {@code r} and
      * {@code i}), and real numbers, whose imaginary part is 0 (as libhdf5 converts them).
      *
+     * @return two values per element, flattened row-major: its real part, then its imaginary part
      * @throws HdfUnsupportedException if the datatype is none of those
      */
     public double[] readComplexDoubles() {
         return reader().complexDoubles();
     }
 
-    /** Reads every element as a complex number, as {@link #readComplexDoubles()}, each part a {@code float}. */
+    /**
+     * Reads every element as a complex number, as {@link #readComplexDoubles()}, each part a {@code float}.
+     *
+     * @return two values per element, flattened row-major: its real part, then its imaginary part
+     * @throws HdfUnsupportedException if the datatype is none of those {@link #readComplexDoubles()} reads
+     */
     public float[] readComplexFloats() {
         return reader().complexFloats();
     }
@@ -251,27 +280,54 @@ public final class Dataset extends Hdf5Object {
     /**
      * Reads every element of a fixed-length or variable-length string datatype; for an enumeration, each
      * element's member name ({@code null} for a value no member has).
+     *
+     * @return one string per element, flattened row-major
+     * @throws HdfUnsupportedException if the datatype is neither a string nor an enumeration
      */
     public String[] readStrings() {
         return reader().strings();
     }
 
-    /** Reads a variable-length sequence (ragged) datatype, one {@code int[]} row per element. */
+    /**
+     * Reads a variable-length sequence (ragged) datatype, one {@code int[]} row per element.
+     *
+     * @return one row per element, flattened row-major; a row may be empty
+     * @throws HdfUnsupportedException if the datatype is not a variable-length sequence, or its base type
+     *         does not read as {@code int}s (see {@link #readInts()})
+     */
     public int[][] readVlenInts() {
         return reader().vlenInts();
     }
 
-    /** Reads a variable-length sequence (ragged) datatype, one {@code long[]} row per element. */
+    /**
+     * Reads a variable-length sequence (ragged) datatype, one {@code long[]} row per element.
+     *
+     * @return one row per element, flattened row-major; a row may be empty
+     * @throws HdfUnsupportedException if the datatype is not a variable-length sequence, or its base type
+     *         does not read as {@code long}s (see {@link #readLongs()})
+     */
     public long[][] readVlenLongs() {
         return reader().vlenLongs();
     }
 
-    /** Reads a variable-length sequence (ragged) datatype, one {@code double[]} row per element. */
+    /**
+     * Reads a variable-length sequence (ragged) datatype, one {@code double[]} row per element.
+     *
+     * @return one row per element, flattened row-major; a row may be empty
+     * @throws HdfUnsupportedException if the datatype is not a variable-length sequence, or its base type
+     *         does not read as {@code double}s (see {@link #readDoubles()})
+     */
     public double[][] readVlenDoubles() {
         return reader().vlenDoubles();
     }
 
-    /** Reads a variable-length sequence (ragged) datatype, one {@code float[]} row per element. */
+    /**
+     * Reads a variable-length sequence (ragged) datatype, one {@code float[]} row per element.
+     *
+     * @return one row per element, flattened row-major; a row may be empty
+     * @throws HdfUnsupportedException if the datatype is not a variable-length sequence, or its base type
+     *         does not read as {@code float}s (see {@link #readFloats()})
+     */
     public float[][] readVlenFloats() {
         return reader().vlenFloats();
     }
@@ -287,7 +343,9 @@ public final class Dataset extends Hdf5Object {
      * is found and opened as the file's {@link ExternalFileAccess} policy allows, and stays open until this
      * file closes; the object read is that file's.
      *
-     * @throws HdfUnsupportedException for a reference into a file the policy refuses
+     * @return the object each element points at (or null), flattened row-major
+     * @throws HdfUnsupportedException if the datatype is neither an object nor a revised reference, or for a
+     *         reference into a file the policy refuses
      * @throws HdfException for a reference into a file that is not found
      */
     public Hdf5Object[] readObjectReferences() {
@@ -301,6 +359,9 @@ public final class Dataset extends Hdf5Object {
      * <p>Revised references (HDF5 1.12's {@code H5R_ref_t}) are read too, into other files as for
      * {@link #readObjectReferences()}. An element that is an object or attribute reference, or points into
      * a file that is refused or not found, becomes a selection that throws when used.
+     *
+     * @return the selection each element refers to (or null), flattened row-major
+     * @throws HdfUnsupportedException if the datatype is neither a region nor a revised reference
      */
     public Selection[] readRegionReferences() {
         return reader().regionReferences();
@@ -310,6 +371,7 @@ public final class Dataset extends Hdf5Object {
      * Reads a dataset of revised attribute references (HDF5 1.12's {@code H5R_ATTR}), resolving each
      * element to the attribute it names, or {@code null} for a null reference.
      *
+     * @return the attribute each element names (or null), flattened row-major
      * @throws HdfUnsupportedException if the datatype is not a revised reference, an element is not an
      *         attribute reference, or one points into a file the {@link ExternalFileAccess} policy refuses
      * @throws HdfException if an element points into a file that is not found
@@ -319,7 +381,12 @@ public final class Dataset extends Hdf5Object {
         return reader().attributeReferences();
     }
 
-    /** The dataset's element bytes as stored, in the datatype's byte order (chunk filters already undone). */
+    /**
+     * The dataset's element bytes as stored, in the datatype's byte order (chunk filters already undone).
+     *
+     * @return the datatype's size in bytes for each element, flattened row-major; variable-length elements
+     *         and references are their stored descriptors, not the data they point at
+     */
     public byte[] readRawBytes() {
         return reader().rawBytes();
     }
@@ -327,6 +394,8 @@ public final class Dataset extends Hdf5Object {
     /**
      * This dataset's fill value as raw datatype-order bytes, if one is explicitly defined. Unallocated
      * or unwritten elements read back as this value; an empty result means the default (all-zero).
+     *
+     * @return a copy of one element's fill bytes, or empty if the dataset defines none
      */
     public java.util.Optional<byte[]> fillValueBytes() {
         byte[] fill = fillValue();
@@ -352,6 +421,10 @@ public final class Dataset extends Hdf5Object {
      *   <li>{@code Selection[]} for region references, and {@code Hdf5Object[]} for object references and
      *       revised references (see {@link #readObjectReferences()}).</li>
      * </ul>
+     *
+     * @return the elements, flattened row-major, as listed above
+     * @throws HdfUnsupportedException if the datatype has no such form (an unknown reference kind, say), or
+     *         a time value lies beyond {@code Instant}'s range
      */
     public Object read() {
         return reader().natural();
@@ -365,6 +438,8 @@ public final class Dataset extends Hdf5Object {
      * double[] temperature = dataset.member("temperature").readDoubles();
      * }</pre>
      *
+     * @param name the member's name, as the compound datatype gives it
+     * @return a selection of every element that reads that member alone
      * @throws IllegalArgumentException if the dataset is not of a compound datatype
      * @throws java.util.NoSuchElementException if it has no member of that name
      */
@@ -376,25 +451,49 @@ public final class Dataset extends Hdf5Object {
         return new Selection(this, new long[dims.length], dims).member(name);
     }
 
-    /** Reads a single-element (scalar or 1-element) integer dataset as an {@code int}. */
+    /**
+     * Reads a single-element (scalar or 1-element) integer dataset as an {@code int}.
+     *
+     * @return the value, as {@link #readInts()} reads it
+     * @throws HdfUnsupportedException if the dataset does not hold exactly one element, or as for
+     *         {@link #readInts()}
+     */
     public int readInt() {
         requireSingleElement("readInt");
         return readInts()[0];
     }
 
-    /** Reads a single-element integer dataset as a {@code long}. */
+    /**
+     * Reads a single-element integer dataset as a {@code long}.
+     *
+     * @return the value, as {@link #readLongs()} reads it
+     * @throws HdfUnsupportedException if the dataset does not hold exactly one element, or as for
+     *         {@link #readLongs()}
+     */
     public long readLong() {
         requireSingleElement("readLong");
         return readLongs()[0];
     }
 
-    /** Reads a single-element floating-point or integer dataset as a {@code double} (see {@link #readDoubles()}). */
+    /**
+     * Reads a single-element floating-point or integer dataset as a {@code double} (see {@link #readDoubles()}).
+     *
+     * @return the value, as {@link #readDoubles()} reads it
+     * @throws HdfUnsupportedException if the dataset does not hold exactly one element, or as for
+     *         {@link #readDoubles()}
+     */
     public double readDouble() {
         requireSingleElement("readDouble");
         return readDoubles()[0];
     }
 
-    /** Reads a single-element string dataset. */
+    /**
+     * Reads a single-element string dataset.
+     *
+     * @return the string, as {@link #readStrings()} reads it
+     * @throws HdfUnsupportedException if the dataset does not hold exactly one element, or as for
+     *         {@link #readStrings()}
+     */
     public String readString() {
         requireSingleElement("readString");
         return readStrings()[0];
@@ -410,6 +509,12 @@ public final class Dataset extends Hdf5Object {
     /**
      * Selects a rectangular hyperslab: {@code offset} and {@code count} give the start and size in
      * each dimension. Reading the returned {@link Selection} yields only those elements.
+     *
+     * @param offset the first index selected in each dimension
+     * @param count  the indices selected in each dimension (0 selects nothing)
+     * @return the selection, which reads flattened row-major in the shape {@code count}
+     * @throws IllegalArgumentException if an argument's rank differs from the dataset's, an offset or count is
+     *         negative, or the hyperslab reaches outside the dataset
      */
     public Selection select(long[] offset, long[] count) {
         long[] dims = dataspace().dimensions();
@@ -440,6 +545,12 @@ public final class Dataset extends Hdf5Object {
      * float[] values = s.readFloats(); // 50 x 8 values
      * }</pre>
      *
+     * @param start  the first index of the first block, in each dimension
+     * @param stride the distance from one block's first index to the next one's, in each dimension, or null
+     *               for 1 in every dimension
+     * @param count  the blocks in each dimension
+     * @param block  the indices in each block, in each dimension, or null for 1 in every dimension
+     * @return the selection, which reads flattened row-major in the shape {@code count[d] * block[d]}
      * @throws IllegalArgumentException if an argument's rank differs from the dataset's, a start or count
      *         is negative, a stride or block is not positive, blocks overlap (a stride below the block, with
      *         more than one block), or the selection reaches outside the dataset
@@ -491,6 +602,8 @@ public final class Dataset extends Hdf5Object {
      * double[] three = dataset.selectPoints(new long[][] {{0, 0}, {512, 7}, {9000, 3}}).readDoubles();
      * }</pre>
      *
+     * @param coordinates each point's index in every dimension, in the order the points are to be read
+     * @return the selection, which reads as a flat array of {@code coordinates.length} elements
      * @throws IllegalArgumentException if a point's rank differs from the dataset's, or it lies outside
      */
     public Selection selectPoints(long[][] coordinates) {
@@ -521,6 +634,11 @@ public final class Dataset extends Hdf5Object {
      * {@link Selection} spanning the full extent of the remaining dimensions. Reading each block touches
      * only the chunks it overlaps, so a large dataset can be processed block-by-block without
      * materializing it whole. A scalar dataset yields a single (whole) block.
+     *
+     * @param blockRows the most indices of the first dimension a block spans; the last block may span fewer
+     * @return the blocks, in order along the first dimension; none for a null dataspace or a first dimension
+     *         of 0
+     * @throws IllegalArgumentException if {@code blockRows} is not positive
      */
     public java.util.stream.Stream<Selection> blocks(long blockRows) {
         if (blockRows <= 0) {

@@ -11,10 +11,11 @@ import org.junit.jupiter.api.Timeout;
 
 /**
  * Corrupt, truncated, and garbage input must fail with a typed {@link HdfException} (or an
- * {@link IOException}) &mdash; never a raw runtime exception, a JVM crash (OOM / StackOverflow), an
- * infinite loop, or silently-wrong data. Truncates and byte-flips a spread of fixtures and forces a
- * full read of each mutation, memory-mapped and, for every truncation and every fifth flip, also read on
- * demand through a {@link RangeReader}.
+ * {@link IOException}) &mdash; never a raw runtime exception, a JVM crash (OOM / StackOverflow), or an
+ * infinite loop. Truncates and byte-flips a spread of fixtures and forces a full read of each mutation,
+ * memory-mapped and, for every truncation and every fifth flip, also read on demand through a
+ * {@link RangeReader}. A mutation may also read without failing: a byte that no checksum covers reads as
+ * whatever it now holds, so the values read are not checked.
  *
  * <p>Runs in its own surefire execution ({@code fuzz} in the module POM) with a small stack and heap,
  * so a regression to unbounded recursion or allocation fails here rather than passing on a big JVM.

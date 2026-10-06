@@ -98,6 +98,9 @@ public final class ExternalFileAccess {
          * <p>A reader that is {@link AutoCloseable} is closed once Falcon is done with it: after the read
          * of external raw data, and for another HDF5 file when the HDF5 file that opened it closes.
          *
+         * @param name    the file's name, exactly as the HDF5 file writes it (relative or absolute)
+         * @param purpose what the file is for
+         * @return a reader of the file, or {@code null} if there is no such file
          * @throws HdfUnsupportedException to refuse the name: the read fails, as when another policy refuses
          * @throws IOException if the file cannot be opened: another HDF5 file is then taken to be missing,
          *         and a read of external raw data fails
@@ -117,17 +120,29 @@ public final class ExternalFileAccess {
         this.resolver = resolver;
     }
 
-    /** The default: files inside the HDF5 file's own directory (or its subdirectories) only. */
+    /**
+     * The default: files inside the HDF5 file's own directory (or its subdirectories) only.
+     *
+     * @return the same-directory policy
+     */
     public static ExternalFileAccess sameDirectory() {
         return new ExternalFileAccess(true, false, List.of(), null);
     }
 
-    /** Any file the HDF5 file names, as libhdf5 allows. Use only for trusted files. */
+    /**
+     * Any file the HDF5 file names, as libhdf5 allows. Use only for trusted files.
+     *
+     * @return the policy that honours every name
+     */
     public static ExternalFileAccess unrestricted() {
         return new ExternalFileAccess(true, true, List.of(), null);
     }
 
-    /** No other file is ever opened. */
+    /**
+     * No other file is ever opened.
+     *
+     * @return the policy that refuses every name
+     */
     public static ExternalFileAccess none() {
         return new ExternalFileAccess(false, false, List.of(), null);
     }
@@ -136,6 +151,9 @@ public final class ExternalFileAccess {
      * Every name is passed to {@code resolver}, which opens it, wherever it is, or refuses it: the policy
      * for files read through a {@link RangeReader}, whose other files are not local paths, and for any
      * application that maps names itself. The resolver alone decides; Falcon looks nowhere else.
+     *
+     * @param resolver opens each name, or refuses it
+     * @return the policy that leaves every name to {@code resolver}
      */
     public static ExternalFileAccess resolvedBy(Resolver resolver) {
         return new ExternalFileAccess(true, false, List.of(), Objects.requireNonNull(resolver, "resolver"));
@@ -145,6 +163,8 @@ public final class ExternalFileAccess {
      * A policy that also allows files under {@code directory}, where relative names are looked up after
      * the HDF5 file's own directory.
      *
+     * @param directory a directory whose files (and its subdirectories' files) may be opened; made absolute
+     * @return a new policy (this one is unchanged)
      * @throws IllegalStateException for a {@link #resolvedBy(Resolver) resolver}'s policy, which looks in
      *         no directory
      */

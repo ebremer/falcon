@@ -71,7 +71,12 @@ public final class Selection {
         return new Selection(null, null, null, null, null, 0, null, failure);
     }
 
-    /** The dataset this selection is taken from. */
+    /**
+     * The dataset this selection is taken from.
+     *
+     * @return the dataset
+     * @throws HdfException if this selection is a region reference that could not be resolved
+     */
     public Dataset dataset() {
         checkResolved();
         return dataset;
@@ -80,6 +85,8 @@ public final class Selection {
     /**
      * The datatype the selection reads: the dataset's, or, for a {@linkplain #member(String) member}, the
      * member's.
+     *
+     * @return the datatype of each element read
      */
     public Datatype datatype() {
         checkResolved();
@@ -96,6 +103,8 @@ public final class Selection {
      * int[] x = dataset.select(offset, count).member("pos").member("x").readInts();
      * }</pre>
      *
+     * @param name the member's name, as the compound datatype gives it
+     * @return a selection of the same elements that reads that member alone
      * @throws IllegalArgumentException if the datatype read is not a compound
      * @throws java.util.NoSuchElementException if it has no member of that name
      */
@@ -105,13 +114,21 @@ public final class Selection {
                 member.type(), null);
     }
 
-    /** True for a single rectangular block, read in its own {@link #shape()}. */
+    /**
+     * True for a single rectangular block, read in its own {@link #shape()}.
+     *
+     * @return whether the selection is one block (not points, a hyperslab with gaps, or several blocks)
+     */
     public boolean isRectangular() {
         checkResolved();
         return elements == null;
     }
 
-    /** The start coordinate of the selection (of its bounding box, if it is not a single block). */
+    /**
+     * The start coordinate of the selection (of its bounding box, if it is not a single block).
+     *
+     * @return a copy of the lowest selected index in each dimension
+     */
     public long[] offset() {
         checkResolved();
         return offset.clone();
@@ -120,13 +137,19 @@ public final class Selection {
     /**
      * The shape of the data a read returns: a block's shape; for a regular hyperslab with gaps, its
      * selected indices in each dimension; or {@code {elementCount}}.
+     *
+     * @return a copy of the shape, whose product is the {@linkplain #elementCount() element count}
      */
     public long[] shape() {
         checkResolved();
         return shape.clone();
     }
 
-    /** The number of selected elements. */
+    /**
+     * The number of selected elements.
+     *
+     * @return the elements a read returns (a point listed twice counts twice)
+     */
     public long elementCount() {
         checkResolved();
         if (elements != null) {
@@ -139,82 +162,170 @@ public final class Selection {
         return n;
     }
 
-    /** Reads an integer selection as {@code int} values; exact, as {@link Dataset#readInts()}. */
+    /**
+     * Reads an integer selection as {@code int} values; exact, as {@link Dataset#readInts()}.
+     *
+     * @return every value, flattened row-major in the selection's {@link #shape()}
+     * @throws HdfUnsupportedException if the datatype is not an integer type or a value does not fit
+     */
     public int[] readInts() {
         return reader().ints();
     }
 
-    /** Reads an integer selection as {@code long} values; exact, as {@link Dataset#readLongs()}. */
+    /**
+     * Reads an integer selection as {@code long} values; exact, as {@link Dataset#readLongs()}.
+     *
+     * @return every value, flattened row-major in the selection's {@link #shape()}
+     * @throws HdfUnsupportedException if the datatype is not an integer type or a value does not fit
+     */
     public long[] readLongs() {
         return reader().longs();
     }
 
-    /** Reads a floating-point or integer selection as {@code float} values, as {@link Dataset#readFloats()}. */
+    /**
+     * Reads a floating-point or integer selection as {@code float} values, as {@link Dataset#readFloats()}.
+     *
+     * @return every value, flattened row-major in the selection's {@link #shape()}
+     * @throws HdfUnsupportedException if the datatype is neither floating-point, complex, nor an integer type
+     */
     public float[] readFloats() {
         return reader().floats();
     }
 
-    /** Reads a floating-point or integer selection as {@code double} values, as {@link Dataset#readDoubles()}. */
+    /**
+     * Reads a floating-point or integer selection as {@code double} values, as {@link Dataset#readDoubles()}.
+     *
+     * @return every value, flattened row-major in the selection's {@link #shape()}
+     * @throws HdfUnsupportedException if the datatype is neither floating-point, complex, nor an integer type
+     */
     public double[] readDoubles() {
         return reader().doubles();
     }
 
-    /** Reads complex values as interleaved (real, imaginary) pairs, as {@link Dataset#readComplexDoubles()}. */
+    /**
+     * Reads complex values as interleaved (real, imaginary) pairs, as {@link Dataset#readComplexDoubles()}.
+     *
+     * @return two values per element, flattened row-major: its real part, then its imaginary part
+     * @throws HdfUnsupportedException if the datatype is none of those {@link Dataset#readComplexDoubles()} reads
+     */
     public double[] readComplexDoubles() {
         return reader().complexDoubles();
     }
 
-    /** Reads complex values as interleaved (real, imaginary) {@code float} pairs, as {@link Dataset#readComplexFloats()}. */
+    /**
+     * Reads complex values as interleaved (real, imaginary) {@code float} pairs, as
+     * {@link Dataset#readComplexFloats()}.
+     *
+     * @return two values per element, flattened row-major: its real part, then its imaginary part
+     * @throws HdfUnsupportedException if the datatype is none of those {@link Dataset#readComplexDoubles()} reads
+     */
     public float[] readComplexFloats() {
         return reader().complexFloats();
     }
 
-    /** Reads fixed- or variable-length strings, or enumeration names, as {@link Dataset#readStrings()}. */
+    /**
+     * Reads fixed- or variable-length strings, or enumeration names, as {@link Dataset#readStrings()}.
+     *
+     * @return one string per element, flattened row-major
+     * @throws HdfUnsupportedException if the datatype is neither a string nor an enumeration
+     */
     public String[] readStrings() {
         return reader().strings();
     }
 
-    /** Reads a variable-length sequence selection, one {@code int[]} row per element. */
+    /**
+     * Reads a variable-length sequence selection, one {@code int[]} row per element.
+     *
+     * @return one row per element, flattened row-major; a row may be empty
+     * @throws HdfUnsupportedException if the datatype is not a variable-length sequence, or its base type
+     *         does not read as {@code int}s
+     */
     public int[][] readVlenInts() {
         return reader().vlenInts();
     }
 
-    /** Reads a variable-length sequence selection, one {@code long[]} row per element. */
+    /**
+     * Reads a variable-length sequence selection, one {@code long[]} row per element.
+     *
+     * @return one row per element, flattened row-major; a row may be empty
+     * @throws HdfUnsupportedException if the datatype is not a variable-length sequence, or its base type
+     *         does not read as {@code long}s
+     */
     public long[][] readVlenLongs() {
         return reader().vlenLongs();
     }
 
-    /** Reads a variable-length sequence selection, one {@code double[]} row per element. */
+    /**
+     * Reads a variable-length sequence selection, one {@code double[]} row per element.
+     *
+     * @return one row per element, flattened row-major; a row may be empty
+     * @throws HdfUnsupportedException if the datatype is not a variable-length sequence, or its base type
+     *         does not read as {@code double}s
+     */
     public double[][] readVlenDoubles() {
         return reader().vlenDoubles();
     }
 
-    /** Reads a variable-length sequence selection, one {@code float[]} row per element. */
+    /**
+     * Reads a variable-length sequence selection, one {@code float[]} row per element.
+     *
+     * @return one row per element, flattened row-major; a row may be empty
+     * @throws HdfUnsupportedException if the datatype is not a variable-length sequence, or its base type
+     *         does not read as {@code float}s
+     */
     public float[][] readVlenFloats() {
         return reader().vlenFloats();
     }
 
-    /** Resolves object references, as {@link Dataset#readObjectReferences()}. */
+    /**
+     * Resolves object references, as {@link Dataset#readObjectReferences()}.
+     *
+     * @return the object each element points at (or null), flattened row-major
+     * @throws HdfUnsupportedException as {@link Dataset#readObjectReferences()} does
+     * @throws HdfException for a reference into a file that is not found
+     */
     public Hdf5Object[] readObjectReferences() {
         return reader().objectReferences();
     }
 
-    /** Resolves region references, as {@link Dataset#readRegionReferences()}. */
+    /**
+     * Resolves region references, as {@link Dataset#readRegionReferences()}.
+     *
+     * @return the selection each element refers to (or null), flattened row-major
+     * @throws HdfUnsupportedException if the datatype is neither a region nor a revised reference
+     */
     public Selection[] readRegionReferences() {
         return reader().regionReferences();
     }
 
-    /** Resolves revised attribute references, as {@link Dataset#readAttributeReferences()}. */
+    /**
+     * Resolves revised attribute references, as {@link Dataset#readAttributeReferences()}.
+     *
+     * @return the attribute each element names (or null), flattened row-major
+     * @throws HdfUnsupportedException as {@link Dataset#readAttributeReferences()} does
+     * @throws HdfException if an element points into a file that is not found
+     * @throws HdfFormatException if a referenced attribute does not exist
+     */
     public Attribute[] readAttributeReferences() {
         return reader().attributeReferences();
     }
 
-    /** The selected elements' bytes as stored, in the datatype's byte order (chunk filters undone). */
+    /**
+     * The selected elements' bytes as stored, in the datatype's byte order (chunk filters undone).
+     *
+     * @return the datatype's size in bytes for each element, in the selection's order (for a member, its bytes
+     *         of each element)
+     */
     public byte[] readRawBytes() {
         return reader().rawBytes();
     }
 
-    /** Reads the selection into the most natural Java value, as {@link Dataset#read()}. */
+    /**
+     * Reads the selection into the most natural Java value, as {@link Dataset#read()}.
+     *
+     * @return the elements, flattened row-major, in the form {@link Dataset#read()} lists
+     * @throws HdfUnsupportedException as {@link Dataset#read()} does
+     */
     public Object read() {
         return reader().natural();
     }

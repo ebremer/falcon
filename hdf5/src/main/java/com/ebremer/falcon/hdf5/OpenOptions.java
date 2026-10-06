@@ -74,18 +74,32 @@ public final class OpenOptions {
      * gap of 0, a 16 MiB decoded-chunk cache, a 16 MiB object cache, and, for a file read through a
      * {@link RangeReader}, 64 KiB pages and a 16 MiB page cache. The virtual-dataset settings are libhdf5's
      * defaults.
+     *
+     * @return the default options
      */
     public static OpenOptions defaults() {
         return DEFAULTS;
     }
 
-    /** These options with a different policy for other files (see {@link ExternalFileAccess}). */
+    /**
+     * These options with a different policy for other files (see {@link ExternalFileAccess}).
+     *
+     * @param access which other files the file may make Falcon open (default
+     *               {@link ExternalFileAccess#sameDirectory()}); not null
+     * @return a copy of these options with that policy
+     */
     public OpenOptions externalFileAccess(ExternalFileAccess access) {
         return new OpenOptions(Objects.requireNonNull(access, "access"), virtualView, virtualPrintfGap,
                 chunkCacheSize, readerPageSize, readerCacheSize, objectCacheSize);
     }
 
-    /** These options with a different virtual view. */
+    /**
+     * These options with a different virtual view.
+     *
+     * @param view how far a virtual dataset with unlimited mappings extends (default
+     *             {@link VirtualView#LAST_AVAILABLE}); not null
+     * @return a copy of these options with that view
+     */
     public OpenOptions virtualView(VirtualView view) {
         return new OpenOptions(externalFileAccess, Objects.requireNonNull(view, "view"), virtualPrintfGap,
                 chunkCacheSize, readerPageSize, readerCacheSize, objectCacheSize);
@@ -96,6 +110,8 @@ public final class OpenOptions {
      * virtual mapping may skip while looking for later ones. 0 stops at the first missing source; skipped
      * sources read as the fill value.
      *
+     * @param gap the most missing sources in a row to skip (default 0)
+     * @return a copy of these options with that gap
      * @throws IllegalArgumentException if {@code gap} is negative
      */
     public OpenOptions virtualPrintfGap(long gap) {
@@ -113,6 +129,8 @@ public final class OpenOptions {
      * file. 0 turns it off; a chunk larger than the cache is not kept. Unfiltered chunks are not cached,
      * since reading them again costs no decoding.
      *
+     * @param bytes the cache's size in bytes (default {@link #DEFAULT_CHUNK_CACHE_SIZE}, 16 MiB); 0 for none
+     * @return a copy of these options with that cache size
      * @throws IllegalArgumentException if {@code bytes} is negative
      */
     public OpenOptions chunkCacheSize(long bytes) {
@@ -129,6 +147,8 @@ public final class OpenOptions {
      * needs. Larger pages mean fewer requests to a high-latency store, each fetching more. A read of a
      * page or more (most chunks) goes to the reader directly, uncached.
      *
+     * @param bytes the page size in bytes (default {@link #DEFAULT_READER_PAGE_SIZE}, 64 KiB)
+     * @return a copy of these options with that page size
      * @throws IllegalArgumentException if {@code bytes} is not between 512 and 2<sup>30</sup>
      */
     public OpenOptions readerPageSize(int bytes) {
@@ -145,6 +165,8 @@ public final class OpenOptions {
      * {@code bytes} of pages are kept, least recently used first out, and at least one page however small
      * the cache.
      *
+     * @param bytes the cache's size in bytes (default {@link #DEFAULT_READER_CACHE_SIZE}, 16 MiB)
+     * @return a copy of these options with that cache size
      * @throws IllegalArgumentException if {@code bytes} is negative
      */
     public OpenOptions readerCacheSize(long bytes) {
@@ -163,6 +185,9 @@ public final class OpenOptions {
      * few hundred bytes, plus its parts: a chunk index read whole counts some 32 bytes a chunk. A handle
      * keeps what it has read, kept here or not. 0 shares nothing: each handle keeps its own.
      *
+     * @param bytes the cache's size in bytes, as estimated (default {@link #DEFAULT_OBJECT_CACHE_SIZE},
+     *              16 MiB); 0 to share nothing
+     * @return a copy of these options with that cache size
      * @throws IllegalArgumentException if {@code bytes} is negative
      */
     public OpenOptions objectCacheSize(long bytes) {
@@ -173,37 +198,65 @@ public final class OpenOptions {
                 readerCacheSize, bytes);
     }
 
-    /** Which other files the file may make Falcon open. */
+    /**
+     * Which other files the file may make Falcon open.
+     *
+     * @return the policy for other files
+     */
     public ExternalFileAccess externalFileAccess() {
         return externalFileAccess;
     }
 
-    /** How the extent of a virtual dataset with unlimited mappings is set. */
+    /**
+     * How the extent of a virtual dataset with unlimited mappings is set.
+     *
+     * @return the virtual view
+     */
     public VirtualView virtualView() {
         return virtualView;
     }
 
-    /** How many missing sources a printf-style mapping may skip. */
+    /**
+     * How many missing sources a printf-style mapping may skip.
+     *
+     * @return the printf gap
+     */
     public long virtualPrintfGap() {
         return virtualPrintfGap;
     }
 
-    /** The most decoded chunks the file keeps, in bytes. */
+    /**
+     * The most decoded chunks the file keeps, in bytes.
+     *
+     * @return the decoded-chunk cache's size in bytes; 0 if it is off
+     */
     public long chunkCacheSize() {
         return chunkCacheSize;
     }
 
-    /** The page size, in bytes, for a file read through a {@link RangeReader}. */
+    /**
+     * The page size, in bytes, for a file read through a {@link RangeReader}.
+     *
+     * @return the page size in bytes
+     */
     public int readerPageSize() {
         return readerPageSize;
     }
 
-    /** The most pages a file read through a {@link RangeReader} keeps, in bytes. */
+    /**
+     * The most pages a file read through a {@link RangeReader} keeps, in bytes.
+     *
+     * @return the page cache's size in bytes
+     */
     public long readerCacheSize() {
         return readerCacheSize;
     }
 
-    /** The most metadata of the file's objects kept for their handles, in bytes (as estimated). */
+    /**
+     * The most metadata of the file's objects kept for their handles, in bytes (as estimated).
+     *
+     * @return the object cache's size in bytes; 0 if handles share nothing
+     */
     public long objectCacheSize() {
         return objectCacheSize;
     }

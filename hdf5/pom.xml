@@ -38,6 +38,26 @@
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <executions>
+                    <!-- The public API's Javadoc stays complete: javac's doclint checks every public and
+                         protected member of the exported packages, and a missing or malformed comment fails
+                         the build. -->
+                    <execution>
+                        <id>default-compile</id>
+                        <configuration>
+                            <showWarnings>true</showWarnings>
+                            <compilerArgs>
+                                <arg>-Xdoclint:all/protected</arg>
+                                <arg>-Xdoclint/package:com.ebremer.falcon.hdf5,com.ebremer.falcon.hdf5.datatype</arg>
+                                <arg>-Werror</arg>
+                            </compilerArgs>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <executions>
                     <!-- The corrupt-input tests run on their own, under a small stack and heap: unbounded
