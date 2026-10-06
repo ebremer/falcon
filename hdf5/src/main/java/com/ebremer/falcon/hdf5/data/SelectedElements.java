@@ -75,6 +75,25 @@ public abstract sealed class SelectedElements permits SelectedElements.Product, 
     /** False if no selected element can lie inside the box (a quick test; true may still visit none). */
     public abstract boolean mayIntersect(long[] offset, long[] count);
 
+    /**
+     * Receives selected elements a run at a time (P2 PF8): {@code length} elements at consecutive positions
+     * from {@code position}, the first at {@code coordinates}, each {@code step} after the one before in the
+     * last dimension (the other coordinates the same). A step of 1 is a run of elements next to each other.
+     */
+    @FunctionalInterface
+    public interface RunVisitor {
+        /** {@code coordinates} must not be kept or changed; it is reused. */
+        void visit(long position, long[] coordinates, long length, long step);
+    }
+
+    /**
+     * Visits, in iteration order, every selected element inside the box {@code [offset, offset + count)}, as
+     * {@link #forEachInBox} does, but a run at a time: a regular hyperslab's elements along its last
+     * dimension, in a box, are blocks of consecutive indices (or, for blocks of one, indices a stride apart),
+     * so a copy takes a whole run at once rather than each element on its own.
+     */
+    public abstract void forEachRunInBox(long[] offset, long[] count, RunVisitor visitor);
+
     /** Copies {@code length} bytes from byte {@code from} of a source to {@code out[at...]}. */
     @FunctionalInterface
     public interface Source {
@@ -89,31 +108,48 @@ public abstract sealed class SelectedElements permits SelectedElements.Product, 
     public byte[] gather(Source source, long[] origin, long[] dims, int elementSize) {
         long n = count();
         byte[] out = new byte[Elements.checkedByteCount(n, elementSize)];
-        long[] c = new long[rank()];
-        long runFrom = -1;  // the source element the current run starts at
-        long runAt = 0;     // its position in the selection
-        long runLength = 0;
-        for (long position = 0; position < n; position++) {
-            coordinates(position, c);
+        if (n == 0) {
+            return out;
+        }
+        long[] low = lowCorner();
+        long[] high = highCorner();
+        long[] box = new long[low.length];
+        for (int d = 0; d < box.length; d++) {
+            box[d] = high[d] - low[d] + 1;
+        }
+        long[] pending = new long[3]; // a run of adjacent elements: its source element, position, and length
+        forEachRunInBox(low, box, (position, coordinates, length, step) -> {
             long flat = 0;
-            for (int d = 0; d < c.length; d++) {
-                flat = flat * dims[d] + (c[d] - origin[d]);
+            for (int d = 0; d < coordinates.length; d++) {
+                flat = flat * dims[d] + (coordinates[d] - origin[d]);
             }
-            if (runLength > 0 && flat == runFrom + runLength) {
-                runLength++;
-                continue;
+            if (step == 1 || length == 1) {
+                // Adjacent to the run before, in the source and in the selection: one copy for both.
+                if (pending[2] > 0 && flat == pending[0] + pending[2] && position == pending[1] + pending[2]) {
+                    pending[2] += length;
+                    return;
+                }
+                flush(source, out, pending, elementSize);
+                pending[0] = flat;
+                pending[1] = position;
+                pending[2] = length;
+                return;
             }
-            if (runLength > 0) {
-                source.copy(runFrom * elementSize, out, (int) (runAt * elementSize), (int) (runLength * elementSize));
+            flush(source, out, pending, elementSize);
+            for (long k = 0; k < length; k++) {
+                source.copy((flat + k * step) * elementSize, out, (int) ((position + k) * elementSize), elementSize);
             }
-            runFrom = flat;
-            runAt = position;
-            runLength = 1;
-        }
-        if (runLength > 0) {
-            source.copy(runFrom * elementSize, out, (int) (runAt * elementSize), (int) (runLength * elementSize));
-        }
+        });
+        flush(source, out, pending, elementSize);
         return out;
+    }
+
+    /** Copies the pending run of adjacent elements, if any, and empties it. */
+    private static void flush(Source source, byte[] out, long[] pending, int elementSize) {
+        if (pending[2] > 0) {
+            source.copy(pending[0] * elementSize, out, (int) (pending[1] * elementSize), (int) (pending[2] * elementSize));
+            pending[2] = 0;
+        }
     }
 
     /**
@@ -150,6 +186,18 @@ public abstract sealed class SelectedElements permits SelectedElements.Product, 
                 p = t / stride * block + t % stride;
             }
             return p < size ? p : -1;
+        }
+
+        /**
+         * The step between this axis's indices within one run, and so whether runs span blocks: 1 when its
+         * indices are consecutive throughout (a single block, or blocks that touch), the stride when its
+         * blocks are single indices, and 0 when runs are its blocks, each of consecutive indices.
+         */
+        long runStep() {
+            if (size <= block || stride == block) {
+                return 1;
+            }
+            return block == 1 ? stride : 0;
         }
 
         /** How many of this axis's indices are below {@code v}. */
@@ -265,6 +313,66 @@ public abstract sealed class SelectedElements permits SelectedElements.Product, 
                 long size = axes[d].size();
                 out[d] = axes[d].valueAt(position % size);
                 position /= size;
+            }
+        }
+
+        @Override
+        public void forEachRunInBox(long[] offset, long[] count, RunVisitor visitor) {
+            int rank = axes.length;
+            if (this.count == 0) {
+                return;
+            }
+            if (rank == 0) {
+                visitor.visit(0, new long[0], 1, 1);
+                return;
+            }
+            long[] from = new long[rank];
+            long[] to = new long[rank];
+            long[] weight = new long[rank];
+            long w = 1;
+            for (int d = rank - 1; d >= 0; d--) {
+                from[d] = axes[d].countBelow(offset[d]);
+                to[d] = axes[d].countBelow(offset[d] + count[d]);
+                if (from[d] >= to[d]) {
+                    return;
+                }
+                weight[d] = w;
+                w *= axes[d].size(); // never overflows: the product is count()
+            }
+            int last = rank - 1;
+            Axis axis = axes[last];
+            long step = axis.runStep();
+            long[] p = from.clone();
+            long[] coordinates = new long[rank];
+            while (true) {
+                long base = 0;
+                for (int d = 0; d < last; d++) {
+                    coordinates[d] = axes[d].valueAt(p[d]);
+                    base += p[d] * weight[d];
+                }
+                // The last axis's positions in the box, a run at a time (its weight is 1).
+                if (step != 0) {
+                    coordinates[last] = axis.valueAt(from[last]);
+                    visitor.visit(base + from[last], coordinates, to[last] - from[last], step);
+                } else {
+                    for (long q = from[last]; q < to[last]; ) {
+                        long end = Math.min(to[last], (q / axis.block() + 1) * axis.block()); // the end of q's block
+                        coordinates[last] = axis.valueAt(q);
+                        visitor.visit(base + q, coordinates, end - q, 1);
+                        q = end;
+                    }
+                }
+                int d = last - 1;
+                while (d >= 0) {
+                    if (++p[d] < to[d]) {
+                        break;
+                    }
+                    p[d] = from[d];
+                    d--;
+                }
+                if (d < 0) {
+                    return;
+                }
             }
         }
 
@@ -390,6 +498,42 @@ public abstract sealed class SelectedElements permits SelectedElements.Product, 
         @Override
         public void coordinates(long position, long[] out) {
             System.arraycopy(coordinates[(int) position], 0, out, 0, rank);
+        }
+
+        @Override
+        public void forEachRunInBox(long[] offset, long[] count, RunVisitor visitor) {
+            // Points listed one after another that are next to each other in the last dimension form a run.
+            long[] start = new long[rank];
+            long[] run = {-1, 0}; // the run's first position, and its length
+            forEachInBox(offset, count, (position, c) -> {
+                if (run[1] > 0 && position == run[0] + run[1] && continues(start, c, run[1])) {
+                    run[1]++;
+                    return;
+                }
+                if (run[1] > 0) {
+                    visitor.visit(run[0], start, run[1], 1);
+                }
+                System.arraycopy(c, 0, start, 0, rank);
+                run[0] = position;
+                run[1] = 1;
+            });
+            if (run[1] > 0) {
+                visitor.visit(run[0], start, run[1], 1);
+            }
+        }
+
+        /** True if {@code at} is the element {@code length} after {@code start} in the last dimension. */
+        private static boolean continues(long[] start, long[] at, long length) {
+            int last = start.length - 1;
+            if (last < 0) {
+                return false;
+            }
+            for (int d = 0; d < last; d++) {
+                if (at[d] != start[d]) {
+                    return false;
+                }
+            }
+            return at[last] == start[last] + length;
         }
 
         @Override

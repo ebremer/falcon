@@ -1,11 +1,11 @@
 # Falcon HDF5 — remaining work (prioritized)
 
-**Status (2026-10-05, after P2 S1–S7, A1–A12, PF1–PF7, and WF1–WF11):** build green, **850 HDF5 tests**
+**Status (2026-10-05, after P2 S1–S7, A1–A12, PF1–PF8, and WF1–WF11):** build green, **855 HDF5 tests**
 (144 at the review, 187 after the top 10, 206 after P0, 228 after P1, 243 after S1–S3, 256 after S4–S7,
 439 after A2–A6, 610 after PF1–PF4, 677 after A1–A10, 692 after A11–A12, 707 after WF1–WF4, 743 after
-WF5–WF9, 782 after WF7 and WF10), plus 38 in the `core` module. The review's top 10, every P1 item, **P2
-S1–S7**, **A1–A12**, **PF1–PF7**, **WF1–WF11**, and the P0 zstd fix (Z6/Z7, in `core`) are done (see *Done*
-at the end). Falcon now:
+WF5–WF9, 782 after WF7 and WF10, 850 after WF11 and PF5–PF7), plus 38 in the `core` module. The review's
+top 10, every P1 item, **P2 S1–S7**, **A1–A12**, **PF1–PF8**, **WF1–WF11**, and the P0 zstd fix (Z6/Z7, in
+`core`) are done (see *Done* at the end). Falcon now:
 
 - reads the files the review showed it misreading:
   - real libhdf5 szip and scale-offset data;
@@ -44,6 +44,7 @@ at the end). Falcon now:
     sources, sources of another shape, and strided or point selections;
   - names are found through the name indexes (see `BENCHMARKS.md`);
   - every handle of an object shares what any of them read of it, in a bounded per-file cache;
+  - selected elements come out of each chunk a run at a time;
 - writes files that **HDF5 2.0 and 1.14 read, and change**, checked by `tools/fixtures/check_hdf5_writer.py`.
   The final run read 348/348 objects with HDF5 2.0 and 298/298 with 1.14.6. Each library then changed every
   file (an attribute on every object, a dataset in every group, a row on every growable dataset, the
@@ -66,6 +67,8 @@ at the end). Falcon now:
   default, and supports concurrent reads of one open file.
 
 P0 and P1 are empty. What remains is features and API (P2) and docs and build (P3).
+
+**P2 PF8** changes no behaviour or API: strided and point selections of chunked data read faster.
 
 **Behaviour and API changes in P2 WF11, PF5–PF7** (pre-1.0):
 - **Writing through virtual datasets** (`Hdf5Writer.open`): `write` and `writeRaw` on a virtual dataset of
@@ -314,11 +317,10 @@ review baseline. Abbreviations: `W` = `Hdf5Writer.java`; other paths are under
    New plugins need Erich's approval.
 3. **S8 — writing the third-party filters,** whose encoders core partly has. It would also let `open()`
    write into datasets so filtered, the last filters it refuses.
-4. **PF8 — selected elements copied a run at a time,** not one by one.
-5. **D4 — Javadoc lint.**
-6. **S9 — more registered filters:** Blosc2, bzip2, ZFP, SZ.
-7. **B3 — housekeeping:** committed `__pycache__`.
-8. **D6 — repo-wide staleness:** `CLAUDE.md` and the root `pom.xml` still call Zarr planned.
+4. **D4 — Javadoc lint.**
+5. **S9 — more registered filters:** Blosc2, bzip2, ZFP, SZ.
+6. **B3 — housekeeping:** committed `__pycache__`.
+7. **D6 — repo-wide staleness:** `CLAUDE.md` and the root `pom.xml` still call Zarr planned.
 
 ---
 
@@ -365,12 +367,9 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
 
 ### Performance
 
-- PF1–PF7 are done (see *Done — 2026-10-05 (P2: WF11, PF5–PF7)* and *(P2: PF1–PF4)*). Still open around
-  them:
-  - [ ] **PF8 — selected elements copied one at a time.** A strided or point selection of chunked data
-    copies each element out of its chunk on its own (a selection of contiguous data copies runs). Every
-    other element of 2000 × 2000 doubles takes 16 ms against 17 ms for the whole read, so this matters
-    only for very large selections: copy the runs of the last dimension instead.
+- PF1–PF8 are done (see *Done — 2026-10-05 (P2: PF8)*, *(P2: WF11, PF5–PF7)* and *(P2: PF1–PF4)*).
+  Nothing is open here. Strided single elements of contiguous data are still copied one by one (runs of
+  adjacent elements are one copy); a benchmark shows no gain worth the change yet.
 
 ## P3 — docs, build, housekeeping
 
@@ -406,6 +405,8 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
     data, the journal).
   - **Also done (P2 WF11, PF5–PF7):** writing through virtual datasets, chunk lookups, the object cache
     (`objectCacheSize`), and what virtual reads read; `BENCHMARKS.md` has the bytes a small read reads.
+  - **Also done (P2 PF8):** the performance note on selections, and the selection rows in
+    `BENCHMARKS.md`.
 - [ ] **D3 — PLAN.md is stale.**
   - §6 lists the non-existent `dataspace` and `util` packages, omits `data`, `index`, and `group`, and
     says only one package is exported (`datatype` is exported too).
@@ -458,6 +459,36 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
     (`tools/fixtures/gen_zstd_corrupt_vectors.py` → `zstd_corrupt_vectors.txt`): mutations, several
     frames, skippable frames, and trailing data. The old decoder fails 137 of them.
   - The core fuzzer: 1.5M further mutated frames threw only typed exceptions.
+
+## Done — 2026-10-05 (P2: PF8)
+
+- [x] **PF8 — selected elements copied a run at a time.**
+  - **Runs:** new `SelectedElements.forEachRunInBox` visits the elements in a box as `forEachInBox` does,
+    but a run at a time: a run is elements at consecutive positions, each a fixed step after the one before
+    in the last dimension.
+    - A regular hyperslab's last axis gives one run per block (step 1), one run spanning its blocks when
+      they touch (stride = block) or it is one block, and one run of its indices when its blocks are
+      single indices (step = the stride).
+    - Listed points one after another along a row form runs of step 1.
+  - **Chunked data** (`ChunkedReader.gather`): each run is one `System.arraycopy`, and a strided run one
+    loop of `long`, `int`, or `short` moves (other sizes copy each element). Points are ordered by chunk
+    with one sort of `long`s, each a chunk's row-major number times the point count plus the point's index.
+    A grid too large for that number falls back to the comparator sort, which is stable.
+  - **Contiguous data** (`SelectedElements.gather`) uses the same runs, merging those adjacent in the
+    file and in the selection, as it did.
+  - **Measured** (`BENCHMARKS.md`): every other row of 2048 × 2048 doubles chunked 64 × 64 takes
+    14.9–16.3 ms, from 31.7–35.3; every other element 9.9–11.9 ms, from 17.8–20.0; 100,000 random points
+    18.6–21.3 ms, from 52.9–57.0. The whole read takes 19–21 ms.
+  - **Tests:** `SelectedElementsRunsTest`:
+    - 3,000 random hyperslabs (touching blocks, gaps, blocks of one) and boxes visit the same elements by
+      runs as one by one;
+    - listed points, with runs, repeats and boxes;
+    - `gather` against an element-by-element copy.
+
+    `SelectionTest.runsOfElementsAreCopiedAcrossChunks` (blocks crossing chunks, point runs across a chunk
+    boundary, repeats) and `pointsOfAVastGridAreOrderedByChunk` (a 2^40 × 2^40 grid: the fallback order).
+  - **Benchmarks** gained the selection rows. The listing row opens its file with `objectCacheSize(0)`,
+    since PF6 keeps a group's links.
 
 ## Done — 2026-10-05 (P2: WF11, PF5–PF7)
 

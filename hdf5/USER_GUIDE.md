@@ -754,7 +754,9 @@ also fail to be read at all: that is `java.io.UncheckedIOException`, wrapping th
   group's or object's name index (as libhdf5 does) instead of reading every link or attribute.
 - **Selections read their chunks.** A strided selection reads only the chunks in the grid cells its
   indices fall in, so one every 100th row of a dataset chunked by rows reads one chunk in 100; points
-  read the chunks they fall in, each once.
+  read the chunks they fall in, each once. Elements come out of each chunk a run at a time: a block along
+  the last dimension in one copy, so every other row of a chunked dataset reads in less time than the
+  whole of it.
 - **Decoded-chunk cache.** Repeated or streaming reads reuse the filter-decode result for a chunk: 16 MiB
   per file, least recently used first out, set by `OpenOptions.chunkCacheSize(bytes)` (0 turns it off).
   A file read through a `RangeReader` also caches its pages, set by `readerPageSize` and

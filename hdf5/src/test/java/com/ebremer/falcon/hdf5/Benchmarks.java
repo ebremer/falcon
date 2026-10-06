@@ -74,6 +74,22 @@ class Benchmarks {
                     .mapToLong(b -> b.readDoubles().length).sum());
             row("1,000 random 4 x 4 selections, chunked", () -> randomSelections(chunked, 1000));
             row("1,000 random 4 x 4 selections, contiguous", () -> randomSelections(contiguous, 1000));
+            // P2 PF8: strided and point selections of chunked data, copied out of each chunk
+            long[] zero = {0, 0};
+            row("every other element (stride 2 x 2), chunked", () -> chunked.select(zero, new long[] {2, 2},
+                    new long[] {side / 2, side / 2}, new long[] {1, 1}).readDoubles().length);
+            row("every other element (stride 2 x 2), contiguous", () -> contiguous.select(zero, new long[] {2, 2},
+                    new long[] {side / 2, side / 2}, new long[] {1, 1}).readDoubles().length);
+            row("every other row (stride 2 x 1), chunked", () -> chunked.select(zero, new long[] {2, 1},
+                    new long[] {side / 2, side}, new long[] {1, 1}).readDoubles().length);
+            row("4 x 4 blocks every 8 x 8, chunked", () -> chunked.select(zero, new long[] {8, 8},
+                    new long[] {side / 8, side / 8}, new long[] {4, 4}).readDoubles().length);
+            long[][] points = new long[100_000][];
+            Random random = new Random(7);
+            for (int i = 0; i < points.length; i++) {
+                points[i] = new long[] {random.nextInt(side), random.nextInt(side)};
+            }
+            row("100,000 random points, chunked", () -> chunked.selectPoints(points).readDoubles().length);
         }
 
         try (Hdf5File h5 = Hdf5File.open(Fixtures.path("vds.h5"))) {
@@ -117,7 +133,10 @@ class Benchmarks {
                 }
                 return n;
             });
-            row("list 20,000 links (new handle)", () -> h5.root().group("many").links().size());
+        }
+        // Since P2 PF6 a group's links are kept for every handle of it, so the listing is timed with nothing kept.
+        try (Hdf5File h5 = Hdf5File.open(Fixtures.path("dense_big.h5"), OpenOptions.defaults().objectCacheSize(0))) {
+            row("list 20,000 links (new handle, nothing cached)", () -> h5.root().group("many").links().size());
         }
         try (Hdf5File h5 = Hdf5File.open(Fixtures.path("oldstyle_big.h5"))) {
             row("100 link lookups, old-style group of 5,000 (new handles)", () -> {

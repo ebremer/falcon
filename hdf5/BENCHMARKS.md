@@ -20,11 +20,16 @@ The data is a 2048 × 2048 `float64` dataset (32 MiB), written three ways by Fal
 chunked 64 × 64 (1,024 chunks), and chunked with gzip. The rows:
 - **Whole reads** of each.
 - **Partial reads:** streaming in blocks, and 1,000 random 4 × 4 selections.
+- **Strided and point selections** (P2 PF8): every other element (stride 2 × 2) of the chunked and the
+  contiguous dataset, every other row of the chunked one, 4 × 4 blocks every 8 × 8, and 100,000 random
+  points.
 - **Virtual datasets:** 100 one-element selections of two fixtures (two source files, and three printf
   sources).
 - **Lookups by name:** fresh handles each time, as a caller walking paths gets. The groups are
   `dense_big.h5` (20,000 links in dense storage, an object with 3,000 dense attributes) and
-  `oldstyle_big.h5` (5,000 links in an old-style group).
+  `oldstyle_big.h5` (5,000 links in an old-style group). Since P2 PF6, a group's links once listed are kept
+  for every handle of it, so the listing row opens the file with `objectCacheSize(0)` to time the listing
+  itself.
 - **Remote reads:** how many bytes a 4 × 4 selection of the gzip dataset fetches through a
   `RangeReader`.
 
@@ -64,6 +69,33 @@ Why each improves:
   - **Before:** a lookup on a new handle read every link or attribute.
   - **After:** a dense group or attribute set is searched through its name-hash v2 B-tree, and an
     old-style group by descending its B-tree of names, as libhdf5 does.
+
+## P2 PF8: strided and point selections
+
+Copying elements out of each chunk a run at a time, not one by one. Measured on the same machine, before
+PF8 (commit `e985257`) and after it, three runs each:
+
+| operation | before | after | |
+|---|--:|--:|--:|
+| every other row (stride 2 × 1), chunked | 31.7–35.3 ms | 14.9–16.3 ms | **2.2×** |
+| 4 × 4 blocks every 8 × 8, chunked | 16.8–18.1 ms | 9.9–11.1 ms | **1.7×** |
+| every other element (stride 2 × 2), chunked | 17.8–20.0 ms | 9.9–11.9 ms | **1.7×** |
+| 100,000 random points, chunked | 52.9–57.0 ms | 18.6–21.3 ms | **2.7×** |
+| read whole: chunked (1,024 chunks) | 19.5–20.9 ms | 18.9–20.4 ms | unchanged |
+| every other element (stride 2 × 2), contiguous | 24.1–26.3 ms | 17.1–29.5 ms | unchanged |
+
+Why each improves:
+- **Runs.** A regular hyperslab's elements along its last dimension, within a chunk, are blocks of
+  consecutive indices. Each block is now one copy, and touching blocks (stride = block) are one copy
+  together. Every other row now takes less time than the whole read; before, it took some 1.7 times as long.
+- **Strided single elements** (blocks of one) are one loop per row of a chunk, each element one move of a
+  `long`, `int`, or `short` rather than a call to `System.arraycopy`.
+- **Points** are ordered by chunk with one sort of numbers, each a chunk's row-major number and the
+  point's index, rather than a sort of boxed indices comparing coordinate arrays. Points listed one after
+  another along a row are copied together.
+
+Contiguous data already copied runs. Its strided single elements are still copied one by one, and that
+row varies from run to run more than it changed.
 
 ## P2 PF5–PF7: what a small read reads
 

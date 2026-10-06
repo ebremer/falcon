@@ -101,7 +101,9 @@ public final class ChunkedReader {
      * Gathers the selected elements, in the selection's order: only the chunks that hold a selected element
      * are read. For a regular hyperslab those are the chunks in the grid cells its indices fall in, in
      * every dimension, so a strided selection skips the chunks between its blocks; for points, the chunks
-     * the points fall in, each read once however many points it holds.
+     * the points fall in, each read once however many points it holds. Elements are copied out of a chunk a
+     * run at a time (P2 PF8): a block of the last dimension in one copy, and indices a stride apart in one
+     * loop.
      */
     public static byte[] gather(FileContext ctx, DataLayout.Chunked layout, ChunkIndex index, long[] datasetDims,
                                 int elementSize, FilterPipeline pipeline, byte[] fill, SelectedElements selection) {
@@ -116,28 +118,29 @@ public final class ChunkedReader {
         if (selection instanceof SelectedElements.Listed points) {
             // Order the points by the chunk they fall in, then read each chunk once for all of its points.
             int n = (int) points.count();
-            long[][] cellOf = new long[n][rank];
-            Integer[] order = new Integer[n];
-            for (int i = 0; i < n; i++) {
-                long[] c = points.at(i);
-                for (int d = 0; d < rank; d++) {
-                    cellOf[i][d] = c[d] / chunkDims[d];
-                }
-                order[i] = i;
-            }
-            java.util.Arrays.sort(order, (a, b) -> java.util.Arrays.compare(cellOf[a], cellOf[b]));
+            int[] order = byCell(points, n, chunkDims, datasetDims);
+            long[] cell = new long[rank];
+            long[] next = new long[rank];
             for (int k = 0; k < n; ) {
-                long[] cell = cellOf[order[k]];
-                int end = k;
-                while (end < n && java.util.Arrays.equals(cellOf[order[end]], cell)) {
+                cellOf(points.at(order[k]), chunkDims, cell);
+                int end = k + 1;
+                while (end < n && java.util.Arrays.equals(cellOf(points.at(order[end]), chunkDims, next), cell)) {
                     end++;
                 }
                 ChunkRecord chunk = index.at(cell);
                 if (chunk != null) {
                     byte[] bytes = readChunk(ctx, layout, chunk, datasetDims, pipeline, elementSize, chunkBytes);
-                    for (int j = k; j < end; j++) {
+                    long[] offset = chunk.offset();
+                    // Points listed one after another, next to each other in the last dimension: one copy.
+                    for (int j = k; j < end; ) {
                         int i = order[j];
-                        copyElement(bytes, chunk.offset(), chunkDims, points.at(i), output, i, elementSize);
+                        long[] at = points.at(i);
+                        int run = 1;
+                        while (j + run < end && order[j + run] == i + run && follows(points.at(i + run), at, run)) {
+                            run++;
+                        }
+                        copyRun(bytes, offset, chunkDims, at, output, i, run, 1, elementSize);
+                        j += run;
                     }
                 }
                 k = end;
@@ -156,20 +159,127 @@ public final class ChunkedReader {
                 box[d] = Math.max(0, Math.min(chunkDims[d], datasetDims[d] - offset[d]));
             }
             byte[] bytes = readChunk(ctx, layout, chunk, datasetDims, pipeline, elementSize, chunkBytes);
-            product.forEachInBox(offset, box, (position, coordinates) ->
-                    copyElement(bytes, offset, chunkDims, coordinates, output, position, elementSize));
+            product.forEachRunInBox(offset, box, (position, coordinates, length, step) ->
+                    copyRun(bytes, offset, chunkDims, coordinates, output, position, length, step, elementSize));
         }
         return output;
     }
 
-    /** Copies the element at {@code coordinates} of a decoded chunk to position {@code position} of {@code output}. */
-    private static void copyElement(byte[] chunk, long[] chunkOffset, int[] chunkDims, long[] coordinates,
-                                    byte[] output, long position, int elementSize) {
+    /**
+     * Copies {@code length} elements of a decoded chunk, from the one at {@code coordinates} on, each
+     * {@code step} after the one before in the last dimension, to {@code output} from position
+     * {@code position} on: in one copy when they are next to each other.
+     */
+    private static void copyRun(byte[] chunk, long[] chunkOffset, int[] chunkDims, long[] coordinates,
+                                byte[] output, long position, long length, long step, int elementSize) {
         long flat = 0;
         for (int d = 0; d < chunkDims.length; d++) {
             flat = flat * chunkDims[d] + (coordinates[d] - chunkOffset[d]);
         }
-        System.arraycopy(chunk, (int) (flat * elementSize), output, (int) (position * elementSize), elementSize);
+        int from = (int) (flat * elementSize);
+        int to = (int) (position * elementSize);
+        if (step == 1) {
+            System.arraycopy(chunk, from, output, to, (int) (length * elementSize));
+            return;
+        }
+        int stride = (int) (step * elementSize);
+        switch (elementSize) { // one move an element, for the common sizes (the bytes' order is kept)
+            case 8 -> {
+                for (long k = 0; k < length; k++, from += stride, to += 8) {
+                    LONGS.set(output, to, (long) LONGS.get(chunk, from));
+                }
+            }
+            case 4 -> {
+                for (long k = 0; k < length; k++, from += stride, to += 4) {
+                    INTS.set(output, to, (int) INTS.get(chunk, from));
+                }
+            }
+            case 2 -> {
+                for (long k = 0; k < length; k++, from += stride, to += 2) {
+                    SHORTS.set(output, to, (short) SHORTS.get(chunk, from));
+                }
+            }
+            default -> {
+                for (long k = 0; k < length; k++, from += stride, to += elementSize) {
+                    System.arraycopy(chunk, from, output, to, elementSize);
+                }
+            }
+        }
+    }
+
+    private static final java.lang.invoke.VarHandle LONGS =
+            java.lang.invoke.MethodHandles.byteArrayViewVarHandle(long[].class, java.nio.ByteOrder.nativeOrder());
+    private static final java.lang.invoke.VarHandle INTS =
+            java.lang.invoke.MethodHandles.byteArrayViewVarHandle(int[].class, java.nio.ByteOrder.nativeOrder());
+    private static final java.lang.invoke.VarHandle SHORTS =
+            java.lang.invoke.MethodHandles.byteArrayViewVarHandle(short[].class, java.nio.ByteOrder.nativeOrder());
+
+    /** The grid cell of the chunk that holds the element at {@code at}, into {@code cell}. */
+    private static long[] cellOf(long[] at, int[] chunkDims, long[] cell) {
+        for (int d = 0; d < cell.length; d++) {
+            cell[d] = at[d] / chunkDims[d];
+        }
+        return cell;
+    }
+
+    /** True if {@code at} is the element {@code distance} after {@code start} in the last dimension. */
+    private static boolean follows(long[] at, long[] start, int distance) {
+        int last = start.length - 1;
+        if (last < 0) {
+            return false;
+        }
+        for (int d = 0; d < last; d++) {
+            if (at[d] != start[d]) {
+                return false;
+            }
+        }
+        return at[last] == start[last] + distance;
+    }
+
+    /**
+     * The points' indices ordered by the chunk-grid cell each falls in (row-major), points of one cell in
+     * their own order: by one sort of numbers, each a cell's row-major number and a point's index, when
+     * those fit in a {@code long}, else by comparing cells.
+     */
+    private static int[] byCell(SelectedElements.Listed points, int n, int[] chunkDims, long[] datasetDims) {
+        int rank = chunkDims.length;
+        long cells = 1;
+        boolean fits = true;
+        long[] grid = new long[rank];
+        for (int d = 0; d < rank && fits; d++) {
+            grid[d] = (datasetDims[d] + chunkDims[d] - 1) / chunkDims[d];
+            fits = grid[d] == 0 || cells <= Long.MAX_VALUE / Math.max(1, grid[d]) / Math.max(1, n);
+            cells *= Math.max(1, grid[d]);
+        }
+        int[] order = new int[n];
+        if (fits) {
+            long[] keys = new long[n];
+            long[] cell = new long[rank];
+            for (int i = 0; i < n; i++) {
+                cellOf(points.at(i), chunkDims, cell);
+                long linear = 0;
+                for (int d = 0; d < rank; d++) {
+                    linear = linear * Math.max(1, grid[d]) + cell[d];
+                }
+                keys[i] = linear * n + i; // the cell first, then the point's own place
+            }
+            java.util.Arrays.sort(keys);
+            for (int k = 0; k < n; k++) {
+                order[k] = (int) (keys[k] % n);
+            }
+            return order;
+        }
+        long[][] cellOf = new long[n][];
+        Integer[] boxed = new Integer[n];
+        for (int i = 0; i < n; i++) {
+            cellOf[i] = cellOf(points.at(i), chunkDims, new long[rank]);
+            boxed[i] = i;
+        }
+        java.util.Arrays.sort(boxed, (a, b) -> java.util.Arrays.compare(cellOf[a], cellOf[b])); // stable
+        for (int k = 0; k < n; k++) {
+            order[k] = boxed[k];
+        }
+        return order;
     }
 
     private static List<ChunkRecord> enumerateChunks(FileContext ctx, DataLayout.Chunked layout, int chunkBytes,

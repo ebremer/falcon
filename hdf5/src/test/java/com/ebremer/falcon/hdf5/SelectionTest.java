@@ -307,6 +307,72 @@ class SelectionTest {
         }
     }
 
+    /**
+     * Elements copied a run at a time (P2 PF8): blocks along the last dimension that cross chunks, points
+     * listed along a row across a chunk boundary, repeated and out of order, all as the whole read has them.
+     */
+    @Test
+    void runsOfElementsAreCopiedAcrossChunks(@TempDir Path dir) throws IOException {
+        int rows = 40;
+        int columns = 50;
+        int[] data = new int[rows * columns];
+        for (int i = 0; i < data.length; i++) {
+            data[i] = i * 7 - 3;
+        }
+        Path file = dir.resolve("runs.h5");
+        try (Hdf5Writer w = Hdf5Writer.create(file)) {
+            w.intChunkedDataset("grid", data, new long[] {rows, columns}, new long[] {6, 7}).deflate(1);
+        }
+        try (Hdf5File h5 = Hdf5File.open(file)) {
+            Dataset grid = h5.root().dataset("grid");
+            // Blocks of 5 x 9 every 7 x 11 (crossing chunks of 6 x 7), touching blocks (stride = block), and
+            // single elements a stride apart.
+            long[][][] hyperslabs = {
+                {{1, 3}, {7, 11}, {5, 4}, {5, 9}},
+                {{0, 2}, {3, 6}, {13, 8}, {3, 6}},
+                {{2, 1}, {3, 5}, {12, 9}, {1, 1}},
+            };
+            for (long[][] h : hyperslabs) {
+                int[] got = grid.select(h[0], h[1], h[2], h[3]).readInts();
+                List<Integer> expected = new ArrayList<>();
+                for (long i = 0; i < h[2][0] * h[3][0]; i++) {
+                    long r = h[0][0] + i / h[3][0] * h[1][0] + i % h[3][0];
+                    for (long j = 0; j < h[2][1] * h[3][1]; j++) {
+                        long c = h[0][1] + j / h[3][1] * h[1][1] + j % h[3][1];
+                        expected.add(data[(int) (r * columns + c)]);
+                    }
+                }
+                assertArrayEquals(expected.stream().mapToInt(Integer::intValue).toArray(), got, Arrays.deepToString(h));
+            }
+            long[][] points = {{3, 4}, {3, 5}, {3, 6}, {3, 7}, {3, 8}, {3, 8}, {39, 49}, {3, 3}, {20, 0}, {20, 1}};
+            int[] expected = new int[points.length];
+            for (int i = 0; i < points.length; i++) {
+                expected[i] = data[(int) (points[i][0] * columns + points[i][1])];
+            }
+            assertArrayEquals(expected, grid.selectPoints(points).readInts());
+        }
+    }
+
+    /**
+     * Points of a dataset whose chunk grid has more cells than a {@code long} can number with the points
+     * (2^40 x 2^40, chunks of one) are still ordered by chunk, each read once.
+     */
+    @Test
+    void pointsOfAVastGridAreOrderedByChunk(@TempDir Path dir) throws IOException {
+        long huge = 1L << 40;
+        Path file = dir.resolve("vast.h5");
+        try (Hdf5Writer w = Hdf5Writer.create(file)) {
+            w.createDataset("sparse", com.ebremer.falcon.hdf5.datatype.Datatype.int32(), 2, 2).chunked(1, 1)
+                    .maxShape(Hdf5Writer.UNLIMITED, Hdf5Writer.UNLIMITED).extend(huge, huge)
+                    .write(new long[] {huge - 1, 0}, new long[] {1, 2}, new int[] {5, 6})
+                    .write(new long[] {0, huge - 1}, new long[] {1, 1}, new int[] {7});
+        }
+        try (Hdf5File h5 = Hdf5File.open(file)) {
+            long[][] points = {{0, huge - 1}, {huge - 1, 1}, {12345, 67890}, {huge - 1, 0}, {0, huge - 1}};
+            assertArrayEquals(new int[] {7, 6, 0, 5, 7}, h5.root().dataset("sparse").selectPoints(points).readInts());
+        }
+    }
+
     @Test
     void stridedSelectionsOfContiguousDataReadOnlyTheirRuns(@TempDir Path dir) throws IOException {
         int n = 1 << 20;

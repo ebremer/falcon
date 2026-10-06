@@ -400,7 +400,7 @@ Each stage ends with a **milestone** and concrete **acceptance criteria**. "Refe
   read looks its chunks up in the file's chunk index (an array entry, or a B-tree's path) rather than
   reading the whole index; what objects read of themselves is shared by every handle of the same object,
   in a bounded per-file cache; and a virtual dataset reads only the source elements a read needs, not
-  the box that bounds them.
+  the box that bounds them. PF8 copies a selection's elements out of each chunk a run at a time.
 - **API ergonomics ✓**: scalar convenience reads (`Dataset.readInt/readLong/readDouble/readString`,
   `Attribute.readInt/…`) and **block streaming** (`Dataset.blocks(rows)` &rarr; `Stream<Selection>`) for
   processing a large dataset without materializing it whole.
