@@ -389,7 +389,8 @@ try (Hdf5Writer w = Hdf5Writer.create(Path.of("out.h5"))) {
 The file is written to a temporary file beside the target, which `close()` moves into place, so the
 path holds either the complete new file or what it held before. Raw data goes to the temporary file as
 it is written, at 64-bit offsets, so a file may be far larger than memory or 2 GB; `close()` adds the
-metadata (object headers, chunk indexes, groups) after it.
+metadata (object headers, chunk indexes, groups) after it. To change a file that exists, see
+[Changing an existing file](#changing-an-existing-file).
 
 - **When `close()` fails,** for example on a reference to an object never added, the target is not
   touched and the writer stays open, the data written so far kept in the temporary file: fix the cause
@@ -472,10 +473,13 @@ grid.write(everything);                                     // or every element 
   every HDF5 version reads.
 - **Configure first.** The chunk shape, maximum shape, filters, fill value and compact layout must be
   set before the first write.
-- **Memory.** Besides chunks partly written: the data of datasets given their data whole (below), until
-  `close()`; the current global-heap collection of variable-length data (at most about 1 MiB; full
-  ones go to the file); each chunked dataset's index entries; and the data of reference datasets, whose
-  targets' addresses are known only at the end.
+- **Memory.** Besides chunks partly written:
+  - the data of the last dataset given its data whole (below), until the next dataset or group is added;
+  - the current global-heap collection of variable-length data (at most about 1 MiB; full ones go to the
+    file);
+  - each chunked dataset's index entries;
+  - the chunks of a chunked dataset of object references, and attributes holding them, whose targets'
+    addresses are known only at the end.
 
 ### Groups, datasets, and attributes
 
@@ -491,7 +495,10 @@ run.group("nested").intDataset("inner", new int[]{7}, new long[]{1});
 The per-type methods take the whole data at once, and their configuration (filters, layout, fill)
 follows: `byteDataset` (int8), `shortDataset` (int16), `intDataset` (int32), `longDataset` (int64),
 `floatDataset` (float32), `doubleDataset` (float64), `stringDataset` (variable-length UTF-8),
-`fixedStringDataset` (fixed-length, UTF-8), and those below. Their data is written on `close()`.
+`fixedStringDataset` (fixed-length, UTF-8), and those below. Their data is written when the next dataset
+or group is added (or on `close()`), so only one such dataset's data is held. Configure each before
+adding the next; afterwards its configuration methods throw `IllegalStateException` (attributes may
+still be added).
 
 Attributes of any datatype, and string attributes:
 
@@ -541,9 +548,10 @@ w.regionReferenceDataset("roi", new long[]{2}, new Hdf5Writer.Region[]{
 ```
 
 A region is all of a dataset, a block, a regular hyperslab, or points. References' targets are named by
-path and may be added before or after the reference; they are resolved on `close()`. References are
-written to contiguous datasets only, not chunked ones or attributes. External links exist only in the
-modern format.
+path and may be added before or after the reference; they are resolved on `close()`. References may be
+written anywhere a value goes: contiguous, chunked (and filtered) and compact datasets, compound members,
+and attributes (`attribute(name, Datatype.objectReference(), shape, paths)`). A chunked dataset of object
+references keeps its chunks until `close()`. External links exist only in the modern format.
 
 ### Compound, enum, reference, array, sequence, complex
 
@@ -573,7 +581,8 @@ an integer dataset accepts only a whole number in range. String, reference, comp
 datasets take no fill value.
 
 Groups with more than 8 links, and objects with more than 8 attributes, switch to dense storage
-(fractal heap + version-2 B-tree) automatically.
+(fractal heap + version-2 B-tree) automatically, of any size: laid out as libhdf5 lays it out, with
+indirect heap blocks and B-tree levels as needed (a group of 100,000 links is checked against libhdf5).
 
 ### On-disk format
 
@@ -585,7 +594,8 @@ Hdf5Writer.create(path, Hdf5Writer.Format.EARLIEST);  // original: v0 superblock
 In `EARLIEST`:
 - every attribute goes in the version-1 object header (there is no dense storage);
 - chunked datasets are indexed by version-1 B-trees, and their filter pipeline is message version 1;
-- groups with more than 256 children, external links, and complex numbers are refused when added.
+- groups of any size are indexed by version-1 B-trees of as many levels as they need;
+- external links and complex numbers are refused when added.
 
 `EARLIEST` uses the message versions libhdf5 writes for its own earliest setting:
 - dataspace v1;
@@ -595,7 +605,51 @@ In `EARLIEST`:
 
 Files Falcon writes are readable by HDF5 1.10 and later (native complex datasets, a type introduced by
 HDF5 2.0, need HDF5 2.0). `tools/fixtures/check_hdf5_writer.py` verifies this against h5py's HDF5 2.0
-and, optionally, an HDF5 1.14 build.
+and, optionally, an HDF5 1.14 build; each library then changes every file and reads it back.
+
+### Changing an existing file
+
+`Hdf5Writer.open(path)` opens a file to change it in place: one Falcon wrote or one libhdf5 wrote, in
+either format.
+
+```java
+try (Hdf5Writer w = Hdf5Writer.open(Path.of("data.h5"))) {
+    Hdf5Writer.GroupWriter run = w.group("run");             // a group of the file: opened
+    run.stringAttribute("status", "reviewed");               // added, or replacing the file's
+    run.deleteAttribute("draft");
+    run.delete("scratch");                                   // a link of the file, deleted
+    run.dataset("frames").append(lastFrame);                 // a dataset of the file, written into
+    run.createDataset("notes", Datatype.variableString(), 2).write(new String[]{"a", "b"});
+}
+```
+
+- **What changes:**
+  - Everything a new file can hold can be added anywhere in the file.
+  - `group(name)` opens a group the file holds, and `dataset(name)` a dataset. Each follows a hard link
+    only: open a soft or external link's target where it is.
+  - A dataset of the file keeps its datatype, chunks, filters, and fill value, and grows only within
+    its maximum shape. Its chunks are written through its filters (deflate, shuffle, fletcher32, szip).
+  - Setting an attribute an object already has replaces it.
+  - `delete(name)` deletes a link. The object it led to stays in the file, unreachable unless another
+    link leads to it (its hard-link count is lowered).
+- **In place:**
+  - New data and metadata go after the file's end. `close()` flushes them to disk, then points the file's
+    existing structures at them (the superblock, then each changed object header, in single writes).
+  - Space freed by a deletion or a replaced attribute is not reused, as libhdf5 does not reuse it either;
+    `h5repack` reclaims it.
+  - Data written into a contiguous dataset of the file goes there at once. `abort()` undoes everything
+    else: it cuts what was added after the file's end.
+  - There is no journal: a crash while `close()` writes the changed headers can leave some changes made.
+    Do not open the file elsewhere while it is changed.
+- **New objects** take the file's format: the earliest one if its superblock is version 0–1. Groups and
+  attributes keep their storage style (original or new, compact or dense, creation order tracked).
+- **Refused** (`HdfUnsupportedException`):
+  - files with 4-byte addresses, of a non-default driver (family, multi), that track their free space
+    persistently or in pages, or that are marked as open by a writer;
+  - writing into datasets filtered by scale-offset, n-bit, szip's nearest-neighbour coding, or a
+    third-party filter, and into virtual datasets or data in external files;
+  - changing attributes kept in the shared-message table;
+  - external links in groups of the original format.
 
 ---
 
@@ -658,6 +712,5 @@ The following are not supported:
 - **Multi-file drivers** (family, multi, split). `driverInfo()` reports them, and Falcon reads only the
   file it opened.
 
-On the write side, indirect-block dense storage (more than about 64 KiB of links or attributes on one
-object), the third-party filters, and changing an existing file are not yet done. See
-[`TODO.md`](TODO.md).
+On the write side, the third-party filters are not written yet, and changing a file refuses what
+*Changing an existing file* lists. See [`TODO.md`](TODO.md).

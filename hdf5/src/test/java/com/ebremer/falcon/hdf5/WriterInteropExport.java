@@ -237,7 +237,393 @@ class WriterInteropExport {
             group("/").put("follow", Map.of("abs", new int[] {7, 8}, "rel", new int[] {7, 8}));
         }
 
+        // --- P2 WF8: references in chunks, compact data and attributes
+        for (Hdf5Writer.Format format : Hdf5Writer.Format.values()) {
+            String name = format == Hdf5Writer.Format.LATEST ? "references.h5" : "references_earliest.h5";
+            try (Hdf5Writer w = Hdf5Writer.create(begin(dir, name, format.name().toLowerCase()), format)) {
+                writeReferences(w);
+            }
+        }
+
+        // --- P2 WF5: dense storage of any size; old-style groups of several B-tree levels
+        writeLargeGroups(dir);
+
+        // --- P2 WF6: files changed in place, written by Falcon and by libhdf5
+        writeEdits(dir);
+
         Files.writeString(dir.resolve("manifest.json"), json(Map.of("files", files)), StandardCharsets.UTF_8);
+    }
+
+    // ------------------------------------------------------------------ P2 WF8, WF5, WF6
+
+    /** References in chunked, filtered, compound and compact datasets, and in attributes (P2 WF8). */
+    private void writeReferences(Hdf5Writer w) {
+        Map<String, Datatype> members = new LinkedHashMap<>();
+        members.put("id", Datatype.int32());
+        members.put("target", Datatype.objectReference());
+        w.createDataset("refs", Datatype.objectReference(), 0).chunked(2).maxShape(Hdf5Writer.UNLIMITED).deflate(4)
+                .append(new String[] {"/a", "/g", null, "/g/b", "/"});
+        dataset("/refs", null).put("refs", java.util.Arrays.asList("/a", "/g", null, "/g/b", "/"));
+        w.createDataset("records", Datatype.compound(members), 3).chunked(2).shuffle().write(Map.of(
+                "id", new int[] {1, 2, 3}, "target", new String[] {"/g/b", null, "/a"}));
+        dataset("/records", null).put("field_refs", Map.of("target", java.util.Arrays.asList("/g/b", null, "/a")));
+        w.createDataset("regions", Datatype.regionReference(), 2).chunked(1).deflate(1).write(new Hdf5Writer.Region[] {
+            Hdf5Writer.Region.block("/a", new long[] {1}, new long[] {2}), Hdf5Writer.Region.all("/g/b")});
+        dataset("/regions", null).put("regions", List.of(Map.of("target", "/a", "values", new int[] {11, 12}),
+                Map.of("target", "/g/b", "values", new int[] {7, 8})));
+        w.createDataset("compact", Datatype.objectReference(), 2).compact().write(new String[] {"/a", "/g/b"});
+        dataset("/compact", null).put("refs", List.of("/a", "/g/b"));
+        w.root().attribute("self", Datatype.objectReference(), new long[0], new String[] {"/"})
+                .attribute("targets", Datatype.objectReference(), new long[] {2}, new String[] {"/a", null})
+                .attribute("region", Datatype.regionReference(), new long[] {1},
+                        new Hdf5Writer.Region[] {Hdf5Writer.Region.points("/a", new long[][] {{3}})});
+        group("/").put("attr_refs", Map.of("self", List.of("/"), "targets", java.util.Arrays.asList("/a", null)));
+        group("/").put("attr_regions", Map.of("region", List.of(Map.of("target", "/a", "values", new int[] {13}))));
+        Hdf5Writer.GroupWriter g = w.group("g");
+        Map<String, Object> refs = new LinkedHashMap<>();
+        for (int i = 0; i < 10; i++) { // dense attribute storage in the modern format
+            String target = i % 2 == 0 ? "/a" : "/g";
+            g.attribute("r" + i, Datatype.objectReference(), new long[0], new String[] {target});
+            refs.put("r" + i, List.of(target));
+        }
+        group("/g").put("attr_refs", refs);
+        g.intDataset("b", new int[] {7, 8}, new long[] {2});
+        dataset("/g/b", new int[] {7, 8});
+        w.intDataset("a", new int[] {10, 11, 12, 13}, new long[] {4});
+        dataset("/a", new int[] {10, 11, 12, 13});
+    }
+
+    /** Dense storage beyond one heap block and one B-tree node (P2 WF5); old-style groups of many levels. */
+    private void writeLargeGroups(Path dir) throws IOException {
+        try (Hdf5Writer w = Hdf5Writer.create(begin(dir, "dense_big.h5", "latest"))) {
+            Hdf5Writer.GroupWriter many = w.group("many");
+            for (int i = 0; i < 20; i++) {
+                many.intDataset(String.format("d%06d", i), new int[] {i}, new long[] {1});
+            }
+            for (int i = 20; i < 100_000; i++) {
+                many.softLink(String.format("l%06d", i), String.format("d%06d", i % 20));
+            }
+            group("/many").put("count", 100_000);
+            group("/many").put("links", Map.of("l050000", Map.of("soft", "d000000"), "l099999", Map.of("soft", "d000019")));
+            group("/many").put("follow", Map.of("l004321", new int[] {1}, "l099999", new int[] {19}));
+            Hdf5Writer.DatasetWriter attrs = w.intDataset("attrs", new int[] {0}, new long[] {1});
+            for (int i = 0; i < 3000; i++) {
+                attrs.intAttribute(String.format("a%04d", i), new int[] {i, -i}, new long[] {2});
+            }
+            dataset("/attrs", new int[] {0}).put("attr_count", 3000);
+            objects.getLast().put("attrs", Map.of("a0000", new int[] {0, 0}, "a1234", new int[] {1234, -1234},
+                    "a2999", new int[] {2999, -2999}));
+            Hdf5Writer.GroupWriter large = w.group("large");
+            Map<String, Object> expected = new LinkedHashMap<>();
+            for (int i = 0; i < 40; i++) {
+                double[] values = new double[1 + i * 187]; // 8 bytes to 58 KB: large blocks, and blocks skipped
+                java.util.Arrays.fill(values, i);
+                large.doubleAttribute("x" + i, values, new long[] {values.length});
+                if (i % 13 == 0 || i == 39) {
+                    expected.put("x" + i, values);
+                }
+            }
+            group("/large").put("attrs", expected);
+        }
+        try (Hdf5Writer w = Hdf5Writer.create(begin(dir, "dense_big_earliest.h5", "earliest"), Hdf5Writer.Format.EARLIEST)) {
+            Hdf5Writer.GroupWriter g = w.group("g");
+            for (int i = 0; i < 300; i++) {
+                g.intDataset("x" + i, new int[] {i}, new long[] {1});
+            }
+            for (int i = 300; i < 9000; i++) {
+                g.softLink("x" + i, "x" + (i % 300));
+            }
+            group("/g").put("count", 9000);
+            group("/g").put("follow", Map.of("x8999", new int[] {299}, "x4567", new int[] {67}));
+            Hdf5Writer.GroupWriter big = w.group("big");
+            for (int i = 0; i < 40_000; i++) {
+                big.softLink(String.format("é%05d", i), "/g/x1");
+            }
+            group("/big").put("count", 40_000);
+            group("/big").put("follow", Map.of("é31234", new int[] {1}));
+        }
+    }
+
+    /** A fixture libhdf5 wrote, copied into the export to be changed. */
+    private static Path fixture(Path dir, String fixture, String name) throws IOException {
+        Path file = dir.resolve(name);
+        Files.copy(Fixtures.path(fixture), file, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        return file;
+    }
+
+    /** Files changed in place (P2 WF6): files Falcon wrote, and files libhdf5 wrote. */
+    private void writeEdits(Path dir) throws IOException {
+        for (Hdf5Writer.Format format : Hdf5Writer.Format.values()) {
+            String name = format == Hdf5Writer.Format.LATEST ? "edit_falcon.h5" : "edit_falcon_earliest.h5";
+            Path file = begin(dir, name, format.name().toLowerCase());
+            try (Hdf5Writer w = Hdf5Writer.create(file, format)) {
+                w.intDataset("ints", range(12), new long[] {3, 4});
+                w.createDataset("rows", Datatype.float64(), 0, 2).chunked(2, 2).maxShape(Hdf5Writer.UNLIMITED, 2)
+                        .deflate(4).append(new double[] {0, 0.5, 1, 1.5, 2, 2.5});
+                w.shortDataset("small", new short[] {1, 2, 3}, new long[] {3}).compact();
+                Hdf5Writer.GroupWriter g = w.group("g");
+                g.intDataset("old", new int[] {9}, new long[] {1});
+                g.intDataset("kept", new int[] {8}, new long[] {1});
+                g.stringAttribute("a1", "one").stringAttribute("a2", "two").stringAttribute("a3", "three");
+            }
+            try (Hdf5Writer w = Hdf5Writer.open(file)) {
+                w.intDataset("added", new int[] {1, 2}, new long[] {2});
+                w.root().stringAttribute("title", "changed");
+                Hdf5Writer.GroupWriter g = w.group("g");
+                g.delete("old");
+                for (int i = 0; i < 20; i++) {
+                    g.softLink("s" + i, "/ints");
+                }
+                g.stringAttribute("a1", "uno").deleteAttribute("a2")
+                        .attribute("a4", Datatype.int32(), new long[] {2}, new int[] {4, 44});
+                g.group("sub").intDataset("deep", new int[] {7}, new long[] {1});
+                w.dataset("ints").write(new long[] {1, 1}, new long[] {2, 2}, new int[] {-1, -2, -3, -4})
+                        .stringAttribute("units", "m");
+                w.dataset("rows").append(new double[] {3, 3.5}).write(new long[] {0, 1}, new long[] {1, 1}, new double[] {-0.5});
+                w.dataset("small").write(new long[] {2}, new long[] {1}, new short[] {30});
+                w.createDataset("refs", Datatype.objectReference(), 3).write(new String[] {"/g/kept", "/added", "/g/sub/deep"});
+            }
+            group("/").put("children", List.of("added", "g", "ints", "refs", "rows", "small"));
+            group("/").put("attrs", Map.of("title", List.of("changed")));
+            dataset("/ints", new int[] {0, 1, 2, 3, 4, -1, -2, 7, 8, -3, -4, 11}).put("attrs", Map.of("units", List.of("m")));
+            dataset("/rows", new double[] {0, -0.5, 1, 1.5, 2, 2.5, 3, 3.5}).put("shape", new long[] {4, 2});
+            dataset("/small", new int[] {1, 2, 30});
+            dataset("/added", new int[] {1, 2});
+            dataset("/refs", null).put("refs", List.of("/g/kept", "/added", "/g/sub/deep"));
+            group("/g").put("count", 22);
+            objects.getLast().put("absent", List.of("old"));
+            objects.getLast().put("attrs", Map.of("a1", List.of("uno"), "a3", List.of("three"), "a4", new int[] {4, 44}));
+            objects.getLast().put("attr_absent", List.of("a2"));
+            objects.getLast().put("follow", Map.of("s7", new int[] {0, 1, 2, 3, 4, -1, -2, 7, 8, -3, -4, 11},
+                    "kept", new int[] {8}));
+            dataset("/g/sub/deep", new int[] {7});
+        }
+
+        // Groups libhdf5 wrote, in both formats: links added (past the compact limit) and deleted.
+        for (String source : new String[] {"new_style_groups.h5", "old_style_groups.h5"}) {
+            boolean latest = source.startsWith("new");
+            Path file = fixture(dir, source, "edit_" + source);
+            begin(dir, "edit_" + source, latest ? "latest" : "earliest");
+            try (Hdf5Writer w = Hdf5Writer.open(file)) {
+                Hdf5Writer.GroupWriter alpha = w.group("alpha");
+                for (int i = 0; i < 300; i++) {
+                    alpha.intDataset(String.format("n%03d", i), new int[] {i}, new long[] {1});
+                }
+                alpha.delete("delta");
+                alpha.group("beta").delete("gamma").softLink("up", "/root_ds");
+                w.group("empty").stringAttribute("now", "not empty");
+                for (int i = 0; i < 12; i++) {
+                    w.root().attribute("r" + i, Datatype.int16(), new long[0], new int[] {i});
+                }
+            }
+            group("/alpha").put("count", 301);
+            objects.getLast().put("absent", List.of("delta"));
+            objects.getLast().put("follow", Map.of("n123", new int[] {123}, "n000", new int[] {0}));
+            group("/alpha/beta").put("children", List.of("up"));
+            objects.getLast().put("links", Map.of("up", Map.of("soft", "/root_ds")));
+            objects.getLast().put("follow", Map.of("up", range(4)));
+            group("/empty").put("attrs", Map.of("now", List.of("not empty")));
+            group("/").put("attr_count", 12);
+            objects.getLast().put("attrs", Map.of("r0", new int[] {0}, "r11", new int[] {11}));
+            dataset("/root_ds", range(4));
+        }
+
+        // Dense links and attributes libhdf5 wrote.
+        Path links = fixture(dir, "dense_links.h5", "edit_dense_links.h5");
+        begin(dir, "edit_dense_links.h5", "latest");
+        try (Hdf5Writer w = Hdf5Writer.open(links)) {
+            Hdf5Writer.GroupWriter dense = w.group("dense");
+            dense.delete("link03").delete("link17").softLink("soft", "/dense/link05");
+            dense.intDataset("link03", new int[] {-3}, new long[] {1});
+        }
+        group("/dense").put("count", 20);
+        objects.getLast().put("absent", List.of("link17"));
+        objects.getLast().put("follow", Map.of("link03", new int[] {-3}, "link05", new int[] {5}, "soft", new int[] {5}));
+        Path attributes = fixture(dir, "dense_attrs.h5", "edit_dense_attrs.h5");
+        begin(dir, "edit_dense_attrs.h5", "latest");
+        try (Hdf5Writer w = Hdf5Writer.open(attributes)) {
+            w.dataset("d").deleteAttribute("attr00").intAttribute("attr05", new int[] {-5}, new long[0])
+                    .stringAttribute("added", "yes");
+        }
+        dataset("/d", range(3)).put("attr_count", 20);
+        objects.getLast().put("attr_absent", List.of("attr00"));
+        objects.getLast().put("attrs", Map.of("attr05", new int[] {-5}, "attr19", new int[] {190}, "added", List.of("yes")));
+
+        // Every chunk index libhdf5 writes, rewritten as Falcon's once chunks are written.
+        Path chunks = fixture(dir, "chunk_indexes.h5", "edit_chunk_indexes.h5");
+        begin(dir, "edit_chunk_indexes.h5", "latest");
+        files.getLast().put("min_hdf5", "2.0"); // libhdf5 2.0 wrote it with version-5 layouts, which 1.14 cannot read
+        try (Hdf5Writer w = Hdf5Writer.open(chunks)) {
+            w.dataset("single").write(new long[] {1}, new long[] {2}, new int[] {-1, -2});
+            w.dataset("implicit").write(new long[] {8}, new long[] {2}, new int[] {-8, -9});
+            w.dataset("fixed").write(new long[] {4}, new long[] {2}, new int[] {-4, -5});
+            w.dataset("extensible").append(new int[] {12, 13, 14, 15, 16});
+            w.dataset("extensible_gz").append(range(7));
+            w.dataset("btree2").extend(5, 6).write(new long[] {4, 4}, new long[] {1, 2}, new int[] {44, 45});
+            w.dataset("btree2_deep").write(new long[] {39, 39}, new long[] {1, 1}, new int[] {-1});
+        }
+        dataset("/single", new int[] {0, -1, -2, 3, 4});
+        int[] implicit = range(10);
+        implicit[8] = -8;
+        implicit[9] = -9;
+        dataset("/implicit", implicit);
+        int[] fixed = range(20);
+        fixed[4] = -4;
+        fixed[5] = -5;
+        dataset("/fixed", fixed);
+        dataset("/extensible", range(17)).put("maxshape", java.util.Arrays.asList((Object) null));
+        int[] gz = java.util.Arrays.copyOf(range(200), 207);
+        System.arraycopy(range(7), 0, gz, 200, 7);
+        dataset("/extensible_gz", gz);
+        int[] btree2 = new int[30];
+        for (int r = 0; r < 4; r++) {
+            for (int c = 0; c < 4; c++) {
+                btree2[r * 6 + c] = r * 4 + c;
+            }
+        }
+        btree2[4 * 6 + 4] = 44;
+        btree2[4 * 6 + 5] = 45;
+        dataset("/btree2", btree2).put("shape", new long[] {5, 6});
+        int[] deep = range(1600);
+        deep[1599] = -1;
+        dataset("/btree2_deep", deep);
+        dataset("/extensible_big", range(1200));
+
+        // The earliest format's filtered chunks (version-1 B-tree): gzip, shuffle, fletcher32.
+        Path filtered = fixture(dir, "chunked_data.h5", "edit_chunked_data.h5");
+        begin(dir, "edit_chunked_data.h5", "earliest");
+        try (Hdf5Writer w = Hdf5Writer.open(filtered)) {
+            w.dataset("gzip_i4").write(new long[] {3}, new long[] {4}, new int[] {-3, -4, -5, -6});
+            w.dataset("shuffle_i4").write(new long[] {19}, new long[] {1}, new int[] {-19});
+            w.dataset("fletcher_i4").write(new long[] {0}, new long[] {20}, range(20, 40));
+            w.dataset("chunk_2d").write(new long[] {3, 5}, new long[] {1, 1}, new int[] {-23});
+        }
+        int[] gzip = range(20);
+        gzip[3] = -3;
+        gzip[4] = -4;
+        gzip[5] = -5;
+        gzip[6] = -6;
+        dataset("/gzip_i4", gzip);
+        int[] shuffled = range(20);
+        shuffled[19] = -19;
+        dataset("/shuffle_i4", shuffled);
+        dataset("/fletcher_i4", range(20, 40));
+        int[] grid = range(24);
+        grid[23] = -23;
+        dataset("/chunk_2d", grid);
+
+        // Creation order tracked (h5py's track_order): links and attributes, compact and dense, with their
+        // creation-order indexes, which h5py iterates by.
+        for (String source : new String[] {"tracked_order.h5", "tracked_order_old.h5"}) {
+            Path file = fixture(dir, source, "edit_" + source);
+            begin(dir, "edit_" + source, source.contains("old") ? "earliest" : "latest");
+            try (Hdf5Writer w = Hdf5Writer.open(file)) {
+                w.group("small").delete("a").intDataset("d", new int[] {100}, new long[] {1});
+                w.group("big").delete("z05").softLink("new", "/d");
+                w.dataset("d").intAttribute("x", new int[] {-1}, new long[0]).deleteAttribute("y")
+                        .intAttribute("v", new int[] {118}, new long[0]);
+                w.dataset("dd").deleteAttribute("q00").intAttribute("p", new int[] {7}, new long[0]);
+                for (int i = 0; i < 9; i++) {
+                    w.dataset("d").intAttribute("m" + i, new int[] {i}, new long[0]);
+                }
+            }
+            group("/small").put("order", List.of("c", "b", "d"));
+            objects.getLast().put("follow", Map.of("d", new int[] {100}, "c", new int[] {'c'}));
+            List<String> big = new ArrayList<>();
+            for (int i = 0; i < 20; i++) {
+                if (i != 14) { // z05, the 15th made
+                    big.add(String.format("z%02d", 19 - i));
+                }
+            }
+            big.add("new");
+            group("/big").put("order", big);
+            objects.getLast().put("follow", Map.of("new", range(3)));
+            List<String> attrs = new ArrayList<>(List.of("w", "x", "v"));
+            for (int i = 0; i < 9; i++) {
+                attrs.add("m" + i);
+            }
+            dataset("/d", range(3)).put("attr_order", attrs);
+            objects.getLast().put("attrs", Map.of("x", new int[] {-1}, "w", new int[] {'w'}, "m8", new int[] {8}));
+            List<String> dd = new ArrayList<>();
+            for (int i = 0; i < 20; i++) {
+                if (i != 19) { // q00, the last made
+                    dd.add(String.format("q%02d", 19 - i));
+                }
+            }
+            dd.add("p");
+            dataset("/dd", range(3)).put("attr_order", dd);
+        }
+
+        // Shared object header messages (SOHM): data written under a shared filter pipeline, objects added.
+        for (String source : new String[] {"sohm.h5", "sohm_latest.h5"}) {
+            Path file = fixture(dir, source, "edit_" + source);
+            begin(dir, "edit_" + source, source.contains("latest") ? "latest" : "earliest");
+            if (source.contains("latest")) {
+                files.getLast().put("min_hdf5", "2.0"); // written by libhdf5 2.0 with version-5 layouts
+            }
+            try (Hdf5Writer w = Hdf5Writer.open(file)) {
+                w.dataset("b").write(new long[] {4}, new long[] {2}, new int[] {-4, -5});
+                w.intDataset("added", new int[] {1}, new long[] {1});
+                w.group("group").intDataset("inner", new int[] {2}, new long[] {1});
+            }
+            dataset("/b", new int[] {0, 1, 2, 3, -4, -5}).put("attrs", Map.of("units", new int[] {7}));
+            dataset("/a", range(6)).put("attrs", Map.of("units", new int[] {7}));
+            dataset("/added", new int[] {1});
+            group("/group").put("attrs", Map.of("title", List.of("shared")));
+            objects.getLast().put("follow", Map.of("inner", new int[] {2}));
+        }
+
+        // Contiguous and compact data libhdf5 wrote, written in place; a block allocated for one never written.
+        Path contiguous = fixture(dir, "data_contiguous.h5", "edit_data_contiguous.h5");
+        begin(dir, "edit_data_contiguous.h5", "earliest");
+        try (Hdf5Writer w = Hdf5Writer.open(contiguous)) {
+            w.dataset("c_i4").write(new long[] {1}, new long[] {2}, new int[] {-1, -2});
+            w.dataset("c_be_i4").write(new long[] {4}, new long[] {1}, new int[] {-4});
+            w.dataset("c_str").write(new long[] {3}, new long[] {1}, new String[] {"xyz"});
+            w.dataset("compact_i4").write(new long[] {2}, new long[] {1}, new int[] {33});
+            w.dataset("unwritten").write(new long[] {1}, new long[] {1}, new int[] {1});
+        }
+        dataset("/c_i4", new int[] {0, -1, -2, 3, 4});
+        dataset("/c_be_i4", new int[] {0, 1, 2, 3, -4});
+        dataset("/c_str", new String[] {"abc", "de", "fghij", "xyz"});
+        dataset("/compact_i4", new int[] {10, 20, 33});
+        dataset("/unwritten", new int[] {7, 1, 7, 7});
+
+        // A second hard link deleted: its object's reference count lowered.
+        Path metadata = fixture(dir, "metadata.h5", "edit_metadata.h5");
+        begin(dir, "edit_metadata.h5", "latest");
+        try (Hdf5Writer w = Hdf5Writer.open(metadata)) {
+            w.delete("hardlink");
+        }
+        dataset("/plain", range(3)).put("refcount", 1);
+        group("/").put("absent", List.of("hardlink"));
+
+        // A user block before the superblock; B-tree 'K' values other than libhdf5's defaults.
+        for (String source : new String[] {"userblock_v0.h5", "userblock_v3.h5", "btree_k_earliest.h5", "btree_k_latest.h5"}) {
+            Path file = fixture(dir, source, "edit_" + source);
+            begin(dir, "edit_" + source, source.contains("v0") || source.contains("earliest") ? "earliest" : "latest");
+            if (source.equals("userblock_v3.h5")) {
+                files.getLast().put("min_hdf5", "2.0"); // written by libhdf5 2.0 with a version-5 layout
+            }
+            try (Hdf5Writer w = Hdf5Writer.open(file)) {
+                Hdf5Writer.GroupWriter g = w.group("added");
+                for (int i = 0; i < 200; i++) {
+                    g.intDataset("l" + i, new int[] {i}, new long[] {1});
+                }
+                w.createDataset("chunks", Datatype.int32(), 0).chunked(1).maxShape(Hdf5Writer.UNLIMITED).append(range(300));
+            }
+            group("/added").put("count", 200);
+            objects.getLast().put("follow", Map.of("l0", new int[] {0}, "l199", new int[] {199}));
+            dataset("/chunks", range(300));
+        }
+    }
+
+    private static int[] range(int from, int to) {
+        int[] a = new int[to - from];
+        for (int i = 0; i < a.length; i++) {
+            a[i] = from + i;
+        }
+        return a;
     }
 
     private void writeEdges(Hdf5Writer w, Hdf5Writer.Format format) {

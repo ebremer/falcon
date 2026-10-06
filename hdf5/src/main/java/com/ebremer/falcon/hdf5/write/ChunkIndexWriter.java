@@ -122,12 +122,13 @@ public final class ChunkIndexWriter {
      * its root's address. Each key is a chunk's stored size, filter mask, and element offset in every
      * dimension plus a trailing 0; key <i>i</i> of a node is its child <i>i</i>'s first chunk, and its last
      * key the next node's first, or, after the last chunk, that chunk's grid position plus one in every
-     * dimension, as libhdf5 sets a new node's right key ({@code H5D__btree_new_node}).
+     * dimension, as libhdf5 sets a new node's right key ({@code H5D__btree_new_node}). Nodes hold
+     * {@code 2 * k} entries: the file's 'K' for chunk B-trees ({@link #BTREE_K} unless it records another).
      */
-    public static long writeBTreeV1(GrowBuffer buf, List<Entry> entries, long[] chunkDims) {
+    public static long writeBTreeV1(GrowBuffer buf, List<Entry> entries, long[] chunkDims, int k) {
         int rank = chunkDims.length;
         int keySize = 4 + 4 + 8 * (rank + 1);
-        int perNode = 2 * BTREE_K;
+        int perNode = 2 * k;
         int nodeSize = 8 + 16 + perNode * 8 + (perNode + 1) * keySize;
         Entry last = entries.getLast();
         long[] beyond = new long[rank];

@@ -1,10 +1,11 @@
 # Falcon HDF5 — remaining work (prioritized)
 
-**Status (2026-10-05, after P2 S1–S7, A1–A12, PF1–PF4, and WF1–WF4):** build green, **707 HDF5 tests**
-(144 at the review, 187 after the top 10, 206 after P0, 228 after P1, 243 after S1–S3, 256 after S4–S7,
-439 after A2–A6, 610 after PF1–PF4, 677 after A1–A10, 692 after A11–A12), plus 38 in the `core` module.
-The review's top 10, every P1 item, **P2 S1–S7**, **A1–A12**, **PF1–PF4**, **WF1–WF4**, and the P0 zstd
-fix (Z6/Z7, in `core`) are done (see *Done* at the end). Falcon now:
+**Status (2026-10-05, after P2 S1–S7, A1–A12, PF1–PF4, WF1–WF6, WF8, and WF9):** build green, **743 HDF5
+tests** (144 at the review, 187 after the top 10, 206 after P0, 228 after P1, 243 after S1–S3, 256 after
+S4–S7, 439 after A2–A6, 610 after PF1–PF4, 677 after A1–A10, 692 after A11–A12, 707 after WF1–WF4), plus
+38 in the `core` module. The review's top 10, every P1 item, **P2 S1–S7**, **A1–A12**, **PF1–PF4**,
+**WF1–WF6**, **WF8**, **WF9**, and the P0 zstd fix (Z6/Z7, in `core`) are done (see *Done* at the end).
+Falcon now:
 
 - reads the files the review showed it misreading:
   - real libhdf5 szip and scale-offset data;
@@ -40,18 +41,45 @@ fix (Z6/Z7, in `core`) are done (see *Done* at the end). Falcon now:
   - chunks are looked up by coordinate in an index read once per dataset;
   - virtual-dataset selections read only the parts of the sources they map to;
   - names are found through the name indexes (see `BENCHMARKS.md`);
-- writes files that **HDF5 2.0 and 1.14 read**, checked by `tools/fixtures/check_hdf5_writer.py`. The
-  final run read 146/146 objects with HDF5 2.0 and 140/140 with 1.14.6. The P0 edge-case files written by
-  the previous writer fail 19 objects under each version.
+- writes files that **HDF5 2.0 and 1.14 read, and change**, checked by `tools/fixtures/check_hdf5_writer.py`.
+  The final run read 246/246 objects with HDF5 2.0 and 226/226 with 1.14.6. Each library then changed every
+  file (an attribute on every object, a dataset in every group, a row on every growable dataset) and read
+  it all back. The P0 edge-case files written by the previous writer fail 19 objects under each version.
+- changes existing files in place (`Hdf5Writer.open`), its own and libhdf5's, in either format: adds
+  objects, writes into datasets, deletes links and attributes;
 - streams what it writes: raw data goes to the file as it is written, so files may pass 2 GB and memory;
   datasets grow (`maxShape`, `append`), and any datatype is written (`createDataset`), with soft and
-  external links and region references;
+  external links, and object and region references anywhere (chunks, attributes);
+- writes groups and attribute sets of any size: dense storage beyond one heap block and one B-tree node,
+  and original-format groups of several B-tree levels;
 - writes atomically (temp file, then move), can be aborted, and validates input when it is added;
 - verifies metadata and fletcher32 checksums, rejects loops and runaway sizes in corrupt files, survives
   fuzzing under a 128 MB heap and 256 KB stack, confines external files to the HDF5 file's directory by
   default, and supports concurrent reads of one open file.
 
 P0 and P1 are empty. What remains is features and API (P2) and docs and build (P3).
+
+**Behaviour and API changes in P2 WF5, WF6, WF8, WF9** (pre-1.0):
+- **New: `Hdf5Writer.open(path)`** changes an existing file in place.
+  - `GroupWriter.group(name)` opens a group the file holds, rather than refusing the name.
+  - New: `GroupWriter.dataset(name)` (and `Hdf5Writer.dataset`) gives a dataset the group holds, or one
+    added in the session; `GroupWriter.delete(name)` (and `Hdf5Writer.delete`) deletes a link;
+    `deleteAttribute(name)` on groups and datasets.
+  - Setting an attribute an object has in the file replaces it.
+  - A dataset of the file keeps its storage: `chunked`, `maxShape`, the filters, `fillValue`, and
+    `compact` throw `IllegalStateException` on it.
+- **Datasets given their data whole** (the per-type methods) write it when the next dataset or group is
+  added (or on close): configure them (filters, layout, fill value) before then. Configuring one after
+  another object was added now throws `IllegalStateException`.
+- **References** are written in chunked (and filtered) and compact datasets and in attributes: chunked
+  ones used to throw `IllegalStateException`, attributes `HdfUnsupportedException`. A chunked dataset of
+  object references keeps its chunks until `close()`.
+- **Dense storage** is laid out as libhdf5 lays it out: heaps of 512-byte first blocks with indirect
+  blocks as needed, and name indexes of 512-byte nodes. A dense set was one direct block and one B-tree
+  leaf sized to fit, which failed past about 64 KiB.
+- **The earliest format** writes groups of any size (multi-level group B-trees); it refused more than 256
+  children.
+- **`compact()`** accepts variable-length and reference datasets; it refused them.
 
 **Behaviour and API changes in P2 WF1–WF4** (pre-1.0):
 - **Streaming:** the writer streams raw data into its temporary file as data is written and appends the
@@ -232,13 +260,15 @@ review baseline. Abbreviations: `W` = `Hdf5Writer.java`; other paths are under
 2. **B1/B2 — CI and release plumbing:** a Windows CI leg, source and Javadoc jars, and the enforcer.
    New plugins need Erich's approval.
 3. **PF5 — chunk lookups without reading the whole index,** for very large or remote datasets.
-4. **S8 — writing the third-party filters,** whose encoders core partly has.
-5. **WF5 — indirect-block fractal heaps,** for more than about 64 KiB of links or attributes on one object.
-6. **WF6 — opening an existing file to change it.**
-7. **WF8 — references in chunked datasets and in attributes.**
-8. **PF8 — selected elements copied a run at a time,** not one by one.
-9. **PF6/PF7 — per-file object caches, and virtual mappings that scatter.**
-10. **D4 — Javadoc lint.**
+4. **S8 — writing the third-party filters,** whose encoders core partly has. It would also let `open()`
+   write into datasets so filtered.
+5. **WF10 — what changing a file still refuses:** datasets filtered with scale-offset, n-bit, or a
+   third-party filter; attributes in the shared-message table; hard links to existing objects, and renames.
+6. **PF8 — selected elements copied a run at a time,** not one by one.
+7. **PF6/PF7 — per-file object caches, and virtual mappings that scatter.**
+8. **D4 — Javadoc lint.**
+9. **WF7 — lower-priority writer options:** a user block, szip's better-ratio modes.
+10. **S9 — more registered filters:** Blosc2, bzip2, ZFP, SZ.
 
 ---
 
@@ -268,17 +298,18 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
 
 ### Write features & API
 
-- WF1–WF4 are done (see *Done — 2026-10-05 (P2: WF1–WF4)*). Still open around them:
-  - [ ] **WF8 — references in chunked datasets and in attributes.** A reference holds its target's
-    address, which is known only when the metadata is laid out at `close()`. In contiguous data it is
-    written in place then; a filtered chunk or a checksummed object header cannot be patched afterwards.
-    Both are refused for now. Fix: lay the metadata out twice, or reserve the objects' headers first.
-  - [ ] **WF9 — the data of datasets given it whole** (the per-type methods) is kept until `close()`,
-    since their filters and layout may still change. Writing it when the next object is added would
-    bound memory by one dataset.
-- [ ] **WF5 — indirect-block fractal heaps** for dense sets beyond one direct block. (carried over; W2
-  must come first)
-- [ ] **WF6 — open an existing file for modification:** add, overwrite, and delete.
+- WF1–WF6, WF8, and WF9 are done (see *Done — 2026-10-05 (P2: WF5, WF6, WF8, WF9)* and *(P2: WF1–WF4)*).
+  Still open around them:
+  - [ ] **WF10 — what changing a file (`open`) still refuses or leaves:**
+    - writing into datasets filtered with scale-offset, n-bit, szip's nearest-neighbour coding, or a
+      third-party filter (S8 would supply the encoders), datasets whose partial edge chunks are stored
+      unfiltered, virtual datasets, and data in external files;
+    - changing attributes kept in the shared-message table (SOHM), and external links in groups of the
+      original format;
+    - new API: hard links to existing objects, and renaming or moving links;
+    - space freed by deletions is not reused, and a dense set shrunk below its minimum stays dense
+      (libhdf5 would make it compact again); `h5repack` reclaims both;
+    - there is no journal: a crash while `close()` writes the changed headers can leave some applied.
 - [ ] **WF7 — lower-priority options:**
   - a user-block option;
   - szip better-ratio modes (NN preprocessing, zero-block, second extension) — carried over;
@@ -336,6 +367,8 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
     values.
   - **Also done (P2 WF1–WF4):** streaming writes and what stays in memory, `createDataset` and its
     value table, growing datasets, typed and string attributes, links, and region references.
+  - **Also done (P2 WF5, WF6, WF8, WF9):** changing a file in place (what it changes, what it refuses,
+    what `abort()` undoes), references anywhere, and when data given whole is written.
 - [ ] **D3 — PLAN.md is stale.**
   - §6 lists the non-existent `dataspace` and `util` packages, omits `data`, `index`, and `group`, and
     says only one package is exported (`datatype` is exported too).
@@ -388,6 +421,94 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
     (`tools/fixtures/gen_zstd_corrupt_vectors.py` → `zstd_corrupt_vectors.txt`): mutations, several
     frames, skippable frames, and trailing data. The old decoder fails 137 of them.
   - The core fuzzer: 1.5M further mutated frames threw only typed exceptions.
+
+## Done — 2026-10-05 (P2: WF5, WF6, WF8, WF9)
+
+- [x] **WF9 — data given whole is written when the next object is added.** A dataset made with its data
+  (the per-type methods) writes it when the next dataset or group is added, or on `close()`, so the
+  writer holds one such dataset's data at most. Its storage is configured until then.
+  - **Tests:** `WriteStreamingTest.givenDataIsWrittenWhenTheNextObjectIsAdded` (both formats).
+- [x] **WF8 — references in chunked datasets and in attributes.**
+  - **Two layouts:** `close()` lays the metadata out once to place every object. It then fills the
+    object references into attributes and compact data, and writes the chunks that held them after the
+    metadata's space. A second layout writes the same metadata with the references in; it is checked to
+    put every object in the same place.
+  - Region references were never the problem: their heap objects are filled in where they are.
+  - **Memory:** a chunked dataset of object references keeps its chunks until `close()`.
+  - **Tests:** `WriteTypesAndLinksTest.referencesInChunksCompactDataAndAttributes` (filtered and growable
+    chunks, compound members, compact data, scalar and dense attributes, region references, both
+    formats) and `aMissingReferenceTargetCanBeAddedAndCloseRetried`.
+- [x] **WF5 — dense storage of any size**, in `write/FractalHeapWriter` and `write/BTreeV2Writer`:
+  - fractal heaps as libhdf5 lays them out (`H5G_FHEAP_*`): a doubling table four 512-byte blocks wide,
+    direct blocks up to 64 KiB, then child indirect blocks nested as deep as needed. Objects go in order
+    into the first block with room for them; blocks skipped stay unallocated. The allocation iterator
+    is left after the last block, so libhdf5 can add to the heap;
+  - version-2 B-trees of 512-byte nodes, built bottom-up to as many levels as the records need, with the
+    count widths `H5B2__hdr_init` derives; names of equal hash ordered by their bytes;
+  - original-format groups of any size: multi-level group B-trees, with the file's K values.
+  - **Tests:** `WriteDenseStorageTest` (100,000 links: child indirect blocks and a four-level name index;
+    3,000 attributes, attributes up to 58 KB, names of equal hash) and
+    `WriterEdgeCaseTest.earliestFormatHoldsManyAttributesAndChildren` (9,000 children).
+- [x] **WF6 — changing an existing file in place: `Hdf5Writer.open`.**
+  - **The file:** `ExistingFile` opens it through the reader, and refuses files the writer cannot
+    change safely:
+    - addresses or lengths other than 8 bytes;
+    - a non-default file driver;
+    - persistent free-space tracking, or paged allocation;
+    - consistency flags set by an open writer.
+
+    Writing continues at its end-of-file address, relative to its superblock, so a user block is kept.
+    New objects take the file's format (superblock version 0–1: the earliest); B-trees take its K values.
+  - **Object headers** change through `write/ObjectHeaderEditor`, in either version:
+    - a removed message becomes a null message;
+    - an added one takes a null message large enough, or a new continuation chunk after the file's end,
+      pointed at from a null message or from the place of a message moved there to make room;
+    - same-size replacements are in place;
+    - a version-2 chunk ending in a gap never keeps a null message (libhdf5 rejects that): the gap is
+      merged into the null space, as `H5O__eliminate_gap` does;
+    - changed chunks are rewritten whole, with their checksums (version 2) or message count (version 1).
+  - **Groups:**
+    - original-format groups get a new symbol table, with the caches of the group symbol tables they
+      hold, and the superblock's root entry is updated;
+    - new-style groups add or remove compact Link messages within their compact limit, else are written
+      densely anew;
+    - groups that track creation order give new links the next creation index and keep their
+      creation-order index (B-tree type 6).
+  - **Attributes:**
+    - version-1 headers: messages;
+    - version 2: compact within the header's limit, else dense anew, with the creation-order index (type
+      9) of objects that track it;
+    - an attribute set again replaces the file's.
+  - **Datasets:** a dataset of the file is written through the same `Storage` as a new one:
+    - contiguous data in place, or a block allocated (filled with the fill value) for one never written;
+    - compact data in its header;
+    - chunked data through its filters (deflate, shuffle, fletcher32, szip), with chunks read back
+      through the reader's pipeline.
+
+    Its chunk index is written anew (fixed array, or version-1 B-tree if it can grow) and its Layout
+    message replaced; a grown dataset's Dataspace message is updated in place.
+  - **Deleting** a link lowers its object's hard-link count when another link remains; a reference to a
+    deleted object fails `close()`.
+  - **Completing:** the new metadata goes after the data and is flushed; then the superblock (new end,
+    root cache), then the changed header chunks, each one write. `abort()` truncates what was added.
+  - **Tests:**
+    - `WriteEditTest` (21) changes files Falcon wrote, in two sessions, and files libhdf5 wrote:
+      - groups of both styles, compact and dense links and attributes, creation order;
+      - every chunk index type, contiguous, compact, never-written and big-endian data;
+      - filtered chunks of the earliest format, shared messages, a second hard link;
+      - user blocks, non-default K values;
+      - refusals, and `abort()`.
+    - `ObjectHeaderEditorTest` (5): null space, continuation chunks with a message moved, gaps, reference
+      counts, both versions.
+- **Verified by libhdf5:** `WriterInteropExport` gained:
+  - `references.h5` and `dense_big.h5`, each in both formats;
+  - eighteen `edit_*.h5` files changed from Falcon's and libhdf5's (fixtures copied, then opened).
+
+  The checker gained checks of counts, deleted names, reference counts, references in attributes and
+  compound members, and creation order. A new pass has each library change every file and read it all
+  back. HDF5 2.0 reads 246/246 objects and 1.14.6 226/226, and each changes every file. Three sources
+  libhdf5 2.0 wrote with version-5 layouts are 2.0-only.
+- **New fixtures:** `tracked_order.h5`, `tracked_order_old.h5` (`gen_fixtures.py tracked_order`).
 
 ## Done — 2026-10-05 (P2: WF1–WF4)
 

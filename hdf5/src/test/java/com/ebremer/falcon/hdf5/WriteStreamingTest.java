@@ -177,6 +177,43 @@ class WriteStreamingTest {
         }
     }
 
+    /**
+     * A dataset given its data whole is written when the next dataset or group is added (P2 WF9), so only
+     * one such dataset's data is held; it is configured before then.
+     */
+    @ParameterizedTest
+    @EnumSource(Hdf5Writer.Format.class)
+    void givenDataIsWrittenWhenTheNextObjectIsAdded(Hdf5Writer.Format format) throws IOException {
+        Path file = dir.resolve("given.h5");
+        Random random = new Random(2);
+        int[] values = new int[1_000_000];
+        for (int i = 0; i < values.length; i++) {
+            values[i] = random.nextInt();
+        }
+        try (Hdf5Writer w = Hdf5Writer.create(file, format)) {
+            Hdf5Writer.DatasetWriter first = w.intChunkedDataset("first", values, new long[] {1000, 1000}, new long[] {100, 1000})
+                    .shuffle().deflate(1);
+            assertEquals(0, streamed(), "held until the next object");
+            Hdf5Writer.GroupWriter next = w.group("next");
+            assertTrue(streamed() >= 3_000_000, "streamed " + streamed());
+            assertThrows(IllegalStateException.class, () -> first.fletcher32()); // its data is written
+            first.intAttribute("still", new int[] {1}, new long[] {1});           // attributes are not data
+            Hdf5Writer.DatasetWriter strings = next.stringDataset("strings", new String[] {"a", "bc"}, new long[] {2});
+            long before = streamed();
+            next.doubleDataset("doubles", new double[] {1.5}, new long[] {1}).compact();
+            assertTrue(streamed() > before, "the strings' heap ids are written when the next dataset is added");
+            assertThrows(IllegalStateException.class, strings::compact);
+        }
+        try (Hdf5File h5 = Hdf5File.open(file)) {
+            Dataset first = h5.root().dataset("first");
+            assertArrayEquals(values, first.readInts());
+            assertEquals(2, first.filters().size());
+            assertArrayEquals(new int[] {1}, first.attribute("still").orElseThrow().readInts());
+            assertArrayEquals(new String[] {"a", "bc"}, h5.root().dataset("next/strings").readStrings());
+            assertEquals(Dataset.Layout.COMPACT, h5.root().dataset("next/doubles").layout());
+        }
+    }
+
     /** A file past 2 GB: a contiguous dataset whose block ends beyond 2^31 bytes, written only at its ends. */
     @Test
     void filesPass2GB() throws IOException {

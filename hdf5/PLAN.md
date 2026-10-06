@@ -366,6 +366,11 @@ Each stage ends with a **milestone** and concrete **acceptance criteria**. "Refe
   written (files past 2 GB); datasets of any datatype (`createDataset`) grow (`maxShape`, `append`,
   version-1 B-tree index); typed and string attributes; soft and external links; region references.
   libhdf5 2.0 and 1.14 read all of it (`tools/fixtures/check_hdf5_writer.py`).
+- **Changing files, and storage of any size ✓** (P2 WF5, WF6, WF8, WF9): `Hdf5Writer.open` changes an
+  existing file in place (its own or libhdf5's: objects added, data written, links and attributes
+  deleted); dense storage and group B-trees of any size; references in chunks and attributes; data given
+  whole written as the next object is added. libhdf5 2.0 and 1.14 read the results and change them
+  further.
 
 ### H9 — API polish, performance, docs  (essentially complete)
 - **Robustness ✓**: a corrupt-input fuzz test truncates and byte-flips 19 fixtures and forces a full

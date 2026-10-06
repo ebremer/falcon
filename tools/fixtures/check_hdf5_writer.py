@@ -2,9 +2,11 @@
 """Checks that the reference library reads what Falcon's HDF5 writer writes.
 
 Falcon's own round-trip tests (WriteTest) only prove the writer and reader agree with each other. This
-script exports the writer's feature matrix (WriterInteropExport: one file per area plus a manifest of
-expected values) and reads every object back with h5py -- HDF5 2.0, and optionally an HDF5 1.14 build
-in a second interpreter -- decoding szip chunks with libaec (h5py ships szip disabled).
+script exports the writer's feature matrix (WriterInteropExport: one file per area, among them files
+Falcon changed in place, plus a manifest of expected values) and reads every object back with h5py --
+HDF5 2.0, and optionally an HDF5 1.14 build in a second interpreter -- decoding szip chunks with libaec
+(h5py ships szip disabled). Each library then changes a copy of every file (an attribute on every object,
+a dataset in every group, a row on every dataset that can grow) and reads it all back.
 
     python tools/fixtures/check_hdf5_writer.py                      # export via Maven, check with this python
     python tools/fixtures/check_hdf5_writer.py --python114 PATH     # ...and also with an HDF5 1.14 h5py
@@ -40,6 +42,12 @@ def export(directory):
 
 def hdf5_version():
     return tuple(int(p) for p in h5py.version.hdf5_version.split(".")[:2])
+
+
+def supported(entry):
+    """False for a file (or object) that needs a newer HDF5 than this one."""
+    need = entry.get("min_hdf5")
+    return not need or hdf5_version() >= tuple(int(p) for p in need.split("."))
 
 
 def szip_values(ds):
@@ -81,15 +89,56 @@ def as_text(values):
     return [v.decode("utf-8") if isinstance(v, bytes) else str(v) for v in values]
 
 
-def check_object(f, obj):
+def region_values(f, ref):
+    target = f[ref]
+    return target.name, np.asarray(target[ref]).ravel()
+
+
+def check_regions(f, refs, expected_list, what):
+    for ref, expected in zip(refs, expected_list):
+        if expected is None:
+            assert not ref, f"{what}: a null region reference is not null"
+            continue
+        name, got = region_values(f, ref)
+        assert name == expected["target"], f"{what}: region of {name}, not {expected['target']}"
+        assert np.array_equal(got, np.asarray(expected["values"])), f"{what}: region {got} != {expected['values']}"
+
+
+def ref_names(f, refs):
+    return [f[r].name if r else None for r in np.asarray(refs).ravel()]
+
+
+def check_object(f, obj, changed=False):
+    """Checks one object against its manifest entry; after libhdf5 changed the file (changed=True), the
+    counts of links and attributes (which it added to) are not checked."""
     path = obj["path"]
     if path not in f:
         raise AssertionError("missing")
     item = f[path]
+    for name in obj.get("absent", []):
+        assert name not in item, f"{name} should be gone"
+    for name in obj.get("attr_absent", []):
+        assert name not in item.attrs, f"attribute {name} should be gone"
+    if "attr_count" in obj and not changed:
+        assert len(item.attrs) == obj["attr_count"], f"{len(item.attrs)} attributes, not {obj['attr_count']}"
+    if "refcount" in obj:
+        rc = h5py.h5o.get_info(item.id).rc
+        assert rc == obj["refcount"], f"reference count {rc} != {obj['refcount']}"
+    for name, expected in obj.get("attr_refs", {}).items():
+        names = ref_names(f, item.attrs[name])
+        assert names == expected, f"attribute {name} references {names} != {expected}"
+    for name, expected in obj.get("attr_regions", {}).items():
+        check_regions(f, np.asarray(item.attrs[name]).ravel(), expected, f"attribute {name}")
+    if "attr_order" in obj and not changed:  # creation order, for an object that tracks it
+        assert list(item.attrs.keys()) == obj["attr_order"], f"attributes in order {list(item.attrs.keys())}"
     if obj["kind"] == "group":
         assert isinstance(item, h5py.Group), "not a group"
-        if "children" in obj:
+        if "order" in obj and not changed:  # creation order, for a group that tracks it
+            assert list(item.keys()) == obj["order"], f"links in order {list(item.keys())}"
+        if "children" in obj and not changed:
             assert sorted(item.keys()) == sorted(obj["children"]), "children differ"
+        if "count" in obj and not changed:
+            assert len(item) == obj["count"], f"{len(item)} links, not {obj['count']}"
         for name, link in obj.get("links", {}).items():
             actual = item.get(name, getlink=True)
             if "soft" in link:
@@ -138,20 +187,16 @@ def check_object(f, obj):
         if "fields" in obj:
             for name, expected in obj["fields"].items():
                 assert np.array_equal(data[name].ravel(), np.asarray(expected)), f"field {name} differs"
+        for name, expected in obj.get("field_refs", {}).items():
+            names = ref_names(f, data[name])
+            assert names == expected, f"field {name} references {names} != {expected}"
         if "rows" in obj:
             assert [list(r) for r in data] == obj["rows"], "vlen rows differ"
         if "refs" in obj:
             names = [f[r].name if r else None for r in data]
             assert names == obj["refs"], f"references {names} != {obj['refs']}"
         if "regions" in obj:
-            for ref, expected in zip(data, obj["regions"]):
-                if expected is None:
-                    assert not ref, "a null region reference is not null"
-                    continue
-                target = f[ref]
-                assert target.name == expected["target"], f"region of {target.name}, not {expected['target']}"
-                got = np.asarray(target[ref]).ravel()
-                assert np.array_equal(got, np.asarray(expected["values"])), f"region {got} != {expected['values']}"
+            check_regions(f, data, obj["regions"], "dataset")
         if "fill" in obj:
             assert item.fillvalue == obj["fill"], f"fill value {item.fillvalue} != {obj['fill']}"
         if "enum" in obj:
@@ -159,6 +204,8 @@ def check_object(f, obj):
             assert mapping == obj["enum"], f"enum members {mapping} != {obj['enum']}"
     for name, expected in obj.get("attrs", {}).items():
         actual = np.asarray(item.attrs[name]).ravel()
+        if not isinstance(expected, list) and not hasattr(expected, "__len__"):
+            expected = [expected]
         if actual.dtype.kind in "SOU" and expected and isinstance(expected[0], str):
             assert as_text(actual) == expected, f"attribute {name}: {as_text(actual)} != {expected}"
         else:
@@ -172,6 +219,9 @@ def check(directory):
     failures = 0
     checked = 0
     for entry in manifest["files"]:
+        if not supported(entry):
+            print(f"skip  {entry['file']}: needs HDF5 {entry['min_hdf5']}")
+            continue
         path = os.path.join(directory, entry["file"])
         try:
             f = h5py.File(path, "r")
@@ -201,6 +251,58 @@ def check(directory):
                     failures += 1
     status = "OK" if failures == 0 else f"{failures} FAILED"
     print(f"HDF5 {version} (h5py {h5py.__version__}): {checked} objects checked, {status}")
+    return failures + change(directory, manifest)
+
+
+def change(directory, manifest):
+    """libhdf5 changes a copy of every file: adds a dataset to each group, an attribute to each object, and
+    a row to each dataset that can grow; then reads it all back. This checks that the structures Falcon
+    writes (or changed in place) are ones libhdf5 can change, not only read."""
+    import shutil
+    failures = 0
+    changed = 0
+    scratch = tempfile.mkdtemp(prefix="falcon-interop-changed-")
+    for entry in manifest["files"]:
+        if not supported(entry):
+            continue
+        objects = [o for o in entry["objects"]
+                   if not (o.get("min_hdf5") and hdf5_version() < tuple(int(p) for p in o["min_hdf5"].split(".")))
+                   and not (o.get("szip") and imagecodecs is None)]
+        path = os.path.join(scratch, entry["file"])
+        shutil.copy(os.path.join(directory, entry["file"]), path)
+        grown = {}
+        try:
+            with h5py.File(path, "r+") as f:
+                for name in dict.fromkeys(o["path"] for o in objects):
+                    item = f[name]
+                    item.attrs["_libhdf5"] = np.int32(1)
+                    if isinstance(item, h5py.Group):
+                        item.create_dataset("_libhdf5_data", data=np.arange(3, dtype="i4"))
+                    elif item.chunks is not None and item.maxshape and item.maxshape[0] is None:
+                        grown[name] = item.shape[0]
+                        item.resize(item.shape[0] + 1, axis=0)
+            with h5py.File(path, "r") as f:
+                for obj in objects:
+                    item = f[obj["path"]]
+                    assert item.attrs["_libhdf5"] == 1, "libhdf5's attribute is missing"
+                    if obj["kind"] == "group":
+                        assert list(item["_libhdf5_data"][()]) == [0, 1, 2], "libhdf5's dataset is missing"
+                    if obj["path"] in grown:
+                        rows = grown[obj["path"]]
+                        assert item.shape[0] == rows + 1, f"grown to {item.shape[0]} rows, not {rows + 1}"
+                        if "values" in obj and not obj.get("szip") and item.dtype.kind in "iuf":
+                            got = np.asarray(item[:rows]).ravel()
+                            assert np.array_equal(got.astype(np.float64) if got.dtype.kind == "f" else got,
+                                                  np.asarray(obj["values"], dtype=np.float64 if got.dtype.kind == "f"
+                                                             else got.dtype)), "the rows before differ"
+                    else:
+                        check_object(f, obj, changed=True)
+                    changed += 1
+        except Exception as e:  # noqa: BLE001
+            print(f"FAIL  {entry['file']} changed by libhdf5: {e}")
+            failures += 1
+    status = "OK" if failures == 0 else f"{failures} FAILED"
+    print(f"HDF5 {h5py.version.hdf5_version}: {changed} objects changed by libhdf5 and read back, {status}")
     return failures
 
 

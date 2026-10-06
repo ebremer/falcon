@@ -1594,6 +1594,23 @@ def build_external_paths(out):
 
 
 # name -> builder; `python gen_fixtures.py NAME ...` regenerates just those fixtures.
+def build_tracked_order(f):
+    """Groups and objects that track creation order (h5py's track_order): links and attributes, compact
+    and dense, each with its creation-order index -- which Falcon keeps when it changes them (P2 WF6)."""
+    small = f.create_group("small", track_order=True)
+    for name in ("c", "a", "b"):
+        small.create_dataset(name, data=np.int32(ord(name)))
+    big = f.create_group("big", track_order=True)
+    for i in range(20):
+        big.create_dataset(f"z{19 - i:02d}", data=np.int32(i))
+    d = f.create_dataset("d", data=np.arange(3, dtype="i4"), track_order=True)
+    for name in ("y", "x", "w"):
+        d.attrs[name] = np.int32(ord(name))
+    dd = f.create_dataset("dd", data=np.arange(3, dtype="i4"), track_order=True)
+    for i in range(20):
+        dd.attrs[f"q{19 - i:02d}"] = np.int32(i)
+
+
 FIXTURES = {
     "vds_loop": lambda: build_vds_loop(OUT),
     "links": lambda: build_links(OUT),
@@ -1627,6 +1644,8 @@ FIXTURES = {
     "typed": lambda: _with_file("typed.h5", build_typed),
     "elinks": lambda: build_elinks(OUT),
     "paths": lambda: build_paths(OUT),
+    "tracked_order": lambda: (_with_file("tracked_order.h5", build_tracked_order, libver="latest"),
+                              _with_file("tracked_order_old.h5", build_tracked_order)),
 }
 
 

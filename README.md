@@ -59,8 +59,9 @@ HTTP byte ranges, any channel), which Falcon reads on demand: the metadata and o
 A resolver opens the other files such a file names (external raw data, virtual-dataset sources, the
 files its external links lead to and its references point into).
 
-**Write** — create a file, add groups, datasets of any datatype (contiguous or chunked + filters, fixed
-or growing), attributes, and links; data is streamed to the file as it is written:
+**Write** — create a file, or change one in place (`Hdf5Writer.open`); add groups, datasets of any
+datatype (contiguous or chunked + filters, fixed or growing), attributes, and links; write into datasets,
+delete links and attributes. Data is streamed to the file as it is written:
 
 ```java
 try (Hdf5Writer w = Hdf5Writer.create(Path.of("out.h5"))) {
@@ -81,9 +82,10 @@ try (Hdf5Writer w = Hdf5Writer.create(Path.of("out.h5"))) {
 
 The reader handles every HDF5 structure (all superblock/header/group forms, chunk indexes, filters,
 vlen, references, virtual datasets, external links). The writer covers every datatype, all six filters,
-compact, contiguous and chunked storage (growing ones included), dense groups and attributes, soft and
-external links, object and region references, files past 2 GB, and both the modern and earliest
-on-disk formats. Full walkthrough in the **[HDF5 User Guide](hdf5/USER_GUIDE.md)**.
+compact, contiguous and chunked storage (growing ones included), dense groups and attributes of any
+size, soft and external links, object and region references (in datasets and attributes), files past
+2 GB, and both the modern and earliest on-disk formats; it changes existing files in place, its own and
+libhdf5's. Full walkthrough in the **[HDF5 User Guide](hdf5/USER_GUIDE.md)**.
 
 ## Zarr
 

@@ -552,7 +552,7 @@ public final class Dataset extends Hdf5Object {
 
     // --------------------------------------------------------------- internals
 
-    private DataLayout dataLayout() {
+    DataLayout dataLayout() {
         DataLayout result = layout;
         if (result == null) {
             result = DataLayoutMessage.parse(ctx, require(MessageType.DATA_LAYOUT, "data layout").bodyOffset());
@@ -565,7 +565,7 @@ public final class Dataset extends Hdf5Object {
      * The chunk index, read on the first read that needs it and then kept, so that later selections (each
      * block of {@link #blocks}, say) look their chunks up instead of walking the index again.
      */
-    private ChunkIndex chunkIndex(DataLayout.Chunked chunked) {
+    ChunkIndex chunkIndex(DataLayout.Chunked chunked) {
         ChunkIndex result = chunkIndex;
         if (result == null) {
             Dataspace space = dataspace();
@@ -585,7 +585,7 @@ public final class Dataset extends Hdf5Object {
         return result;
     }
 
-    private byte[] fillValue() {
+    byte[] fillValue() {
         java.util.Optional<byte[]> result = fillValue;
         if (result == null) {
             HeaderMessage message = header().find(MessageType.FILL_VALUE);
@@ -600,7 +600,7 @@ public final class Dataset extends Hdf5Object {
         return result.orElse(null);
     }
 
-    private FilterPipeline filterPipeline() {
+    FilterPipeline filterPipeline() {
         java.util.Optional<FilterPipeline> result = filterPipeline;
         if (result == null) {
             HeaderMessage message = header().find(MessageType.FILTER_PIPELINE);

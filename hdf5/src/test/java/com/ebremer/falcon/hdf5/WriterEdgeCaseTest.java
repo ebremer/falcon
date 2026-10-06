@@ -334,8 +334,9 @@ class WriterEdgeCaseTest {
         }
     }
 
+    /** The earliest format's version-1 headers hold every attribute; its groups' B-trees grow levels (P2 WF5). */
     @Test
-    void earliestFormatLimitsAreCheckedWhenAdded() throws IOException {
+    void earliestFormatHoldsManyAttributesAndChildren() throws IOException {
         Path file = dir.resolve("old_limits.h5");
         try (Hdf5Writer w = Hdf5Writer.create(file, Hdf5Writer.Format.EARLIEST)) {
             Hdf5Writer.DatasetWriter d = w.intDataset("d", new int[] {1}, new long[] {1});
@@ -343,14 +344,20 @@ class WriterEdgeCaseTest {
                 d.intAttribute("a" + i, new int[] {i}, new long[] {}); // v1 headers hold them all
             }
             Hdf5Writer.GroupWriter g = w.group("g");
-            for (int i = 0; i < 256; i++) {
+            for (int i = 0; i < 300; i++) {
                 g.intDataset("x" + i, new int[] {i}, new long[] {1});
             }
-            assertThrows(HdfUnsupportedException.class, () -> g.intDataset("x256", new int[] {0}, new long[] {1}));
+            for (int i = 300; i < 9000; i++) { // 1,125 symbol-table nodes: a group B-tree of two levels
+                g.softLink("x" + i, "x" + (i % 300));
+            }
         }
         try (Hdf5File h5 = Hdf5File.open(file)) {
             assertEquals(12, h5.root().dataset("d").attributes().size());
-            assertEquals(256, h5.root().group("g").childNames().size());
+            Group g = h5.root().group("g");
+            assertEquals(9000, g.childNames().size());
+            for (int i : new int[] {0, 299, 300, 4567, 8999}) {
+                assertArrayEquals(new int[] {i % 300}, g.dataset("x" + i).readInts(), "x" + i);
+            }
         }
     }
 }

@@ -505,12 +505,15 @@ final class ValueEncoder {
         };
     }
 
-    /** True for a type whose elements hold object addresses (references), known only when the file is complete. */
-    static boolean holdsReferences(Datatype type) {
+    /**
+     * True for a type whose elements hold object references: object header addresses, which are filled in
+     * on close (a region reference's address is in its heap object, filled in there).
+     */
+    static boolean holdsObjectReferences(Datatype type) {
         return switch (type) {
-            case Datatype.Reference r -> true;
-            case Datatype.Compound c -> c.members().stream().anyMatch(m -> holdsReferences(m.type()));
-            case Datatype.Array a -> holdsReferences(a.base());
+            case Datatype.Reference r -> r.kind() == Datatype.ReferenceKind.OBJECT;
+            case Datatype.Compound c -> c.members().stream().anyMatch(m -> holdsObjectReferences(m.type()));
+            case Datatype.Array a -> holdsObjectReferences(a.base());
             default -> false;
         };
     }

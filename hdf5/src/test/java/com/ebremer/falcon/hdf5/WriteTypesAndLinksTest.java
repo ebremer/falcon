@@ -106,10 +106,6 @@ class WriteTypesAndLinksTest {
             members.put("y", Datatype.int8());
             assertThrows(IllegalArgumentException.class,
                     () -> w.createDataset("f", Datatype.compound(members), 1).write(Map.of("x", new int[] {1})));
-            assertThrows(IllegalStateException.class,
-                    () -> w.createDataset("g", Datatype.objectReference(), 2).chunked(1).write(new String[] {"/a", null}));
-            assertThrows(HdfUnsupportedException.class,
-                    () -> w.root().attribute("ref", Datatype.objectReference(), new long[] {1}, new String[] {"/a"}));
             w.abort();
         }
         try (Hdf5Writer w = Hdf5Writer.create(dir.resolve("old.h5"), Hdf5Writer.Format.EARLIEST)) {
@@ -160,5 +156,89 @@ class WriteTypesAndLinksTest {
             assertNull(regions[2]);
             assertEquals("/grid", regions[0].dataset().path());
         }
+    }
+
+    /**
+     * References in chunked (filtered) and compact datasets and in attributes (P2 WF8): their chunks and
+     * headers are written once close() knows where the targets are, which may be added after them.
+     */
+    @ParameterizedTest
+    @EnumSource(Hdf5Writer.Format.class)
+    void referencesInChunksCompactDataAndAttributes(Hdf5Writer.Format format) throws IOException {
+        Path file = dir.resolve("refs.h5");
+        Map<String, Datatype> members = new LinkedHashMap<>();
+        members.put("id", Datatype.int32());
+        members.put("target", Datatype.objectReference());
+        try (Hdf5Writer w = Hdf5Writer.create(file, format)) {
+            Hdf5Writer.DatasetWriter refs = w.createDataset("refs", Datatype.objectReference(), 0).chunked(2)
+                    .maxShape(Hdf5Writer.UNLIMITED).deflate(4);
+            refs.append(new String[] {"/a", "/g", null});      // targets added afterwards
+            refs.append(new String[] {"/g/b", "/"});
+            w.createDataset("records", Datatype.compound(members), 3).chunked(2).shuffle().write(Map.of(
+                    "id", new int[] {1, 2, 3}, "target", new String[] {"/g/b", null, "/a"}));
+            w.createDataset("regions", Datatype.regionReference(), 2).chunked(1).deflate(1).write(new Hdf5Writer.Region[] {
+                    Hdf5Writer.Region.block("/a", new long[] {1}, new long[] {2}), Hdf5Writer.Region.all("/g/b")});
+            w.createDataset("compact", Datatype.objectReference(), 2).compact().write(new String[] {"/a", "/g/b"});
+            w.referenceDataset("given", new long[] {1}, new String[] {"/g"}).compact();
+            w.root().attribute("self", Datatype.objectReference(), new long[0], new String[] {"/"})
+                    .attribute("targets", Datatype.objectReference(), new long[] {2}, new String[] {"/a", null})
+                    .attribute("region", Datatype.regionReference(), new long[] {1},
+                            new Hdf5Writer.Region[] {Hdf5Writer.Region.points("/a", new long[][] {{3}})});
+            Hdf5Writer.GroupWriter g = w.group("g");
+            for (int i = 0; i < 10; i++) { // dense attribute storage in the modern format
+                g.attribute("r" + i, Datatype.objectReference(), new long[0], new String[] {i % 2 == 0 ? "/a" : "/g"});
+            }
+            g.intDataset("b", new int[] {7, 8}, new long[] {2})
+                    .attribute("parent", Datatype.objectReference(), new long[0], new String[] {"/g"});
+            w.intDataset("a", new int[] {10, 11, 12, 13}, new long[] {4});
+        }
+        try (Hdf5File h5 = Hdf5File.open(file)) {
+            Group root = h5.root();
+            assertArrayEquals(new String[] {"/a", "/g", null, "/g/b", "/"}, paths(root.dataset("refs").readObjectReferences()));
+            assertEquals(Dataset.Layout.CHUNKED, root.dataset("refs").layout());
+            assertArrayEquals(new String[] {"/g/b", null, "/a"},
+                    paths(root.dataset("records").member("target").readObjectReferences()));
+            Selection[] regions = root.dataset("regions").readRegionReferences();
+            assertArrayEquals(new int[] {11, 12}, regions[0].readInts());
+            assertArrayEquals(new int[] {7, 8}, regions[1].readInts());
+            assertArrayEquals(new String[] {"/a", "/g/b"}, paths(root.dataset("compact").readObjectReferences()));
+            assertEquals(Dataset.Layout.COMPACT, root.dataset("given").layout());
+            assertArrayEquals(new String[] {"/g"}, paths(root.dataset("given").readObjectReferences()));
+            assertArrayEquals(new String[] {"/"}, paths(root.attribute("self").orElseThrow().readObjectReferences()));
+            assertArrayEquals(new String[] {"/a", null}, paths(root.attribute("targets").orElseThrow().readObjectReferences()));
+            assertArrayEquals(new int[] {13}, root.attribute("region").orElseThrow().readRegionReferences()[0].readInts());
+            Group g = root.group("g");
+            for (int i = 0; i < 10; i++) {
+                assertArrayEquals(new String[] {i % 2 == 0 ? "/a" : "/g"},
+                        paths(g.attribute("r" + i).orElseThrow().readObjectReferences()), "r" + i);
+            }
+            assertArrayEquals(new String[] {"/g"}, paths(g.dataset("b").attribute("parent").orElseThrow().readObjectReferences()));
+        }
+    }
+
+    /** A reference to an object never added fails close(), which can be called again once it is added. */
+    @Test
+    void aMissingReferenceTargetCanBeAddedAndCloseRetried() throws IOException {
+        Path file = dir.resolve("retry.h5");
+        Hdf5Writer w = Hdf5Writer.create(file);
+        w.createDataset("refs", Datatype.objectReference(), 1).chunked(1).deflate(1).write(new String[] {"/late"});
+        w.root().attribute("ref", Datatype.objectReference(), new long[0], new String[] {"/late"});
+        IllegalArgumentException missing = assertThrows(IllegalArgumentException.class, w::close);
+        assertTrue(missing.getMessage().contains("/late"), missing.getMessage());
+        assertTrue(w.isOpen());
+        w.intDataset("late", new int[] {5}, new long[] {1});
+        w.close();
+        try (Hdf5File h5 = Hdf5File.open(file)) {
+            assertArrayEquals(new String[] {"/late"}, paths(h5.root().dataset("refs").readObjectReferences()));
+            assertArrayEquals(new String[] {"/late"}, paths(h5.root().attribute("ref").orElseThrow().readObjectReferences()));
+        }
+    }
+
+    private static String[] paths(Hdf5Object[] objects) {
+        String[] paths = new String[objects.length];
+        for (int i = 0; i < objects.length; i++) {
+            paths[i] = objects[i] == null ? null : objects[i].path();
+        }
+        return paths;
     }
 }
