@@ -2,6 +2,7 @@ package com.ebremer.falcon.core.checksum;
 
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
+import java.nio.ByteOrder;
 
 /**
  * Bob Jenkins' {@code lookup3} hash ({@code hashlittle}): the checksum HDF5 uses throughout the file
@@ -68,9 +69,10 @@ public final class Lookup3 {
         long i = offset;
         long len = length;
         while (len > 12) {
-            a += u8(key, i)     + (u8(key, i + 1) << 8)  + (u8(key, i + 2) << 16)  + (u8(key, i + 3) << 24);
-            b += u8(key, i + 4) + (u8(key, i + 5) << 8)  + (u8(key, i + 6) << 16)  + (u8(key, i + 7) << 24);
-            c += u8(key, i + 8) + (u8(key, i + 9) << 8)  + (u8(key, i + 10) << 16) + (u8(key, i + 11) << 24);
+            // three little-endian words a read each, the bytes lookup3.c adds one at a time
+            a += key.get(LE_INT, i);
+            b += key.get(LE_INT, i + 4);
+            c += key.get(LE_INT, i + 8);
 
             a -= c; a ^= rot(c, 4);  c += b;
             b -= a; b ^= rot(a, 6);  a += c;
@@ -110,6 +112,9 @@ public final class Lookup3 {
         c ^= b; c -= rot(b, 24);
         return c;
     }
+
+    /** A little-endian 32-bit word at any byte offset. */
+    private static final ValueLayout.OfInt LE_INT = ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
 
     private static int u8(MemorySegment s, long index) {
         return s.get(ValueLayout.JAVA_BYTE, index) & 0xff;

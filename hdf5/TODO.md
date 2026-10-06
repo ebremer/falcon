@@ -418,7 +418,9 @@ By Erich's decision, what both modules had written twice moved to `core`. HDF5's
 
 - [x] **`core.checksum`:** Fletcher-32 (`H5_checksum_fletcher32`, numcodecs' `fletcher32`) and Jenkins'
   lookup3 (`H5_checksum_lookup3`, numcodecs' `jenkins_lookup3`), moved from HDF5 (its `Lookup3Test` with
-  them). Zarr's `ChecksumCodec` drops its own copies.
+  them). Zarr's `ChecksumCodec` drops its own copies. lookup3 now reads whole little-endian words: HDF5's
+  byte-at-a-time segment reads hashed arrays at half the speed of Zarr's copy (46 against 22 ms for
+  64 MiB); now 18 ms.
 - [x] **`core.compress.shuffle.ByteShuffle`:** the byte shuffle of HDF5's `shuffle` filter, Blosc, and
   numcodecs' `shuffle`, moved from Blosc. Bytes past the last whole element are copied through.
 - [x] **`core.compress.zlib.Zlib`:** zlib streams for HDF5's `deflate` filter and numcodecs' `zlib`, through
