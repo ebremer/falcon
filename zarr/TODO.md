@@ -1387,10 +1387,11 @@ what was done, then gives the original finding.
   - Non-`regular` chunk grids, storage transformers, extension data types, and blosc2 (format ≥ 3). All
     are refused cleanly today. (carried over)
 
-**Out of scope / deferred (unchanged):**
+**Out of scope / deferred:**
 - **Creating Zarr v2 arrays** — Falcon creates v3 only. Writing into an existing v2 array works (F4).
-- **`com.ebremer.falcon.core` extraction** — investigated and deferred (`PLAN.md` §10). Revisit if HDF5
-  S4 (third-party HDF5 filters) wants Falcon's zstd, blosc, or lz4.
+- **A shared data model in `com.ebremer.falcon.core`** — investigated and deferred (`PLAN.md` §10): data
+  types, byte I/O, checksums, and chunk indexing stay format-specific. The compression codecs did move to
+  `core` (2026-10-05), when HDF5's S4 (third-party HDF5 filters) needed Falcon's zstd, Blosc, and LZ4.
 
 ## P3 — docs, build, housekeeping
 
