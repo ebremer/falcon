@@ -26,7 +26,12 @@ mvn verify              # whole reactor (parent + all modules)
 mvn -pl hdf5 -am test   # the HDF5 module (and core, which it depends on)
 mvn -pl zarr -am test   # the Zarr module (and core)
 mvn -pl core test       # just the shared codecs
+mvn verify -Pcoverage   # ...with a coverage report per module, in target/site/jacoco/
 ```
+
+Each module builds its jar with a sources jar and a Javadoc jar beside it. Builds are reproducible: the
+same sources give byte-identical jars. The build checks its own preconditions (JDK 25, Maven 3.9) and
+fails on any dependency beyond Falcon's own modules and JUnit 5 for tests.
 
 The build is hermetic: conformance fixtures are committed, so no HDF5, h5py, or zarr-python is needed at
 build time. (Those are the dev-time reference oracles that *generate* the fixtures — never Falcon

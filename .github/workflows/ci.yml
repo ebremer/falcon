@@ -7,8 +7,14 @@ on:
 
 jobs:
   build:
-    name: build & test (JDK 25)
-    runs-on: ubuntu-latest
+    name: build & test (JDK 25, ${{ matrix.os }})
+    # Windows too: memory mapping and deleting or replacing files differ there (a mapped file cannot be
+    # deleted or truncated while mapped).
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -20,6 +26,7 @@ jobs:
           cache: maven
 
       # The test fixtures (.h5 files, AEC/szip vectors) are committed and hermetic, so the build needs
-      # only JDK 25 and Maven — no HDF5, h5py, or native libraries.
+      # only JDK 25 and Maven — no HDF5, h5py, or native libraries. (.gitattributes keeps text fixtures
+      # LF on Windows checkouts too.)
       - name: Build and test
         run: mvn -B --no-transfer-progress verify

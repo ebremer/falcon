@@ -40,6 +40,11 @@ slashes are ignored, `.` is the group itself, and soft links along the way are f
 named by the path it was reached through. When a path reaches nothing, `group`, `dataset` and
 `committedType` say which component failed and why.
 
+Every object (`Hdf5Object`: a group, dataset, or committed datatype) has its `name()` and `path()`, its
+`attributes()`, and `objectHeaderAddress()`, which identifies it within its file. It also has what
+libhdf5 records of it: `comment()` (`H5Oset_comment`), `modificationTime()` (to the second, when the
+file tracks object times), and `referenceCount()` (its hard links).
+
 `Hdf5File` also describes the file itself:
 - `superblockVersion()`;
 - `fileSpaceInfo()`, for files that record it: allocation strategy, page size, and total free space.
@@ -189,7 +194,10 @@ double[] col = ds.member("temperature").readDoubles(); // one member of a compou
 ```
 
 Multidimensional data is returned flattened row-major; `ds.dataspace().dimensions()` gives the shape and
-`ds.datatype()` the element type.
+`ds.datatype()` the element type. A `Dataspace` also gives `rank()`, `elementCount()`, `maxDimensions()`
+(null when the file stores none; `Dataspace.UNLIMITED` for a dimension that can grow without bound, as
+`isUnlimited(i)` says), and `kind()`: `SIMPLE`, `SCALAR` (one element, no dimensions), or `NULL` (no
+elements).
 
 **Integers are exact.** `readInts()` and `readLongs()` never wrap a value: one that does not fit throws
 `HdfUnsupportedException`. A `uint32` above 2³¹−1 does not fit an `int`, and a `uint64` of 2⁶³ or more
@@ -244,6 +252,9 @@ filter's name is the one the file stores, or libhdf5's name for its built-in fil
 reads the whole chunk index of a chunked dataset; it is 0 for a virtual dataset and for contiguous data
 never written.
 
+`fillValueBytes()` gives the dataset's fill value, as one element's bytes in the datatype's byte order,
+when the file defines one; elements never written read as it. Empty means the default, all zeros.
+
 ### Selections and streaming
 
 Read part of a dataset without materializing the whole of it: only the chunks that hold selected
@@ -265,7 +276,8 @@ ds.blocks(10_000).forEach(block -> process(block.readDoubles()));
 A selection has every reader a dataset has: numbers, strings, variable-length sequences
 (`readVlenInts()` and the rest), references, `readRawBytes()`, and `read()`. A block, or a regular
 hyperslab, reads flattened row-major in its own shape (`shape()`: `count[d] * block[d]` in each
-dimension); points read as a flat array. `member(name)` narrows a selection of a compound dataset to one
+dimension); points read as a flat array. `elementCount()` is the number of elements a read returns (a
+point listed twice counts twice). `member(name)` narrows a selection of a compound dataset to one
 member.
 
 Decoded (filtered) chunks are cached per file, so streaming reads that revisit a boundary chunk reuse the
@@ -592,6 +604,11 @@ w.float32ArrayDataset("grid", new long[]{2}, new int[]{2, 3}, gridData);     // 
 w.complexDataset("cx", new long[]{2}, new double[]{1, 3}, new double[]{2, -4});
 w.intSequenceDataset("ragged", new long[]{3}, new int[][]{{1}, {2, 3}, {}}); // ragged rows
 ```
+
+Each comes in a second element type too: `int32ArrayDataset` beside `float32ArrayDataset`,
+`doubleSequenceDataset` beside `intSequenceDataset`, and likewise `doubleChunkedDataset` and
+`doubleAttribute` beside `intChunkedDataset` and `intAttribute`. Any other type goes through
+`createDataset` or `attribute`.
 
 ### Layout, fill value, and dense storage
 

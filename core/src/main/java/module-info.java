@@ -15,6 +15,8 @@
  * comes from {@code java.util.zip}). Its packages are exported only to Falcon's own modules: they are
  * shared implementation, not public API.
  */
+// The modules exported to are built after this one, so javac cannot see them here ("module not found").
+@SuppressWarnings("module")
 module com.ebremer.falcon.core {
     exports com.ebremer.falcon.core.compress to com.ebremer.falcon.hdf5, com.ebremer.falcon.zarr;
     exports com.ebremer.falcon.core.compress.bitshuffle to com.ebremer.falcon.hdf5, com.ebremer.falcon.zarr;

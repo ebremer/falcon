@@ -463,13 +463,16 @@ Items 1–5 of the previous TODO's top-5 are F1–F5 below.
 - [ ] **B1 — the surefire `argLine` `--add-reads com.ebremer.falcon.zarr=jdk.httpserver` prints
   `WARNING: Unknown module` on every test run** (`zarr/pom.xml`). It is dead; remove it, or fix it so it
   takes effect.
-- [ ] **B2 — repo-wide (mirrored in `../hdf5/TODO.md`):**
-  - add a `windows-latest` CI leg;
-  - release plumbing (source/Javadoc jars, enforcer, reproducible `outputTimestamp`, coverage) —
-    **⚠ every new Maven plugin needs Erich's approval** under the dependency gate;
-  - remove the committed `tools/fixtures/__pycache__/*.pyc` and ignore `__pycache__/`;
-  - `CLAUDE.md` still calls Zarr "Planned / pinned … Do not start it until asked", and the root
-    `pom.xml` says "a zarr module is planned". Editing CLAUDE.md is Erich's call.
+- [x] **B2 — repo-wide** (done 2026-10-05; details in `../hdf5/TODO.md`, *Done — 2026-10-05 (P3: D2,
+  D6, B1–B3)*):
+  - a `windows-latest` CI leg;
+  - release plumbing, each plugin approved by Erich: sources and Javadoc jars, the enforcer, reproducible
+    jars (`outputTimestamp`), and coverage (`mvn verify -Pcoverage`; zarr: 88.7% of lines, 80.6% of
+    branches). Zarr's surefire `argLine` starts with `@{argLine}` for the coverage agent, and its
+    `--add-reads …=jdk.httpserver` compiler argument is passed to the test compile only;
+  - the committed `tools/fixtures/__pycache__/*.pyc` removed and `__pycache__/` ignored;
+  - `CLAUDE.md` and the root `pom.xml` call Zarr built. The refusal of `zarr_format 2` in a `zarr.json`
+    no longer calls v2 "planned".
 
 ## Notes (still accurate)
 

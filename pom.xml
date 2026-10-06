@@ -40,11 +40,30 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
         <maven.compiler.release>25</maven.compiler.release>
+        <!-- Reproducible builds: every jar's entries carry this time, so the same sources build the same
+             bytes. Move it forward when releasing. -->
+        <project.build.outputTimestamp>2026-10-05T00:00:00Z</project.build.outputTimestamp>
+        <!-- The test JVM's arguments: empty, or JaCoCo's agent under -Pcoverage. Surefire configurations
+             that set their own argLine start with @{argLine} to keep it. -->
+        <argLine/>
 
         <!-- Test-scope only; the shipped artifacts have zero runtime dependencies. -->
         <junit.version>5.11.4</junit.version>
-        <compiler.plugin.version>3.13.0</compiler.plugin.version>
+
+        <!-- Build plugins. Every one is approved under the dependency gate (CLAUDE.md); the lifecycle's own
+             (clean, resources, jar, install, deploy) are pinned to the versions Maven 3.9.16 binds, so
+             the build does not change with the Maven patch release. -->
+        <compiler.plugin.version>3.15.0</compiler.plugin.version>
         <surefire.plugin.version>3.5.2</surefire.plugin.version>
+        <clean.plugin.version>3.2.0</clean.plugin.version>
+        <resources.plugin.version>3.4.0</resources.plugin.version>
+        <jar.plugin.version>3.5.0</jar.plugin.version>
+        <install.plugin.version>3.1.4</install.plugin.version>
+        <deploy.plugin.version>3.1.4</deploy.plugin.version>
+        <source.plugin.version>3.3.1</source.plugin.version>
+        <javadoc.plugin.version>3.12.0</javadoc.plugin.version>
+        <enforcer.plugin.version>3.6.3</enforcer.plugin.version>
+        <jacoco.plugin.version>0.8.15</jacoco.plugin.version>
     </properties>
 
     <dependencyManagement>
@@ -72,7 +91,152 @@
                     <artifactId>maven-surefire-plugin</artifactId>
                     <version>${surefire.plugin.version}</version>
                 </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-clean-plugin</artifactId>
+                    <version>${clean.plugin.version}</version>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-resources-plugin</artifactId>
+                    <version>${resources.plugin.version}</version>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-jar-plugin</artifactId>
+                    <version>${jar.plugin.version}</version>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-install-plugin</artifactId>
+                    <version>${install.plugin.version}</version>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-deploy-plugin</artifactId>
+                    <version>${deploy.plugin.version}</version>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-source-plugin</artifactId>
+                    <version>${source.plugin.version}</version>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-javadoc-plugin</artifactId>
+                    <version>${javadoc.plugin.version}</version>
+                    <configuration>
+                        <!-- Broken links, bad HTML, and wrong tags fail the Javadoc jar; missing comments are
+                             not reported here (the hdf5 module's compile checks its public API for them). -->
+                        <doclint>all,-missing</doclint>
+                    </configuration>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-enforcer-plugin</artifactId>
+                    <version>${enforcer.plugin.version}</version>
+                </plugin>
+                <plugin>
+                    <groupId>org.jacoco</groupId>
+                    <artifactId>jacoco-maven-plugin</artifactId>
+                    <version>${jacoco.plugin.version}</version>
+                </plugin>
             </plugins>
         </pluginManagement>
+
+        <plugins>
+            <!-- The build's own preconditions, and the zero-dependency rule: nothing but Falcon's own modules,
+                 and JUnit 5 (with the jars it brings) for tests. A new dependency fails here until it is
+                 approved and added to the includes. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-enforcer-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>enforce</id>
+                        <goals>
+                            <goal>enforce</goal>
+                        </goals>
+                        <configuration>
+                            <rules>
+                                <requireJavaVersion>
+                                    <version>[25,)</version>
+                                </requireJavaVersion>
+                                <requireMavenVersion>
+                                    <version>[3.9,)</version>
+                                </requireMavenVersion>
+                                <bannedDependencies>
+                                    <excludes>
+                                        <exclude>*</exclude>
+                                    </excludes>
+                                    <includes>
+                                        <include>com.ebremer</include>
+                                        <include>org.junit.jupiter:*:*:*:test</include>
+                                        <include>org.junit.platform:*:*:*:test</include>
+                                        <include>org.opentest4j:*:*:*:test</include>
+                                        <include>org.apiguardian:*:*:*:test</include>
+                                    </includes>
+                                    <message>Only Falcon's own modules, and JUnit 5 for tests: a new dependency needs Erich's approval first (CLAUDE.md).</message>
+                                </bannedDependencies>
+                            </rules>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <!-- A sources jar and a Javadoc jar beside each module's jar. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-source-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>attach-sources</id>
+                        <goals>
+                            <goal>jar-no-fork</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-javadoc-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>attach-javadocs</id>
+                        <goals>
+                            <goal>jar</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
     </build>
+
+    <profiles>
+        <!-- Code coverage: mvn verify -Pcoverage writes each module's report to target/site/jacoco/. -->
+        <profile>
+            <id>coverage</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.jacoco</groupId>
+                        <artifactId>jacoco-maven-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>prepare-agent</id>
+                                <goals>
+                                    <goal>prepare-agent</goal>
+                                </goals>
+                            </execution>
+                            <execution>
+                                <id>report</id>
+                                <goals>
+                                    <goal>report</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>

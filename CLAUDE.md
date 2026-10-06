@@ -5,11 +5,14 @@ writers of scientific-data formats:
 
 - **`hdf5`** module (`com.ebremer.falcon.hdf5`) — an HDF5 reader/writer implementing the
   [HDF5 File Format Specification, Version 4.0](https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html)
-  (HDF5 2.0). **Built now** (Falcon Phase 1).
-- **`zarr`** module (`com.ebremer.falcon.zarr`) — a Zarr reader/writer. **Planned / pinned**
-  (Falcon Phase 2). Do not start it until asked.
+  (HDF5 2.0). **Built** (Falcon Phase 1).
+- **`zarr`** module (`com.ebremer.falcon.zarr`) — a Zarr reader/writer: reads v2 and v3, writes v3.
+  **Built** (Falcon Phase 2).
+- **`core`** module (`com.ebremer.falcon.core`) — the pure-Java compression codecs both formats use
+  (zstd, Blosc, LZ4, LZF, bitshuffle), exported only to Falcon's own modules.
 
-The full roadmap is in [`PLAN.md`](PLAN.md).
+The full roadmap is in [`PLAN.md`](PLAN.md); each module has its own `PLAN.md`, `TODO.md`, and
+`USER_GUIDE.md`.
 
 ## Commit policy (IMPORTANT)
 
@@ -32,13 +35,13 @@ Verify before pushing anywhere: `git log --format='%an <%ae> | %cn <%ce>'` — e
 
 ```bash
 mvn verify                 # build/test the whole reactor (parent + all modules)
-mvn -pl hdf5 test          # test just the hdf5 module
-mvn -pl hdf5 compile       # compile just the hdf5 module
+mvn -pl hdf5 -am test      # test the hdf5 module (-am also builds core, which it depends on)
+mvn -pl hdf5 -am compile   # compile the hdf5 module
 ```
 
 - **JDK 25 required.** The parent POM sets `<maven.compiler.release>25</maven.compiler.release>`.
 - Each format module is a **JPMS module** (e.g. `module com.ebremer.falcon.hdf5`), exporting only its
-  public API package; format-level packages stay encapsulated.
+  public API packages; format-level packages stay encapsulated.
 - The root `pom.xml` is a `pom`-packaging aggregator: shared versions live in its `<properties>`,
   `<dependencyManagement>` (JUnit BOM), and `<pluginManagement>`.
 
@@ -47,6 +50,9 @@ mvn -pl hdf5 compile       # compile just the hdf5 module
 - **Approval gate for dependencies (standing instruction from Erich).** Before adding ANY library
   outside `java.base` — any module, **any scope** (runtime, test, or build) — **stop and ask Erich for
   explicit approval first.** The only pre-approved non-JDK library is **JUnit 5** (test scope).
+  Approved since, build scope only (2026-10-05): `maven-source-plugin`, `maven-javadoc-plugin`,
+  `maven-enforcer-plugin`, `jacoco-maven-plugin`, and pinning the versions of the plugins Maven's default
+  lifecycle runs.
 - **Pure JDK, zero runtime dependencies.** Every shipped artifact must depend on nothing beyond
   `java.base`. JUnit 5 is allowed but **test scope only**. Do not add runtime dependencies —
   including compression libraries.
@@ -62,8 +68,9 @@ mvn -pl hdf5 compile       # compile just the hdf5 module
 ## Conventions
 
 - HDF5 code lives under `com.ebremer.falcon.hdf5.*`; sub-packages by format concern (see `hdf5/PLAN.md` §6).
-- Shared abstractions (byte I/O, checksums, the array/datatype/chunk model) may be promoted to a
-  future `com.ebremer.falcon.core` module when the Zarr module lands — keep them cohesive.
+- Code both formats need goes in `core` (`com.ebremer.falcon.core`), which holds only the compression
+  codecs: a shared data model (byte I/O, checksums, datatypes, chunk indexing) was considered when Zarr
+  landed and deferred (see `zarr/PLAN.md` §10).
 - Reference the spec section in a comment when implementing a non-obvious on-disk structure.
 - Every roadmap stage lands with tests: unit tests plus conformance tests against reference `.h5`
   files generated with **h5py** (3.16.0 / HDF5 2.0.0 is installed locally — the reference oracle).

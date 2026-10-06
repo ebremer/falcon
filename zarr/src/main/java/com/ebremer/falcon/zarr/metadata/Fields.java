@@ -84,14 +84,15 @@ final class Fields {
     }
 
     /**
-     * Validates {@code zarr_format == 3}. A value of {@code 2} is a recognized but not-yet-supported
-     * format; any other value is malformed.
+     * Validates {@code zarr_format == 3} in a {@code zarr.json}. A value of {@code 2} is refused as
+     * unsupported there (Zarr v2 metadata is read from {@code .zarray}/{@code .zgroup}); any other value
+     * is malformed.
      */
     static void requireZarrFormat3(JsonObject o, String ctx) {
         long format = number(require(o, "zarr_format", ctx), ctx + ".zarr_format").longValue();
         if (format == 2) {
             throw new ZarrUnsupportedException(
-                    ctx + ": zarr_format 2 is not yet supported (planned; see PLAN.md, stage Z8)");
+                    ctx + ": zarr_format 2 in zarr.json (Zarr v2 metadata is read from .zarray and .zgroup)");
         }
         if (format != 3) {
             throw new ZarrFormatException(ctx + ": unsupported zarr_format " + format);

@@ -10,6 +10,10 @@ dependency-reduced-pom.xml
 # Compiled class files
 *.class
 
+# Python bytecode (the fixture generators under tools/)
+__pycache__/
+*.py[cod]
+
 # Log / package files
 *.log
 *.jar

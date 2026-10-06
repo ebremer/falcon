@@ -82,7 +82,7 @@
                                 <include>**/RobustnessTest.java</include>
                                 <include>**/HardeningTest.java</include>
                             </includes>
-                            <argLine>-Xss256k -Xmx128m</argLine>
+                            <argLine>@{argLine} -Xss256k -Xmx128m</argLine>
                         </configuration>
                     </execution>
                 </executions>

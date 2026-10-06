@@ -6,8 +6,8 @@ writer for the [HDF5 File Format Specification v4.0](https://support.hdfgroup.or
 See the root [`../PLAN.md`](../PLAN.md) for the umbrella roadmap.
 
 > **Status (2026-10-05): stages H0–H9 are done, and the P2 features since; 855 tests. Pre-1.0** (version
-> `0.1.0-SNAPSHOT`): the API may still change (`TODO.md` records each change), CI builds on Linux only
-> (B1), and there is no release plumbing yet (B2).
+> `0.1.0-SNAPSHOT`): the API may still change (`TODO.md` records each change), and no version has been
+> released.
 >
 > **Read:** every superblock, object-header, and group form; every datatype class; compact, contiguous,
 > external, and chunked storage with every chunk index at any scale; the six built-in filters (szip in
@@ -431,14 +431,16 @@ Each stage ends with a **milestone** and concrete **acceptance criteria**. "Refe
   (compound members by name, enumeration names, complex pairs, bit fields, opaque bytes, time as
   `Instant`), and strided and
   point selections read only the chunks they touch, with every reader a dataset has.
-- **CI ✓**: GitHub Actions builds + tests the reactor on **JDK 25**, on Linux (fixtures are committed and
-  hermetic, so no HDF5/h5py at build time). **Docs ✓**: README usage examples + a standalone
+- **CI ✓**: GitHub Actions builds + tests the reactor on **JDK 25**, on Linux and Windows (fixtures are
+  committed and hermetic, so no HDF5/h5py at build time). **Release plumbing ✓** (P3 B2): sources and
+  Javadoc jars, the enforcer (JDK 25, Maven 3.9, no dependencies but Falcon's own and JUnit's),
+  reproducible jars, and coverage (`-Pcoverage`). **Docs ✓**: README usage examples + a standalone
   [user guide](USER_GUIDE.md), and [`BENCHMARKS.md`](BENCHMARKS.md).
 - Remaining (optional polish): mmap tuning, and a performance-regression gate (the benchmarks in
   [`BENCHMARKS.md`](BENCHMARKS.md) are run by hand).
 - **Milestone met, short of 1.0:** read-complete, write-broad, failing on corrupt input with typed
-  exceptions, >2 GB-capable, documented, and CI-gated. Before 1.0: a Windows CI leg (B1), release
-  plumbing (B2), and an API settled enough to promise.
+  exceptions, >2 GB-capable, documented, and CI-gated. Before 1.0: an API settled enough to promise, and
+  a release.
 
 ## 9. SZIP filter plan (in scope, pure Java)
 

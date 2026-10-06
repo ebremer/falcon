@@ -1,12 +1,11 @@
 # Falcon HDF5 — remaining work (prioritized)
 
-**Status (2026-10-05, after P2 S1–S7, A1–A12, PF1–PF8, WF1–WF11, and P3 D1, D3, D4):** build green,
-**855 HDF5 tests**
-(144 at the review, 187 after the top 10, 206 after P0, 228 after P1, 243 after S1–S3, 256 after S4–S7,
-439 after A2–A6, 610 after PF1–PF4, 677 after A1–A10, 692 after A11–A12, 707 after WF1–WF4, 743 after
-WF5–WF9, 782 after WF7 and WF10, 850 after WF11 and PF5–PF7), plus 38 in the `core` module. The review's
-top 10, every P1 item, **P2 S1–S7**, **A1–A12**, **PF1–PF8**, **WF1–WF11**, **P3 D1, D3, D4**, and the P0 zstd
-fix (Z6/Z7, in `core`) are done (see *Done* at the end). Falcon now:
+**Status (2026-10-05, after P2 S1–S7, A1–A12, PF1–PF8, WF1–WF11, and all of P3):** build green, **855
+HDF5 tests** (144 at the review, 187 after the top 10, 206 after P0, 228 after P1, 243 after S1–S3, 256
+after S4–S7, 439 after A2–A6, 610 after PF1–PF4, 677 after A1–A10, 692 after A11–A12, 707 after WF1–WF4,
+743 after WF5–WF9, 782 after WF7 and WF10, 850 after WF11 and PF5–PF7), plus 38 in the `core` module. The
+review's top 10, every P1 item, **P2 S1–S7**, **A1–A12**, **PF1–PF8**, **WF1–WF11**, **every P3 item**, and
+the P0 zstd fix (Z6/Z7, in `core`) are done (see *Done* at the end). Falcon now:
 
 - reads the files the review showed it misreading:
   - real libhdf5 szip and scale-offset data;
@@ -67,7 +66,13 @@ fix (Z6/Z7, in `core`) are done (see *Done* at the end). Falcon now:
   fuzzing under a 128 MB heap and 256 KB stack, confines external files to the HDF5 file's directory by
   default, and supports concurrent reads of one open file.
 
-P0 and P1 are empty. What remains is features and API (P2) and docs and build (P3).
+P0, P1, and P3 are empty. What remains is two P2 features: writing the third-party filters (S8) and
+more registered filters (S9).
+
+**P3 D2, D6, B1–B3** change no behaviour or API. The build changed (repo-wide): each module also
+builds a sources jar and a Javadoc jar; the enforcer fails a build on JDK below 25, Maven below 3.9, or a
+dependency other than Falcon's modules and JUnit 5 (test scope); jars are reproducible
+(`project.build.outputTimestamp`); `-Pcoverage` reports coverage; `maven-compiler-plugin` is 3.15.0.
 
 **P3 D1, D3, D4** change no behaviour or API. The module's build now fails on a public or protected
 member of an exported package without complete Javadoc (javac's doclint, with `-Werror`, in the `hdf5`
@@ -317,13 +322,9 @@ review baseline. Abbreviations: `W` = `Hdf5Writer.java`; other paths are under
 
 ## Next up — top 10
 
-1. **B1/B2 — CI and release plumbing:** a Windows CI leg, source and Javadoc jars, and the enforcer.
-   New plugins need Erich's approval.
-2. **S8 — writing the third-party filters,** whose encoders core partly has. It would also let `open()`
+1. **S8 — writing the third-party filters,** whose encoders core partly has. It would also let `open()`
    write into datasets so filtered, the last filters it refuses.
-3. **S9 — more registered filters:** Blosc2, bzip2, ZFP, SZ.
-4. **B3 — housekeeping:** committed `__pycache__`.
-5. **D6 — repo-wide staleness:** `CLAUDE.md` and the root `pom.xml` still call Zarr planned.
+2. **S9 — more registered filters:** Blosc2, bzip2, ZFP, SZ.
 
 ---
 
@@ -376,8 +377,17 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
 
 ## P3 — docs, build, housekeeping
 
-- D1, D3, and D4 are done (see *Done — 2026-10-05 (P3: D1, D3, D4)*).
-- [ ] **D2 — USER_GUIDE gaps.**
+- D1, D2, D3, D4, D6, B1, B2, and B3 are done (see *Done — 2026-10-05 (P3: D2, D6, B1–B3)* and
+  *(P3: D1, D3, D4)*). P3 is empty.
+
+## Done — 2026-10-05 (P3: D2, D6, B1–B3)
+
+- [x] **D2 — USER_GUIDE gaps.** Every public name of the two exported packages was checked against the
+  guide. The guide now also covers each object's `comment()`, `modificationTime()`, `referenceCount()`
+  and `objectHeaderAddress()`; the `Dataspace` accessors (`maxDimensions()`, `UNLIMITED`,
+  `isUnlimited(i)`, `elementCount()`, `kind()`); `Dataset.fillValueBytes()`; `Selection.elementCount()`;
+  and the writer's second element types (`int32ArrayDataset`, `doubleSequenceDataset`,
+  `doubleChunkedDataset`, `doubleAttribute`). What it documented before:
   - **Done:** thread safety, filter rules, the writer's HDF5 1.10+ compatibility, and checksum
     verification are now documented.
   - **Also done (P0 pass):** unsigned and non-native numeric reads, VDS type rules, writer names and
@@ -407,18 +417,38 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
     `BENCHMARKS.md`.
   - **Also done (P3 D1):** *Error handling* says which bytes no checksum covers, and that corrupting them
     goes unnoticed.
-- [ ] **B1 — CI: add a `windows-latest` leg** (mmap and file-deletion semantics differ). Repo-wide.
-- [ ] **B2 — release plumbing.**
-  - **Add:** source and Javadoc jars, `maven-enforcer` (JDK 25 / Maven 3.9 / banned dependencies),
-    `project.build.outputTimestamp` for reproducible builds, and coverage (JaCoCo).
-  - **⚠ Approval:** every new Maven plugin needs Erich's approval under the dependency gate.
-- [ ] **B3 — housekeeping:** `tools/fixtures/__pycache__/*.pyc` is committed and not ignored. Remove it
-  and add `__pycache__/` to `.gitignore`. Repo-wide.
-- [ ] **D6 — repo-wide staleness.**
-  - `CLAUDE.md` still calls Zarr "Planned / pinned … Do not start it until asked".
-  - The root `pom.xml` description says "a zarr module is planned".
-
-  Editing CLAUDE.md is Erich's call.
+- [x] **B1 — CI: a `windows-latest` leg.** `.github/workflows/ci.yml` builds and tests on `ubuntu-latest`
+  and `windows-latest` (a matrix, `fail-fast: false`), where mapping and deleting files differ. Repo-wide.
+  The suite already passed on Windows locally; the CI leg is proven only once the workflow runs.
+- [x] **B2 — release plumbing** (repo-wide; each plugin approved by Erich, 2026-10-05):
+  - **Sources and Javadoc jars** beside each module's jar (`maven-source-plugin` 3.3.1,
+    `maven-javadoc-plugin` 3.12.0). The Javadoc jar fails on broken links, bad HTML, or wrong tags
+    (`doclint` `all,-missing`; the hdf5 compile checks for missing comments itself).
+  - **`maven-enforcer-plugin` 3.6.3:** JDK 25+, Maven 3.9+, and banned dependencies: only `com.ebremer`
+    modules, and JUnit 5 with its own jars (opentest4j, apiguardian, junit-platform) in test scope. Tried:
+    JUnit in compile scope fails the build with the dependency gate's message.
+  - **Reproducible builds:** `project.build.outputTimestamp`, and the lifecycle's plugins pinned to the
+    versions Maven 3.9.16 binds (clean 3.2.0, resources 3.4.0, jar 3.5.0, install 3.1.4, deploy 3.1.4).
+    Two clean builds give byte-identical jars, all nine (classes, sources, Javadoc). `maven-compiler-plugin`
+    went from 3.13.0 to 3.15.0: with the timestamp set it rewrites `module-info.class`, and 3.13.0's ASM
+    cannot read JDK 25 class files.
+  - **Coverage:** `mvn verify -Pcoverage` (`jacoco-maven-plugin` 0.8.15) writes each module's report to
+    `target/site/jacoco/`. Surefire configurations that set their own `argLine` (the hdf5 fuzz run,
+    zarr's) start with `@{argLine}` so the agent reaches them. At this commit: hdf5 92.1% of lines and
+    81.0% of branches, core 95.4% and 88.4%, zarr 88.7% and 80.6%.
+  - **Quieter build:** compiler 3.15.0 shows warnings, so `core`'s module-info suppresses "module not
+    found" for the modules it exports to (built after it), and zarr's `--add-reads …=jdk.httpserver` is
+    passed to the test compile only. The build prints no warnings.
+- [x] **B3 — housekeeping:** `tools/fixtures/__pycache__/gen_fixtures.cpython-314.pyc` is removed, and
+  `.gitignore` ignores `__pycache__/` and `*.py[cod]`. Repo-wide.
+- [x] **D6 — repo-wide staleness.**
+  - `CLAUDE.md` (at Erich's request): Zarr is built (reads v2 and v3, writes v3), `core` is described,
+    the build commands use `-am` (hdf5 needs core), each module exports its API packages, code both
+    formats need goes in `core` (a shared model was deferred), and the build plugins approved under the
+    dependency gate are listed.
+  - The root `pom.xml` description already named the zarr and core modules.
+  - Zarr's refusal of `zarr_format 2` in a `zarr.json` said v2 was "planned (stage Z8)"; it now says v2
+    metadata is read from `.zarray` and `.zgroup`.
 
 ## Done — 2026-10-05 (P0: Z6/Z7)
 
