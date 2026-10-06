@@ -116,9 +116,11 @@ out.writeDoubles(myData);
 ```
 
 Every codec the ecosystem commonly uses is supported — `bytes`, `transpose`, `gzip`, `crc32c`,
-`sharding_indexed`, `vlen-utf8` strings, and the `zstd` and `blosc` families — with `zstd`/`blosc` read
-*and* written by Falcon's own pure-Java encoders (libzstd / c-blosc / zarr-python read the output).
-Stores: in-memory, filesystem, ZIP, and read-only HTTP (byte-range). Full walkthrough in the
+`sharding_indexed`, `vlen-utf8` strings and `vlen-bytes` byte strings, and the `zstd` and `blosc`
+families — with `zstd`/`blosc` read *and* written by Falcon's own pure-Java encoders (libzstd / c-blosc /
+zarr-python read the output). Consolidated metadata is read and written, so a remote hierarchy opens in
+one request. Stores: in-memory, filesystem, ZIP, read-only HTTP (byte-range), and S3-compatible object
+storage (Amazon S3, Google Cloud Storage, MinIO, R2; requests signed with SigV4). Full walkthrough in the
 **[Zarr User Guide](zarr/USER_GUIDE.md)**.
 
 ## Design highlights

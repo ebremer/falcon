@@ -21,9 +21,11 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -52,7 +54,9 @@ class HttpStoreTest {
     private volatile int extraRangeBytes;           // send this many bytes more than a range asked for
     private volatile String redirectFrom;           // requests under "/" + redirectFrom ...
     private volatile String redirectTo;             // ... are redirected (302) to "/" + redirectTo
+    private volatile String redirectAbsolute;       // ... or, if set, to this URL (another origin)
     private final List<String> requests = new CopyOnWriteArrayList<>(); // "METHOD rawPath?rawQuery Range"
+    private final List<String> seen = new CopyOnWriteArrayList<>();     // "Authorization|X-Api-Key" per request
 
     @BeforeEach
     void start() throws IOException {
@@ -74,10 +78,12 @@ class HttpStoreTest {
         String method = exchange.getRequestMethod();
         requests.add(method + " " + uri.getRawPath() + (uri.getRawQuery() == null ? "" : "?" + uri.getRawQuery())
                 + (range == null ? "" : " " + range));
+        seen.add(exchange.getRequestHeaders().getFirst("Authorization") + "|"
+                + exchange.getRequestHeaders().getFirst("X-Api-Key"));
         String path = uri.getPath().substring(1); // decoded, without the leading '/'
         if (redirectFrom != null && path.startsWith(redirectFrom)) {
-            exchange.getResponseHeaders().set("Location",
-                    "/" + redirectTo + uri.getRawPath().substring(1 + redirectFrom.length()));
+            exchange.getResponseHeaders().set("Location", (redirectAbsolute != null ? redirectAbsolute : "/" + redirectTo)
+                    + uri.getRawPath().substring(1 + redirectFrom.length()));
             exchange.sendResponseHeaders(302, -1);
             exchange.close();
             return;
@@ -425,5 +431,106 @@ class HttpStoreTest {
         assertNull(HttpStore.contentRange(null));
         assertNull(HttpStore.contentRange("items 0-1/2"));
         assertNull(HttpStore.contentRange("bytes x-y/z"));
+    }
+    // ---- F1: the caller's headers ------------------------------------------------------------------
+
+    @Test
+    void fixedHeadersAndTheHookGoWithEveryRequest() {
+        backing.set("hello", bytes("hello world"));
+        AtomicInteger tokens = new AtomicInteger();
+        List<String> calls = new CopyOnWriteArrayList<>();
+        HttpStore store = HttpStore.builder(base + "/?sig=1")
+                .header("X-Api-Key", "k1").header("x-api-key", "k2") // the same header: the second value wins
+                .header("Authorization", "Basic old")                // the hook's value replaces it
+                .requestHeaders((method, uri) -> {
+                    calls.add(method + " " + uri);
+                    return Map.of("Authorization", "Bearer t" + tokens.incrementAndGet());
+                })
+                .build();
+        assertArrayEquals(bytes("hello world"), store.get("hello").orElseThrow());
+        assertEquals(OptionalLong.of(11), store.size("hello"));
+        assertArrayEquals(bytes("hello"), store.getRange("hello", 0, 5).orElseThrow());
+        assertEquals(List.of("Bearer t1|k2", "Bearer t2|k2", "Bearer t3|k2"), seen);
+        assertEquals(List.of("GET " + base + "/hello?sig=1", "HEAD " + base + "/hello?sig=1",
+                "GET " + base + "/hello?sig=1"), calls);
+
+        seen.clear();
+        HttpStore none = HttpStore.builder(base).requestHeaders((method, uri) -> null).build();
+        assertTrue(none.exists("hello"));
+        assertEquals(List.of("null|null"), seen);
+    }
+
+    @Test
+    void headersAreChecked() {
+        for (String owned : new String[] {"Range", "host", "Content-Length", "Transfer-Encoding", "Connection"}) {
+            assertThrows(IllegalArgumentException.class, () -> HttpStore.builder(base).header(owned, "1"), owned);
+        }
+        assertThrows(IllegalArgumentException.class, () -> HttpStore.builder(base).header("X-Bad Name", "v"));
+        assertThrows(IllegalArgumentException.class, () -> HttpStore.builder(base).header("", "v"));
+        assertThrows(IllegalArgumentException.class, () -> HttpStore.builder(base).header("X-Ok", "a\r\nInjected: 1"));
+        assertThrows(IllegalArgumentException.class, () -> HttpStore.builder(base).header("X-Ok", "a\nb"));
+        assertThrows(IllegalArgumentException.class, () -> HttpStore.builder(base).header("X-Ok", "\u20ac"));
+        assertThrows(NullPointerException.class, () -> HttpStore.builder(base).header("X-Ok", null));
+
+        backing.set("hello", bytes("hello world"));
+        HttpStore range = HttpStore.builder(base).requestHeaders((m, u) -> Map.of("Range", "bytes=0-0")).build();
+        assertThrows(IllegalArgumentException.class, () -> range.get("hello"));
+        HttpStore split = HttpStore.builder(base).requestHeaders((m, u) -> Map.of("X-Ok", "a\r\nb: c")).build();
+        assertThrows(IllegalArgumentException.class, () -> split.get("hello"));
+        assertEquals(List.of(), requests); // refused before anything was sent
+    }
+
+    /**
+     * Headers holding credentials must not follow a redirect to another origin (scheme, host, port), as curl
+     * drops {@code Authorization}: the fixed ones and the hook's are sent only to the base URL's origin, and
+     * the hook is not asked for the other one.
+     */
+    @Test
+    void theCallersHeadersNeverGoToAnotherOrigin() throws IOException {
+        HttpServer other = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        List<String> otherSeen = new CopyOnWriteArrayList<>();
+        other.createContext("/", exchange -> {
+            otherSeen.add(exchange.getRequestHeaders().getFirst("Authorization") + "|"
+                    + exchange.getRequestHeaders().getFirst("X-Api-Key"));
+            byte[] body = bytes("elsewhere");
+            exchange.sendResponseHeaders(200, body.length);
+            try (OutputStream out = exchange.getResponseBody()) {
+                out.write(body);
+            }
+            exchange.close();
+        });
+        other.start();
+        try {
+            redirectFrom = "away/";
+            redirectAbsolute = "http://127.0.0.1:" + other.getAddress().getPort() + "/there/"; // same host, other port
+            List<URI> hooked = new CopyOnWriteArrayList<>();
+            HttpStore store = HttpStore.builder(base).header("X-Api-Key", "secret-key")
+                    .requestHeaders((method, uri) -> {
+                        hooked.add(uri);
+                        return Map.of("Authorization", "Bearer secret-token");
+                    })
+                    .build();
+            assertArrayEquals(bytes("elsewhere"), store.get("away/x").orElseThrow());
+            assertEquals(List.of("Bearer secret-token|secret-key"), seen);   // the first hop, to the base's origin
+            assertEquals(List.of("null|null"), otherSeen);                  // none at the other origin
+            assertEquals(List.of(URI.create(base + "/away/x")), hooked);    // nor asked for
+
+            // a redirect within the origin keeps them
+            seen.clear();
+            redirectAbsolute = null;
+            redirectFrom = "old/";
+            redirectTo = "new/";
+            mount = "new/";
+            backing.set("hello", bytes("hello world"));
+            HttpStore moved = HttpStore.builder(base + "/old").header("X-Api-Key", "secret-key").build();
+            assertArrayEquals(bytes("hello world"), moved.get("hello").orElseThrow());
+            assertEquals(List.of("null|secret-key", "null|secret-key"), seen);
+        } finally {
+            other.stop(0);
+        }
+
+        assertEquals(HttpIo.origin(URI.create("http://H:80/x")), HttpIo.origin(URI.create("http://h/y")));
+        assertEquals("https://h:443", HttpIo.origin(URI.create("https://h/")));
+        assertTrue(!HttpIo.origin(URI.create("http://h/")).equals(HttpIo.origin(URI.create("https://h/"))));
     }
 }

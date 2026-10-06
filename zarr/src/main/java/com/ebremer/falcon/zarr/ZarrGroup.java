@@ -2,11 +2,21 @@ package com.ebremer.falcon.zarr;
 
 import com.ebremer.falcon.zarr.json.Json;
 import com.ebremer.falcon.zarr.json.JsonObject;
+import com.ebremer.falcon.zarr.json.JsonString;
+import com.ebremer.falcon.zarr.json.JsonValue;
+import com.ebremer.falcon.zarr.metadata.ArrayMetadata;
+import com.ebremer.falcon.zarr.metadata.ConsolidatedMetadata;
 import com.ebremer.falcon.zarr.metadata.GroupMetadata;
+import com.ebremer.falcon.zarr.metadata.Metadata;
+import com.ebremer.falcon.zarr.metadata.NodeMetadata;
+import com.ebremer.falcon.zarr.metadata.V2Metadata;
 import com.ebremer.falcon.zarr.store.Store;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.NoSuchElementException;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 
@@ -14,8 +24,20 @@ import java.util.Set;
  * A group in a Zarr hierarchy: a named collection of child nodes.
  *
  * <p>Children are discovered from the store: a child is a subdirectory of this group's path that
- * contains its own {@code zarr.json}. Each accessor reads the store on demand, so a group reflects the
- * store's current contents rather than a cached snapshot.
+ * contains its own {@code zarr.json} (or v2 {@code .zarray}/{@code .zgroup}). Each accessor reads the
+ * store on demand, so a group reflects the store's current contents rather than a cached snapshot.
+ *
+ * <p><b>Consolidated metadata.</b> A group may store a snapshot of the metadata of every node below it
+ * (written by {@link #consolidate()} or zarr-python's {@code consolidate_metadata}); {@link Zarr#open(Store)}
+ * uses it, as zarr-python 3 does. Such a group, and every group opened through it, answers
+ * {@link #childNames()}, {@link #child}, {@link #children()}, {@link #groups()}, {@link #arrays()},
+ * {@link #group}, and {@link #array} from the snapshot without reading the store
+ * ({@link #isConsolidated()} says which). Arrays still read and write their chunks in the store. The
+ * snapshot is what the hierarchy was when it was consolidated: a node created, resized, or given new
+ * attributes since is seen as it was until {@code consolidate()} runs again, and so is the metadata of
+ * this group's children. Deleting a child through a group ({@link #delete}) is the exception: as in
+ * zarr-python, it also removes the child from the consolidated metadata stored with that group, and from
+ * the snapshot every handle opened with it answers from.
  */
 public final class ZarrGroup extends ZarrNode {
 
@@ -27,10 +49,17 @@ public final class ZarrGroup extends ZarrNode {
             "zarr.json", ".zarray", ".zgroup", ".zattrs", ".zmetadata");
 
     private final GroupMetadata metadata;
+    private final Snapshot snapshot;       // the consolidated metadata it answers from, or null: read the store
+    private final String snapshotPath;     // this group's path within the snapshot ("" for the group holding it)
+    private final boolean useConsolidated; // whether a group opened from the store uses its consolidated metadata
 
-    ZarrGroup(Store store, String path, GroupMetadata metadata) {
+    ZarrGroup(Store store, String path, GroupMetadata metadata, Snapshot snapshot, String snapshotPath,
+              boolean useConsolidated) {
         super(store, path);
         this.metadata = metadata;
+        this.snapshot = snapshot;
+        this.snapshotPath = snapshotPath;
+        this.useConsolidated = useConsolidated;
     }
 
     @Override
@@ -43,13 +72,44 @@ public final class ZarrGroup extends ZarrNode {
         return metadata.attributes();
     }
 
+    /** {@inheritDoc} A group answering from consolidated metadata keeps answering from it. */
+    @Override
+    public ZarrGroup setAttributes(JsonObject attributes) {
+        Objects.requireNonNull(attributes, "attributes");
+        return withMetadata((GroupMetadata) rewriteAttributes(current -> attributes));
+    }
+
+    /** {@inheritDoc} A group answering from consolidated metadata keeps answering from it. */
+    @Override
+    public ZarrGroup updateAttributes(JsonObject changes) {
+        Objects.requireNonNull(changes, "changes");
+        return withMetadata((GroupMetadata) rewriteAttributes(current -> merge(current, changes)));
+    }
+
+    private ZarrGroup withMetadata(GroupMetadata newMetadata) {
+        return new ZarrGroup(store, path, newMetadata, snapshot, snapshotPath, useConsolidated);
+    }
+
+    /**
+     * Whether this group answers {@link #childNames()}, {@link #child}, and the other child accessors from
+     * consolidated metadata, a snapshot of the hierarchy below it, rather than from the store. See the
+     * class description.
+     */
+    public boolean isConsolidated() {
+        return snapshot != null;
+    }
+
     /**
      * The names of this group's direct children, sorted: every subdirectory that holds node metadata
-     * (v3 or v2), including a child whose metadata is malformed or unsupported.
+     * (v3 or v2), including a child whose metadata is malformed or unsupported. A consolidated group lists
+     * the children its snapshot does.
      */
     public List<String> childNames() {
+        if (snapshot != null) {
+            return snapshot.get().childNames(snapshotPath);
+        }
         List<String> names = new ArrayList<>();
-        for (String childPath : subdirectories()) {
+        for (String childPath : subdirectories(path)) {
             if (ZarrNode.hasNode(store, childPath)) {
                 names.add(childPath.substring(childPath.lastIndexOf('/') + 1));
             }
@@ -57,9 +117,9 @@ public final class ZarrGroup extends ZarrNode {
         return names; // listDir returns sorted entries, so names are already sorted
     }
 
-    /** The paths of this group's subdirectories in the store, sorted. */
-    private List<String> subdirectories() {
-        String dir = path.isEmpty() ? "" : path + "/";
+    /** The paths of the subdirectories of {@code dirPath} in the store, sorted. */
+    private List<String> subdirectories(String dirPath) {
+        String dir = dirPath.isEmpty() ? "" : dirPath + "/";
         List<String> paths = new ArrayList<>();
         for (String entry : store.listDir(dir)) {
             if (entry.endsWith("/")) { // a child directory ("<name>/"), as opposed to a key
@@ -78,7 +138,18 @@ public final class ZarrGroup extends ZarrNode {
      * @throws ZarrUnsupportedException if the child uses an unimplemented feature
      */
     public Optional<ZarrNode> child(String childName) {
-        return ZarrNode.tryOpen(store, childPath(childName));
+        String childPath = childPath(childName);
+        return snapshot != null ? fromSnapshot(childName, childPath)
+                : ZarrNode.tryOpen(store, childPath, useConsolidated, false);
+    }
+
+    /** The child {@code name} as the snapshot describes it; no store access. */
+    private Optional<ZarrNode> fromSnapshot(String name, String childPath) {
+        String relative = snapshotPath.isEmpty() ? name : snapshotPath + "/" + name;
+        return snapshot.get().entry(relative).<ZarrNode>map(entry -> switch (entry.parse(snapshot.describe(relative))) {
+            case GroupMetadata g -> new ZarrGroup(store, childPath, g, snapshot, relative, useConsolidated);
+            case ArrayMetadata a -> new ZarrArray(store, childPath, a);
+        });
     }
 
     /**
@@ -90,9 +161,19 @@ public final class ZarrGroup extends ZarrNode {
      */
     public List<ZarrNode> children() {
         List<ZarrNode> result = new ArrayList<>();
-        for (String childPath : subdirectories()) {
+        if (snapshot != null) {
+            for (String name : childNames()) {
+                try {
+                    fromSnapshot(name, key(path, name)).ifPresent(result::add);
+                } catch (ZarrFormatException | ZarrUnsupportedException e) {
+                    // left out, as documented: child(name) reports it
+                }
+            }
+            return result;
+        }
+        for (String childPath : subdirectories(path)) {
             try {
-                ZarrNode.tryOpen(store, childPath).ifPresent(result::add);
+                ZarrNode.tryOpen(store, childPath, useConsolidated, false).ifPresent(result::add);
             } catch (ZarrFormatException | ZarrUnsupportedException e) {
                 // left out, as documented: child(name) reports it
             }
@@ -195,7 +276,7 @@ public final class ZarrGroup extends ZarrNode {
         String childPath = newChildPath(name);
         ZarrNode.prepareCreate(store, childPath, false, overwrite);
         store.set(ZarrNode.metadataKey(childPath), Json.writeBytes(groupJson(attributes)));
-        return ZarrNode.open(store, childPath).asGroup();
+        return ZarrNode.open(store, childPath, useConsolidated).asGroup();
     }
 
     /**
@@ -223,7 +304,143 @@ public final class ZarrGroup extends ZarrNode {
         String childPath = newChildPath(name);
         ZarrNode.prepareCreate(store, childPath, true, overwrite);
         store.set(ZarrNode.metadataKey(childPath), Json.writeBytes(spec.toJson()));
-        return ZarrNode.open(store, childPath).asArray();
+        return ZarrNode.open(store, childPath, useConsolidated).asArray();
+    }
+
+    /**
+     * Deletes the direct child {@code name}: every key stored under it, an array's chunks or a group and
+     * all its descendants, the child's own metadata first, so a delete cut short leaves no node that reads
+     * what is left. As in zarr-python, the child is also removed from the consolidated metadata stored with
+     * this group, if it has any, and from the snapshot this handle (and every handle opened with it)
+     * answers from; consolidated metadata stored with a group further up is not changed, and lists the
+     * child until it is consolidated again. Handles already open on the child or below it are not
+     * invalidated: their reads see fill values and missing metadata.
+     *
+     * @throws IllegalArgumentException      if the name cannot name a child
+     * @throws UnsupportedOperationException if the store is read-only, or cannot list its keys
+     * @throws NoSuchElementException        if there is no child of that name, in the store or the snapshot
+     */
+    public void delete(String name) {
+        String childPath = childPath(name);
+        if (!store.isWritable()) {
+            throw new UnsupportedOperationException("store is read-only");
+        }
+        String relative = snapshotPath.isEmpty() ? name : snapshotPath + "/" + name;
+        boolean listed = snapshot != null && snapshot.get().entry(relative).isPresent();
+        if (!listed && !ZarrNode.hasNode(store, childPath)) {
+            throw new NoSuchElementException("no child '" + name + "' in " + display());
+        }
+        ZarrNode.deleteTree(store, childPath);
+        forgetInStoredSnapshot(name);
+        if (snapshot != null) {
+            snapshot.remove(relative);
+        }
+    }
+
+    /** Removes the child {@code name} from the consolidated metadata stored with this group, if it has any. */
+    private void forgetInStoredSnapshot(String name) {
+        String key = metadataKey(path);
+        Optional<byte[]> v3 = store.get(key);
+        if (v3.isPresent()) {
+            JsonObject doc = parseObject(v3.get(), key);
+            Optional<JsonValue> member = doc.find("consolidated_metadata");
+            if (member.isPresent()) {
+                JsonValue kept = ConsolidatedMetadata.withoutV3(member.get(), name);
+                if (kept != member.get()) {
+                    store.set(key, Json.writeBytes(withMember(doc, "consolidated_metadata", kept)));
+                }
+            }
+            return;
+        }
+        String zmetadataKey = key(path, V2Metadata.ZMETADATA);
+        Optional<byte[]> zmetadata = store.get(zmetadataKey);
+        if (zmetadata.isPresent()) {
+            JsonObject doc = parseObject(zmetadata.get(), zmetadataKey);
+            JsonObject kept = ConsolidatedMetadata.withoutV2(doc, name);
+            if (kept != doc) {
+                store.set(zmetadataKey, Json.writeBytes(kept));
+            }
+        }
+    }
+
+    /**
+     * Consolidates the metadata of every node below this group into this group's {@code zarr.json}, as
+     * zarr-python's {@code consolidate_metadata} does, and returns a handle that answers from it. A reader
+     * then learns the whole hierarchy below the group from one fetch.
+     *
+     * <p>Each descendant's metadata is read from the store, never from an earlier snapshot, and embedded
+     * as stored, in zarr-python 3.4's layout (an inline {@code consolidated_metadata} member listing every
+     * node by its path relative to this group), so zarr-python reads it with {@code use_consolidated=True}.
+     * This group's {@code zarr.json} is rewritten with only that member changed. A node Falcon cannot read
+     * because it uses an unimplemented feature is embedded too, for readers that can; a node whose
+     * metadata is malformed stops the consolidation, since a snapshot without it would hide it from every
+     * reader of the snapshot.
+     *
+     * <p>The result is a snapshot: see the class description for what later changes do to it. The walk and
+     * the write are separate store calls, not one atomic step, so consolidate when nothing else is changing
+     * the hierarchy.
+     *
+     * @return a handle on this group that answers from the new consolidated metadata
+     * @throws UnsupportedOperationException if the store is read-only, or cannot list its keys; or if this
+     *                                       group or a node below it is a Zarr v2 node (Falcon writes v3
+     *                                       metadata only)
+     * @throws ZarrFormatException           if the metadata of this group or a node below it is malformed
+     */
+    public ZarrGroup consolidate() {
+        if (!store.isWritable()) {
+            throw new UnsupportedOperationException("store is read-only");
+        }
+        String key = metadataKey(path);
+        Optional<byte[]> stored = store.get(key);
+        if (stored.isEmpty()) {
+            if (store.exists(key(path, V2Metadata.ZGROUP))) {
+                throw new UnsupportedOperationException("'" + display()
+                        + "' is a Zarr v2 group; consolidate() writes v3 consolidated metadata only");
+            }
+            throw new ZarrFormatException("no zarr.json at '" + display() + "'");
+        }
+        JsonObject doc = parseObject(stored.get(), key);
+        Map<String, JsonObject> documents = new LinkedHashMap<>();
+        collect(path, "", documents);
+        JsonObject member = ConsolidatedMetadata.inline(documents);
+        byte[] written = Json.writeBytes(withMember(doc, "consolidated_metadata", member));
+        NodeMetadata meta = Metadata.parse(written, key);
+        if (!(meta instanceof GroupMetadata group)) {
+            throw new IllegalStateException("the node at '" + display() + "' is now an array, not a group");
+        }
+        ConsolidatedMetadata consolidated = ConsolidatedMetadata.parseV3(member, key).orElseThrow();
+        store.set(key, written);
+        return new ZarrGroup(store, path, group, new Snapshot(consolidated, key), "", true);
+    }
+
+    /**
+     * Adds the {@code zarr.json} document of every node below the group at {@code groupPath} to {@code out},
+     * keyed by its path relative to the consolidating group ({@code relative} is the group's own).
+     */
+    private void collect(String groupPath, String relative, Map<String, JsonObject> out) {
+        for (String childPath : subdirectories(groupPath)) {
+            String name = childPath.substring(childPath.lastIndexOf('/') + 1);
+            String childRelative = relative.isEmpty() ? name : relative + "/" + name;
+            String key = metadataKey(childPath);
+            Optional<byte[]> bytes = store.get(key);
+            if (bytes.isEmpty()) {
+                if (store.exists(key(childPath, V2Metadata.ZARRAY)) || store.exists(key(childPath, V2Metadata.ZGROUP))) {
+                    throw new UnsupportedOperationException("'" + childPath
+                            + "' is a Zarr v2 node; consolidate() writes v3 consolidated metadata only");
+                }
+                continue; // no node here, as childNames() leaves such a directory out
+            }
+            JsonObject doc = parseObject(bytes.get(), key);
+            try {
+                Metadata.parse(doc, key);
+            } catch (ZarrUnsupportedException e) {
+                // valid Zarr that Falcon cannot read: embedded as stored, for readers that can
+            }
+            out.put(childRelative, doc);
+            if (doc.members().get("node_type") instanceof JsonString type && type.value().equals("group")) {
+                collect(childPath, childRelative, out);
+            }
+        }
     }
 
     /** The {@code zarr.json} document for a group with the given attributes. */

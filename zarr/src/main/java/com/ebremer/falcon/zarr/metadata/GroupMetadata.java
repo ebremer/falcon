@@ -1,25 +1,30 @@
 package com.ebremer.falcon.zarr.metadata;
 
 import com.ebremer.falcon.zarr.json.JsonObject;
+import com.ebremer.falcon.zarr.json.JsonValue;
+import java.util.Optional;
 import java.util.Set;
 
 /**
  * Parsed group metadata: {@code {"zarr_format": 3, "node_type": "group", "attributes": {...}}}.
+ *
+ * <p>A group may also carry {@code consolidated_metadata}, which zarr-python writes into a consolidated
+ * group's {@code zarr.json}: a snapshot of the metadata of every node below the group (or {@code null} in
+ * older releases). It is kept here unparsed, so a damaged snapshot does not stop the group opening when
+ * the caller asked not to use it; {@link ConsolidatedMetadata#parseV3} reads it.
  */
 public final class GroupMetadata implements NodeMetadata {
 
-    /**
-     * The members Falcon reads, plus {@code consolidated_metadata}, which zarr-python writes into a
-     * consolidated group's {@code zarr.json} (as an object with {@code "must_understand": false}, or as
-     * {@code null} in older releases). Falcon does not use it yet: each node's own metadata is read.
-     */
+    /** The members Falcon reads. */
     private static final Set<String> KNOWN =
             Set.of("zarr_format", "node_type", "attributes", "consolidated_metadata");
 
     private final JsonObject attributes;
+    private final JsonValue consolidated; // the raw consolidated_metadata member, or null if absent
 
-    GroupMetadata(JsonObject attributes) {
+    GroupMetadata(JsonObject attributes, JsonValue consolidated) {
         this.attributes = attributes;
+        this.consolidated = consolidated;
     }
 
     /** Parses a validated group document. {@code ctx} names the source key for diagnostics. */
@@ -29,7 +34,7 @@ public final class GroupMetadata implements NodeMetadata {
                 .map(v -> Fields.object(v, ctx + ".attributes"))
                 .orElse(Fields.EMPTY_OBJECT);
         Fields.checkUnknownFields(o, KNOWN, ctx);
-        return new GroupMetadata(attributes);
+        return new GroupMetadata(attributes, o.find("consolidated_metadata").orElse(null));
     }
 
     @Override
@@ -40,5 +45,10 @@ public final class GroupMetadata implements NodeMetadata {
     @Override
     public JsonObject attributes() {
         return attributes;
+    }
+
+    /** The raw {@code consolidated_metadata} member, unparsed; empty if the document has none. */
+    public Optional<JsonValue> consolidatedMetadata() {
+        return Optional.ofNullable(consolidated);
     }
 }

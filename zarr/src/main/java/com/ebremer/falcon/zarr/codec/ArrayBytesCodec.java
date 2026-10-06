@@ -29,7 +29,7 @@ interface ArrayBytesCodec {
 
     /**
      * Encodes a whole chunk to its stored bytes. {@code fillElement} lets a codec recognize empty regions
-     * (a shard omits sub-chunks that hold only the fill value).
+     * (a shard omits sub-chunks that hold only the fill value, unless {@code writeEmptyChunks}).
      */
-    byte[] encode(ArrayValue array, int elementSize, byte[] fillElement);
+    byte[] encode(ArrayValue array, int elementSize, byte[] fillElement, boolean writeEmptyChunks);
 }

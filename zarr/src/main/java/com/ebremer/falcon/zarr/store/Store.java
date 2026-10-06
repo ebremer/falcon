@@ -21,9 +21,9 @@ import java.util.OptionalLong;
  *
  * <p><b>Threads.</b> A store may be used from several threads at once: an array's blocks are often read
  * in parallel. Every store this package ships is safe for that ({@link MemoryStore}, {@link FileSystemStore},
- * {@link ZipStore}, {@link HttpStore}), and an implementation of your own should be too. Safe means each
- * call is atomic on its own, as a {@code ConcurrentHashMap} is: a {@link #get} running beside a
- * {@link #set} of the same key returns the old value or the new one, never a mix, and a listing running
+ * {@link ZipStore}, {@link HttpStore}, {@link S3Store}), and an implementation of your own should be too.
+ * Safe means each call is atomic on its own, as a {@code ConcurrentHashMap} is: a {@link #get} running beside
+ * a {@link #set} of the same key returns the old value or the new one, never a mix, and a listing running
  * beside writes may or may not include them. A sequence of calls is not atomic.
  */
 public interface Store {

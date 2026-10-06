@@ -5,6 +5,7 @@ import com.ebremer.falcon.zarr.ZarrUnsupportedException;
 import com.ebremer.falcon.zarr.datatype.DataType;
 import com.ebremer.falcon.zarr.json.JsonException;
 import com.ebremer.falcon.zarr.json.JsonObject;
+import com.ebremer.falcon.zarr.json.JsonString;
 import com.ebremer.falcon.zarr.json.JsonValue;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
@@ -21,12 +22,14 @@ import java.util.List;
  * order. The result is a flat buffer of the chunk's elements in C order, each primitive in
  * {@link #elementOrder()}.
  *
- * <p>Variable-length strings take the same chain with a {@code String[]} for the array: the
- * array&rarr;bytes codec is {@code vlen-utf8}, or {@code sharding_indexed} whose sub-chunks use it, and
- * {@code transpose} may come before either ({@link #decodeStringChunk}, {@link #encodeStrings}).
+ * <p>Variable-length elements take the same chain with an {@code Object[]} for the array (a
+ * {@code String[]} for strings, a {@code byte[][]} for byte strings): the array&rarr;bytes codec is
+ * {@code vlen-utf8} or {@code vlen-bytes} ({@link VlenCodec}), or {@code sharding_indexed} whose
+ * sub-chunks use it, and {@code transpose} may come before either ({@link #decodeVlenChunk},
+ * {@link #encodeVlen}).
  *
  * <p>Every bytes&rarr;bytes codec decodes against a limit derived from the chunk's size (H1), so a few
- * bytes of corrupt input cannot claim gigabytes of output. Only a {@code vlen-utf8} chunk, whose decoded
+ * bytes of corrupt input cannot claim gigabytes of output. Only a variable-length chunk, whose decoded
  * size is not known in advance, is limited by the size of a Java array alone.
  */
 public final class ChunkPipeline {
@@ -37,18 +40,21 @@ public final class ChunkPipeline {
     private final DataType dataType;
     private final int[] chunkShape;
     private final List<ArrayArrayCodec> arrayCodecs;
-    private final ArrayBytesCodec bytesCodec; // null when the array->bytes codec is vlen-utf8
+    private final ArrayBytesCodec bytesCodec; // null when the array->bytes codec is variable-length
+    private final VlenCodec vlen;             // the array->bytes codec when it is variable-length, else null
     private final List<BytesBytesCodec> byteCodecs;
     private final int[] boundaryShape; // chunk shape at the array->bytes boundary (after array->array encode)
     private final long[] decodeLimits; // per bytes->bytes codec: the most bytes its decode may produce
     private final long maxEncodedLength;
 
     private ChunkPipeline(DataType dataType, int[] chunkShape, List<ArrayArrayCodec> arrayCodecs,
-                          ArrayBytesCodec bytesCodec, List<BytesBytesCodec> byteCodecs, int[] boundaryShape) {
+                          ArrayBytesCodec bytesCodec, VlenCodec vlen, List<BytesBytesCodec> byteCodecs,
+                          int[] boundaryShape) {
         this.dataType = dataType;
         this.chunkShape = chunkShape;
         this.arrayCodecs = arrayCodecs;
         this.bytesCodec = bytesCodec;
+        this.vlen = vlen;
         this.byteCodecs = byteCodecs;
         this.boundaryShape = boundaryShape;
         // The encode chain grows the array->bytes output stage by stage; decoding stage i may produce at
@@ -79,7 +85,7 @@ public final class ChunkPipeline {
         }
         List<ArrayArrayCodec> arrayCodecs = new ArrayList<>();
         ArrayBytesCodec bytesCodec = null;
-        boolean vlen = false;
+        VlenCodec vlen = null;
         List<BytesBytesCodec> byteCodecs = new ArrayList<>();
         int[] boundaryShape = shape;
 
@@ -88,7 +94,7 @@ public final class ChunkPipeline {
                 String name = spec.get("name").asString();
                 JsonObject config = spec.find("configuration")
                         .map(JsonValue::asObject).orElse(EMPTY_CONFIG);
-                boolean arrayBytesSet = bytesCodec != null || vlen;
+                boolean arrayBytesSet = bytesCodec != null || vlen != null;
                 switch (name) {
                     case "transpose" -> {
                         if (arrayBytesSet) {
@@ -104,21 +110,22 @@ public final class ChunkPipeline {
                             throw new ZarrFormatException("more than one array->bytes codec");
                         }
                         if (dataType.isVariableLength()) {
-                            throw new ZarrFormatException(
-                                    "the '" + dataType.name() + "' data type requires the 'vlen-utf8' codec, not 'bytes'");
+                            throw new ZarrFormatException("the '" + dataType.name() + "' data type requires the '"
+                                    + VlenCodec.of(dataType).codecName() + "' codec, not 'bytes'");
                         }
                         bytesCodec = BytesCodec.parse(config, dataType);
                     }
-                    case "vlen-utf8" -> {
+                    case "vlen-utf8", "vlen-bytes" -> {
                         if (arrayBytesSet) {
                             throw new ZarrFormatException("more than one array->bytes codec");
                         }
-                        if (!dataType.isVariableLength()) {
-                            throw new ZarrFormatException(
-                                    "the 'vlen-utf8' codec requires a variable-length data type, not '"
-                                            + dataType.name() + "'");
+                        VlenCodec codec = VlenCodec.of(dataType);
+                        if (codec == null || !codec.codecName().equals(name)) {
+                            throw new ZarrFormatException("the '" + name + "' codec requires the '"
+                                    + (name.equals("vlen-utf8") ? DataType.STRING : DataType.BYTES).name()
+                                    + "' data type, not '" + dataType.name() + "'");
                         }
-                        vlen = true;
+                        vlen = codec;
                     }
                     case "gzip" -> {
                         requireBytesCodec(arrayBytesSet, name);
@@ -149,10 +156,10 @@ public final class ChunkPipeline {
             throw new ZarrFormatException("invalid codec configuration: " + e.getMessage(), e);
         }
 
-        if (bytesCodec == null && !vlen) {
+        if (bytesCodec == null && vlen == null) {
             throw new ZarrFormatException("codec pipeline has no array->bytes codec");
         }
-        return new ChunkPipeline(dataType, shape, List.copyOf(arrayCodecs), bytesCodec,
+        return new ChunkPipeline(dataType, shape, List.copyOf(arrayCodecs), bytesCodec, vlen,
                 List.copyOf(byteCodecs), boundaryShape);
     }
 
@@ -163,14 +170,22 @@ public final class ChunkPipeline {
         }
     }
 
-    /** The byte order of each decoded primitive (the {@code bytes} codec's endian, or LE for vlen strings). */
+    /** The byte order of each decoded primitive (the {@code bytes} codec's endian, or LE for vlen elements). */
     public ByteOrder elementOrder() {
         return bytesCodec == null ? ByteOrder.LITTLE_ENDIAN : bytesCodec.elementByteOrder();
     }
 
-    /** Whether the array&rarr;bytes codec is {@code vlen-utf8} (a {@code String[]} chunk). */
+    /** Whether the array&rarr;bytes codec is {@code vlen-utf8} or {@code vlen-bytes} (an {@code Object[]} chunk). */
     public boolean isVlen() {
-        return bytesCodec == null;
+        return vlen != null;
+    }
+
+    /**
+     * The variable-length codec of this pipeline's elements, whether it is the array&rarr;bytes codec or a
+     * shard's sub-chunks use it; {@code null} for a fixed-size data type.
+     */
+    public VlenCodec vlenCodec() {
+        return VlenCodec.of(dataType);
     }
 
     /** Whether the array&rarr;bytes codec is {@code sharding_indexed}. */
@@ -214,6 +229,14 @@ public final class ChunkPipeline {
      * bytes&rarr;bytes codecs in order. {@code fillElement} lets a shard omit all-fill sub-chunks.
      */
     public byte[] encode(byte[] elements, byte[] fillElement) {
+        return encode(elements, fillElement, false);
+    }
+
+    /**
+     * {@link #encode(byte[], byte[])}, where {@code writeEmptyChunks} keeps a shard's all-fill sub-chunks
+     * (F7): each is stored rather than omitted.
+     */
+    public byte[] encode(byte[] elements, byte[] fillElement, boolean writeEmptyChunks) {
         requireFixedSize();
         int elementSize = dataType.byteCount();
         long expected = (long) Pipelines.elementCount(chunkShape) * elementSize;
@@ -225,7 +248,7 @@ public final class ChunkPipeline {
         for (ArrayArrayCodec codec : arrayCodecs) {
             array = codec.encode(array, elementSize);
         }
-        byte[] bytes = bytesCodec.encode(array, elementSize, fillElement);
+        byte[] bytes = bytesCodec.encode(array, elementSize, fillElement, writeEmptyChunks);
         for (BytesBytesCodec codec : byteCodecs) {
             bytes = codec.encode(bytes);
         }
@@ -326,38 +349,43 @@ public final class ChunkPipeline {
      * re-encoding only the sub-chunks the region touches (PF2). {@code chunk} is a whole-chunk buffer that
      * holds the new elements in the region; it is not read outside it.
      *
-     * @param oldShard the shard's stored bytes, or {@code null} if it is absent
+     * @param oldShard         the shard's stored bytes, or {@code null} if it is absent
+     * @param writeEmptyChunks whether a touched sub-chunk holding only the fill value is stored (F7) rather
+     *                         than omitted
      * @return the shard to store, or {@code null} if it now holds only the fill value
      * @throws IllegalStateException if {@link #canUpdateShard()} is false
      */
     public byte[] updateShard(byte[] oldShard, byte[] chunk, byte[] fillElement, int[] regionOrigin,
-                              int[] regionShape) {
+                              int[] regionShape, boolean writeEmptyChunks) {
         if (!canUpdateShard()) {
             throw new IllegalStateException("updateShard needs a shard with no other codecs");
         }
         return ((ShardingCodec) bytesCodec).update(oldShard, chunk, chunkShape, dataType.byteCount(),
-                fillElement, regionOrigin, regionShape);
+                fillElement, regionOrigin, regionShape, writeEmptyChunks);
     }
 
     private void requireFixedSize() {
         if (dataType.isVariableLength()) {
-            throw new IllegalStateException("the '" + dataType.name() + "' pipeline holds strings, not bytes");
+            throw new IllegalStateException("the '" + dataType.name()
+                    + "' pipeline holds variable-length elements, not fixed-size ones");
         }
     }
 
-    // ---- variable-length strings ---------------------------------------------------------------------
+    // ---- variable-length elements --------------------------------------------------------------------
 
     /**
-     * Decodes a variable-length string chunk read through {@code source}: the bytes&rarr;bytes codecs are
-     * undone, then {@code vlen-utf8} (or the shard of {@code vlen-utf8} sub-chunks), then any
+     * Decodes a variable-length chunk read through {@code source}: the bytes&rarr;bytes codecs are undone,
+     * then {@code vlen-utf8}/{@code vlen-bytes} (or the shard of such sub-chunks), then any
      * {@code transpose}. In a shard without a transpose, only the sub-chunks overlapping the region are
-     * fetched; every other element is {@code fill}.
+     * fetched; every other element is the {@code fill} object itself.
      *
-     * @return the chunk's elements in C order, or {@code null} if the chunk is absent from the store
+     * @param fill the fill element ({@link VlenCodec#fill}): a {@code String} or a {@code byte[]}
+     * @return the chunk's elements in C order, a {@code String[]} or a {@code byte[][]}, or {@code null} if
+     *         the chunk is absent from the store
      * @throws ZarrFormatException if the bytes are malformed
      */
-    public String[] decodeStringChunk(ChunkBytes source, String fill, int[] regionOrigin, int[] regionShape) {
-        requireStrings();
+    public Object[] decodeVlenChunk(ChunkBytes source, Object fill, int[] regionOrigin, int[] regionShape) {
+        requireVlen();
         ChunkBytes effective = source;
         if (!byteCodecs.isEmpty()) {
             byte[] bytes = source.readAll().orElse(null);
@@ -366,21 +394,21 @@ public final class ChunkPipeline {
             }
             effective = ChunkBytes.of(undoBytesCodecs(bytes));
         }
-        String[] array;
+        Object[] array;
         if (bytesCodec == null) {
             byte[] bytes = effective.readAll().orElse(null);
             if (bytes == null) {
                 return null;
             }
-            array = VlenUtf8.decode(bytes);
+            array = vlen.decode(bytes);
             int expected = Pipelines.elementCount(boundaryShape);
             if (array.length != expected) {
-                throw new ZarrFormatException("decoded string chunk has " + array.length
+                throw new ZarrFormatException("decoded " + vlen.codecName() + " chunk has " + array.length
                         + " elements, expected " + expected);
             }
         } else {
             boolean wholeChunk = !arrayCodecs.isEmpty(); // as in decodeChunk: a transpose moves the region
-            array = ((ShardingCodec) bytesCodec).decodeStrings(effective, boundaryShape, fill,
+            array = ((ShardingCodec) bytesCodec).decodeVlen(effective, boundaryShape, fill,
                     wholeChunk ? new int[boundaryShape.length] : regionOrigin,
                     wholeChunk ? boundaryShape : regionShape);
             if (array == null) {
@@ -390,61 +418,78 @@ public final class ChunkPipeline {
         int[] shape = boundaryShape;
         for (int i = arrayCodecs.size() - 1; i >= 0; i--) {
             ArrayArrayCodec codec = arrayCodecs.get(i);
-            array = codec.decodeStrings(array, shape);
+            array = codec.decodeObjects(array, shape);
             shape = codec.decodedShape(shape);
         }
         return array;
     }
 
     /**
-     * Decodes a {@code vlen-utf8} string chunk's stored bytes into its {@code elementCount} elements in C
-     * order.
+     * Decodes a variable-length chunk's stored bytes into its {@code elementCount} elements in C order, an
+     * empty element standing in for the fill value.
      *
-     * @throws ZarrFormatException if the pipeline is not a string pipeline, or the bytes are malformed
+     * @throws ZarrFormatException if the pipeline is not variable-length, or the bytes are malformed
      */
-    public String[] decodeStrings(byte[] stored, int elementCount) {
-        String[] elements = decodeStringChunk(ChunkBytes.of(stored), "", new int[chunkShape.length], chunkShape);
+    public Object[] decodeVlen(byte[] stored, int elementCount) {
+        requireVlen();
+        Object fill = vlenCodec().fill(new JsonString(""));
+        Object[] elements = decodeVlenChunk(ChunkBytes.of(stored), fill, new int[chunkShape.length], chunkShape);
         if (elements.length != elementCount) {
-            throw new ZarrFormatException("decoded string chunk has " + elements.length
+            throw new ZarrFormatException("decoded " + vlenCodec().codecName() + " chunk has " + elements.length
                     + " elements, expected " + elementCount);
         }
         return elements;
     }
 
-    /**
-     * Encodes a variable-length string chunk (a flat C-order {@code String[]}) into the bytes to store:
-     * any {@code transpose}, then {@code vlen-utf8} (or a shard of it, omitting sub-chunks that hold only
-     * {@code fill}), then the bytes&rarr;bytes codecs in order. A {@code null} element is written as "".
-     */
-    public byte[] encodeStrings(String[] elements, String fill) {
+    /** {@link #decodeVlen} for a {@code vlen-utf8} pipeline. */
+    public String[] decodeStrings(byte[] stored, int elementCount) {
         requireStrings();
+        return (String[]) decodeVlen(stored, elementCount);
+    }
+
+    /**
+     * Encodes a variable-length chunk (a flat C-order {@code String[]} or {@code byte[][]}) into the bytes to
+     * store: any {@code transpose}, then {@code vlen-utf8}/{@code vlen-bytes} (or a shard of it, omitting
+     * sub-chunks that hold only {@code fill} unless {@code writeEmptyChunks}), then the bytes&rarr;bytes
+     * codecs in order. A {@code null} element is written as an empty one.
+     */
+    public byte[] encodeVlen(Object[] elements, Object fill, boolean writeEmptyChunks) {
+        requireVlen();
         int expected = Pipelines.elementCount(chunkShape);
         if (elements.length != expected) {
             throw new ZarrFormatException(
-                    "string chunk has " + elements.length + " elements, expected " + expected);
+                    "variable-length chunk has " + elements.length + " elements, expected " + expected);
         }
-        String[] array = elements;
+        Object[] array = elements;
         int[] shape = chunkShape;
         for (ArrayArrayCodec codec : arrayCodecs) {
-            array = codec.encodeStrings(array, shape);
+            array = codec.encodeObjects(array, shape);
             shape = codec.encodedShape(shape);
         }
-        byte[] bytes = bytesCodec == null ? VlenUtf8.encode(array)
-                : ((ShardingCodec) bytesCodec).encodeStrings(array, shape, fill);
+        byte[] bytes = bytesCodec == null ? vlen.encode(array)
+                : ((ShardingCodec) bytesCodec).encodeVlen(array, shape, fill, writeEmptyChunks);
         for (BytesBytesCodec codec : byteCodecs) {
             bytes = codec.encode(bytes);
         }
         return bytes;
     }
 
-    /** {@link #encodeStrings(String[], String)} with the empty string as the fill value. */
+    /** {@link #encodeVlen} for a {@code vlen-utf8} pipeline, with the empty string as the fill value. */
     public byte[] encodeStrings(String[] elements) {
-        return encodeStrings(elements, "");
+        requireStrings();
+        return encodeVlen(elements, "", false);
+    }
+
+    private void requireVlen() {
+        if (!dataType.isVariableLength()) {
+            throw new IllegalStateException("the variable-length methods need a variable-length data type, not '"
+                    + dataType.name() + "'");
+        }
     }
 
     private void requireStrings() {
-        if (!dataType.isVariableLength()) {
-            throw new IllegalStateException("the string methods need a variable-length data type, not '"
+        if (vlenCodec() != VlenCodec.UTF8) {
+            throw new IllegalStateException("the string methods need the 'string' data type, not '"
                     + dataType.name() + "'");
         }
     }

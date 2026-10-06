@@ -261,6 +261,8 @@ public final class Elements {
                     dt.name() + " cannot be written from a primitive array; use the raw element bytes");
             case STRING -> throw new ZarrException(
                     "the '" + dt.name() + "' data type is variable-length; use writeStrings()");
+            case BYTES -> throw new ZarrException(
+                    "the '" + dt.name() + "' data type is variable-length; use writeByteArrays()");
         };
     }
 

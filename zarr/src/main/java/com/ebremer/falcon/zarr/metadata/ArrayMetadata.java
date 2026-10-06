@@ -5,6 +5,7 @@ import com.ebremer.falcon.zarr.ZarrUnsupportedException;
 import com.ebremer.falcon.zarr.chunk.ChunkKeyEncoding;
 import com.ebremer.falcon.zarr.chunk.RegularChunkGrid;
 import com.ebremer.falcon.zarr.codec.ChunkPipeline;
+import com.ebremer.falcon.zarr.codec.VlenCodec;
 import com.ebremer.falcon.zarr.datatype.DataType;
 import com.ebremer.falcon.zarr.json.JsonArray;
 import com.ebremer.falcon.zarr.json.JsonObject;
@@ -93,11 +94,12 @@ public final class ArrayMetadata implements NodeMetadata {
 
         JsonValue fillValue = Fields.require(o, "fill_value", ctx);
         if (dataType.isVariableLength()) {
-            // A variable-length string's fill value is a JSON string (typically ""); there is no fixed-size
-            // byte encoding to validate against.
-            if (!(fillValue instanceof JsonString)) {
-                throw new ZarrFormatException(ctx + ".fill_value: the '" + dataType.name()
-                        + "' data type requires a string fill value");
+            // A variable-length fill value is a JSON string (typically ""): the string itself, or base64 for
+            // variable_length_bytes. There is no fixed-size byte encoding to validate against.
+            try {
+                VlenCodec.of(dataType).fill(fillValue);
+            } catch (ZarrFormatException e) {
+                throw new ZarrFormatException(ctx + ".fill_value: " + e.getMessage(), e);
             }
         } else {
             try {

@@ -41,15 +41,26 @@ public final class V2Metadata {
     public static final String ZARRAY = ".zarray";
     public static final String ZGROUP = ".zgroup";
     public static final String ZATTRS = ".zattrs";
+    /** The key of a v2 hierarchy's consolidated metadata, which zarr-python writes beside the root group's. */
+    public static final String ZMETADATA = ".zmetadata";
 
     private V2Metadata() {
     }
 
     /** Translates a v2 group ({@code .zgroup} + optional {@code .zattrs}) into v3 group metadata. */
     public static GroupMetadata parseGroup(byte[] zgroup, byte[] zattrs, String key) {
+        return Metadata.wrapJson(key, () -> parseGroup(object(zgroup, key),
+                zattrs == null ? null : object(zattrs, key + " (.zattrs)"), key));
+    }
+
+    /**
+     * Translates already-parsed v2 group documents, such as entries of consolidated metadata. A
+     * {@code null} {@code zattrs} means no attributes are stored.
+     */
+    public static GroupMetadata parseGroup(JsonValue zgroup, JsonValue zattrs, String key) {
         return Metadata.wrapJson(key, () -> {
-            checkFormat(object(zgroup, key), key);
-            JsonObject attributes = zattrs == null ? Fields.EMPTY_OBJECT : object(zattrs, key + " (.zattrs)");
+            checkFormat(Fields.object(zgroup, key), key);
+            JsonObject attributes = zattrs == null ? Fields.EMPTY_OBJECT : Fields.object(zattrs, key + " (.zattrs)");
             return GroupMetadata.parse(JsonObject.builder()
                     .put("zarr_format", 3).put("node_type", "group").put("attributes", attributes)
                     .build(), key);
@@ -58,11 +69,20 @@ public final class V2Metadata {
 
     /** Translates a v2 array ({@code .zarray} + optional {@code .zattrs}) into v3 array metadata. */
     public static ArrayMetadata parseArray(byte[] zarray, byte[] zattrs, String key) {
-        return Metadata.wrapJson(key, () -> translateArray(zarray, zattrs, key));
+        return Metadata.wrapJson(key, () -> parseArray(object(zarray, key),
+                zattrs == null ? null : object(zattrs, key + " (.zattrs)"), key));
     }
 
-    private static ArrayMetadata translateArray(byte[] zarray, byte[] zattrs, String key) {
-        JsonObject meta = object(zarray, key);
+    /**
+     * Translates already-parsed v2 array documents, such as entries of consolidated metadata. A
+     * {@code null} {@code zattrs} means no attributes are stored.
+     */
+    public static ArrayMetadata parseArray(JsonValue zarray, JsonValue zattrs, String key) {
+        return Metadata.wrapJson(key, () -> translateArray(Fields.object(zarray, key),
+                zattrs == null ? null : Fields.object(zattrs, key + " (.zattrs)"), key));
+    }
+
+    private static ArrayMetadata translateArray(JsonObject meta, JsonObject zattrs, String key) {
         checkFormat(meta, key);
 
         JsonArray shape = Fields.array(Fields.require(meta, "shape", key), key + ".shape");
@@ -91,7 +111,7 @@ public final class V2Metadata {
                 .map(v -> Fields.string(v, key + ".dimension_separator")).orElse(".");
 
         JsonValue fillValue = translateFill(meta.find("fill_value").orElse(JsonNull.INSTANCE), dtype);
-        JsonObject attributes = zattrs == null ? Fields.EMPTY_OBJECT : object(zattrs, key + " (.zattrs)");
+        JsonObject attributes = zattrs == null ? Fields.EMPTY_OBJECT : zattrs;
 
         JsonObject v3 = JsonObject.builder()
                 .put("zarr_format", 3)

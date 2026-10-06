@@ -18,9 +18,15 @@ interface ArrayArrayCodec {
     /** Encodes {@code input} (the logical-side array) toward the stored form. */
     ArrayValue encode(ArrayValue input, int elementSize);
 
-    /** {@link #decode} for a variable-length string chunk of {@code encodedShape}, in C order. */
-    String[] decodeStrings(String[] input, int[] encodedShape);
+    /**
+     * {@link #decode} for a variable-length chunk of {@code encodedShape}, in C order; the result has the
+     * input's runtime type ({@code String[]} or {@code byte[][]}).
+     */
+    Object[] decodeObjects(Object[] input, int[] encodedShape);
 
-    /** {@link #encode} for a variable-length string chunk of {@code shape}, in C order. */
-    String[] encodeStrings(String[] input, int[] shape);
+    /**
+     * {@link #encode} for a variable-length chunk of {@code shape}, in C order; the result has the input's
+     * runtime type.
+     */
+    Object[] encodeObjects(Object[] input, int[] shape);
 }

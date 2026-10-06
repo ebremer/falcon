@@ -15,5 +15,7 @@ public enum DataTypeKind {
     /** {@code r<N>}: raw {@code N}-bit values, {@code N} a positive multiple of 8. */
     RAW,
     /** {@code string}: variable-length UTF-8, decoded to {@link String}s (no fixed element size). */
-    STRING
+    STRING,
+    /** {@code variable_length_bytes}: variable-length byte strings, decoded to {@code byte[]}s. */
+    BYTES
 }

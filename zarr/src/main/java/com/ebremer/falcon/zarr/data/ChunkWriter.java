@@ -16,7 +16,9 @@ import java.util.Arrays;
  * is built directly from the input. A chunk it covers in part is read back (decoded, or fill if absent),
  * updated, and re-encoded: a read-modify-write. A shard covered in part re-encodes only the sub-chunks
  * the selection touches and keeps the stored bytes of the rest. After the update, a chunk holding nothing
- * but the fill value is <em>deleted</em> rather than stored, which is how Zarr represents empty chunks.
+ * but the fill value is <em>deleted</em> rather than stored, which is how Zarr represents empty chunks;
+ * with {@code writeEmptyChunks} (zarr-python's {@code write_empty_chunks}, F7) it is stored like any other,
+ * and so is each sub-chunk of a shard that the write touches.
  *
  * <p>Writes to the same chunk through the same store object take turns ({@link ChunkLocks}), so two
  * threads updating different parts of one chunk or shard do not lose either update.
@@ -26,9 +28,12 @@ public final class ChunkWriter {
     private ChunkWriter() {
     }
 
-    /** Writes {@code elements} (the selection's elements, C order) into {@code [offset, offset+selShape)}. */
+    /**
+     * Writes {@code elements} (the selection's elements, C order) into {@code [offset, offset+selShape)}.
+     * A chunk left holding only the fill value is deleted, unless {@code writeEmptyChunks}.
+     */
     public static void write(Store store, String arrayPath, ArrayMetadata meta, ChunkCache cache,
-                             long[] offset, long[] selShape, byte[] elements) {
+                             long[] offset, long[] selShape, byte[] elements, boolean writeEmptyChunks) {
         ChunkAssembler.checkSelection(meta, offset, selShape);
         if (!store.isWritable()) {
             throw new UnsupportedOperationException("store is read-only");
@@ -72,7 +77,7 @@ public final class ChunkWriter {
         long[] coord = firstChunk.clone();
         while (true) {
             writeChunk(store, arrayPath, pipeline, encoding, cache, coord, offset, selShape, selEnd,
-                    chunkShape, arrayShape, elements, elementSize, fillElement, emptyChunk);
+                    chunkShape, arrayShape, elements, elementSize, fillElement, emptyChunk, writeEmptyChunks);
             int d = rank - 1;
             for (; d >= 0; d--) {
                 if (++coord[d] <= lastChunk[d]) {
@@ -90,7 +95,7 @@ public final class ChunkWriter {
                                    ChunkKeyEncoding encoding, ChunkCache cache, long[] coord,
                                    long[] selOffset, long[] selShape, long[] selEnd, long[] chunkShape,
                                    long[] arrayShape, byte[] elements, int elementSize, byte[] fillElement,
-                                   byte[] emptyChunk) {
+                                   byte[] emptyChunk, boolean writeEmptyChunks) {
         int rank = chunkShape.length;
         long[] srcOrigin = new long[rank];
         long[] dstOrigin = new long[rank];
@@ -116,18 +121,20 @@ public final class ChunkWriter {
                 // Nothing in the array is left to keep: the part of an edge chunk past the array is fill.
                 byte[] chunk = edge ? emptyChunk.clone() : new byte[emptyChunk.length];
                 Blocks.copy(elements, selShape, srcOrigin, chunk, chunkShape, dstOrigin, block, elementSize);
-                stored = Arrays.equals(chunk, emptyChunk) ? null : pipeline.encode(chunk, fillElement);
+                stored = !writeEmptyChunks && Arrays.equals(chunk, emptyChunk) ? null
+                        : pipeline.encode(chunk, fillElement, writeEmptyChunks);
             } else if (pipeline.canUpdateShard()) {
                 byte[] chunk = new byte[emptyChunk.length]; // read only inside the written region
                 Blocks.copy(elements, selShape, srcOrigin, chunk, chunkShape, dstOrigin, block, elementSize);
                 stored = pipeline.updateShard(store.get(key).orElse(null), chunk, fillElement,
-                        ChunkAssembler.toInt(dstOrigin), ChunkAssembler.toInt(block));
+                        ChunkAssembler.toInt(dstOrigin), ChunkAssembler.toInt(block), writeEmptyChunks);
             } else {
                 // Partial update: start from what is already stored, or from fill.
                 byte[] existing = ChunkAssembler.readChunkOrNull(store, key, pipeline, fillElement, chunkShape);
                 byte[] chunk = existing != null ? existing : emptyChunk.clone();
                 Blocks.copy(elements, selShape, srcOrigin, chunk, chunkShape, dstOrigin, block, elementSize);
-                stored = Arrays.equals(chunk, emptyChunk) ? null : pipeline.encode(chunk, fillElement);
+                stored = !writeEmptyChunks && Arrays.equals(chunk, emptyChunk) ? null
+                        : pipeline.encode(chunk, fillElement, writeEmptyChunks);
             }
             if (stored == null) {
                 store.delete(key); // an all-fill chunk is represented by its absence

@@ -65,7 +65,7 @@ final class BytesCodec implements ArrayBytesCodec {
     }
 
     @Override
-    public byte[] encode(ArrayValue array, int elementSize, byte[] fillElement) {
+    public byte[] encode(ArrayValue array, int elementSize, byte[] fillElement, boolean writeEmptyChunks) {
         long expected = Pipelines.elementCount(array.shape) * (long) elementSize;
         if (array.data.length != expected) {
             throw new ZarrFormatException(

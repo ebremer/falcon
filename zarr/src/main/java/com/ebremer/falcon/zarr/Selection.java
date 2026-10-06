@@ -4,8 +4,9 @@ import com.ebremer.falcon.zarr.chunk.RegularChunkGrid;
 import com.ebremer.falcon.zarr.data.ChunkAssembler;
 import com.ebremer.falcon.zarr.data.ChunkWriter;
 import com.ebremer.falcon.zarr.data.Elements;
-import com.ebremer.falcon.zarr.data.StringChunks;
+import com.ebremer.falcon.zarr.data.VlenChunks;
 import com.ebremer.falcon.zarr.datatype.DataType;
+import com.ebremer.falcon.zarr.datatype.DataTypeKind;
 import com.ebremer.falcon.zarr.metadata.ArrayMetadata;
 import java.nio.ByteOrder;
 
@@ -74,7 +75,7 @@ public final class Selection {
     public void writeRawBytes(byte[] elements) {
         requireFixedSize();
         ChunkWriter.write(array.store, array.path, array.metadata(), array.chunkCache(),
-                offset, shape, elements);
+                offset, shape, elements, array.writeEmptyChunks());
     }
 
     /** Writes {@code values} into this region, narrowing to the array's data type. */
@@ -107,8 +108,8 @@ public final class Selection {
      * @throws ZarrException if this array is not a variable-length string array
      */
     public String[] readStrings() {
-        requireStringArray();
-        return StringChunks.read(array.store, array.path, array.metadata(), offset, shape);
+        requireKind(DataTypeKind.STRING, "readStrings/writeStrings");
+        return (String[]) VlenChunks.read(array.store, array.path, array.metadata(), offset, shape);
     }
 
     /**
@@ -118,22 +119,50 @@ public final class Selection {
      * @throws ZarrException if this array is not a variable-length string array
      */
     public void writeStrings(String[] values) {
-        requireStringArray();
+        requireKind(DataTypeKind.STRING, "readStrings/writeStrings");
         checkLength(values.length);
-        StringChunks.write(array.store, array.path, array.metadata(), offset, shape, values);
+        VlenChunks.write(array.store, array.path, array.metadata(), offset, shape, values,
+                array.writeEmptyChunks());
     }
 
-    private void requireStringArray() {
-        if (!dataType().isVariableLength()) {
-            throw new ZarrException("readStrings/writeStrings requires the 'string' data type, not '"
+    /**
+     * The selected elements as byte strings, in C order (the {@code variable_length_bytes} data type only).
+     * Each {@code byte[]} is the caller's own.
+     *
+     * @throws ZarrException if this array is not a variable-length bytes array
+     */
+    public byte[][] readByteArrays() {
+        requireKind(DataTypeKind.BYTES, "readByteArrays/writeByteArrays");
+        return (byte[][]) VlenChunks.read(array.store, array.path, array.metadata(), offset, shape);
+    }
+
+    /**
+     * Writes {@code values} into this region (the {@code variable_length_bytes} data type only). A
+     * {@code null} element is written as an empty byte string. The arrays are encoded during the call and
+     * not kept.
+     *
+     * @throws ZarrException if this array is not a variable-length bytes array
+     */
+    public void writeByteArrays(byte[][] values) {
+        requireKind(DataTypeKind.BYTES, "readByteArrays/writeByteArrays");
+        checkLength(values.length);
+        VlenChunks.write(array.store, array.path, array.metadata(), offset, shape, values,
+                array.writeEmptyChunks());
+    }
+
+    private void requireKind(DataTypeKind kind, String methods) {
+        if (dataType().kind() != kind) {
+            String needed = kind == DataTypeKind.STRING ? DataType.STRING.name() : DataType.BYTES.name();
+            throw new ZarrException(methods + " requires the '" + needed + "' data type, not '"
                     + dataType().name() + "'");
         }
     }
 
     private void requireFixedSize() {
         if (dataType().isVariableLength()) {
-            throw new ZarrException("the '" + dataType().name()
-                    + "' data type is variable-length; use readStrings()/writeStrings()");
+            throw new ZarrException("the '" + dataType().name() + "' data type is variable-length; use "
+                    + (dataType().kind() == DataTypeKind.STRING ? "readStrings()/writeStrings()"
+                    : "readByteArrays()/writeByteArrays()"));
         }
     }
 

@@ -4,8 +4,11 @@ Falcon's reader is checked against zarr-python's stores (gen_zarr_fixtures.py an
 other direction, that what Falcon *writes* zarr-python reads as intended (P1 T1): every core data type,
 every codec Falcon writes, sharding with the index at either end, partial writes, strings, and codec
 configurations Falcon must honour in arrays it did not create (for those, the stored bytes are checked to
-follow the configuration as well: zstd checksums, Blosc shuffle modes). Dev-time tool; zarr-python is not
-a Falcon dependency. Run it before every release:
+follow the configuration as well: zstd checksums, Blosc shuffle modes). P2 added variable-length bytes
+(F5), arrays written with write_empty_chunks (F7: every chunk, and every sub-chunk of a shard, must be
+stored), and resized arrays (F6: what a shrink cut off must read as fill after growing back, and the chunks
+outside the smaller shape must be gone). Dev-time tool; zarr-python is not a Falcon dependency. Run it
+before every release:
 
     mvn -pl zarr -am compile
     java -cp "zarr/target/classes;core/target/classes" tools/fixtures/WriteZarrCases.java OUT_DIR
@@ -29,6 +32,8 @@ SHAPE = (13, 7)
 def value(dtype, i):
     if dtype == "string":
         return POOL[i % len(POOL)] + str(i)
+    if dtype == "bytes":
+        return bytes(((i * 31 + j * 7) & 0xff) for j in range(i % 9))
     if dtype == "bool":
         return i % 3 == 0
     if dtype == "int8":
@@ -63,6 +68,8 @@ def value(dtype, i):
 def same(dtype, got, want):
     if dtype == "string":
         return got == want
+    if dtype == "bytes":
+        return bytes(got) == want
     if dtype.startswith("float"):
         if isinstance(want, float) and math.isnan(want):
             return math.isnan(float(got))
@@ -100,6 +107,22 @@ def layout_problem(directory, name):
                 return f"{os.path.basename(path)}: blosc shuffle flags {header[2] & 0x05}, configured {want}"
         if not checked:
             return "every chunk stored as memcpy; the shuffle could not be checked"
+    if "_write_empty" in name:
+        files = list(chunk_files(directory, name))
+        if len(files) != 6:  # a 3 x 2 grid of chunks (or shards)
+            return f"{len(files)} chunk files stored, expected all 6"
+        if name.endswith("_sharded"):
+            for path in files:
+                shard = open(path, "rb").read()
+                index = shard[len(shard) - 4 - 4 * 16:len(shard) - 4]
+                for k in range(4):
+                    if index[16 * k:16 * k + 16] == b"\xff" * 16:
+                        return f"{os.path.basename(path)}: sub-chunk {k} omitted, though written as fill"
+    if "_resized" in name:
+        left = [f for f in chunk_files(directory, name)
+                if os.path.relpath(f, os.path.join(directory, name, "c")).split(os.sep)[0] == "2"]
+        if left:  # an empty directory may stay behind, as zarr-python's LocalStore leaves it too
+            return f"{len(left)} chunks outside the shrunk shape (row 2 of the grid) are still stored"
     return None
 
 

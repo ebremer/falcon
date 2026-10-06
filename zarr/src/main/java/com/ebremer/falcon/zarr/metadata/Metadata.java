@@ -26,6 +26,17 @@ public final class Metadata {
         } catch (JsonException e) {
             throw new ZarrFormatException("malformed JSON in '" + key + "': " + e.getMessage(), e);
         }
+        return parse(root, key);
+    }
+
+    /**
+     * Parses one node's already-parsed {@code zarr.json} document, such as an entry of consolidated metadata.
+     * {@code key} names where the document came from, used only in diagnostics.
+     *
+     * @throws ZarrFormatException if the document violates the array/group schema
+     * @throws com.ebremer.falcon.zarr.ZarrUnsupportedException if the node uses an unimplemented feature
+     */
+    public static NodeMetadata parse(JsonValue root, String key) {
         JsonObject o = Fields.object(root, key);
         String nodeType = Fields.string(Fields.require(o, "node_type", key), key + ".node_type");
         return wrapJson(key, () -> switch (nodeType) {

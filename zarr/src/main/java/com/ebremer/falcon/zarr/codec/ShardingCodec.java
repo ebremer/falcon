@@ -14,7 +14,6 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
-import java.util.Objects;
 
 /**
  * The {@code sharding_indexed} array&rarr;bytes codec: one stored chunk (a <em>shard</em>) packs a grid
@@ -28,8 +27,9 @@ import java.util.Objects;
  * <p>Decoding fetches the index (from the end with a suffix read, so no size query is needed) and then
  * only the sub-chunks overlapping the requested region, using {@link ChunkBytes} byte ranges, so a small
  * read does not pull the whole shard. {@link #decodeRegion} returns just that region. Sub-chunks may hold
- * fixed-size elements or variable-length strings (an inner {@code vlen-utf8} pipeline, as zarr-python
- * writes for sharded string arrays). {@link #update} re-encodes only the sub-chunks a write touches.
+ * fixed-size elements or variable-length ones (an inner {@code vlen-utf8} or {@code vlen-bytes} pipeline,
+ * as zarr-python writes for sharded string arrays). {@link #update} re-encodes only the sub-chunks a write
+ * touches.
  */
 final class ShardingCodec implements ArrayBytesCodec {
 
@@ -177,21 +177,21 @@ final class ShardingCodec implements ArrayBytesCodec {
     }
 
     /**
-     * Decodes a shard of variable-length strings: the sub-chunks overlapping the region are decoded by the
-     * inner ({@code vlen-utf8}) pipeline; every other element is {@code fill}.
+     * Decodes a shard of variable-length elements: the sub-chunks overlapping the region are decoded by the
+     * inner ({@code vlen-utf8} or {@code vlen-bytes}) pipeline; every other element is {@code fill}.
      *
      * @return the shard's elements in C order, or {@code null} if the shard is absent
      */
-    String[] decodeStrings(ChunkBytes source, int[] shape, String fill, int[] regionOrigin, int[] regionShape) {
+    Object[] decodeVlen(ChunkBytes source, int[] shape, Object fill, int[] regionOrigin, int[] regionShape) {
         long[] entries = readIndex(source);
         if (entries == null) {
             return null;
         }
-        String[] out = new String[Pipelines.elementCount(shape)];
+        Object[] out = inner.vlenCodec().newArray(Pipelines.elementCount(shape));
         Arrays.fill(out, fill);
         int[] zero = new int[shape.length];
         forEachSubChunk(source, entries, regionOrigin, regionShape, (origin, stored) -> {
-            String[] sub = inner.decodeStringChunk(ChunkBytes.of(stored), fill, zero, subChunkShape);
+            Object[] sub = inner.decodeVlenChunk(ChunkBytes.of(stored), fill, zero, subChunkShape);
             Pipelines.copyBox(sub, subChunkShape, zero, out, shape, origin, subChunkShape);
         });
         return out;
@@ -334,30 +334,30 @@ final class ShardingCodec implements ArrayBytesCodec {
     }
 
     @Override
-    public byte[] encode(ArrayValue array, int elementSize, byte[] fillElement) {
+    public byte[] encode(ArrayValue array, int elementSize, byte[] fillElement, boolean writeEmptyChunks) {
         byte[] emptySub = new byte[Pipelines.elementCount(subChunkShape) * elementSize];
         Pipelines.tile(emptySub, fillElement);
         int[] zero = new int[subChunkShape.length];
         byte[] shard = assemble((linear, origin) -> {
             byte[] sub = new byte[emptySub.length];
             Pipelines.copyBox(array.data, array.shape, origin, sub, subChunkShape, zero, subChunkShape, elementSize);
-            return Arrays.equals(sub, emptySub) ? null : inner.encode(sub, fillElement); // all fill: omitted
+            return !writeEmptyChunks && Arrays.equals(sub, emptySub) ? null // all fill: omitted
+                    : inner.encode(sub, fillElement);
         });
         return shard != null ? shard : assembleEmpty();
     }
 
-    /** Encodes a shard of variable-length strings; a sub-chunk holding only {@code fill} is omitted. */
-    byte[] encodeStrings(String[] chunk, int[] shape, String fill) {
+    /**
+     * Encodes a shard of variable-length elements; a sub-chunk holding only {@code fill} is omitted unless
+     * {@code writeEmptyChunks}.
+     */
+    byte[] encodeVlen(Object[] chunk, int[] shape, Object fill, boolean writeEmptyChunks) {
+        VlenCodec vlen = inner.vlenCodec();
         int[] zero = new int[subChunkShape.length];
         byte[] shard = assemble((linear, origin) -> {
-            String[] sub = new String[Pipelines.elementCount(subChunkShape)];
+            Object[] sub = vlen.newArray(Pipelines.elementCount(subChunkShape));
             Pipelines.copyBox(chunk, shape, origin, sub, subChunkShape, zero, subChunkShape);
-            for (String s : sub) {
-                if (!Objects.equals(s == null ? "" : s, fill)) {
-                    return inner.encodeStrings(sub, fill);
-                }
-            }
-            return null;
+            return !writeEmptyChunks && vlen.isAllFill(sub, fill) ? null : inner.encodeVlen(sub, fill, false);
         });
         return shard != null ? shard : assembleEmpty();
     }
@@ -368,11 +368,13 @@ final class ShardingCodec implements ArrayBytesCodec {
      * region does not touch keeps its stored bytes; one it covers is encoded from {@code chunk}; one it
      * covers partly is decoded, updated, and encoded. Nothing else is decoded or encoded.
      *
-     * @param oldShard the shard's stored bytes, or {@code null} if it is absent
+     * @param oldShard         the shard's stored bytes, or {@code null} if it is absent
+     * @param writeEmptyChunks whether a touched sub-chunk that holds only the fill value is stored rather
+     *                         than omitted
      * @return the new shard, or {@code null} if every sub-chunk is now empty (all fill)
      */
     byte[] update(byte[] oldShard, byte[] chunk, int[] shape, int elementSize, byte[] fillElement,
-                  int[] regionOrigin, int[] regionShape) {
+                  int[] regionOrigin, int[] regionShape, boolean writeEmptyChunks) {
         ChunkBytes old = oldShard == null ? null : ChunkBytes.of(oldShard);
         long[] entries = old == null ? null : readIndex(old);
         byte[] emptySub = new byte[Pipelines.elementCount(subChunkShape) * elementSize];
@@ -401,7 +403,7 @@ final class ShardingCodec implements ArrayBytesCodec {
             }
             Pipelines.copyBox(chunk, shape, overlap[0], sub, subChunkShape, Pipelines.minus(overlap[0], origin),
                     overlap[1], elementSize);
-            return Arrays.equals(sub, emptySub) ? null : inner.encode(sub, fillElement);
+            return !writeEmptyChunks && Arrays.equals(sub, emptySub) ? null : inner.encode(sub, fillElement);
         });
     }
 

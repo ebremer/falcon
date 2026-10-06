@@ -23,16 +23,37 @@ public final class Zarr {
     }
 
     /**
-     * Opens the root node of the hierarchy in {@code store}.
+     * Opens the root node of the hierarchy in {@code store}, using consolidated metadata when the root has
+     * it, as zarr-python 3 does: {@code open(store, true)}.
      *
      * <p>Both Zarr v3 (a {@code zarr.json} at each node) and Zarr v2 ({@code .zarray}/{@code .zgroup}
      * with a sidecar {@code .zattrs}) are read; v2 metadata is translated into the v3 model on open.
      *
-     * @throws ZarrFormatException      if there is no root node metadata or it is malformed
+     * @throws ZarrFormatException      if there is no root node metadata, or it or the consolidated metadata
+     *                                  is malformed
      * @throws ZarrUnsupportedException if the store uses an unimplemented feature
      */
     public static ZarrNode open(Store store) {
-        return ZarrNode.tryOpen(store, "").orElseThrow(() -> new ZarrFormatException(
+        return open(store, true);
+    }
+
+    /**
+     * Opens the root node of the hierarchy in {@code store}.
+     *
+     * <p>With {@code useConsolidated}, a root group that stores consolidated metadata (a snapshot of the
+     * metadata of every node below it, written by {@link ZarrGroup#consolidate()} or zarr-python's
+     * {@code consolidate_metadata}) answers child queries from it, and so do the groups opened through it:
+     * walking the hierarchy then costs no store requests beyond the root's. A v3 root's snapshot is in its
+     * {@code zarr.json}; a v2 root's is the {@code .zmetadata} key, one more request to look for. A
+     * snapshot shows the hierarchy as it was consolidated (see {@link ZarrGroup}). Without
+     * {@code useConsolidated}, every node's own metadata is read, here and below.
+     *
+     * @throws ZarrFormatException      if there is no root node metadata or it is malformed, or, with
+     *                                  {@code useConsolidated}, if the consolidated metadata is malformed
+     * @throws ZarrUnsupportedException if the store uses an unimplemented feature
+     */
+    public static ZarrNode open(Store store, boolean useConsolidated) {
+        return ZarrNode.tryOpen(store, "", useConsolidated, true).orElseThrow(() -> new ZarrFormatException(
                 "no root zarr.json, .zarray, or .zgroup found: not a Zarr store"));
     }
 
@@ -42,12 +63,21 @@ public final class Zarr {
     }
 
     /**
-     * Opens the hierarchy root as a group.
+     * Opens the hierarchy root as a group, using its consolidated metadata if it has any.
      *
      * @throws IllegalStateException if the root is an array
      */
     public static ZarrGroup openGroup(Store store) {
         return open(store).asGroup();
+    }
+
+    /**
+     * Opens the hierarchy root as a group; see {@link #open(Store, boolean)}.
+     *
+     * @throws IllegalStateException if the root is an array
+     */
+    public static ZarrGroup openGroup(Store store, boolean useConsolidated) {
+        return open(store, useConsolidated).asGroup();
     }
 
     /**

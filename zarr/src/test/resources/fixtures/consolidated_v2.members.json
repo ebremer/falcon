@@ -1,0 +1,100 @@
+{
+  "consolidated": [
+    {
+      "path": "a",
+      "kind": "array",
+      "attributes": {},
+      "shape": [
+        4
+      ],
+      "dtype": "int32"
+    },
+    {
+      "path": "empty",
+      "kind": "group",
+      "attributes": {}
+    },
+    {
+      "path": "g",
+      "kind": "group",
+      "attributes": {
+        "level": 1
+      }
+    },
+    {
+      "path": "g/deep",
+      "kind": "group",
+      "attributes": {}
+    },
+    {
+      "path": "g/deep/leaf",
+      "kind": "array",
+      "attributes": {},
+      "shape": [
+        1
+      ],
+      "dtype": "uint8"
+    },
+    {
+      "path": "g/inner",
+      "kind": "array",
+      "attributes": {
+        "units": "m"
+      },
+      "shape": [
+        2,
+        3
+      ],
+      "dtype": "float64"
+    }
+  ],
+  "per_node": [
+    {
+      "path": "a",
+      "kind": "array",
+      "attributes": {},
+      "shape": [
+        4
+      ],
+      "dtype": "int32"
+    },
+    {
+      "path": "empty",
+      "kind": "group",
+      "attributes": {}
+    },
+    {
+      "path": "g",
+      "kind": "group",
+      "attributes": {
+        "level": 1
+      }
+    },
+    {
+      "path": "g/deep",
+      "kind": "group",
+      "attributes": {}
+    },
+    {
+      "path": "g/deep/leaf",
+      "kind": "array",
+      "attributes": {},
+      "shape": [
+        1
+      ],
+      "dtype": "uint8"
+    },
+    {
+      "path": "g/inner",
+      "kind": "array",
+      "attributes": {
+        "units": "m"
+      },
+      "shape": [
+        2,
+        3
+      ],
+      "dtype": "float64"
+    }
+  ]
+}

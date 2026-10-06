@@ -1,0 +1,11 @@
+{
+  "title": "consolidated",
+  "nested": {
+    "list": [
+      1,
+      2.5,
+      "x"
+    ],
+    "flag": true
+  }
+}

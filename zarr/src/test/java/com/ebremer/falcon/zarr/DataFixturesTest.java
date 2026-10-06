@@ -88,6 +88,37 @@ class DataFixturesTest {
         assertArrayEquals(want, open("blosc_r2400").readRawBytes());
     }
 
+    private static byte[][] hexes(JsonObject meta) {
+        return meta.get("values").asArray().values().stream()
+                .map(v -> HexFormat.of().parseHex(v.asString())).toArray(byte[][]::new);
+    }
+
+    /**
+     * zarr-python's {@code variable_length_bytes} arrays (F5, {@code gen_zarr_bytes_fixtures.py}): plain with
+     * zstd, sharded with a three-byte fill value and only part written, and transposed before
+     * {@code vlen-bytes}.
+     */
+    @Test
+    void variableLengthBytes() {
+        byte[][] plain = hexes(expected("bytes_plain"));
+        ZarrArray a = open("bytes_plain");
+        assertEquals(com.ebremer.falcon.zarr.datatype.DataType.BYTES, a.dataType());
+        assertArrayEquals(plain, a.readByteArrays());
+        assertArrayEquals(new byte[][] {plain[6], plain[7], plain[11], plain[12]},
+                a.select(new long[] {1, 1}, new long[] {2, 2}).readByteArrays());
+
+        JsonObject sharded = expected("bytes_sharded");
+        byte[][] want = hexes(sharded);
+        ZarrArray s = open("bytes_sharded");
+        assertArrayEquals(want, s.readByteArrays());
+        assertArrayEquals(new byte[][] {want[6 + 1], want[6 + 2], want[12 + 1], want[12 + 2]},
+                s.select(new long[] {1, 1}, new long[] {2, 2}).readByteArrays());
+        assertEquals(sharded.get("fill").asString(),
+                HexFormat.of().formatHex(java.util.Base64.getDecoder().decode(s.fillValue().asString())));
+
+        assertArrayEquals(hexes(expected("bytes_transposed")), open("bytes_transposed").readByteArrays());
+    }
+
     /** A 140 MB chunk: more than one libzstd block, and well past any small fixed buffer. */
     @Test
     void aChunkOver128Megabytes() {

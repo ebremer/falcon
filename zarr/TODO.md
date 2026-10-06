@@ -63,6 +63,21 @@ New API: `HttpStore.builder(url)` with `missingStatuses(...)` (I7), `Store.getSu
 `ZstdEncoder.compress(data, checksum)`, `BloscEncoder.compress(data, typeSize, shuffle, blockSize[, clevel])`,
 `BloscDecoder.decompress(src, maxSize)`. What remains is P2, and P3's D3, D4, and B1.
 
+**Update (2026-10-06): P2's F1, F2, F5, F6, and F7 are done.** 431 Zarr tests, 15 more under a small heap,
+and 55 core tests pass; zarr-python 3.4 reads all 189 arrays `check_zarr_writer.py` checks and all 6
+hierarchies `check_zarr_hierarchies.py` checks. Each item says what changed, then gives the original
+finding. Behaviour changes worth knowing:
+- `Zarr.open` answers from consolidated metadata when a group has some (F2), so a listing shows the
+  hierarchy as it was consolidated; `Zarr.open(store, false)` reads node by node;
+- `StringChunks` and `VlenUtf8` became `VlenChunks` and `VlenCodec`, serving strings and byte strings
+  (F5; internal).
+
+New API: `S3Store`, `HttpStore.builder(url).header(...)`/`requestHeaders(...)` (F1);
+`Zarr.open(store, useConsolidated)`, `ZarrGroup.consolidate()`/`isConsolidated()` (F2);
+`DataType.BYTES`, `readByteArrays`/`writeByteArrays` (F5); `ZarrArray.resize`,
+`ZarrNode.setAttributes`/`updateAttributes`, `ZarrGroup.delete` (F6); `ZarrArray.withWriteEmptyChunks`
+(F7). What remains is P2's F3, F4, and F8–F14, and P3's D3, D4, and B1.
+
 ## Do these first — top 10
 
 1. ~~**Z1/Z2 — node replacement destroys or corrupts data.**~~ Done 2026-10-05 (below).
@@ -76,8 +91,8 @@ New API: `HttpStore.builder(url)` with `missingStatuses(...)` (I7), `Store.getSu
 6. ~~**Z8 — bounds and overflow.**~~ Done 2026-10-05 (below).
 7. ~~**H1 — bound decompression.**~~ Done 2026-10-06 (below).
 8. ~~**I1–I3 — interop.**~~ Done 2026-10-06 (below).
-9. **PF1 + F1/F2 — remote use.** ~~Partial shard reads; a shard-index cache~~ (PF1, done 2026-10-06).
-   Cloud stores and consolidated metadata (F1/F2, P2) remain.
+9. ~~**PF1 + F1/F2 — remote use.**~~ Done 2026-10-06: partial shard reads and a shard-index cache
+   (PF1), then cloud stores and consolidated metadata (F1/F2).
 10. ~~**T1/T2 — test gaps.**~~ Done 2026-10-06 (below).
 
 ---
@@ -825,13 +840,70 @@ Zarr's main use case is sharded data in object storage, so these matter more tha
 
 ## P2 — features & API
 
-Items 1–5 of the previous TODO's top-5 are F1–F5 below.
+Items 1–5 of the previous TODO's top-5 are F1–F5 below. F1, F2, F5, F6, and F7 are done (2026-10-06);
+each says what was done, then gives the original finding.
 
-- [ ] **F1 — cloud object stores (S3 / GCS / Azure).** The primary Zarr use case. First add `HttpStore`
+- [x] **F1 — cloud object stores (S3 / GCS / Azure).** The primary Zarr use case. First add `HttpStore`
   hooks (auth and custom headers, the missing-status policy, presigned URLs; see I7) so `HttpStore` can
   serve public and presigned buckets. (carried over)
-- [ ] **F2 — consolidated metadata (read + write).** One fetch instead of one per node; pairs with F1 and
+  **Done 2026-10-06.**
+    Both halves, as Erich chose ("S3 store + HttpStore hooks"):
+    - **`HttpStore` hooks:** `builder(url).header(name, value)` and `requestHeaders((method, uri) -> headers)`,
+      called for each request. Headers are checked: a valid name; no control characters; none of the
+      headers the store or the JDK owns (`Range`, `Host`, `Content-Length`, …). They go only to the base
+      URL's origin, so a redirect to another origin gets none, as curl drops `Authorization`.
+    - **`S3Store`:** S3-compatible object storage (Amazon S3, GCS through HMAC keys, MinIO, R2).
+      - SigV4 signing (`javax.crypto`, in `java.base`), the body's hash and a session token included;
+        anonymous (unsigned) use is read-only.
+      - Built from a bucket or an `s3://bucket/prefix` URL: a region, an endpoint, path-style or host-name
+        addressing, a prefix, credentials given or from the environment.
+      - Range and suffix GETs, HEAD, PUT, DELETE. Listings use ListObjectsV2 with continuation tokens,
+        `encoding-type=url`, and the `/` delimiter for `listDir`.
+      - S3's error code and message go into the exception; a 301 names the bucket's region (redirects are
+        not followed); 5xx and failed connections are retried 3 times; `missingStatuses` as on `HttpStore`.
+      - A hand-written XML reader (`java.xml` is beyond `java.base`) that refuses a DOCTYPE and bounds
+        nesting.
+    - **Not done:** `~/.aws` profiles, instance roles, SSO; Azure Shared Key (SAS URLs work through
+      `HttpStore`); GCS OAuth (a bearer token through the `HttpStore` hook works for reads).
+    - Tests:
+      - `SigV4Test`: AWS's four worked examples from the S3 API reference, and 9 vectors made with botocore
+        1.43.108 (a dev-time oracle in the scratchpad, never committed): keys with spaces, unicode, `%`,
+        `+`, `=`, `~`; a session token; port 9000; a listing query; a PUT body.
+      - `S3StoreTest` against `FakeS3`, an in-process S3 (`jdk.httpserver`, test scope) that verifies each
+        signature itself: a Zarr round trip under a prefix, a sharded partial read, paged and encoded
+        listings, 403 as absent, a wrong secret or region, retries, parallel reads.
+      - `XmlTest` (malformed input, a "billion laughs" DOCTYPE, deep nesting); `HttpStoreTest` (the hooks,
+        no headers sent to another origin).
+
+  The original finding follows.
+- [x] **F2 — consolidated metadata (read + write).** One fetch instead of one per node; pairs with F1 and
   PF5. (carried over)
+  **Done 2026-10-06.**
+    As Erich chose ("use when present", snapshot semantics, both as zarr-python 3):
+    - **Reading:** `Zarr.open(store)` uses consolidated metadata when present: inline in a v3 group's
+      `zarr.json`, or a v2 root's `.zmetadata` (one more request). `Zarr.open(store, false)` and
+      `openGroup(store, false)` read node by node. A consolidated group answers `childNames`, `children`,
+      `child`, `group`, and `array` from the snapshot, nested groups included, so a v3 tree costs one GET;
+      arrays still read chunks from the store. `ZarrGroup.isConsolidated()` says which a group does.
+      - A malformed snapshot is a `ZarrFormatException` at open, as zarr-python fails; an unknown `kind` is
+        ignored (`must_understand: false`). Entries are parsed lazily, so a bad one affects only itself, as
+        I3 has it.
+    - **Writing:** `ZarrGroup.consolidate()` walks every node below by its own metadata and writes zarr-python
+      3.4's layout: each node's stored document, flat keys ordered by depth and then by NFKC casefold, child
+      groups with an empty marker. It refuses v2 nodes (Falcon writes v3 only) and fails, before writing,
+      on a malformed node.
+    - **Staleness:** creating, resizing, or changing attributes leaves a snapshot stale until `consolidate()`
+      runs again; deleting a child also removes it from the group's stored and in-memory snapshot, as
+      zarr-python does.
+    - Oracles:
+      - 4 zarr-python fixtures (`gen_zarr_consolidated_fixtures.py`: v3, v2, a subgroup, a stale snapshot),
+        each with a sidecar of zarr-python's two views, which Falcon matches.
+      - `WriteZarrHierarchies.java` + `check_zarr_hierarchies.py`: zarr-python 3.4 reads 6 of 6
+        Falcon-written hierarchies (21 checks), and its own re-consolidation of a copy lists the same keys in
+        the same order.
+    - Tests: `ConsolidatedFixtureTest` (with exact request counts), `ConsolidatedTest`.
+
+  The original finding follows.
 - [ ] **F3 — full blosc encode configurations** (lz4 / lz4hc / zlib + bit-shuffle at a chosen `clevel`),
   and honouring the configured codec parameters on write (I9). (carried over)
 - [ ] **F4 — Zarr v2 read gaps:**
@@ -841,14 +913,62 @@ Items 1–5 of the previous TODO's top-5 are F1–F5 below.
   - `<U` / `|S` / `|O` dtypes.
 
   (carried over and extended)
-- [ ] **F5 — the `vlen-bytes` data type.** (carried over)
-- [ ] **F6 — a mutation API:**
+- [x] **F5 — the `vlen-bytes` data type.** (carried over)
+  **Done 2026-10-06.**
+    `DataType.BYTES` is zarr-python's `variable_length_bytes` (`"bytes"` opens too),
+    serialized by `vlen-bytes`; the fill value is base64. `readByteArrays`/`writeByteArrays` on `ZarrArray`
+    and `Selection` take and give `byte[][]`, each array the caller's own.
+    - The string path became a variable-length one: `VlenCodec` (`vlen-utf8`, `vlen-bytes`) replaces
+      `VlenUtf8`, `VlenChunks` replaces `StringChunks`, and a chunk is a `String[]` or a `byte[][]`. Bytes
+      therefore get everything strings have: compression, sharding, partial shard reads, `transpose` before
+      the codec. A codec that does not match the data type (`vlen-utf8` on bytes) is a format error.
+    - zarr-python 3.4's arrays read (`bytes_plain`, `bytes_sharded`, `bytes_transposed`, from the new
+      `gen_zarr_bytes_fixtures.py`); zarr-python reads what Falcon writes (7 more `check_zarr_writer.py`
+      cases); the fuzz runs over the new fixtures.
+    - Zarr v2's `|O` with a `vlen-bytes` filter is still F4.
+    - Tests: `BytesArrayTest`, `DataFixturesTest.variableLengthBytes`.
+
+  The original finding follows.
+- [x] **F6 — a mutation API:**
+  **Done 2026-10-06.**
+    **Resize:** `ZarrArray.resize(long...)`, as Erich chose:
+    - **Shrinking** deletes every chunk wholly outside the new shape.
+    - **Growing** first sets to fill the part of each old edge chunk that comes inside, so values cut
+      off by a shrink never reappear, whoever shrank the array. zarr-python's own resize brings them
+      back (checked: 70 and 5 reappear after (13,7) → (10,5) → (13,7)).
+    - The current shape is read from the store, and only `shape` is rewritten in the stored document
+      (`zarr.json`, or a v2 `.zarray`); a cached handle drops what it deleted or cleared.
+    - zarr-python reads Falcon-resized arrays, sharded, strings, and bytes included (9
+      `check_zarr_writer.py` cases).
+    - Tests: `ResizeTest`.
+
+    **Attributes and deleting:**
+    - `ZarrNode.setAttributes(JsonObject)` replaces and `updateAttributes(JsonObject)` merges top-level
+      members, with covariant returns on `ZarrGroup` and `ZarrArray`. Each rereads the stored document,
+      rewrites only its attributes (a v2 node's `.zattrs`), parses the result before writing, and returns a
+      new handle that keeps the old handle's options.
+    - `ZarrGroup.delete(String)` deletes the child and everything under it, metadata keys first, and
+      removes it from the group's consolidated metadata; `NoSuchElementException` if there is no such child.
+    - zarr-python reads the results (`check_zarr_hierarchies.py`). Tests: `ConsolidatedTest`.
+
+  The original finding follows.
   - resize;
   - update attributes;
   - delete a node;
   - ~~an explicit `overwrite` flag for create~~: done with Z1.
-- [ ] **F7 — `write_empty_chunks` option.** Writing an all-fill chunk deletes it today, which is correct;
+- [x] **F7 — `write_empty_chunks` option.** Writing an all-fill chunk deletes it today, which is correct;
   expose the zarr-python knob.
+  **Done 2026-10-06.**
+    `ZarrArray.withWriteEmptyChunks(boolean)` returns a handle that stores a chunk a write
+    leaves holding only the fill value, rather than deleting it. In a shard, each sub-chunk the write
+    touches is then stored too, as zarr-python does. Like the chunk cache, it is a handle option, not
+    metadata; handles made from the handle keep it (`withChunkCache`, `resize`). Strings and bytes honour
+    it too.
+    - zarr-python reads arrays written this way, and every chunk and sub-chunk is checked to be stored
+      (6 `check_zarr_writer.py` cases).
+    - Tests: `WriteEmptyChunksTest`.
+
+  The original finding follows.
 - [ ] **F8 — exact unsigned and complex reads.**
   - `readLongs` on uint64 always throws (it's honest, but there's no exact path short of raw bytes).
     Offer `readUnsignedLongs` (raw bits) or allow `readLongs` when all values fit.

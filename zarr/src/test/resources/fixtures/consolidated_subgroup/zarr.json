@@ -1,0 +1,15 @@
+{
+  "attributes": {
+    "title": "consolidated",
+    "nested": {
+      "list": [
+        1,
+        2.5,
+        "x"
+      ],
+      "flag": true
+    }
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

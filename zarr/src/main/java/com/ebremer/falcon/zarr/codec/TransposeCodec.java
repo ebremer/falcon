@@ -72,17 +72,22 @@ final class TransposeCodec implements ArrayArrayCodec {
     }
 
     @Override
-    public String[] encodeStrings(String[] input, int[] shape) {
-        String[] out = new String[input.length];
+    public Object[] encodeObjects(Object[] input, int[] shape) {
+        Object[] out = sameType(input);
         permute(input, out, shape, order, 1);
         return out;
     }
 
     @Override
-    public String[] decodeStrings(String[] input, int[] encodedShape) {
-        String[] out = new String[input.length];
+    public Object[] decodeObjects(Object[] input, int[] encodedShape) {
+        Object[] out = sameType(input);
         permute(input, out, encodedShape, inverse, 1);
         return out;
+    }
+
+    /** An empty array of {@code input}'s length and runtime type ({@code String[]}, {@code byte[][]}). */
+    private static Object[] sameType(Object[] input) {
+        return (Object[]) java.lang.reflect.Array.newInstance(input.getClass().getComponentType(), input.length);
     }
 
     /** The shape of a permutation: {@code out[i] = shape[perm[i]]}. */

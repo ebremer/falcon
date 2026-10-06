@@ -22,8 +22,9 @@ import java.util.function.IntUnaryOperator;
 
 /**
  * Writes one Zarr v3 array per data type and codec layout with Falcon, for check_zarr_writer.py to read
- * back with zarr-python (P1 T1). Dev-time tool, run with the JDK's source launcher from the repo root,
- * after {@code mvn -pl zarr -am compile}:
+ * back with zarr-python (P1 T1), plus P2's variable-length bytes (F5), arrays written with
+ * {@code withWriteEmptyChunks} (F7), and resized arrays (F6). Dev-time tool, run with the JDK's source
+ * launcher from the repo root, after {@code mvn -pl zarr -am compile}:
  *
  * <pre>
  *     java -cp "zarr/target/classes;core/target/classes" tools/fixtures/WriteZarrCases.java OUT_DIR
@@ -93,6 +94,61 @@ public class WriteZarrCases {
         write(root.createArray("string_partial", ArraySpec.builder(SHAPE, DataType.STRING).chunkShape(6, 4)
                 .sharding(3, 2).fillValue(new JsonString("?")).build()), "string", ByteOrder.LITTLE_ENDIAN, PARTIAL);
 
+        // P2 F5: variable_length_bytes, in the string layouts.
+        for (String layout : new String[] {"plain", "zstd", "gzip", "sharded", "sharded_zstd"}) {
+            ArraySpec.Builder b = ArraySpec.builder(SHAPE, DataType.BYTES).chunkShape(6, 4);
+            switch (layout) {
+                case "zstd" -> b.zstd();
+                case "gzip" -> b.gzip(3);
+                case "sharded" -> b.sharding(3, 2);
+                case "sharded_zstd" -> b.sharding(3, 2).zstd().crc32c();
+                default -> {
+                }
+            }
+            write(root.createArray("bytes_" + layout, b.build()), "bytes", ByteOrder.LITTLE_ENDIAN, null);
+        }
+        write(root.createArray("bytes_partial", ArraySpec.builder(SHAPE, DataType.BYTES).chunkShape(6, 4)
+                .sharding(3, 2).fillValue(new JsonString("AP8/")).build()), "bytes", ByteOrder.LITTLE_ENDIAN, PARTIAL);
+
+        // P2 F7: every chunk first written as all fill with withWriteEmptyChunks, so all are stored (and every
+        // sub-chunk of a shard), then the partial region with values.
+        for (String dtype : new String[] {"int32", "string", "bytes"}) {
+            for (boolean sharded : new boolean[] {false, true}) {
+                ArraySpec.Builder b = ArraySpec.builder(SHAPE, DataType.of(dtype)).chunkShape(6, 4);
+                if (sharded) {
+                    b.sharding(3, 2);
+                }
+                ZarrArray a = root.createArray(dtype + "_write_empty" + (sharded ? "_sharded" : ""), b.build())
+                        .withWriteEmptyChunks(true);
+                switch (dtype) {
+                    case "int32" -> a.writeInts(new int[91]);
+                    case "string" -> a.writeStrings(new String[91]);
+                    default -> a.writeByteArrays(new byte[91][]);
+                }
+                write(a, dtype, ByteOrder.LITTLE_ENDIAN, PARTIAL);
+            }
+        }
+
+        // P2 F6: written whole, shrunk to 10 x 5, grown back to 13 x 7: what was cut off reads as fill (where
+        // zarr-python's own resize brings the old values back). And one grown from 10 x 5.
+        for (String dtype : new String[] {"int32", "float64", "string", "bytes"}) {
+            for (boolean sharded : new boolean[] {false, true}) {
+                ArraySpec.Builder b = ArraySpec.builder(SHAPE, DataType.of(dtype)).chunkShape(6, 4);
+                if (sharded) {
+                    b.sharding(3, 2).zstd();
+                }
+                ZarrArray a = root.createArray(dtype + "_resized" + (sharded ? "_sharded" : ""), b.build());
+                write(a, dtype, ByteOrder.LITTLE_ENDIAN, null);
+                MANIFEST.remove(MANIFEST.size() - 1);
+                a.resize(10, 5).resize(SHAPE);
+                MANIFEST.add(entry(a.name(), dtype, new long[] {0, 10, 0, 5}));
+            }
+        }
+        ZarrArray grown = root.createArray("int16_grown", ArraySpec.builder(new long[] {10, 5}, DataType.INT16)
+                .chunkShape(4, 3).fillValue(-7).build());
+        write(grown, "int16", ByteOrder.LITTLE_ENDIAN, new long[] {0, 10, 0, 5});
+        grown.resize(SHAPE);
+
         // Layouts ArraySpec does not build, written into hand-made metadata (as zarr-python would make it).
         handMade("int32_transpose", "int32",
                 "[{\"name\":\"transpose\",\"configuration\":{\"order\":[1,0]}},{\"name\":\"bytes\",\"configuration\":{\"endian\":\"little\"}},"
@@ -107,6 +163,9 @@ public class WriteZarrCases {
                     "[" + BYTES_LE + ",{\"name\":\"blosc\",\"configuration\":{\"cname\":\"zstd\",\"clevel\":5,"
                             + "\"shuffle\":\"" + shuffle + "\",\"typesize\":8,\"blocksize\":0}}]", "[13,7]");
         }
+        handMade("bytes_transpose", "bytes",
+                "[{\"name\":\"transpose\",\"configuration\":{\"order\":[1,0]}},{\"name\":\"vlen-bytes\",\"configuration\":{}},"
+                        + "{\"name\":\"zstd\",\"configuration\":{\"level\":0,\"checksum\":false}}]");
         handMade("int16_blosc_lz4", "int16",
                 "[" + BYTES_LE + ",{\"name\":\"blosc\",\"configuration\":{\"cname\":\"lz4\",\"clevel\":5,"
                         + "\"shuffle\":\"shuffle\",\"typesize\":2,\"blocksize\":0}}]", "[13,7]");
@@ -122,8 +181,9 @@ public class WriteZarrCases {
 
     /** An array of 13 x 7 with the given chunk shape, fill 0 (or ""), with hand-written codecs. */
     static void handMade(String name, String dtype, String codecs, String chunks) throws Exception {
-        String fill = dtype.equals("string") ? "\"\"" : "0";
-        String json = "{\"zarr_format\":3,\"node_type\":\"array\",\"shape\":[13,7],\"data_type\":\"" + dtype + "\","
+        String fill = dtype.equals("string") || dtype.equals("bytes") ? "\"\"" : "0";
+        String dataType = dtype.equals("bytes") ? DataType.BYTES.name() : dtype;
+        String json = "{\"zarr_format\":3,\"node_type\":\"array\",\"shape\":[13,7],\"data_type\":\"" + dataType + "\","
                 + "\"chunk_grid\":{\"name\":\"regular\",\"configuration\":{\"chunk_shape\":" + chunks + "}},"
                 + "\"chunk_key_encoding\":{\"name\":\"default\"},\"fill_value\":" + fill + ",\"codecs\":" + codecs
                 + ",\"attributes\":{}}";
@@ -145,6 +205,8 @@ public class WriteZarrCases {
         switch (dtype) {
             case "string" -> s.writeStrings(Arrays.stream(index).mapToObj(i -> POOL[i % POOL.length] + i)
                     .toArray(String[]::new));
+            case "bytes" -> s.writeByteArrays(Arrays.stream(index).mapToObj(WriteZarrCases::bytesValue)
+                    .toArray(byte[][]::new));
             case "bool" -> s.writeInts(map(index, i -> i % 3 == 0 ? 1 : 0));
             case "int8" -> s.writeInts(map(index, i -> (i * 37 + 11) % 256 - 128));
             case "uint8" -> s.writeInts(map(index, i -> (i * 37 + 11) % 256));
@@ -172,8 +234,21 @@ public class WriteZarrCases {
             }
             default -> throw new IllegalArgumentException(dtype);
         }
-        MANIFEST.add("  {\"name\":\"" + a.name() + "\",\"dtype\":\"" + dtype + "\",\"written\":"
-                + (written == null ? "null" : Arrays.toString(written).replace(" ", "")) + "}");
+        MANIFEST.add(entry(a.name(), dtype, written));
+    }
+
+    static String entry(String name, String dtype, long[] written) {
+        return "  {\"name\":\"" + name + "\",\"dtype\":\"" + dtype + "\",\"written\":"
+                + (written == null ? "null" : Arrays.toString(written).replace(" ", "")) + "}";
+    }
+
+    /** Byte strings of 0 to 8 bytes, zeros and high bytes included (as in BytesArrayTest). */
+    static byte[] bytesValue(int i) {
+        byte[] b = new byte[i % 9];
+        for (int j = 0; j < b.length; j++) {
+            b[j] = (byte) (i * 31 + j * 7);
+        }
+        return b;
     }
 
     static int[] map(int[] index, IntUnaryOperator f) {

@@ -1,5 +1,6 @@
 package com.ebremer.falcon.zarr;
 
+import com.ebremer.falcon.zarr.codec.VlenCodec;
 import com.ebremer.falcon.zarr.data.Elements;
 import com.ebremer.falcon.zarr.datatype.DataType;
 import com.ebremer.falcon.zarr.json.Json;
@@ -93,9 +94,10 @@ public final class ArraySpec {
 
     private static List<JsonValue> buildCodecs(Builder b) {
         List<JsonValue> inner = new ArrayList<>();
-        // The array->bytes codec: vlen-utf8 for variable-length strings, otherwise the fixed-size bytes codec.
+        // The array->bytes codec: vlen-utf8 or vlen-bytes for variable-length elements, otherwise the
+        // fixed-size bytes codec.
         inner.add(b.dataType.isVariableLength()
-                ? named("vlen-utf8", JsonObject.builder().build())
+                ? named(VlenCodec.of(b.dataType).codecName(), JsonObject.builder().build())
                 : bytesCodec(b.dataType, b.endian));
         if (b.gzipLevel != null) {
             inner.add(named("gzip", JsonObject.builder().put("level", b.gzipLevel).build()));
@@ -223,7 +225,11 @@ public final class ArraySpec {
             return this;
         }
 
-        /** Sets the fill value as raw JSON, written to {@code zarr.json} as given. */
+        /**
+         * Sets the fill value as raw JSON, written to {@code zarr.json} as given: for the {@code string} data
+         * type a JSON string, and for {@code variable_length_bytes} the bytes in base64 (as zarr-python
+         * writes them). Both default to empty.
+         */
         public Builder fillValue(JsonValue fillValue) {
             this.fillValue = fillValue;
             this.fillNumber = null;

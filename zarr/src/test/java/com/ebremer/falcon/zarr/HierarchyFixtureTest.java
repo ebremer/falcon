@@ -53,8 +53,8 @@ class HierarchyFixtureTest {
     }
 
     /**
-     * P1 I10: a consolidated group's zarr.json carries "consolidated_metadata". Falcon ignores it and reads
-     * each node's own metadata, so the tree reads the same.
+     * P1 I10: a consolidated group's zarr.json carries "consolidated_metadata", which the group may carry.
+     * Since P2 F2 Falcon answers from it (ConsolidatedFixtureTest); either way the tree reads the same.
      */
     @Test
     void readsAConsolidatedGroupTree() {

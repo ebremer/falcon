@@ -83,10 +83,12 @@ abstraction — Zarr keeps its own model and HDF5 is untouched.
   touch-only-needed-chunks selection reader; zero runtime dependencies; a JPMS module on JDK 25.
 
 **Non-goals / deferred**
-- **Cloud object stores** (S3/GCS/Azure) — a `java.net.http`-based HTTP store is a possible later add
-  (§ Z8), but signed/authenticated object-store access is out of scope.
-- **Consolidated metadata** and other registered **extensions** (custom chunk grids, storage transformers)
-  beyond what the core spec mandates — read past-through of `must_understand:false` fields only.
+- ~~**Cloud object stores**~~ — done in P2 (F1, 2026-10-06): `S3Store` signs its requests with SigV4
+  (`javax.crypto`, in `java.base`) and covers S3, GCS through HMAC keys, MinIO, and R2; `HttpStore` takes
+  auth headers. Azure Shared Key and GCS OAuth remain out of scope (SAS URLs and bearer tokens work).
+- ~~**Consolidated metadata**~~ — done in P2 (F2, 2026-10-06): read (v3 inline, v2 `.zmetadata`) and
+  written (v3). Other registered **extensions** (custom chunk grids, storage transformers) beyond what the
+  core spec mandates remain out of scope: `must_understand: false` fields are read past.
 - **Blosc / Zstandard** codecs until they are hand-written in pure Java (staged in Z8) — the same
   "implement compression from scratch, no native/deps" decision made for HDF5's szip.
 - **Zarr v2** — read-compatibility is an optional Z8 add; v2 writing is out of scope.
@@ -98,7 +100,7 @@ abstraction — Zarr keeps its own model and HDF5 is untouched.
 | Language level | JDK 25, `--release 25` | Matches the reactor. |
 | Dependencies | None at runtime; JUnit 5 test-only | "Pure JDK" mandate. |
 | JSON | **Hand-written** reader/writer (`zarr.json`) | `java.base` has no JSON; keeps zero-dependency. Small, spec-scoped (objects, arrays, strings, numbers, booleans, null; UTF-8; the special float strings). |
-| Stores | Filesystem (`java.nio.file`), memory, zip (`java.util.zip`); **byte-range reads** in the SPI | Byte-range reads make sharding and partial selections cheap. Cloud/HTTP behind the same SPI later. |
+| Stores | Filesystem (`java.nio.file`), memory, zip (`java.util.zip`), HTTP and S3 (`HttpURLConnection`); **byte-range reads** in the SPI | Byte-range reads make sharding and partial selections cheap. `java.net.http` would be a module beyond `java.base`, so the remote stores use `java.net.HttpURLConnection`. |
 | Codecs | `bytes` / `transpose` hand-written; `gzip` via `java.util.zip`; `crc32c` via `java.util.zip.CRC32C`; `sharding_indexed` hand-written; `blosc`/`zstd` **from scratch** (Z8) | All pure-JDK; external compressors implemented from the published formats, not wrapped. |
 | Data model | Own N-D array/dtype/chunk model; promote to `com.ebremer.falcon.core` later | No premature cross-module abstraction. |
 | Endianness | Per the `bytes` codec `endian` config | The spec puts byte order in the codec, not the data type. |

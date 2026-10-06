@@ -1,0 +1,24 @@
+{
+ "name": "bytes_transposed",
+ "shape": [
+  3,
+  4
+ ],
+ "dtype": "variable_length_bytes",
+ "attributes": {},
+ "fill": "",
+ "values": [
+  "",
+  "1f",
+  "3e45",
+  "5d646b",
+  "7c838a91",
+  "9ba2a9b0b7",
+  "bac1c8cfd6dd",
+  "d9e0e7eef5fc03",
+  "f8ff060d141b2229",
+  "",
+  "36",
+  "555c"
+ ]
+}

@@ -3,48 +3,54 @@ package com.ebremer.falcon.zarr.data;
 import com.ebremer.falcon.zarr.chunk.ChunkKeyEncoding;
 import com.ebremer.falcon.zarr.chunk.RegularChunkGrid;
 import com.ebremer.falcon.zarr.codec.ChunkPipeline;
+import com.ebremer.falcon.zarr.codec.VlenCodec;
 import com.ebremer.falcon.zarr.metadata.ArrayMetadata;
 import com.ebremer.falcon.zarr.store.Store;
 import java.util.Arrays;
-import java.util.Objects;
 
 /**
- * The variable-length {@code string} analogue of {@link ChunkAssembler} / {@link ChunkWriter}: reads and
- * writes a hyperslab of a string array as a C-order {@code String[]}, touching only the chunks that overlap
- * the selection.
+ * The variable-length analogue of {@link ChunkAssembler} / {@link ChunkWriter}: reads and writes a
+ * hyperslab of a {@code string} or {@code variable_length_bytes} array as a C-order {@code String[]} or
+ * {@code byte[][]}, touching only the chunks that overlap the selection.
  *
- * <p>String chunks decode to {@code String[]} rather than a flat byte buffer, through the pipeline's string
- * path ({@link ChunkPipeline#decodeStringChunk}/{@link ChunkPipeline#encodeStrings}): {@code vlen-utf8},
- * or a shard of {@code vlen-utf8} sub-chunks, with an optional {@code transpose} before either. Reading part
- * of a shard fetches only the sub-chunks it needs; a write re-encodes the whole chunk.
+ * <p>Such chunks decode to an {@code Object[]} rather than a flat byte buffer, through the pipeline's
+ * variable-length path ({@link ChunkPipeline#decodeVlenChunk}/{@link ChunkPipeline#encodeVlen}):
+ * {@code vlen-utf8} or {@code vlen-bytes}, or a shard of such sub-chunks, with an optional {@code transpose}
+ * before either. Reading part of a shard fetches only the sub-chunks it needs; a write re-encodes the whole
+ * chunk.
  */
-public final class StringChunks {
+public final class VlenChunks {
 
-    private StringChunks() {
+    private VlenChunks() {
     }
 
-    /** Reads the selection {@code [offset, offset+selShape)} as a flat C-order {@code String[]}. */
-    public static String[] read(Store store, String arrayPath, ArrayMetadata meta,
+    /**
+     * Reads the selection {@code [offset, offset+selShape)} as a flat C-order array: a {@code String[]} for
+     * the {@code string} data type, a {@code byte[][]} for {@code variable_length_bytes}. Every
+     * {@code byte[]} is the caller's own.
+     */
+    public static Object[] read(Store store, String arrayPath, ArrayMetadata meta,
                                 long[] offset, long[] selShape) {
         ChunkAssembler.checkSelection(meta, offset, selShape);
 
         RegularChunkGrid grid = meta.grid();
         int rank = grid.rank();
         long[] chunkShape = grid.chunkShape();
+        ChunkPipeline pipeline = meta.pipeline();
+        VlenCodec vlen = pipeline.vlenCodec();
 
         long total = RegularChunkGrid.elementCount(selShape); // within the array, so it fits a long
         if (total > Integer.MAX_VALUE) {
             throw new IllegalArgumentException(
                     "selection of " + total + " elements is too large to read into a single array");
         }
-        String[] out = new String[(int) total];
+        Object[] out = vlen.newArray((int) total);
         if (total == 0) {
             return out;
         }
 
-        ChunkPipeline pipeline = meta.pipeline();
         ChunkKeyEncoding encoding = meta.chunkKeyEncoding();
-        String fill = fillString(meta);
+        Object fill = vlen.fill(meta.fillValue());
         int[] chunkShapeInt = ChunkAssembler.toInt(chunkShape);
 
         long[] selEnd = new long[rank];
@@ -68,10 +74,10 @@ public final class StringChunks {
                 regionShape[i] = (int) (hi - lo);
             }
             String key = ChunkAssembler.chunkKey(arrayPath, encoding, coord);
-            String[] chunk = pipeline.decodeStringChunk(new StoreChunkBytes(store, key, null), fill,
+            Object[] chunk = pipeline.decodeVlenChunk(new StoreChunkBytes(store, key, null), fill,
                     regionOrigin, regionShape);
             if (chunk == null) {
-                chunk = fillChunk(chunkShapeInt, fill);
+                chunk = fillChunk(vlen, chunkShapeInt, fill);
             }
             copyIntersection(out, selShape, offset, selEnd, coord, chunkShape, chunk);
 
@@ -86,12 +92,16 @@ public final class StringChunks {
                 break;
             }
         }
-        return out;
+        return vlen.detach(out, fill);
     }
 
-    /** Writes {@code elements} (the selection's strings, C order) into {@code [offset, offset+selShape)}. */
-    public static void write(Store store, String arrayPath, ArrayMetadata meta,
-                             long[] offset, long[] selShape, String[] elements) {
+    /**
+     * Writes {@code elements} (the selection's elements, C order, a {@code String[]} or {@code byte[][]} to
+     * match the data type) into {@code [offset, offset+selShape)}. A chunk left holding only the fill value
+     * is deleted, unless {@code writeEmptyChunks}, which stores it.
+     */
+    public static void write(Store store, String arrayPath, ArrayMetadata meta, long[] offset, long[] selShape,
+                             Object[] elements, boolean writeEmptyChunks) {
         ChunkAssembler.checkSelection(meta, offset, selShape);
         if (!store.isWritable()) {
             throw new UnsupportedOperationException("store is read-only");
@@ -112,8 +122,9 @@ public final class StringChunks {
         }
 
         ChunkPipeline pipeline = meta.pipeline();
+        VlenCodec vlen = pipeline.vlenCodec();
         ChunkKeyEncoding encoding = meta.chunkKeyEncoding();
-        String fill = fillString(meta);
+        Object fill = vlen.fill(meta.fillValue());
         int[] chunkShapeInt = ChunkAssembler.toInt(chunkShape);
 
         long[] selEnd = new long[rank];
@@ -127,8 +138,8 @@ public final class StringChunks {
 
         long[] coord = firstChunk.clone();
         while (true) {
-            writeChunk(store, arrayPath, pipeline, encoding, coord, offset, selShape, selEnd, chunkShape,
-                    arrayShape, chunkShapeInt, elements, fill);
+            writeChunk(store, arrayPath, pipeline, vlen, encoding, coord, offset, selShape, selEnd, chunkShape,
+                    arrayShape, chunkShapeInt, elements, fill, writeEmptyChunks);
             int d = rank - 1;
             for (; d >= 0; d--) {
                 if (++coord[d] <= lastChunk[d]) {
@@ -142,10 +153,10 @@ public final class StringChunks {
         }
     }
 
-    private static void writeChunk(Store store, String arrayPath, ChunkPipeline pipeline,
+    private static void writeChunk(Store store, String arrayPath, ChunkPipeline pipeline, VlenCodec vlen,
                                    ChunkKeyEncoding encoding, long[] coord, long[] selOffset, long[] selShape,
                                    long[] selEnd, long[] chunkShape, long[] arrayShape, int[] chunkShapeInt,
-                                   String[] elements, String fill) {
+                                   Object[] elements, Object fill, boolean writeEmptyChunks) {
         int rank = chunkShape.length;
         long[] srcOrigin = new long[rank];
         long[] dstOrigin = new long[rank];
@@ -163,26 +174,26 @@ public final class StringChunks {
         String key = ChunkAssembler.chunkKey(arrayPath, encoding, coord);
 
         synchronized (ChunkLocks.of(store, key)) {
-            String[] chunk = null;
+            Object[] chunk = null;
             if (!coversChunk) {
-                chunk = pipeline.decodeStringChunk(new StoreChunkBytes(store, key, null), fill,
+                chunk = pipeline.decodeVlenChunk(new StoreChunkBytes(store, key, null), fill,
                         new int[rank], chunkShapeInt);
             }
             if (chunk == null) {
-                chunk = fillChunk(chunkShapeInt, fill); // also the part of an edge chunk past the array
+                chunk = fillChunk(vlen, chunkShapeInt, fill); // also the part of an edge chunk past the array
             }
             Blocks.copyObjects(elements, selShape, srcOrigin, chunk, chunkShape, dstOrigin, block);
 
-            if (isAllFill(chunk, fill)) {
+            if (!writeEmptyChunks && vlen.isAllFill(chunk, fill)) {
                 store.delete(key); // an all-fill chunk is represented by its absence
             } else {
-                store.set(key, pipeline.encodeStrings(chunk, fill));
+                store.set(key, pipeline.encodeVlen(chunk, fill, writeEmptyChunks));
             }
         }
     }
 
-    private static void copyIntersection(String[] out, long[] selShape, long[] selOffset, long[] selEnd,
-                                         long[] coord, long[] chunkShape, String[] chunk) {
+    private static void copyIntersection(Object[] out, long[] selShape, long[] selOffset, long[] selEnd,
+                                         long[] coord, long[] chunkShape, Object[] chunk) {
         int rank = selShape.length;
         long[] srcOrigin = new long[rank];
         long[] dstOrigin = new long[rank];
@@ -198,27 +209,13 @@ public final class StringChunks {
         Blocks.copyObjects(chunk, chunkShape, srcOrigin, out, selShape, dstOrigin, block);
     }
 
-    private static String[] fillChunk(int[] chunkShape, String fill) {
+    private static Object[] fillChunk(VlenCodec vlen, int[] chunkShape, Object fill) {
         int count = 1;
         for (int d : chunkShape) {
             count *= d;
         }
-        String[] chunk = new String[count];
+        Object[] chunk = vlen.newArray(count);
         Arrays.fill(chunk, fill);
         return chunk;
-    }
-
-    /** Whether every element equals {@code fill}; a {@code null} counts as the empty string it is stored as. */
-    private static boolean isAllFill(String[] chunk, String fill) {
-        for (String s : chunk) {
-            if (!Objects.equals(s == null ? "" : s, fill)) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    private static String fillString(ArrayMetadata meta) {
-        return meta.fillValue().asString();
     }
 }

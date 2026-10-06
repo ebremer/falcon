@@ -67,6 +67,12 @@ public final class DataType {
     public static final DataType COMPLEX128 = new DataType("complex128", DataTypeKind.COMPLEX, 16);
     /** {@code string}: variable-length UTF-8 (elements have no fixed byte size). */
     public static final DataType STRING = new DataType("string", DataTypeKind.STRING, -1);
+    /**
+     * {@code variable_length_bytes}: variable-length byte strings, as zarr-python names them (it reads the
+     * shorter {@code "bytes"} too, and so does {@link #of}). Elements have no fixed byte size, and the fill
+     * value is base64 text.
+     */
+    public static final DataType BYTES = new DataType("variable_length_bytes", DataTypeKind.BYTES, -1);
 
     private static final Map<String, DataType> BUILTINS = Map.ofEntries(
             Map.entry(BOOL.name, BOOL),
@@ -77,7 +83,8 @@ public final class DataType {
             Map.entry(FLOAT16.name, FLOAT16), Map.entry(FLOAT32.name, FLOAT32),
             Map.entry(FLOAT64.name, FLOAT64),
             Map.entry(COMPLEX64.name, COMPLEX64), Map.entry(COMPLEX128.name, COMPLEX128),
-            Map.entry(STRING.name, STRING));
+            Map.entry(STRING.name, STRING),
+            Map.entry(BYTES.name, BYTES), Map.entry("bytes", BYTES));
 
     private final String name;
     private final DataTypeKind kind;
@@ -132,9 +139,9 @@ public final class DataType {
         return byteCount;
     }
 
-    /** Whether elements have no fixed byte size (the {@code string} type). */
+    /** Whether elements have no fixed byte size (the {@code string} and {@code variable_length_bytes} types). */
     public boolean isVariableLength() {
-        return kind == DataTypeKind.STRING;
+        return kind == DataTypeKind.STRING || kind == DataTypeKind.BYTES;
     }
 
     /**
@@ -165,7 +172,7 @@ public final class DataType {
                 yield out;
             }
             case RAW -> decodeRaw(fill);
-            case STRING -> throw new UnsupportedOperationException(
+            case STRING, BYTES -> throw new UnsupportedOperationException(
                     "the '" + name + "' data type has no fixed-size fill encoding; its fill value is a string");
         };
     }
@@ -199,7 +206,7 @@ public final class DataType {
                 }
                 yield new JsonArray(bytes);
             }
-            case STRING -> throw new UnsupportedOperationException(
+            case STRING, BYTES -> throw new UnsupportedOperationException(
                     "the '" + name + "' data type has no fixed-size fill encoding; its fill value is a string");
         };
     }

@@ -7,8 +7,10 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.URISyntaxException;
-import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
@@ -39,7 +41,15 @@ import java.util.TreeSet;
  *       absent too, at the cost of reading a denied key as missing (fill values) rather than failing;</li>
  *   <li>a whole value is read into one array of at most 2&nbsp;GB, and a range never beyond the length
  *       asked for: a larger body fails with {@link ZarrException}.</li>
+ *   <li>headers of the caller's, fixed ({@link Builder#header}) or made for each request
+ *       ({@link Builder#requestHeaders}, for a bearer token that expires, or a signature), are sent only
+ *       to the base URL's origin (its scheme, host, and port): a redirect elsewhere gets none of them, as
+ *       curl drops {@code Authorization}. So an {@code http} base URL that redirects to {@code https}
+ *       loses them; give the {@code https} URL.</li>
  * </ul>
+ *
+ * <p>For S3-compatible object storage with credentials, listing, and writing, see {@link S3Store}; a
+ * public bucket, or a presigned or SAS URL, needs only this store.
  *
  * <p>It may be used from several threads at once.
  */
@@ -47,16 +57,19 @@ public final class HttpStore implements Store {
 
     private static final int DEFAULT_TIMEOUT_MILLIS = 30_000;
     private static final int MAX_REDIRECTS = 10;
-    private static final long MAX_BODY_BYTES = Integer.MAX_VALUE - 8; // the largest array the JDK allocates
+    private static final long MAX_BODY_BYTES = HttpIo.MAX_BODY_BYTES;
     private static final int HTTP_TEMPORARY_REDIRECT = 307;
     private static final int HTTP_PERMANENT_REDIRECT = 308;
-    private static final int HTTP_RANGE_NOT_SATISFIABLE = 416;
+    private static final int HTTP_RANGE_NOT_SATISFIABLE = HttpIo.HTTP_RANGE_NOT_SATISFIABLE;
 
     private final String base;  // scheme://authority/path, without a trailing '/'
     private final String query; // the base URL's query (no '?'), sent with every key, or null
+    private final String origin; // the base URL's origin: the only one the caller's headers go to
     private final int timeoutMillis;
     private final Set<Integer> missingStatuses;
     private final long maxBodyBytes;
+    private final Map<String, String> headers;  // fixed headers, checked
+    private final RequestHeaders requestHeaders; // per-request headers, or null
 
     private HttpStore(Builder b) {
         String url = b.baseUrl;
@@ -77,9 +90,35 @@ public final class HttpStore implements Store {
         String path = question < 0 ? url : url.substring(0, question);
         this.query = question < 0 || question == url.length() - 1 ? null : url.substring(question + 1);
         this.base = path.endsWith("/") ? path.substring(0, path.length() - 1) : path;
+        this.origin = HttpIo.origin(uri);
         this.timeoutMillis = b.timeoutMillis;
         this.missingStatuses = Set.copyOf(b.missingStatuses);
         this.maxBodyBytes = b.maxBodyBytes;
+        this.headers = Map.copyOf(b.givenHeaders());
+        this.requestHeaders = b.requestHeaders;
+    }
+
+    /**
+     * Makes headers for each request an {@link HttpStore} sends, such as a bearer token that expires and
+     * must be fetched again, or a signature over the request. It is called once per request, redirects to
+     * the same origin included, and never for a request to another origin, which gets none of the
+     * caller's headers. It may be called from several threads at once.
+     */
+    @FunctionalInterface
+    public interface RequestHeaders {
+
+        /**
+         * The headers to add to one request.
+         *
+         * @param method the request's method: {@code GET} or {@code HEAD}
+         * @param uri    the request's full URL, its key percent-encoded and its query included
+         * @return the headers to add, by name; empty or {@code null} for none. A name the store or the JDK's
+         *         HTTP client sets ({@code Range}, {@code Host}, {@code Content-Length}, ...), or a value
+         *         with a line break or another control character, is refused with
+         *         {@link IllegalArgumentException} when the request is made. A header that
+         *         {@link Builder#header} also sets is sent with this value.
+         */
+        Map<String, String> headers(String method, URI uri);
     }
 
     /** Opens a read-only store rooted at {@code baseUrl} (for example {@code https://host/data/store}). */
@@ -110,6 +149,9 @@ public final class HttpStore implements Store {
         private int timeoutMillis = DEFAULT_TIMEOUT_MILLIS;
         private Set<Integer> missingStatuses = Set.of(HttpURLConnection.HTTP_NOT_FOUND);
         private long maxBodyBytes = MAX_BODY_BYTES;
+        private final Map<String, String> headers = new LinkedHashMap<>(); // lower-case name -> value
+        private final Map<String, String> headerNames = new LinkedHashMap<>(); // lower-case name -> as given
+        private RequestHeaders requestHeaders;
 
         private Builder(String baseUrl) {
             this.baseUrl = Objects.requireNonNull(baseUrl, "baseUrl");
@@ -154,6 +196,38 @@ public final class HttpStore implements Store {
             return this;
         }
 
+        /**
+         * Adds a header to every request to the base URL's origin, such as {@code Authorization} or an API
+         * key. Call it once per header; a second call with the same name (in any case) replaces the value.
+         *
+         * @param name  the header's name
+         * @param value its value
+         * @return this builder
+         * @throws IllegalArgumentException if the name is not a valid header name or is one the store or the
+         *                                  JDK's HTTP client sets ({@code Range}, {@code Host},
+         *                                  {@code Content-Length}, ...), or the value holds a line break or
+         *                                  another control character
+         */
+        public Builder header(String name, String value) {
+            HttpIo.checkHeader(name, value);
+            String lower = name.toLowerCase(Locale.ROOT);
+            headers.put(lower, value);
+            headerNames.put(lower, name);
+            return this;
+        }
+
+        /**
+         * Sets a hook that makes headers for each request, called as each is sent: for a token that expires,
+         * or to sign a request. Its headers go only to the base URL's origin, like {@link #header}'s.
+         *
+         * @param hook the hook, or {@code null} for none
+         * @return this builder
+         */
+        public Builder requestHeaders(RequestHeaders hook) {
+            this.requestHeaders = hook;
+            return this;
+        }
+
         /** Caps a whole value read into one array (default and most: the JDK's array limit). For tests. */
         Builder maxBodyBytes(long maxBodyBytes) {
             this.maxBodyBytes = Math.min(maxBodyBytes, MAX_BODY_BYTES);
@@ -169,6 +243,13 @@ public final class HttpStore implements Store {
          */
         public HttpStore build() {
             return new HttpStore(this);
+        }
+
+        /** The fixed headers by the names given, for the store. */
+        private Map<String, String> givenHeaders() {
+            Map<String, String> given = new LinkedHashMap<>();
+            headers.forEach((lower, value) -> given.put(headerNames.get(lower), value));
+            return given;
         }
     }
 
@@ -401,19 +482,7 @@ public final class HttpStore implements Store {
      * ({@code A-Z a-z 0-9 - . _ ~}) becomes {@code %XX}, and {@code '/'} stays the segment separator.
      */
     static String encodePath(String key) {
-        StringBuilder out = new StringBuilder(key.length() + 16);
-        for (byte b : key.getBytes(StandardCharsets.UTF_8)) {
-            int c = b & 0xff;
-            boolean keep = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
-                    || c == '-' || c == '.' || c == '_' || c == '~' || c == '/';
-            if (keep) {
-                out.append((char) c);
-            } else {
-                out.append('%').append(Character.toUpperCase(Character.forDigit(c >> 4, 16)))
-                        .append(Character.toUpperCase(Character.forDigit(c & 0xf, 16)));
-            }
-        }
-        return out.toString();
+        return HttpIo.encodePath(key);
     }
 
     /**
@@ -441,8 +510,20 @@ public final class HttpStore implements Store {
                 if (range != null) {
                     connection.setRequestProperty("Range", range);
                 }
-                code = connection.getResponseCode();
             } catch (IOException | IllegalArgumentException e) {
+                throw new ZarrException("failed to request '" + key + "' over HTTP", e);
+            }
+            if (HttpIo.origin(uri).equals(origin)) { // the caller's headers never go to another origin
+                try {
+                    addHeaders(connection, method, uri);
+                } catch (RuntimeException e) {
+                    connection.disconnect();
+                    throw e;
+                }
+            }
+            try {
+                code = connection.getResponseCode();
+            } catch (IOException e) {
                 throw new ZarrException("failed to request '" + key + "' over HTTP", e);
             }
             if (!isRedirect(code)) {
@@ -470,6 +551,18 @@ public final class HttpStore implements Store {
         }
     }
 
+    /** Adds the fixed headers, then the hook's (which win over a fixed header of the same name). */
+    private void addHeaders(HttpURLConnection connection, String method, URI uri) {
+        headers.forEach(connection::setRequestProperty);
+        if (requestHeaders != null) {
+            Map<String, String> made = requestHeaders.headers(method, uri);
+            if (made != null) {
+                HttpIo.checkHeaders(made);
+                made.forEach(connection::setRequestProperty);
+            }
+        }
+    }
+
     private static boolean isRedirect(int code) {
         return code == HttpURLConnection.HTTP_MOVED_PERM || code == HttpURLConnection.HTTP_MOVED_TEMP
                 || code == HttpURLConnection.HTTP_SEE_OTHER || code == HTTP_TEMPORARY_REDIRECT
@@ -487,111 +580,26 @@ public final class HttpStore implements Store {
 
     /** A whole value, which must fit one array. */
     private byte[] readBody(HttpURLConnection connection, String key) throws IOException {
-        long declared = connection.getContentLengthLong();
-        if (declared > maxBodyBytes) {
-            throw new ZarrException("'" + key + "' is " + declared + " bytes, too large to read into one array");
-        }
-        try (InputStream in = connection.getInputStream()) {
-            if (declared >= 0) {
-                byte[] body = in.readNBytes((int) declared);
-                if (body.length < declared) {
-                    throw new ZarrException("'" + key + "' ended after " + body.length + " of " + declared + " bytes");
-                }
-                return body;
-            }
-            byte[] body = in.readNBytes((int) maxBodyBytes); // no length given: read up to the cap
-            if (in.read() >= 0) {
-                throw new ZarrException("'" + key + "' is more than " + maxBodyBytes
-                        + " bytes, too large to read into one array");
-            }
-            return body;
-        }
+        return HttpIo.readBody(connection, key, maxBodyBytes);
     }
 
-    /** A partial body, which must be no longer than the {@code len} bytes asked for. */
     private static byte[] readAtMost(HttpURLConnection connection, int len, String key) throws IOException {
-        long declared = connection.getContentLengthLong();
-        if (declared > len) {
-            throw new ZarrException("asked for " + len + " bytes of '" + key + "' but the server sends " + declared);
-        }
-        try (InputStream in = connection.getInputStream()) {
-            byte[] body = in.readNBytes(len);
-            if (in.read() >= 0) {
-                throw new ZarrException("asked for " + len + " bytes of '" + key + "' but the server sends more");
-            }
-            return body;
-        }
+        return HttpIo.readAtMost(connection, len, key);
     }
 
-    /** Skips {@code n} bytes; false if the stream ends first. */
     private static boolean skip(InputStream in, long n) throws IOException {
-        long left = n;
-        while (left > 0) {
-            long skipped = in.skip(left);
-            if (skipped <= 0) {
-                if (in.read() < 0) {
-                    return false;
-                }
-                skipped = 1;
-            }
-            left -= skipped;
-        }
-        return true;
+        return HttpIo.skip(in, n);
     }
 
-    /** The last {@code len} bytes of a stream of unknown length, keeping no more than {@code len}. */
     private static byte[] tail(InputStream in, int len) throws IOException {
-        byte[] ring = new byte[len];
-        long total = 0;
-        byte[] chunk = new byte[8192];
-        for (int n; (n = in.read(chunk)) >= 0; ) {
-            for (int i = 0; i < n; i++) {
-                ring[(int) ((total + i) % len)] = chunk[i];
-            }
-            total += n;
-        }
-        int size = (int) Math.min(total, len);
-        byte[] out = new byte[size];
-        long start = total - size;
-        for (int i = 0; i < size; i++) {
-            out[i] = ring[(int) ((start + i) % len)];
-        }
-        return out;
+        return HttpIo.tail(in, len);
     }
 
     /**
-     * Parses {@code Content-Range: bytes first-last/total} (or {@code bytes *}{@code /total}) into
-     * {@code {first, last, total}}, with -1 for a part given as {@code *}; {@code null} if absent or
-     * unreadable.
+     * Parses {@code Content-Range: bytes first-last/total} into {@code {first, last, total}}; see
+     * {@link HttpIo#contentRange}.
      */
     static long[] contentRange(String header) {
-        if (header == null) {
-            return null;
-        }
-        String h = header.trim();
-        if (!h.regionMatches(true, 0, "bytes ", 0, 6)) {
-            return null;
-        }
-        h = h.substring(6).trim();
-        int slash = h.indexOf('/');
-        if (slash < 0) {
-            return null;
-        }
-        try {
-            String span = h.substring(0, slash).trim();
-            String size = h.substring(slash + 1).trim();
-            long total = size.equals("*") ? -1 : Long.parseLong(size);
-            if (span.equals("*")) {
-                return new long[] {-1, -1, total};
-            }
-            int dash = span.indexOf('-');
-            if (dash < 0) {
-                return null;
-            }
-            return new long[] {Long.parseLong(span.substring(0, dash).trim()),
-                Long.parseLong(span.substring(dash + 1).trim()), total};
-        } catch (NumberFormatException e) {
-            return null;
-        }
+        return HttpIo.contentRange(header);
     }
 }

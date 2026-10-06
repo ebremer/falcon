@@ -29,7 +29,9 @@ ZarrArray array = root.asArray();                            // or root.asGroup(
 ```
 
 `Zarr.open(Store)` opens any store (see [Stores](#stores)); `Zarr.open(Path)` is the convenience for a
-read-only directory. `Zarr.openArray(store)` / `Zarr.openGroup(store)` assert the root's kind.
+read-only directory. `Zarr.openArray(store)` / `Zarr.openGroup(store)` assert the root's kind. A root
+group with [consolidated metadata](#consolidated-metadata) is opened from it; `Zarr.open(store, false)`
+reads every node's own metadata instead.
 
 ## Reading arrays
 
@@ -116,6 +118,28 @@ covered in part, only the sub-chunks the write touches are decoded and re-encode
 stored bytes. A chunk that ends up holding only the fill value is **not stored** — its absence *is* the
 fill, which is how Zarr represents empty chunks.
 
+**Storing empty chunks.** zarr-python's `write_empty_chunks` is a handle option:
+`a.withWriteEmptyChunks(true)` returns a handle that stores an all-fill chunk like any other (and, in a
+shard, each sub-chunk the write touches). Reads are the same either way; stored empty chunks cost space,
+but every chunk written shows up in a listing of the store. The option is not recorded in the metadata:
+it belongs to the handle, which passes it on to the handles it makes (`withChunkCache`, `resize`).
+
+**Resizing.** `a.resize(newShape...)` changes the shape and returns a handle on the resized array; the
+chunk shape, data, and every other field of the stored metadata stay as they were (a v2 array's `.zarray`
+is rewritten in place).
+
+```java
+ZarrArray longer = a.resize(2000);   // grow: the new elements read as the fill value
+ZarrArray shorter = a.resize(500);   // shrink: chunks wholly past 500 are deleted
+```
+
+Shrinking deletes every chunk wholly outside the new shape (one store delete per chunk in the removed part
+of the grid). Growing sets to the fill value the part of each old edge chunk that comes inside the array,
+which rewrites the stored edge chunks when the old shape was not a multiple of the chunk shape. So values a
+shrink cut off never come back, whoever shrank the array; zarr-python's own resize skips that step, and
+after shrinking and growing it reads the old values again. A resize is not atomic: let no other writer
+touch the array meanwhile, and note that handles opened earlier keep the old shape.
+
 `build()` checks the whole spec as opening the array would (shapes, fill value, dimension names, chunk
 key encoding, codecs, and that a chunk fits one Java array), so a bad spec fails with
 `IllegalArgumentException` before anything is stored.
@@ -160,9 +184,9 @@ ZarrGroup g = Zarr.createGroup(store);
 g.createGroup("model").createArray("weights", spec).writeFloats(...);
 ```
 
-Navigation reads the store on demand, so a group reflects the store's current contents. Opening a node
-fetches its metadata directly, without probing first: one request for a v3 node. Creating a node where
-one exists needs `overwrite` (see [Writing](#writing)).
+Navigation reads the store on demand, so a group reflects the store's current contents, unless it answers
+from consolidated metadata (below). Opening a node fetches its metadata directly, without probing first:
+one request for a v3 node. Creating a node where one exists needs `overwrite` (see [Writing](#writing)).
 
 `children()`, `arrays()`, and `groups()` leave out a child Falcon cannot open (malformed metadata, or a
 feature it does not implement); `childNames()` still lists it, and `child(name)` throws the reason. A new
@@ -170,16 +194,49 @@ node's name must not be empty, contain `/`, consist only of periods, start with 
 specification), be a metadata key name (`zarr.json`, `.zarray`, …), or end in `.` or a space.
 
 Metadata is read as the v3 specification says: a `zarr.json` member Falcon does not know fails to open
-unless it is an object with `"must_understand": false` (zarr-python's `consolidated_metadata` is accepted
-and ignored). The specification's shorthand is accepted too: a codec, chunk grid, or chunk key encoding
-given by its bare name (`"codecs": ["bytes"]`), and a core data type as `{"name": "int32"}`.
+unless it is an object with `"must_understand": false` (zarr-python's `consolidated_metadata` is accepted,
+and used as below). The specification's shorthand is accepted too: a codec, chunk grid, or chunk key
+encoding given by its bare name (`"codecs": ["bytes"]`), and a core data type as `{"name": "int32"}`.
+
+### Consolidated metadata
+
+A group can store a snapshot of the metadata of every node below it, so a reader learns the whole
+hierarchy from one fetch, which matters over a network. `Zarr.open(store)` uses it when present, as
+zarr-python 3 does: for v3 it is inside the group's `zarr.json`, and for a v2 root it is `.zmetadata` (one
+more request). Walking a consolidated tree (`childNames`, `children`, `child`, `group`, `array`) then reads
+nothing more; arrays still read their chunks from the store. `group.isConsolidated()` says whether a group
+answers from a snapshot, and `Zarr.open(store, false)` reads every node's own metadata.
+
+```java
+ZarrGroup root = Zarr.openGroup(store).consolidate();   // write the snapshot (v3 only)
+ZarrGroup remote = Zarr.openGroup(s3Store);             // one GET, then the whole tree from the snapshot
+```
+
+`consolidate()` walks every node below the group by its own metadata and writes the snapshot into the
+group's `zarr.json` in zarr-python 3.4's layout, which zarr-python reads with `use_consolidated=True`. It
+refuses a v2 hierarchy (Falcon writes v3 only) and fails, before writing anything, if a node's metadata is
+malformed. A malformed snapshot fails to open; use `Zarr.open(store, false)` to read around it.
+
+The snapshot is what the hierarchy was when it was consolidated: nodes created, resized, or given new
+attributes later look as they were until `consolidate()` runs again. Deleting a child (below) is the one
+change that also updates the group's own snapshot, as in zarr-python.
+
+### Changing attributes and deleting nodes
+
+`node.setAttributes(attrs)` replaces a node's attributes; `node.updateAttributes(changes)` merges top-level
+members, as zarr-python's `attrs.update` does. Both reread the node's stored metadata and rewrite only its
+attributes (for a v2 node, `.zattrs`), and return a new handle; the old one keeps what it was opened with.
+`group.delete(name)` deletes the child and everything under it, its metadata first, so a delete cut short
+leaves no node behind, and removes it from the group's consolidated metadata. Deleting needs a store that
+can list its keys (not `HttpStore`). None of these is atomic: two processes changing one node race, and
+the last write wins.
 
 ## Data types and fill values
 
 Core data types are modeled by `DataType`: `bool`, `int8/16/32/64`, `uint8/16/32/64`, `float16/32/64`,
-`complex64/128`, the raw `r<N>` family, and the variable-length `string` type. Byte order is **not** part
-of the data type — it lives in the `bytes` codec (`ArraySpec.endian`, or the v2 dtype string when reading
-v2).
+`complex64/128`, the raw `r<N>` family, and the variable-length `string` and `variable_length_bytes`
+types. Byte order is **not** part of the data type — it lives in the `bytes` codec (`ArraySpec.endian`, or
+the v2 dtype string when reading v2).
 
 A fill value is stored as JSON; `array.fillValue()` returns it, and `array.fillValueBytes(order)` decodes
 it to element bytes. Non-finite floats use the strings `"NaN"`, `"Infinity"`, `"-Infinity"`; a NaN other
@@ -211,6 +268,25 @@ sharded (`vlen-utf8` inside the shard, as zarr-python writes sharded string arra
 transposed (`transpose` before `vlen-utf8`, zarr-python's order). A `null` element is written as `""`, as
 numcodecs writes Python's `None`.
 
+### Variable-length bytes
+
+`DataType.BYTES` is zarr-python's `variable_length_bytes` (what `VariableLengthBytes()` creates; the
+shorter name `"bytes"` opens too): byte strings of any length, serialized by the `vlen-bytes` codec, which
+lays them out as `vlen-utf8` does. Its fill value is the bytes in base64 (default `""`, no bytes). Read and
+write it as `byte[][]`:
+
+```java
+ZarrArray a = Zarr.createArray(store, ArraySpec.builder(new long[] {3}, DataType.BYTES)
+        .fillValue(new JsonString(Base64.getEncoder().encodeToString(new byte[] {0, -1})))
+        .build());
+a.writeByteArrays(new byte[][] {{1, 2, 3}, {}, null});    // null is written as no bytes
+byte[][] back = a.readByteArrays();                       // and Selection.readByteArrays()/writeByteArrays()
+```
+
+Each `byte[]` returned is the caller's own. Everything said of strings above holds: compression,
+sharding, `transpose` before the codec, and the other accessors refusing the type. zarr-python marks the
+type as not yet in the v3 specification, and so may other implementations.
+
 ## Codecs and compression
 
 Falcon implements the Zarr v3 codec pipeline `(array→array)* (array→bytes) (bytes→bytes)*`:
@@ -219,6 +295,7 @@ Falcon implements the Zarr v3 codec pipeline `(array→array)* (array→bytes) (
 |---|---|---|
 | `bytes` (endianness) | ✅ | ✅ |
 | `vlen-utf8` (variable-length strings) | ✅ | ✅ |
+| `vlen-bytes` (variable-length byte strings) | ✅ | ✅ |
 | `transpose` (axis order) | ✅ | ✅ |
 | `gzip` | ✅ | ✅ |
 | `crc32c` (checksum) | ✅ | ✅ |
@@ -238,7 +315,7 @@ header, but not the compressor the metadata names).
 
 ## Stores
 
-A `Store` is a key→value map with byte-range reads; the module ships four:
+A `Store` is a key→value map with byte-range reads; the module ships five:
 
 ```java
 import com.ebremer.falcon.zarr.store.*;
@@ -249,12 +326,14 @@ FileSystemStore.openReadOnly(root);
 ZipStore.openReadOnly(archive);                     // a .zip archive, read-only
 ZipStore.pack(sourceStore, archivePath);            // build a .zip from any store
 HttpStore.openReadOnly("https://host/data/store");  // read-only over HTTP(S)
+S3Store.fromUrl("s3://bucket/data.zarr").build();   // S3-compatible object storage
 ```
 
 `HttpStore` uses HTTP `Range` requests, so a remote sharded array reads only the bytes it needs. Plain
 HTTP has no directory listing, so a group's children cannot be *enumerated* over HTTP (a named child still
-opens fine). Implement `Store` yourself for other backends (object stores, databases); `getSuffix`, which
-reads the last bytes of a value, has a default you can override with a single request.
+opens fine, and a consolidated group lists its children from its snapshot). Implement `Store` yourself
+for other backends (databases, other object stores); `getSuffix`, which reads the last bytes of a value,
+has a default you can override with a single request.
 
 `HttpStore` percent-encodes keys, keeps a base URL's query (presigned or SAS URLs) on every request, and
 follows redirects (http to https, never back). Only 404 means a key is absent. For an S3 or GCS bucket
@@ -262,6 +341,39 @@ that answers 403 for absent keys, build the store with
 `HttpStore.builder(url).missingStatuses(404, 403).build()`; a denied key then reads as fill, so do this
 only for public buckets. Bodies are bounded: a response longer than asked for fails rather than being
 buffered.
+
+`HttpStore` can also authenticate: `builder(url).header("Authorization", "Bearer …")` adds a fixed header,
+and `requestHeaders((method, uri) -> Map.of(...))` computes headers for each request, for tokens that
+expire. Both go only to the base URL's origin (scheme, host, and port); a redirect elsewhere gets none of
+them, as curl drops `Authorization`. Headers the store or the JDK owns (`Range`, `Host`, `Content-Length`,
+…) and values with control characters are refused.
+
+### Cloud object stores
+
+`S3Store` reads, lists, and writes S3-compatible object storage: Amazon S3, Google Cloud Storage (its XML
+API with HMAC keys, region `auto`), MinIO, and Cloudflare R2.
+
+```java
+Store store = S3Store.fromUrl("s3://my-bucket/data/image.zarr")
+        .region("eu-west-1")
+        .fromEnvironment()   // AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN, AWS_REGION
+        .build();
+ZarrGroup root = Zarr.openGroup(store);
+```
+
+- Requests are signed with AWS Signature Version 4 (`credentials(id, secret[, token])`, or
+  `fromEnvironment()`). Without credentials, the default, they go unsigned, for public buckets, and the
+  store is read-only (`readOnly()` makes a signed one read-only too).
+- `endpoint("http://localhost:9000")` names another service and addresses the bucket in the path;
+  `pathStyle(false)` puts it in the host name. `prefix(...)`, or the path of an `s3://` URL, roots the store
+  inside the bucket.
+- Listings use ListObjectsV2 with the `/` delimiter, so `childNames()` works, a page of 1,000 keys per
+  request. Writes are single PUTs (a value is at most 2 GB).
+- A bucket that may be read but not listed answers 403 for an absent key: pass `missingStatuses(404, 403)`.
+- Server errors (500, 502, 503, 504) and failed connections are retried 3 times (`maxRetries`). A bucket
+  in another region is reported with its region; redirects are not followed.
+- Not supported: `~/.aws` profiles, instance roles, and SSO; Azure's Shared Key (read Azure through a SAS
+  URL on `HttpStore`); GCS OAuth (use HMAC keys, or a bearer token on `HttpStore` for reads).
 
 `ZipStore` reads a range of an uncompressed (STORED) entry directly, so sharded arrays in a ZIP read only
 what they need; `ZipStore.pack` writes STORED entries, as zarr-python does.
@@ -281,34 +393,40 @@ What is wrong with the store and what is wrong with the call are told apart. Any
 stored is a `ZarrException`: `ZarrFormatException` for malformed metadata, chunks, or compressed data
 (including a failed checksum, and a chunk that decodes to more than it should hold);
 `ZarrUnsupportedException` for a valid store using a feature Falcon does not implement; and a plain
-`ZarrException` for I/O failures, a selection too large for one Java array, or a typed read or write the
-array's data type does not support. A mistaken call gets the JDK's own exceptions:
-`IllegalArgumentException` (a wrong rank or number of values, an invalid name or spec, a value the type
-cannot hold, a node that exists), `IndexOutOfBoundsException` (outside the array),
-`NoSuchElementException` (a missing child), `IllegalStateException` (`asArray()` of a group),
-`UnsupportedOperationException` (writing to a read-only store).
+`ZarrException` for I/O failures (an object store's error code and message included), a selection too
+large for one Java array, or a typed read or write the array's data type does not support. A mistaken
+call gets the JDK's own exceptions: `IllegalArgumentException` (a wrong rank or number of values, an
+invalid name or spec, a value the type cannot hold, a node that exists), `IndexOutOfBoundsException`
+(outside the array), `NoSuchElementException` (a missing child), `IllegalStateException` (`asArray()` of
+a group), `UnsupportedOperationException` (writing to a read-only store).
 
-Handles hold no mutable state except a cached handle's cache, and every shipped store is safe for
-concurrent use, so one handle can serve several threads. Reads run in parallel with each other and with
-writes; writes to different chunks run in parallel. Writes that touch the same chunk, or the same shard,
-through the same `Store` object take turns, so neither update is lost. Writes to one chunk through
-different `Store` objects or processes are not coordinated: the last to store the chunk wins.
+Handles hold no mutable state except a cached handle's cache and a consolidated group's snapshot (which a
+`delete` through it updates in one swap), and every shipped store is safe for concurrent use, so one
+handle can serve several threads. Reads run in parallel with each other and with writes; writes to
+different chunks run in parallel. Writes that touch the same chunk, or the same shard, through the same
+`Store` object take turns, so neither update is lost. Writes to one chunk through different `Store`
+objects or processes are not coordinated: the last to store the chunk wins. Changes to metadata
+(attributes, resizing, deleting, consolidating) are several store calls, not atomic: make them while
+nothing else writes to that part of the hierarchy.
 
 ## What is and isn't supported
 
-**Supported:** Zarr v3 read *and* write; Zarr v2 read; all core data types plus variable-length `string`;
+**Supported:** Zarr v3 read *and* write; Zarr v2 read; all core data types plus variable-length `string`
+and `variable_length_bytes`; resizing, and zarr-python's `write_empty_chunks`;
 the regular chunk grid; both chunk key encodings; every codec in the table above (including `zstd` and
 `blosc` written by Falcon's own encoders, and all of blosc's internal codecs + both shuffle filters on
 read); sharding with efficient byte-range reads and writes, for strings too; selections and block
-streaming; the memory, filesystem, ZIP, and HTTP stores.
+streaming; consolidated metadata, read and written; changing attributes and deleting nodes; the memory,
+filesystem, ZIP, HTTP, and S3-compatible stores.
 
-**Not supported** (see [`TODO.md`](TODO.md)): the `vlen-bytes` data type; Zarr v2 *writing*, Fortran
+**Not supported** (see [`TODO.md`](TODO.md)): Zarr v2 *writing*, Fortran
 (`"F"`) order, and v2 filters; extension metadata that must be understood, non-`regular` chunk grids,
-extension data types, and storage transformers; and cloud object stores (implement the `Store` SPI
-yourself — the byte-range contract fits). The `zstd`/`blosc` encoders are correct and interoperable but
-single-level (not tuned for ratio).
+extension data types, and storage transformers; consolidating a v2 hierarchy; Azure Shared Key and GCS
+OAuth (implement the `Store` SPI yourself, or use SAS URLs and bearer tokens on `HttpStore`). The
+`zstd`/`blosc` encoders are correct and interoperable but single-level (not tuned for ratio).
 
 Corrupt input (bad metadata, truncated or damaged chunks, malformed compressed streams) fails with a typed
 exception — `ZarrFormatException`, `ZarrUnsupportedException`, or `ZarrException`. Decompression is bounded
-by what the chunk can hold, so a few bytes claiming gigabytes fail at once. A string chunk is the
-exception: its decoded size is not known in advance, so only the 2 GB a Java array holds bounds it.
+by what the chunk can hold, so a few bytes claiming gigabytes fail at once. A variable-length chunk
+(strings or bytes) is the exception: its decoded size is not known in advance, so only the 2 GB a Java
+array holds bounds it.
