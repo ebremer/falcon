@@ -255,6 +255,7 @@ class WriterInteropExport {
         writeWf7(dir);
         writeLinks(dir);
         writeWf10Edits(dir);
+        writeWf11(dir);
 
         Files.writeString(dir.resolve("manifest.json"), json(Map.of("files", files)), StandardCharsets.UTF_8);
     }
@@ -734,6 +735,42 @@ class WriterInteropExport {
     }
 
     /** Files libhdf5 wrote, changed in ways P2 WF10 opened: filters with parameters, links, dense storage shrunk. */
+    // ------------------------------------------------------------------ P2 WF11
+
+    /**
+     * Writes through virtual datasets into their sources (P2 WF11): sources in other files, by an unlimited
+     * mapping and by a printf-style one, and sources in the same file, interleaved by column. libhdf5 reads
+     * the virtual datasets, and the sources alone.
+     */
+    private void writeWf11(Path dir) throws IOException {
+        List<String> sources = List.of("vds_unlim_src.h5", "vds_printf_0.h5", "vds_printf_1.h5", "vds_printf_2.h5");
+        Path vds = fixture(dir, "vds_unlimited.h5", "edit_vds_unlimited.h5");
+        for (String source : sources) {
+            fixture(dir, source, source);
+        }
+        try (Hdf5Writer w = Hdf5Writer.open(vds)) {
+            w.dataset("rows").write(range(500, 515));
+            w.dataset("printf").write(new long[] {1, 0}, new long[] {4, 3}, range(600, 612));
+            w.dataset("cols").write(range(0, 10));
+        }
+        begin(dir, "edit_vds_unlimited.h5", "latest");
+        files.getLast().put("min_hdf5", "2.0"); // libhdf5 2.0 wrote its mappings in a block 1.14 cannot read
+        files.getLast().put("companions", sources);
+        dataset("/rows", range(500, 515)).put("shape", new long[] {5, 3});
+        int[] printf = new int[18];
+        java.util.Arrays.fill(printf, 0, 3, 10);
+        System.arraycopy(range(600, 612), 0, printf, 3, 12);
+        java.util.Arrays.fill(printf, 15, 18, 30);
+        dataset("/printf", printf).put("shape", new long[] {6, 3});
+        dataset("/cols", range(0, 10)).put("shape", new long[] {2, 5});
+        dataset("/a", new int[] {0, 2, 4, 5, 7, 9});
+        dataset("/b", new int[] {1, 3, 6, 8});
+        begin(dir, "vds_unlim_src.h5", "latest");
+        dataset("/data", range(500, 515)).put("shape", new long[] {5, 3});
+        begin(dir, "vds_printf_1.h5", "earliest");
+        dataset("/data", range(603, 609)).put("shape", new long[] {2, 3});
+    }
+
     private void writeWf10Edits(Path dir) throws IOException {
         // szip datasets of either coding (written with libaec's own coding, each chunk checked against it)
         Path szip = fixture(dir, "szip.h5", "edit_szip.h5");

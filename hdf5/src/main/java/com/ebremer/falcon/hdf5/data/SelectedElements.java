@@ -62,6 +62,12 @@ public abstract sealed class SelectedElements permits SelectedElements.Product, 
     public abstract void coordinates(long position, long[] out);
 
     /**
+     * The position of the element at {@code coordinates}, the inverse of {@link #coordinates}: -1 if it is not
+     * selected (for one listed twice, its first position).
+     */
+    public abstract long positionOf(long[] coordinates);
+
+    /**
      * Visits, in iteration order, every selected element inside the box {@code [offset, offset + count)}.
      */
     public abstract void forEachInBox(long[] offset, long[] count, Visitor visitor);
@@ -126,6 +132,24 @@ public abstract sealed class SelectedElements permits SelectedElements.Product, 
         /** The index at position {@code p} of this axis. */
         long valueAt(long p) {
             return start + (p / block) * stride + p % block;
+        }
+
+        /** The position of index {@code v} on this axis, or -1 if it is not one of its indices. */
+        long indexOf(long v) {
+            if (size == 0 || v < start) {
+                return -1;
+            }
+            long t = v - start;
+            long p;
+            if (size <= block) {
+                p = t; // a single run
+            } else {
+                if (t % stride >= block) {
+                    return -1; // between two runs
+                }
+                p = t / stride * block + t % stride;
+            }
+            return p < size ? p : -1;
         }
 
         /** How many of this axis's indices are below {@code v}. */
@@ -245,6 +269,19 @@ public abstract sealed class SelectedElements permits SelectedElements.Product, 
         }
 
         @Override
+        public long positionOf(long[] coordinates) {
+            long position = 0;
+            for (int d = 0; d < axes.length; d++) {
+                long p = axes[d].indexOf(coordinates[d]);
+                if (p < 0) {
+                    return -1;
+                }
+                position = position * axes[d].size() + p;
+            }
+            return count > 0 ? position : -1;
+        }
+
+        @Override
         public boolean mayIntersect(long[] offset, long[] count) {
             for (int d = 0; d < axes.length; d++) {
                 if (axes[d].countBelow(offset[d]) >= axes[d].countBelow(offset[d] + count[d])) {
@@ -303,6 +340,7 @@ public abstract sealed class SelectedElements permits SelectedElements.Product, 
         private final int rank;
         private final long[] low;
         private final long[] high;
+        private volatile java.util.Map<Coordinates, Long> positions; // made on first positionOf
 
         Listed(long[][] coordinates, int rank) {
             this.coordinates = coordinates;
@@ -352,6 +390,33 @@ public abstract sealed class SelectedElements permits SelectedElements.Product, 
         @Override
         public void coordinates(long position, long[] out) {
             System.arraycopy(coordinates[(int) position], 0, out, 0, rank);
+        }
+
+        @Override
+        public long positionOf(long[] at) {
+            java.util.Map<Coordinates, Long> map = positions;
+            if (map == null) {
+                map = new java.util.HashMap<>();
+                for (int i = coordinates.length - 1; i >= 0; i--) {
+                    map.put(new Coordinates(coordinates[i]), (long) i); // the first position wins
+                }
+                positions = map;
+            }
+            Long position = map.get(new Coordinates(at));
+            return position == null ? -1 : position;
+        }
+
+        /** Coordinates as a map key. */
+        private record Coordinates(long[] values) {
+            @Override
+            public boolean equals(Object other) {
+                return other instanceof Coordinates c && java.util.Arrays.equals(values, c.values);
+            }
+
+            @Override
+            public int hashCode() {
+                return java.util.Arrays.hashCode(values);
+            }
         }
 
         @Override

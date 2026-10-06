@@ -86,8 +86,9 @@ vlen, references, virtual datasets, external links). The writer covers every dat
 included), dense groups and attributes of any size, hard, soft and external links, object and region
 references (in datasets and attributes), user blocks, files past 2 GB, and both the modern and earliest
 on-disk formats; it changes existing files in place, its own and libhdf5's (writing into their datasets
-through their filters, moving and deleting links, changing shared attributes), through a journal that
-redoes an interrupted change. Full walkthrough in the **[HDF5 User Guide](hdf5/USER_GUIDE.md)**.
+through their filters, and through virtual datasets into their sources; moving and deleting links;
+changing shared attributes), through a journal that redoes an interrupted change. Full walkthrough in
+the **[HDF5 User Guide](hdf5/USER_GUIDE.md)**.
 
 ## Zarr
 

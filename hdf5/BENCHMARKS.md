@@ -65,7 +65,43 @@ Why each improves:
   - **After:** a dense group or attribute set is searched through its name-hash v2 B-tree, and an
     old-style group by descending its B-tree of names, as libhdf5 does.
 
+## P2 PF5–PF7: what a small read reads
+
+These were measured with a throwaway harness rather than `Benchmarks`. Each read opens the fixture fresh
+through a counting `RangeReader` and reads nothing else. The time is the best of seven runs and includes
+opening the file.
+
+**PF5: one element of a dataset of thousands of chunks** (4 KiB reader pages). Before PF5, the first read
+read the whole chunk index. That is the "whole index" column: the same read, after `storageSize()`.
+
+| dataset (index) | one element | with the whole index |
+|---|---|---|
+| `ea_paged.h5` (extensible array, 150,000 chunks, paged) | 24,598 bytes, 0.30 ms | 2,915,500 bytes, 19.3 ms |
+| `big_index.h5` `fa` (fixed array, 16,384 chunks, paged) | 28,676 bytes, 0.19 ms | 274,496 bytes, 2.33 ms |
+| `big_index.h5` `bt2` (v2 B-tree, 4,096 chunks) | 12,288 bytes, 0.16 ms | 126,976 bytes, 1.37 ms |
+| `big_index_old.h5` `bt1` (v1 B-tree, 4,096 chunks) | 12,288 bytes, 0.11 ms | 217,088 bytes, 1.02 ms |
+| `paged_sparse.h5` `ea_sparse` (extensible array, sparse) | 4,096 bytes, 0.12 ms | 49,178 bytes, 0.33 ms |
+
+The lookup reads one entry of an array index, with the block or page it is in, verified once. A B-tree
+lookup reads one node per level.
+
+**PF7: a virtual dataset whose elements scatter over their source** (`vds_scatter.h5`, 512-byte reader
+pages, the size of one source chunk; no chunk cache). The source is a flat array of 65,536 elements,
+chunked 128 elements a chunk. Before PF7, every read below read the 64,513-element box that bounds its
+source elements: 267,794 bytes.
+
+| read | bytes |
+|---|---|
+| `strided`, whole (source elements 1,024 apart) | 43,026 |
+| a column of `reshaped` (a 128 × 512 grid over the flat source) | 76,306 |
+| one element in 1,024 of `same` (a strided selection) | 43,026 |
+
+When chunks are smaller than a reader page, the pages decide: with 4 KiB pages, these reads touch every
+page, as the box does.
+
 ## Remote reads
 
 Through a `RangeReader`, a 4 × 4 selection of the 32 MiB gzip dataset (in a 94 MiB file) fetched 176,193
-bytes: the metadata pages, the chunk index, and one chunk.
+bytes: the metadata pages, the chunk index, and one chunk. PF5 leaves that number unchanged. The
+dataset's 1,024-entry fixed array is a single data block, which a lookup verifies whole, and it fits in
+one 64 KiB page anyway.

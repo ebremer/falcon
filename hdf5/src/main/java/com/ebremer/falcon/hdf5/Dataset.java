@@ -35,15 +35,10 @@ import java.nio.file.Path;
  */
 public final class Dataset extends Hdf5Object {
 
-    // Parsed lazily, then cached. Each cache is one volatile field, read once into a local, so a dataset
-    // shared between threads is never seen half-initialized (Optional distinguishes "none" from "not yet").
-    private volatile Datatype datatype;
-    private volatile Dataspace dataspace;
-    private volatile DataLayout layout;
-    private volatile java.util.Optional<FilterPipeline> filterPipeline;
-    private volatile java.util.Optional<byte[]> fillValue;
-    private volatile ChunkIndex chunkIndex; // a chunked dataset's index, read once (see chunkIndex())
-    private volatile VirtualDataset virtual; // a virtual dataset's mappings and sources, kept for later reads
+    // Its datatype, dataspace, layout, filters, fill value, chunk index, and virtual mappings are parsed
+    // lazily into the object's state, shared by its handles (P2 PF6). Each is one volatile field, read once
+    // into a local, so a dataset shared between threads is never seen half-initialized (Optional
+    // distinguishes "none" from "not yet").
 
     private Dataset(FileContext ctx, String name, String path, long objectHeaderAddress) {
         super(ctx, name, path, objectHeaderAddress);
@@ -61,11 +56,11 @@ public final class Dataset extends Hdf5Object {
     /** This dataset's element datatype (resolving a committed/shared type if referenced). */
     public Datatype datatype() {
         ctx.checkOpen();
-        Datatype result = datatype;
+        Datatype result = state.datatype;
         if (result == null) {
             HeaderMessage message = require(MessageType.DATATYPE, "datatype");
             result = DatatypeMessage.resolve(ctx, message.bodyOffset(), SharedMessage.isShared(message));
-            datatype = result;
+            state.datatype = result;
         }
         return result;
     }
@@ -77,7 +72,7 @@ public final class Dataset extends Hdf5Object {
      */
     public Dataspace dataspace() {
         ctx.checkOpen();
-        Dataspace result = dataspace;
+        Dataspace result = state.dataspace;
         if (result == null) {
             result = DataspaceMessage.parse(ctx, SharedMessage.resolve(ctx, require(MessageType.DATASPACE, "dataspace")));
             // Only an unlimited dimension can hold an unlimited mapping.
@@ -88,7 +83,7 @@ public final class Dataset extends Hdf5Object {
                     result = new Dataspace(result.version(), result.kind(), dims, result.maxDimensions());
                 }
             }
-            dataspace = result;
+            state.dataspace = result;
         }
         return result;
     }
@@ -553,40 +548,52 @@ public final class Dataset extends Hdf5Object {
     // --------------------------------------------------------------- internals
 
     DataLayout dataLayout() {
-        DataLayout result = layout;
+        DataLayout result = state.layout;
         if (result == null) {
             result = DataLayoutMessage.parse(ctx, require(MessageType.DATA_LAYOUT, "data layout").bodyOffset());
-            layout = result;
+            state.layout = result;
         }
         return result;
     }
 
     /**
-     * The chunk index, read on the first read that needs it and then kept, so that later selections (each
-     * block of {@link #blocks}, say) look their chunks up instead of walking the index again.
+     * The chunk index, made on the first read that needs it and then kept (for every handle of the
+     * dataset): its chunks are looked up in the file's index, or, once a read needs enough of them, the
+     * index is read whole and kept, so later selections (each block of {@link #blocks}, say) find their
+     * chunks there instead of walking the index again (see {@link ChunkIndex}).
      */
     ChunkIndex chunkIndex(DataLayout.Chunked chunked) {
-        ChunkIndex result = chunkIndex;
+        ChunkIndex result = state.chunkIndex;
         if (result == null) {
             Dataspace space = dataspace();
-            result = ChunkedReader.readIndex(ctx, chunked, space.dimensions(), space.maxDimensions(), datatype().size());
-            chunkIndex = result;
+            result = ChunkedReader.readIndex(ctx, chunked, space.dimensions(), space.maxDimensions(), datatype().size(),
+                    state::charge);
+            state.chunkIndex = result;
         }
         return result;
     }
 
+    /** The virtual dataset behind this virtual dataset's layout (P2 WF11: a write through it). */
+    VirtualDataset virtualDataset() {
+        if (!(dataLayout() instanceof DataLayout.Virtual layout)) {
+            throw new IllegalStateException("dataset " + label() + " is not virtual");
+        }
+        return virtual(layout);
+    }
+
     /** The virtual dataset behind this dataset's layout, made on first use and then kept. */
     private VirtualDataset virtual(DataLayout.Virtual layout) {
-        VirtualDataset result = virtual;
+        VirtualDataset result = state.virtual;
         if (result == null) {
             result = VirtualDataset.of(ctx, layout);
-            virtual = result;
+            state.virtual = result;
+            state.charge(1024); // its mappings, and the sources it keeps
         }
         return result;
     }
 
     byte[] fillValue() {
-        java.util.Optional<byte[]> result = fillValue;
+        java.util.Optional<byte[]> result = state.fillValue;
         if (result == null) {
             HeaderMessage message = header().find(MessageType.FILL_VALUE);
             if (message == null) {
@@ -595,19 +602,19 @@ public final class Dataset extends Hdf5Object {
             message = message == null ? null : SharedMessage.resolve(ctx, message);
             result = java.util.Optional.ofNullable(message == null ? null
                     : FillValueMessage.parse(message.buffer(), message.bodyOffset(), message.type()));
-            fillValue = result;
+            state.fillValue = result;
         }
         return result.orElse(null);
     }
 
     FilterPipeline filterPipeline() {
-        java.util.Optional<FilterPipeline> result = filterPipeline;
+        java.util.Optional<FilterPipeline> result = state.filterPipeline;
         if (result == null) {
             HeaderMessage message = header().find(MessageType.FILTER_PIPELINE);
             message = message == null ? null : SharedMessage.resolve(ctx, message);
             result = java.util.Optional.ofNullable(message == null ? null
                     : FilterPipelineMessage.parse(message.buffer(), message.bodyOffset()));
-            filterPipeline = result;
+            state.filterPipeline = result;
         }
         return result.orElse(null);
     }
@@ -678,8 +685,8 @@ public final class Dataset extends Hdf5Object {
 
     /**
      * The raw bytes of {@code elements}, in their order: for chunked data only the chunks that hold them
-     * are read, and for contiguous data in this file only their runs; other layouts read the box that
-     * bounds them and take the elements from it.
+     * are read, for contiguous data in this file only their runs, and for virtual data only the source
+     * elements they come from; other layouts read the box that bounds them and take the elements from it.
      */
     MemorySegment selectedData(SelectedElements elements) {
         int elementSize = datatype().size();
@@ -691,6 +698,9 @@ public final class Dataset extends Hdf5Object {
         if (layout instanceof DataLayout.Chunked chunked) {
             return MemorySegment.ofArray(ChunkedReader.gather(ctx, chunked, chunkIndex(chunked), dims, elementSize,
                     filterPipeline(), fillValue(), elements));
+        }
+        if (layout instanceof DataLayout.Virtual v) {
+            return MemorySegment.ofArray(virtual(v).gather(dims, datatype(), fillValue(), elements));
         }
         HdfBuffer block = contiguousBlock(layout);
         if (block != null) {

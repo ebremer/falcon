@@ -1,6 +1,7 @@
 package com.ebremer.falcon.hdf5.index;
 
 import com.ebremer.falcon.hdf5.HdfFormatException;
+import com.ebremer.falcon.hdf5.layout.ChunkLookup;
 import com.ebremer.falcon.hdf5.layout.ChunkRecord;
 import java.util.ArrayList;
 import java.util.List;
@@ -45,5 +46,22 @@ public final class ImplicitIndex {
             }
         }
         return chunks;
+    }
+
+    /** Finds a chunk by arithmetic on its linear index: every chunk of the grid is stored. */
+    public static ChunkLookup lookup(long baseAddress, int chunkBytes, ChunkGrid grid, long fileSize) {
+        return cell -> {
+            long linear = grid.linearIndex(cell);
+            long address;
+            try {
+                address = Math.addExact(baseAddress, Math.multiplyExact(linear, (long) chunkBytes));
+            } catch (ArithmeticException e) {
+                throw new HdfFormatException("implicit chunk index addresses a chunk past the file");
+            }
+            if (address > fileSize) {
+                throw new HdfFormatException("implicit chunk index addresses a chunk past the file");
+            }
+            return new ChunkRecord(grid.offsetOf(cell), address, chunkBytes, 0);
+        };
     }
 }

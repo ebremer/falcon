@@ -83,7 +83,8 @@ several threads. Falcon reads through it on demand:
 Hdf5File.open(reader, OpenOptions.defaults()
         .readerPageSize(1 << 20)        // 1 MiB pages
         .readerCacheSize(256L << 20)    // keep up to 256 MiB of them
-        .chunkCacheSize(512L << 20));   // and up to 512 MiB of decoded chunks
+        .chunkCacheSize(512L << 20)     // and up to 512 MiB of decoded chunks
+        .objectCacheSize(64L << 20));   // and up to 64 MiB of objects' metadata (see Performance notes)
 ```
 
 A reader failure surfaces from the read that needed the bytes as `java.io.UncheckedIOException`, or as
@@ -664,6 +665,13 @@ try (Hdf5Writer w = Hdf5Writer.open(Path.of("data.h5"))) {
     link leads to it (its hard-link count is lowered).
   - `hardLink` and `move` work on the file's links as on new ones. An external link added to (or moved
     into) a group of the original format converts that group to the new format, as libhdf5 does.
+  - A virtual dataset of the file is written into its sources, as libhdf5's `H5Dwrite` writes one: each
+    element into the source element its mapping pairs it with (in the source's byte order), through every
+    kind of mapping (regular, strided, unlimited, printf-style). A source in the same file is written in
+    the session; one in another file, in a session of its own (`Hdf5Writer.open` of that file), completed
+    when this one closes and aborted with it. As libhdf5 does, a write that includes an element no mapping
+    covers, or whose source is missing, or that two mappings cover, is refused (`IllegalArgumentException`)
+    before anything is written. Its extent is its sources': `extend` and `append` are refused.
   - Attributes kept in the file's shared-message table (SOHM) change like others: one deleted or
     replaced is released there (its count lowered, as libhdf5 lowers it, and dropped from the index at
     0); a dataset that grows gets its own dataspace message, releasing the shared one. Their copies stay
@@ -688,8 +696,10 @@ try (Hdf5Writer w = Hdf5Writer.open(Path.of("data.h5"))) {
 - **Refused** (`HdfUnsupportedException`):
   - files with 4-byte addresses, of a non-default driver (family, multi), that track their free space
     persistently or in pages, or that are marked as open by a writer (with no journal of Falcon's to redo);
-  - writing into datasets filtered by a third-party filter (see S8 in `TODO.md`), and into virtual
-    datasets, which are views of other datasets: write those;
+  - writing into datasets filtered by a third-party filter (see S8 in `TODO.md`);
+  - writing through a virtual dataset of variable-length or reference data (as reading one is), into a
+    source of another type (other than the other byte order), or into a source file read through a
+    resolver;
   - external raw data files the access policy refuses (by default, outside the HDF5 file's directory).
 
 ---
@@ -722,13 +732,24 @@ also fail to be read at all: that is `java.io.UncheckedIOException`, wrapping th
   2³¹ elements.
 - **Remote files.** Through a `RangeReader`, metadata is read in cached 64 KiB pages and data a chunk or
   run at a time, so a reader pays for what it reads, not for the file's size.
-- **Keep the handle.** A `Dataset` reads its chunk index once, on its first read, and then looks each
-  selection's chunks up by coordinate; `blocks()` and repeated selections reuse it. A virtual dataset
-  keeps its mappings and the sources it found. So reuse a handle for many reads, rather than looking the
-  dataset up again each time. An object's attribute list is likewise read once per handle.
+- **Chunks looked up, then the index kept.** A small read of a chunked dataset looks its chunks up in the
+  file's chunk index, as libhdf5 does: an array index's entry, or a B-tree's path down to the chunk. So
+  the first small read of a dataset of millions of chunks, or of a remote one, reads a few entries or
+  nodes, not the whole index. A read that covers an eighth of the chunk grid or more reads the whole index
+  instead (as does any read once the lookups made add up to the grid's cells), which is then kept: every
+  later read, `blocks()` among them, finds its chunks there by coordinate.
+- **Handles share what they read.** What an object has read of itself (its header, attributes, and links;
+  a dataset's datatype, shape, layout, chunk index, and virtual mappings) is kept per file, by object, for
+  every handle of it, however it was reached: `group.dataset("x")` asked again, or through another path
+  or a reference, reads none of it again. The cache keeps up to 16 MiB of it per file (as estimated: a few
+  hundred bytes an object, plus some 32 bytes a chunk for a chunk index read whole), least recently used
+  first out, set by `OpenOptions.objectCacheSize(bytes)`; 0 makes each handle keep its own. A handle keeps
+  what it has read either way.
 - **Virtual datasets read lazily.** A selection skips mappings that do not reach it, and reads from each
-  source only the part it maps to. Source files are opened once and stay open until the virtual
-  dataset's file is closed.
+  source only the elements it maps to: the box that bounds them when they fill a quarter of it or more,
+  else the elements themselves, so a strided source, a source of another shape, or a strided or point
+  selection of the virtual dataset reads only the chunks that hold what it needs. Source files are opened
+  once and stay open until the virtual dataset's file is closed.
 - **Lookups by name read the index.** `attribute(name)`, `link(name)`, and path lookups search a large
   group's or object's name index (as libhdf5 does) instead of reading every link or attribute.
 - **Selections read their chunks.** A strided selection reads only the chunks in the grid cells its

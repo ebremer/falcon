@@ -12,7 +12,8 @@ import java.util.Objects;
  *         .externalFileAccess(ExternalFileAccess.unrestricted())
  *         .virtualView(OpenOptions.VirtualView.FIRST_MISSING)
  *         .virtualPrintfGap(2)
- *         .chunkCacheSize(256L << 20));
+ *         .chunkCacheSize(256L << 20)
+ *         .objectCacheSize(64L << 20));
  * }</pre>
  *
  * The virtual-dataset settings are libhdf5's dataset access properties {@code H5Pset_virtual_view} and
@@ -38,13 +39,16 @@ public final class OpenOptions {
     public static final int DEFAULT_READER_PAGE_SIZE = 64 << 10;
     /** The default page cache for a file read through a {@link RangeReader}: 16 MiB. */
     public static final long DEFAULT_READER_CACHE_SIZE = 16L << 20;
+    /** The default size of the cache of objects' metadata: 16 MiB. */
+    public static final long DEFAULT_OBJECT_CACHE_SIZE = 16L << 20;
     /** The smallest page size: 512 bytes, libhdf5's smallest file-space page. */
     private static final int MIN_READER_PAGE_SIZE = 512;
     /** The largest page size: 1 GiB. */
     private static final int MAX_READER_PAGE_SIZE = 1 << 30;
 
     private static final OpenOptions DEFAULTS = new OpenOptions(ExternalFileAccess.sameDirectory(),
-            VirtualView.LAST_AVAILABLE, 0, DEFAULT_CHUNK_CACHE_SIZE, DEFAULT_READER_PAGE_SIZE, DEFAULT_READER_CACHE_SIZE);
+            VirtualView.LAST_AVAILABLE, 0, DEFAULT_CHUNK_CACHE_SIZE, DEFAULT_READER_PAGE_SIZE, DEFAULT_READER_CACHE_SIZE,
+            DEFAULT_OBJECT_CACHE_SIZE);
 
     private final ExternalFileAccess externalFileAccess;
     private final VirtualView virtualView;
@@ -52,21 +56,24 @@ public final class OpenOptions {
     private final long chunkCacheSize;
     private final int readerPageSize;
     private final long readerCacheSize;
+    private final long objectCacheSize;
 
     private OpenOptions(ExternalFileAccess externalFileAccess, VirtualView virtualView, long virtualPrintfGap,
-                        long chunkCacheSize, int readerPageSize, long readerCacheSize) {
+                        long chunkCacheSize, int readerPageSize, long readerCacheSize, long objectCacheSize) {
         this.externalFileAccess = externalFileAccess;
         this.virtualView = virtualView;
         this.virtualPrintfGap = virtualPrintfGap;
         this.chunkCacheSize = chunkCacheSize;
         this.readerPageSize = readerPageSize;
         this.readerCacheSize = readerCacheSize;
+        this.objectCacheSize = objectCacheSize;
     }
 
     /**
      * The defaults: {@link ExternalFileAccess#sameDirectory()}, {@link VirtualView#LAST_AVAILABLE}, a printf
-     * gap of 0, a 16 MiB decoded-chunk cache, and, for a file read through a {@link RangeReader}, 64 KiB
-     * pages and a 16 MiB page cache. The virtual-dataset settings are libhdf5's defaults.
+     * gap of 0, a 16 MiB decoded-chunk cache, a 16 MiB object cache, and, for a file read through a
+     * {@link RangeReader}, 64 KiB pages and a 16 MiB page cache. The virtual-dataset settings are libhdf5's
+     * defaults.
      */
     public static OpenOptions defaults() {
         return DEFAULTS;
@@ -75,13 +82,13 @@ public final class OpenOptions {
     /** These options with a different policy for other files (see {@link ExternalFileAccess}). */
     public OpenOptions externalFileAccess(ExternalFileAccess access) {
         return new OpenOptions(Objects.requireNonNull(access, "access"), virtualView, virtualPrintfGap,
-                chunkCacheSize, readerPageSize, readerCacheSize);
+                chunkCacheSize, readerPageSize, readerCacheSize, objectCacheSize);
     }
 
     /** These options with a different virtual view. */
     public OpenOptions virtualView(VirtualView view) {
         return new OpenOptions(externalFileAccess, Objects.requireNonNull(view, "view"), virtualPrintfGap,
-                chunkCacheSize, readerPageSize, readerCacheSize);
+                chunkCacheSize, readerPageSize, readerCacheSize, objectCacheSize);
     }
 
     /**
@@ -95,7 +102,8 @@ public final class OpenOptions {
         if (gap < 0) {
             throw new IllegalArgumentException("printf gap must not be negative: " + gap);
         }
-        return new OpenOptions(externalFileAccess, virtualView, gap, chunkCacheSize, readerPageSize, readerCacheSize);
+        return new OpenOptions(externalFileAccess, virtualView, gap, chunkCacheSize, readerPageSize, readerCacheSize,
+                objectCacheSize);
     }
 
     /**
@@ -111,7 +119,8 @@ public final class OpenOptions {
         if (bytes < 0) {
             throw new IllegalArgumentException("chunk cache size must not be negative: " + bytes);
         }
-        return new OpenOptions(externalFileAccess, virtualView, virtualPrintfGap, bytes, readerPageSize, readerCacheSize);
+        return new OpenOptions(externalFileAccess, virtualView, virtualPrintfGap, bytes, readerPageSize, readerCacheSize,
+                objectCacheSize);
     }
 
     /**
@@ -127,7 +136,8 @@ public final class OpenOptions {
             throw new IllegalArgumentException("reader page size must be between " + MIN_READER_PAGE_SIZE + " and "
                     + MAX_READER_PAGE_SIZE + ": " + bytes);
         }
-        return new OpenOptions(externalFileAccess, virtualView, virtualPrintfGap, chunkCacheSize, bytes, readerCacheSize);
+        return new OpenOptions(externalFileAccess, virtualView, virtualPrintfGap, chunkCacheSize, bytes, readerCacheSize,
+                objectCacheSize);
     }
 
     /**
@@ -141,7 +151,26 @@ public final class OpenOptions {
         if (bytes < 0) {
             throw new IllegalArgumentException("reader cache size must not be negative: " + bytes);
         }
-        return new OpenOptions(externalFileAccess, virtualView, virtualPrintfGap, chunkCacheSize, readerPageSize, bytes);
+        return new OpenOptions(externalFileAccess, virtualView, virtualPrintfGap, chunkCacheSize, readerPageSize, bytes,
+                objectCacheSize);
+    }
+
+    /**
+     * These options with a different object cache: up to {@code bytes} (as estimated) of what the file's
+     * objects have read of themselves (their headers, attributes, and links, and a dataset's datatype,
+     * shape, layout, and chunk index) are kept for every handle of the same object, least recently used
+     * first out (P2 PF6). So {@code group.dataset("x")}, asked again, reads nothing again. An object counts a
+     * few hundred bytes, plus its parts: a chunk index read whole counts some 32 bytes a chunk. A handle
+     * keeps what it has read, kept here or not. 0 shares nothing: each handle keeps its own.
+     *
+     * @throws IllegalArgumentException if {@code bytes} is negative
+     */
+    public OpenOptions objectCacheSize(long bytes) {
+        if (bytes < 0) {
+            throw new IllegalArgumentException("object cache size must not be negative: " + bytes);
+        }
+        return new OpenOptions(externalFileAccess, virtualView, virtualPrintfGap, chunkCacheSize, readerPageSize,
+                readerCacheSize, bytes);
     }
 
     /** Which other files the file may make Falcon open. */
@@ -174,10 +203,15 @@ public final class OpenOptions {
         return readerCacheSize;
     }
 
+    /** The most metadata of the file's objects kept for their handles, in bytes (as estimated). */
+    public long objectCacheSize() {
+        return objectCacheSize;
+    }
+
     @Override
     public String toString() {
         return "OpenOptions[virtualView=" + virtualView + ", virtualPrintfGap=" + virtualPrintfGap
                 + ", chunkCacheSize=" + chunkCacheSize + ", readerPageSize=" + readerPageSize
-                + ", readerCacheSize=" + readerCacheSize + "]";
+                + ", readerCacheSize=" + readerCacheSize + ", objectCacheSize=" + objectCacheSize + "]";
     }
 }

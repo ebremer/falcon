@@ -11,6 +11,7 @@ import com.ebremer.falcon.hdf5.index.FixedArray;
 import com.ebremer.falcon.hdf5.index.ImplicitIndex;
 import com.ebremer.falcon.hdf5.io.FileContext;
 import com.ebremer.falcon.hdf5.io.HdfBuffer;
+import com.ebremer.falcon.hdf5.layout.ChunkLookup;
 import com.ebremer.falcon.hdf5.layout.ChunkRecord;
 import com.ebremer.falcon.hdf5.layout.DataLayout;
 import java.util.List;
@@ -27,14 +28,38 @@ public final class ChunkedReader {
     }
 
     /**
-     * Reads the dataset's chunk index, once: every chunk stored. {@code maxDims} are the dataspace's
-     * maximum dimensions (or {@code null} if it stores none): the array-style chunk indexes number their
-     * chunks over the maximum chunk grid, so they are needed to locate each chunk.
+     * The dataset's chunk index: its chunks looked up one at a time in the file's index, or read from it
+     * all at once, as each read needs (see {@link ChunkIndex}). {@code maxDims} are the dataspace's maximum
+     * dimensions (or {@code null} if it stores none): the array-style chunk indexes number their chunks
+     * over the maximum chunk grid, so they are needed to locate each chunk. {@code loadedBytes} is told what
+     * the index takes in memory when it is read whole.
      */
     public static ChunkIndex readIndex(FileContext ctx, DataLayout.Chunked layout, long[] datasetDims, long[] maxDims,
-                                       int elementSize) {
-        int chunkBytes = chunkBytes(layout.chunkDimensions(), elementSize);
-        return ChunkIndex.of(enumerateChunks(ctx, layout, chunkBytes, datasetDims, maxDims), layout.chunkDimensions());
+                                       int elementSize, java.util.function.LongConsumer loadedBytes) {
+        int[] chunkDims = layout.chunkDimensions();
+        int chunkBytes = chunkBytes(chunkDims, elementSize);
+        int rank = datasetDims.length;
+        if (chunkDims.length != rank) {
+            throw new HdfFormatException("chunk rank " + chunkDims.length + " does not match dataset rank " + rank);
+        }
+        long address = layout.indexAddress();
+        if (address == HdfBuffer.UNDEFINED_ADDRESS) {
+            return ChunkIndex.of(List.of(), chunkDims); // no chunk ever written: it all reads as the fill value
+        }
+        ChunkLookup lookup = switch (layout.indexType()) {
+            case DataLayout.INDEX_V1_BTREE -> ChunkBTreeV1.lookup(ctx, address, rank, chunkDims);
+            case DataLayout.INDEX_SINGLE_CHUNK -> null; // one chunk: the index is the layout message
+            case DataLayout.INDEX_IMPLICIT -> ImplicitIndex.lookup(address, chunkBytes,
+                    ChunkGrid.forFixedArray(datasetDims, maxDims, chunkDims), ctx.buffer().size());
+            case DataLayout.INDEX_FIXED_ARRAY -> FixedArray.lookup(ctx, address, chunkBytes,
+                    ChunkGrid.forFixedArray(datasetDims, maxDims, chunkDims));
+            case DataLayout.INDEX_EXTENSIBLE_ARRAY -> ExtensibleArray.lookup(ctx, address, chunkBytes,
+                    ChunkGrid.forExtensibleArray(datasetDims, maxDims, chunkDims));
+            case DataLayout.INDEX_V2_BTREE -> ChunkBTreeV2.lookup(ctx, address, chunkBytes, datasetDims, chunkDims);
+            default -> throw new HdfUnsupportedException("unknown chunk index type " + layout.indexType());
+        };
+        return ChunkIndex.of(chunkDims, datasetDims, lookup,
+                () -> enumerateChunks(ctx, layout, chunkBytes, datasetDims, maxDims), loadedBytes);
     }
 
     /** Assembles the whole dataset from the chunks within its extent. */

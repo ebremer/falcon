@@ -1,11 +1,11 @@
 # Falcon HDF5 — remaining work (prioritized)
 
-**Status (2026-10-05, after P2 S1–S7, A1–A12, PF1–PF4, and WF1–WF10):** build green, **782 HDF5 tests**
+**Status (2026-10-05, after P2 S1–S7, A1–A12, PF1–PF7, and WF1–WF11):** build green, **850 HDF5 tests**
 (144 at the review, 187 after the top 10, 206 after P0, 228 after P1, 243 after S1–S3, 256 after S4–S7,
 439 after A2–A6, 610 after PF1–PF4, 677 after A1–A10, 692 after A11–A12, 707 after WF1–WF4, 743 after
-WF5–WF9), plus 38 in the `core` module. The review's top 10, every P1 item, **P2 S1–S7**, **A1–A12**,
-**PF1–PF4**, **WF1–WF10**, and the P0 zstd fix (Z6/Z7, in `core`) are done (see *Done* at the end).
-Falcon now:
+WF5–WF9, 782 after WF7 and WF10), plus 38 in the `core` module. The review's top 10, every P1 item, **P2
+S1–S7**, **A1–A12**, **PF1–PF7**, **WF1–WF11**, and the P0 zstd fix (Z6/Z7, in `core`) are done (see *Done*
+at the end). Falcon now:
 
 - reads the files the review showed it misreading:
   - real libhdf5 szip and scale-offset data;
@@ -38,18 +38,21 @@ Falcon now:
 - follows external links, and references into other files, as libhdf5 does, under the same policy or
   resolver as every other file;
 - reads only what a read needs:
-  - chunks are looked up by coordinate in an index read once per dataset;
-  - virtual-dataset selections read only the parts of the sources they map to;
+  - a small read looks its chunks up in the file's chunk index (an array entry, or a B-tree's path), and
+    a large one reads the index once, kept for later reads;
+  - virtual-dataset reads take from each source only the elements they map to, also for strided
+    sources, sources of another shape, and strided or point selections;
   - names are found through the name indexes (see `BENCHMARKS.md`);
+  - every handle of an object shares what any of them read of it, in a bounded per-file cache;
 - writes files that **HDF5 2.0 and 1.14 read, and change**, checked by `tools/fixtures/check_hdf5_writer.py`.
-  The final run read 341/341 objects with HDF5 2.0 and 296/296 with 1.14.6. Each library then changed every
+  The final run read 348/348 objects with HDF5 2.0 and 298/298 with 1.14.6. Each library then changed every
   file (an attribute on every object, a dataset in every group, a row on every growable dataset, the
   shared attributes a file names deleted) and read it all back; each refused a change left interrupted.
   The P0 edge-case files written by the previous writer fail 19 objects under each version.
 - changes existing files in place (`Hdf5Writer.open`), its own and libhdf5's, in either format: adds
-  objects, writes into datasets through every built-in filter as libhdf5 encodes it, hard-links, moves and
-  deletes links, changes attributes (in the shared-message table too), through a journal that redoes an
-  interrupted change;
+  objects, writes into datasets through every built-in filter as libhdf5 encodes it (and through virtual
+  datasets into their sources), hard-links, moves and deletes links, changes attributes (in the
+  shared-message table too), through a journal that redoes an interrupted change;
 - writes szip's nearest-neighbour coding, its encoder a port of libaec's (byte for byte its output), and
   user blocks;
 - streams what it writes: raw data goes to the file as it is written, so files may pass 2 GB and memory;
@@ -63,6 +66,25 @@ Falcon now:
   default, and supports concurrent reads of one open file.
 
 P0 and P1 are empty. What remains is features and API (P2) and docs and build (P3).
+
+**Behaviour and API changes in P2 WF11, PF5–PF7** (pre-1.0):
+- **Writing through virtual datasets** (`Hdf5Writer.open`): `write` and `writeRaw` on a virtual dataset of
+  the file write into its sources, in this file and in others, which are changed in sessions of their own,
+  completed by `close()` and undone by `abort()`. They threw `HdfUnsupportedException`. A write including
+  elements no mapping covers (or whose source is missing, or that two mappings cover) throws
+  `IllegalArgumentException`; `extend` and `append` throw `IllegalStateException`.
+- **New: `OpenOptions.objectCacheSize(bytes)`** (default 16 MiB), and `DEFAULT_OBJECT_CACHE_SIZE`.
+- **Handles share what they read** (P2 PF6): an object's header, attributes, links, and a dataset's
+  datatype, shape, layout, chunk index and virtual mappings are kept per file, by object, for every handle
+  of it, within that bound. They were kept per handle. A handle keeps what it has read either way.
+  `attributes()` and `links()` of two handles of one object may now return the same list.
+- **Chunk lookups** (P2 PF5): a read covering under an eighth of the chunk grid looks its chunks up in the
+  file's index instead of reading the whole of it. Reading the whole index still rejects a corrupt one (a
+  chunk misaligned, or two at one offset); a lookup does not read the chunks it does not need, so it does
+  not see them, as libhdf5's does not.
+- **Virtual reads** (P2 PF7) read from a source only the elements wanted, when they fill less than a
+  quarter of the box that bounds them; a strided or point selection of a virtual dataset no longer reads
+  the box that bounds it.
 
 **Behaviour and API changes in P2 WF7, WF10** (pre-1.0):
 - **New API:**
@@ -290,15 +312,13 @@ review baseline. Abbreviations: `W` = `Hdf5Writer.java`; other paths are under
 1. **D1/D3 — docs that overclaim, and a stale PLAN.md.**
 2. **B1/B2 — CI and release plumbing:** a Windows CI leg, source and Javadoc jars, and the enforcer.
    New plugins need Erich's approval.
-3. **PF5 — chunk lookups without reading the whole index,** for very large or remote datasets.
-4. **S8 — writing the third-party filters,** whose encoders core partly has. It would also let `open()`
+3. **S8 — writing the third-party filters,** whose encoders core partly has. It would also let `open()`
    write into datasets so filtered, the last filters it refuses.
-5. **PF8 — selected elements copied a run at a time,** not one by one.
-6. **PF6/PF7 — per-file object caches, and virtual mappings that scatter.**
-7. **D4 — Javadoc lint.**
-8. **S9 — more registered filters:** Blosc2, bzip2, ZFP, SZ.
-9. **B3 — housekeeping:** committed `__pycache__`.
-10. **WF11 — writing through virtual datasets,** into their sources (low priority).
+4. **PF8 — selected elements copied a run at a time,** not one by one.
+5. **D4 — Javadoc lint.**
+6. **S9 — more registered filters:** Blosc2, bzip2, ZFP, SZ.
+7. **B3 — housekeeping:** committed `__pycache__`.
+8. **D6 — repo-wide staleness:** `CLAUDE.md` and the root `pom.xml` still call Zarr planned.
 
 ---
 
@@ -328,13 +348,12 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
 
 ### Write features & API
 
-- WF1–WF10 are done (see *Done — 2026-10-05 (P2: WF7, WF10)*, *(P2: WF5, WF6, WF8, WF9)* and
-  *(P2: WF1–WF4)*). Still open around them:
-  - [ ] **WF11 — writing through virtual datasets.** `open()` refuses to write into a virtual dataset:
-    it is a view of other datasets, often in other files, so a write would go to their sources (libhdf5's
-    `H5Dwrite` on a VDS does, refusing elements no mapping covers). Writing the sources directly works.
-    Low priority.
+- WF1–WF11 are done (see *Done — 2026-10-05 (P2: WF11, PF5–PF7)*, *(P2: WF7, WF10)*,
+  *(P2: WF5, WF6, WF8, WF9)* and *(P2: WF1–WF4)*). Still open around them:
   - Third-party filters, for writing into datasets so filtered: S8.
+  - **Not planned: writing through a virtual dataset of variable-length or reference data** (Falcon reads
+    none either: its elements point into each source's own heaps and objects), **or converting types** on
+    the way (other than the byte order), which libhdf5 does.
   - **Not planned: reusing space a session frees** (a deleted object's, a replaced attribute's, an old
     symbol table's). A session writes only after the file's end until `close()`, which is what lets
     `abort()` and a crash before `close()` leave the file as it was, and the journal stay small; libhdf5
@@ -346,22 +365,8 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
 
 ### Performance
 
-- PF1–PF4 are done (see *Done — 2026-10-05 (P2: PF1–PF4)*). Still open around them:
-  - [ ] **PF5 — look chunks up without reading the whole index.** PF1 reads a dataset's whole chunk
-    index on its first read, about 32 bytes kept per chunk.
-    - **Cost:** for a dataset of millions of chunks, or a remote one through a `RangeReader`, the first
-      small read pays for the whole index.
-    - **Fix:** each index type can find one chunk directly:
-      - an implicit, fixed-array, or extensible-array index by arithmetic on the chunk's linear index;
-      - a v1 or v2 B-tree by descending its keys.
-  - [ ] **PF6 — share per-object caches between handles.** Each `Dataset`, `Group`, or attribute list is
-    cached per handle, and `group.dataset("x")` returns a new handle each time. A per-file cache keyed by
-    object-header address would share them. Bound it, since a file can hold millions of objects.
-  - [ ] **PF7 — virtual mappings that scatter.** A virtual selection reads the bounding box of the source
-    elements it needs. For regular mappings that is about what it needs. For a mapping whose virtual and
-    source shapes differ, or whose source is strided, the box can be much larger than the elements:
-    read those by runs. A strided or point selection of a virtual dataset (A4) also reads its bounding
-    box, through the same path.
+- PF1–PF7 are done (see *Done — 2026-10-05 (P2: WF11, PF5–PF7)* and *(P2: PF1–PF4)*). Still open around
+  them:
   - [ ] **PF8 — selected elements copied one at a time.** A strided or point selection of chunked data
     copies each element out of its chunk on its own (a selection of contiguous data copies runs). Every
     other element of 2000 × 2000 doubles takes 16 ms against 17 ms for the whole read, so this matters
@@ -399,6 +404,8 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
   - **Also done (P2 WF7, WF10):** szip's codings, user blocks, hard links and moves, the earliest format's
     external links, and changing a file further (filters with parameters, shared attributes, external raw
     data, the journal).
+  - **Also done (P2 WF11, PF5–PF7):** writing through virtual datasets, chunk lookups, the object cache
+    (`objectCacheSize`), and what virtual reads read; `BENCHMARKS.md` has the bytes a small read reads.
 - [ ] **D3 — PLAN.md is stale.**
   - §6 lists the non-existent `dataspace` and `util` packages, omits `data`, `index`, and `group`, and
     says only one package is exported (`datatype` is exported too).
@@ -451,6 +458,79 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
     (`tools/fixtures/gen_zstd_corrupt_vectors.py` → `zstd_corrupt_vectors.txt`): mutations, several
     frames, skippable frames, and trailing data. The old decoder fails 137 of them.
   - The core fuzzer: 1.5M further mutated frames threw only typed exceptions.
+
+## Done — 2026-10-05 (P2: WF11, PF5–PF7)
+
+- [x] **PF5 — chunk lookups without reading the whole index.** A `ChunkIndex` is made when a dataset is
+  first read and holds no chunks yet. A read covering fewer than an eighth of the grid's cells looks each
+  cell up in the file's index through a `layout.ChunkLookup`, as libhdf5's `H5D__chunk_lookup` does:
+  - an implicit index by arithmetic (`ImplicitIndex.lookup`);
+  - a fixed array by the chunk's entry, in its data block or page (`FixedArray.lookup`; paged blocks check
+    the page-init bitmap);
+  - an extensible array through the index block, the super block's secondary block and the data block
+    (`ExtensibleArray.lookup`, paged blocks too);
+  - a version-1 B-tree by descending its keys, each a child's first chunk (`ChunkBTreeV1.lookup`);
+  - a version-2 B-tree by `BTreeV2.find` on the records' scaled offsets (`ChunkBTreeV2.lookup`).
+
+  Each block, page or node is checksum-verified the first time a lookup reads it, as reading the whole
+  index verifies it. A larger read reads the whole index (once, then kept), as does every read once the
+  lookups made add up to the grid's cells. A single-chunk index is read whole.
+  - **Tests:** `ChunkLookupTest`: every element sampled, points and strided selections of every index
+    type of thousands of chunks (paged, sparse, filtered, multi-level B-trees, rank 3) find what the whole
+    index finds; a one-element read reads under a quarter of the bytes the index takes. New fixtures
+    `big_index.h5` and `big_index_old.h5` (libhdf5's).
+  - **Measured:** one element of `ea_paged.h5` (150,000 chunks) reads 24,598 bytes in 0.30 ms; with the
+    whole index, 2.9 MB in 19 ms (`BENCHMARKS.md`).
+- [x] **PF6 — share per-object caches between handles.** New `ObjectCache`, a per-file resource of
+  `ObjectCache.State`s by object-header address: the header, attributes, links (and the map of them by
+  name), and a dataset's datatype, dataspace, layout, filters, fill value, chunk index and virtual
+  dataset. Every handle of an object gets its state, however it was reached (a path, a hard link, a
+  reference, `children()`); `classify` parses a header into the state the handle then uses. A group's
+  `children()` stays per handle, since its children are named by the handle's path.
+  - **Bound:** `OpenOptions.objectCacheSize(bytes)`, 16 MiB by default, least recently used first out,
+    by estimate: 512 bytes a state, 48 bytes a header message, about 160 bytes an attribute and 128 a
+    link, and 16 + 8 × rank bytes a chunk once an index is read whole. The state being charged is never
+    evicted. 0 shares nothing.
+  - **Tests:** `ObjectCacheTest`: handles reached by two hard links, a path, a reference and `children()`
+    share one state; 600 objects under a 64 KiB bound stay within it, and evicted objects still read;
+    a bound of 0 shares nothing; threads share one object's state; the option.
+- [x] **PF7 — virtual mappings that scatter.** `VirtualDataset` splits a read into `Part`s (a mapping, or
+  a printf source, with the virtual elements it fills and the source elements they take). A shared
+  `transfer` reads each part's source elements one of three ways:
+  - the box that bounds them, when they fill a quarter of it or more (a mapping of the same shape, or a
+    little strided);
+  - every element the source selection picks, through the source's `selectedData`, when all are wanted;
+  - otherwise the elements themselves, in batches of 65,536 points, so only the chunks that hold them are
+    read.
+
+  A strided or point selection of a virtual dataset (`Dataset.selectedData`) now goes through
+  `VirtualDataset.gather`, which pairs the selection's elements with each mapping's target positions
+  (new `SelectedElements.positionOf`) instead of reading the bounding box.
+  - **Tests:** `VirtualScatterTest`: a strided source, a source of another shape read by column, and a
+    strided selection read under a third of the bytes of the box; every strided and point selection of 12
+    virtual datasets (other files, gaps, columns, strides, byte order, unlimited, printf, same-file) reads
+    what the whole read holds there. New fixture `vds_scatter.h5` (libhdf5's, same-file sources).
+- [x] **WF11 — writing through virtual datasets.** `DatasetWriter.write` and `writeRaw` on a virtual dataset
+  of a file being changed write into its sources, as libhdf5's `H5Dwrite` (`H5D__virtual_write`) does,
+  through the same `Part`s reads use: each element into the source element its mapping pairs it with, in
+  runs along the source's last dimension, byte-swapped for a source of the other byte order.
+  - **Same file:** the source is opened in the session by its header's address. **Another file:** a
+    session of its own (`Hdf5Writer.open`, one per file), completed by `close()` once this file's reader,
+    which may hold it open, is closed. `abort()` aborts them too; a failed one is completed by a retry.
+  - **Refused before anything is written,** as libhdf5 refuses: a box with elements no mapping covers, or
+    whose source is missing, or that two mappings cover (`IllegalArgumentException`, "write requested to
+    unmapped portion of virtual dataset"); a source of another type; elements past a source's extent; a
+    source file read through a resolver; variable-length or reference data. `extend` and `append` are
+    refused: the sources set the extent. Writes through a virtual dataset whose sources are virtual nest
+    at most 32 deep, so a dataset mapping itself fails.
+  - **Tests:** `WriteVirtualTest` (8): sources in other files (regular, columns, strided, byte order,
+    unlimited, printf), in the same file in one session (interleaved columns, printf names, a floored
+    mapping), scattered sources; refusals with nothing written; `abort()`; a dataset mapping itself.
+  - **Interop:** the export writes through the unlimited, printf and same-file mappings of
+    `vds_unlimited.h5`. HDF5 2.0 reads the virtual datasets (1.14 cannot read that file's version-1 mapping
+    block, whoever writes it), and both read the source files changed.
+- [x] **Benchmarks:** the documented benchmark command no longer fails in the 128 MB fuzz execution, which
+  `-Dtest=Benchmarks` also selects; the benchmark skips itself there.
 
 ## Done — 2026-10-05 (P2: WF7, WF10)
 

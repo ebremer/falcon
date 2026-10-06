@@ -33,25 +33,21 @@ public abstract sealed class Hdf5Object permits Group, Dataset, CommittedDatatyp
     private volatile String name; // null until found, for an object reached through a reference
     private volatile String path; // likewise
     private final long objectHeaderAddress;
-    private volatile ObjectHeader header; // parsed lazily, then cached (safely published across threads)
-    private volatile List<Attribute> attributes; // read on first attributes(), then cached (immutable)
+    // What the object has read of itself (its header, attributes, ...), shared by its handles (P2 PF6).
+    final ObjectCache.State state;
 
     Hdf5Object(FileContext ctx, String name, String path, long objectHeaderAddress) {
         this.ctx = ctx;
         this.name = name;
         this.path = path;
         this.objectHeaderAddress = objectHeaderAddress;
+        this.state = ObjectCache.of(ctx).state(objectHeaderAddress);
     }
 
-    /** This object's header, parsed on first use. */
+    /** This object's header, parsed on first use (by any handle of it). */
     ObjectHeader header() {
         ctx.checkOpen();
-        ObjectHeader result = header;
-        if (result == null) {
-            result = ObjectHeader.parse(ctx, objectHeaderAddress);
-            header = result;
-        }
-        return result;
+        return state.header(ctx);
     }
 
     /**
@@ -97,14 +93,19 @@ public abstract sealed class Hdf5Object permits Group, Dataset, CommittedDatatyp
 
     /**
      * This object's attributes (compact header messages and/or dense fractal-heap storage), read on first
-     * use and then kept. The list is unmodifiable.
+     * use and then kept (for every handle of the object). The list is unmodifiable.
      */
     public List<Attribute> attributes() {
         ctx.checkOpen();
-        List<Attribute> result = attributes;
+        List<Attribute> result = state.attributes;
         if (result == null) {
             result = List.copyOf(loadAttributes());
-            attributes = result;
+            state.attributes = result;
+            long bytes = 0;
+            for (Attribute attribute : result) {
+                bytes += 160 + 2L * attribute.name().length();
+            }
+            state.charge(bytes);
         }
         return result;
     }
@@ -159,7 +160,7 @@ public abstract sealed class Hdf5Object permits Group, Dataset, CommittedDatatyp
      */
     public Optional<Attribute> attribute(String name) {
         ctx.checkOpen();
-        List<Attribute> loaded = attributes;
+        List<Attribute> loaded = state.attributes;
         if (loaded != null) {
             return loaded.stream().filter(a -> a.name().equals(name)).findFirst();
         }
@@ -237,7 +238,7 @@ public abstract sealed class Hdf5Object permits Group, Dataset, CommittedDatatyp
      * dataset, or a committed datatype. Shared by group traversal and object-reference resolution.
      */
     static Hdf5Object classify(FileContext ctx, String name, String parentPath, long objectHeaderAddress) {
-        ObjectHeader header = ObjectHeader.parse(ctx, objectHeaderAddress);
+        ObjectHeader header = ObjectCache.of(ctx).state(objectHeaderAddress).header(ctx); // kept for the handle made
         boolean isGroup = header.contains(MessageType.SYMBOL_TABLE)
                 || header.contains(MessageType.LINK_INFO)
                 || header.contains(MessageType.GROUP_INFO)

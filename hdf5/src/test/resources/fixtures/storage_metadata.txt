@@ -1,4 +1,11 @@
 attributes.h5	/data	CONTIGUOUS	-	24	0
+big_index.h5	/bt2	CHUNKED	1,1	16384	0
+big_index.h5	/bt2_gz	CHUNKED	1,1	12288	1	1	1	4	deflate
+big_index.h5	/fa	CHUNKED	1,1	65536	0
+big_index.h5	/implicit	CHUNKED	1,1	16384	0
+big_index_old.h5	/bt1	CHUNKED	1,1	16384	0
+big_index_old.h5	/bt1_3d	CHUNKED	1,2,1	16384	0
+big_index_old.h5	/bt1_gz	CHUNKED	1,1	12288	1	1	1	4	deflate
 btree_k_earliest.h5	/d	CHUNKED	5	40	0
 btree_k_latest.h5	/d	CHUNKED	5	40	0
 chunk_indexes.h5	/btree2	CHUNKED	2,2	64	0
@@ -779,6 +786,9 @@ paged_sparse.h5	/ea_sparse	CHUNKED	1	56	0
 paged_sparse.h5	/fa_paged	CHUNKED	2	20000	0
 paged_sparse.h5	/fa_paged_gz	CHUNKED	2	35000	1	1	1	4	deflate
 paged_sparse.h5	/fa_paged_sparse	CHUNKED	2	80	0
+partial_edges.h5	/fixed	CHUNKED	4	54	1	1	1	4	deflate
+partial_edges.h5	/grows	CHUNKED	4	54	1	1	1	4	deflate
+partial_edges.h5	/plane	CHUNKED	2,3	184	2	2	1	4	shuffle	1	1	4	deflate
 paths.h5	/a/b/c/deep	CONTIGUOUS	-	24	0
 paths.h5	/many/alias_a	CONTIGUOUS	-	8	0
 paths.h5	/many/t01	CONTIGUOUS	-	8	0
@@ -903,6 +913,11 @@ sohm.h5	/pair1	CONTIGUOUS	-	24	0
 sohm.h5	/pair2	CONTIGUOUS	-	24	0
 sohm.h5	/s1	CONTIGUOUS	-	4	0
 sohm.h5	/s2	CONTIGUOUS	-	4	0
+sohm_btree.h5	/d1	CONTIGUOUS	-	12	0
+sohm_btree.h5	/d2	CONTIGUOUS	-	12	0
+sohm_btree.h5	/e1	CHUNKED	2	16	0
+sohm_btree.h5	/e2	CHUNKED	2	16	0
+sohm_btree.h5	/e3	CHUNKED	2	16	0
 sohm_latest.h5	/a	CHUNKED	3	34	1	1	1	4	deflate
 sohm_latest.h5	/b	CHUNKED	3	34	1	1	1	4	deflate
 sohm_latest.h5	/many	CONTIGUOUS	-	32	0
@@ -919,6 +934,56 @@ szip.h5	/i32_2d	CHUNKED	5,30	420	1	4	1	169 8 32 30	Unknown library filter
 szip.h5	/i32_nn_multi	CHUNKED	256	698	1	4	1	169 8 32 256	Unknown library filter
 szip.h5	/u16_pad_nn	CHUNKED	10,100	451	1	4	1	169 32 16 100	Unknown library filter
 szip.h5	/u8_ec_pad	CHUNKED	300	295	1	4	1	141 8 8 300	Unknown library filter
+tracked_order.h5	/big/z00	CONTIGUOUS	-	4	0
+tracked_order.h5	/big/z01	CONTIGUOUS	-	4	0
+tracked_order.h5	/big/z02	CONTIGUOUS	-	4	0
+tracked_order.h5	/big/z03	CONTIGUOUS	-	4	0
+tracked_order.h5	/big/z04	CONTIGUOUS	-	4	0
+tracked_order.h5	/big/z05	CONTIGUOUS	-	4	0
+tracked_order.h5	/big/z06	CONTIGUOUS	-	4	0
+tracked_order.h5	/big/z07	CONTIGUOUS	-	4	0
+tracked_order.h5	/big/z08	CONTIGUOUS	-	4	0
+tracked_order.h5	/big/z09	CONTIGUOUS	-	4	0
+tracked_order.h5	/big/z10	CONTIGUOUS	-	4	0
+tracked_order.h5	/big/z11	CONTIGUOUS	-	4	0
+tracked_order.h5	/big/z12	CONTIGUOUS	-	4	0
+tracked_order.h5	/big/z13	CONTIGUOUS	-	4	0
+tracked_order.h5	/big/z14	CONTIGUOUS	-	4	0
+tracked_order.h5	/big/z15	CONTIGUOUS	-	4	0
+tracked_order.h5	/big/z16	CONTIGUOUS	-	4	0
+tracked_order.h5	/big/z17	CONTIGUOUS	-	4	0
+tracked_order.h5	/big/z18	CONTIGUOUS	-	4	0
+tracked_order.h5	/big/z19	CONTIGUOUS	-	4	0
+tracked_order.h5	/d	CONTIGUOUS	-	12	0
+tracked_order.h5	/dd	CONTIGUOUS	-	12	0
+tracked_order.h5	/small/a	CONTIGUOUS	-	4	0
+tracked_order.h5	/small/b	CONTIGUOUS	-	4	0
+tracked_order.h5	/small/c	CONTIGUOUS	-	4	0
+tracked_order_old.h5	/big/z00	CONTIGUOUS	-	4	0
+tracked_order_old.h5	/big/z01	CONTIGUOUS	-	4	0
+tracked_order_old.h5	/big/z02	CONTIGUOUS	-	4	0
+tracked_order_old.h5	/big/z03	CONTIGUOUS	-	4	0
+tracked_order_old.h5	/big/z04	CONTIGUOUS	-	4	0
+tracked_order_old.h5	/big/z05	CONTIGUOUS	-	4	0
+tracked_order_old.h5	/big/z06	CONTIGUOUS	-	4	0
+tracked_order_old.h5	/big/z07	CONTIGUOUS	-	4	0
+tracked_order_old.h5	/big/z08	CONTIGUOUS	-	4	0
+tracked_order_old.h5	/big/z09	CONTIGUOUS	-	4	0
+tracked_order_old.h5	/big/z10	CONTIGUOUS	-	4	0
+tracked_order_old.h5	/big/z11	CONTIGUOUS	-	4	0
+tracked_order_old.h5	/big/z12	CONTIGUOUS	-	4	0
+tracked_order_old.h5	/big/z13	CONTIGUOUS	-	4	0
+tracked_order_old.h5	/big/z14	CONTIGUOUS	-	4	0
+tracked_order_old.h5	/big/z15	CONTIGUOUS	-	4	0
+tracked_order_old.h5	/big/z16	CONTIGUOUS	-	4	0
+tracked_order_old.h5	/big/z17	CONTIGUOUS	-	4	0
+tracked_order_old.h5	/big/z18	CONTIGUOUS	-	4	0
+tracked_order_old.h5	/big/z19	CONTIGUOUS	-	4	0
+tracked_order_old.h5	/d	CONTIGUOUS	-	12	0
+tracked_order_old.h5	/dd	CONTIGUOUS	-	12	0
+tracked_order_old.h5	/small/a	CONTIGUOUS	-	4	0
+tracked_order_old.h5	/small/b	CONTIGUOUS	-	4	0
+tracked_order_old.h5	/small/c	CONTIGUOUS	-	4	0
 typed.h5	/arr_f4	CONTIGUOUS	-	48	0
 typed.h5	/arr_s	CONTIGUOUS	-	12	0
 typed.h5	/bits_b16be	CONTIGUOUS	-	6	0

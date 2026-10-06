@@ -418,6 +418,47 @@ def build_paged_sparse(f):
     fs[4990:5000] = np.arange(4990, 5000, dtype="i4")
 
 
+def build_big_index(out):
+    """Chunk indexes of thousands of one-element chunks (P2 PF5), for reading one chunk without reading the
+    rest of the index: a paged fixed array, an implicit index, version-2 B-trees (filtered or not) of more
+    than one level, and, in the earliest format, version-1 B-trees of more than one level."""
+    with h5py.File(os.path.join(out, "big_index.h5"), "w", libver="latest") as f:
+        f.create_dataset("fa", data=np.arange(16384, dtype="i4").reshape(128, 128), chunks=(1, 1))
+        f.create_dataset("bt2", data=np.arange(4096, dtype="i4").reshape(64, 64), maxshape=(None, None),
+                         chunks=(1, 1))
+        f.create_dataset("bt2_gz", data=np.arange(1024, dtype="i4").reshape(32, 32), maxshape=(None, None),
+                         chunks=(1, 1), compression="gzip")
+        dc = h5py.h5p.create(h5py.h5p.DATASET_CREATE)
+        dc.set_chunk((1, 1))
+        dc.set_alloc_time(h5py.h5d.ALLOC_TIME_EARLY)
+        space = h5py.h5s.create_simple((64, 64))
+        d = h5py.h5d.create(f.id, b"implicit", h5py.h5t.py_create(np.dtype("<i4")), space, dc)
+        d.write(h5py.h5s.ALL, h5py.h5s.ALL, np.arange(4096, dtype="<i4").reshape(64, 64))
+        d.close()
+    with h5py.File(os.path.join(out, "big_index_old.h5"), "w", libver="earliest") as f:
+        f.create_dataset("bt1", data=np.arange(4096, dtype="i4").reshape(64, 64), chunks=(1, 1))
+        f.create_dataset("bt1_gz", data=np.arange(1024, dtype="i4").reshape(32, 32), chunks=(1, 1),
+                         compression="gzip")
+        f.create_dataset("bt1_3d", data=np.arange(4096, dtype="i4").reshape(16, 16, 16), chunks=(1, 2, 1))
+
+
+def build_vds_scatter(f):
+    """Virtual datasets whose elements scatter over their source (P2 PF7), all in this same file ("."): a
+    strided source selection (one element of every 1024), a source of another shape (a flat array viewed as
+    a 128 x 512 grid, read by column), and a mapping of the same shape (read by a strided selection). The
+    source is chunked, 128 elements a chunk, so reading only the elements wanted reads few of its chunks."""
+    f.create_dataset("flat", data=np.arange(65536, dtype="i4"), chunks=(128,))
+    strided = h5py.VirtualLayout(shape=(64,), dtype="i4")
+    strided[:] = h5py.VirtualSource(".", "flat", shape=(65536,))[0:65536:1024]
+    f.create_virtual_dataset("strided", strided, fillvalue=-1)
+    reshaped = h5py.VirtualLayout(shape=(128, 512), dtype="i4")
+    reshaped[:, :] = h5py.VirtualSource(".", "flat", shape=(65536,))
+    f.create_virtual_dataset("reshaped", reshaped, fillvalue=-1)
+    same = h5py.VirtualLayout(shape=(65536,), dtype="i4")
+    same[:] = h5py.VirtualSource(".", "flat", shape=(65536,))
+    f.create_virtual_dataset("same", same, fillvalue=-1)
+
+
 def build_filtered_single(f):
     """Single-chunk index (one chunk covers the dataset) with filters: the layout message itself
     records the chunk's filtered size and filter mask."""
@@ -1687,6 +1728,8 @@ FIXTURES = {
     "chunk_maxshape": lambda: _with_file("chunk_maxshape.h5", build_chunk_maxshape, libver="latest"),
     "layout_v4": lambda: _with_file("layout_v4.h5", build_layout_v4, libver=("v110", "v110")),
     "paged_sparse": lambda: _with_file("paged_sparse.h5", build_paged_sparse, libver="latest"),
+    "big_index": lambda: build_big_index(OUT),
+    "vds_scatter": lambda: _with_file("vds_scatter.h5", build_vds_scatter, libver="latest"),
     "filtered_single": lambda: _with_file("filtered_single.h5", build_filtered_single, libver="latest"),
     "unwritten": lambda: build_unwritten(OUT),
     "scaleoffset": lambda: build_scaleoffset(os.path.join(OUT, "scaleoffset.h5")),

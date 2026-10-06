@@ -2,6 +2,7 @@ package com.ebremer.falcon.hdf5;
 
 import com.ebremer.falcon.hdf5.checksum.Fletcher32;
 import com.ebremer.falcon.hdf5.checksum.Lookup3;
+import com.ebremer.falcon.hdf5.data.SelectedElements;
 import com.ebremer.falcon.hdf5.datatype.Datatype;
 import com.ebremer.falcon.hdf5.filter.FilterPipeline;
 import com.ebremer.falcon.hdf5.filter.FilterPipelineMessage;
@@ -167,6 +168,11 @@ public final class Hdf5Writer implements AutoCloseable {
     private final List<ObjectHeaderEditor.Patch> headerPatches = new ArrayList<>();
     private final List<SharedMessages.Release> sharedReleases = new ArrayList<>(); // messages no longer held
     private final Map<Path, java.nio.channels.FileChannel> externalFiles = new LinkedHashMap<>(); // external raw data
+    // The other files written through virtual datasets (P2 WF11), each changed in a session of its own.
+    private final Map<Path, Hdf5Writer> sourceWriters = new LinkedHashMap<>();
+    // Writes through virtual datasets whose sources are virtual: nested no deeper than reads are.
+    private static final int MAX_VIRTUAL_NESTING = 32;
+    private static final ThreadLocal<int[]> VIRTUAL_NESTING = ThreadLocal.withInitial(() -> new int[1]);
     // A file being changed: the writes over it (superblock first), once journaled and on disk (P2 WF10).
     private List<ObjectHeaderEditor.Patch> journal;
     // For tests: the writes over a file after which writing them fails, as a crash would stop it (-1: never).
@@ -271,13 +277,13 @@ public final class Hdf5Writer implements AutoCloseable {
     }
 
     /**
-     * Opens the existing HDF5 file at {@code path} to change it in place (P2 WF6, WF10): add groups, datasets,
-     * links and attributes anywhere in it; open its groups ({@link GroupWriter#group}) and datasets
-     * ({@link GroupWriter#dataset}) to write their data or set and delete their attributes (those kept in its
-     * shared-message table too); and hard-link ({@link GroupWriter#hardLink}), move
-     * ({@link GroupWriter#move}) and delete ({@link GroupWriter#delete}) its links. New objects are written in
-     * the file's own format: the earliest one for a file with a version 0&ndash;1 superblock, else the modern
-     * one.
+     * Opens the existing HDF5 file at {@code path} to change it in place (P2 WF6, WF10, WF11): add groups,
+     * datasets, links and attributes anywhere in it; open its groups ({@link GroupWriter#group}) and datasets
+     * ({@link GroupWriter#dataset}) to write their data (a virtual dataset's into its sources, those of other
+     * files too) or set and delete their attributes (those kept in its shared-message table too); and
+     * hard-link ({@link GroupWriter#hardLink}), move ({@link GroupWriter#move}) and delete
+     * ({@link GroupWriter#delete}) its links. New objects are written in the file's own format: the earliest
+     * one for a file with a version 0&ndash;1 superblock, else the modern one.
      *
      * <p>The file is changed in place, not rewritten: new data and metadata go after its end as they are
      * written, and {@link #close()} then points the file's existing structures at them (a group's link
@@ -446,25 +452,36 @@ public final class Hdf5Writer implements AutoCloseable {
      * contiguous datasets); one after it is redone by retrying {@code close()}, or by the next
      * {@link #open} of the file (after a crash, or {@link #abort()}). Meanwhile a version-3 superblock is
      * marked as open by a writer, as libhdf5 marks it, so libhdf5 refuses the file until the change is whole.
+     * The other files written through its virtual datasets are then completed, each in the same way; one
+     * that fails is completed by retrying {@code close()} (or undone by {@link #abort()}).
      *
      * <p>{@code close()} cannot tell that the code building the file failed: inside
      * try-with-resources, call {@link #abort()} on failure to avoid writing what was added so far.
      */
     @Override
     public void close() throws IOException {
-        if (lifecycle.closed) {
+        if (lifecycle.closed && sourceWriters.isEmpty()) {
             return;
         }
-        try {
-            complete();
-        } catch (UncheckedIOException e) {
-            throw e.getCause();
-        } catch (HdfException | IllegalArgumentException | IllegalStateException e) {
-            throw e;
-        } catch (RuntimeException e) {
-            throw new HdfException("could not write " + path + ": " + e, e);
+        if (!lifecycle.closed) {
+            try {
+                complete();
+            } catch (UncheckedIOException e) {
+                throw e.getCause();
+            } catch (HdfException | IllegalArgumentException | IllegalStateException e) {
+                throw e;
+            } catch (RuntimeException e) {
+                throw new HdfException("could not write " + path + ": " + e, e);
+            }
+            lifecycle.closed = true;
         }
-        lifecycle.closed = true;
+        // Then the files written through virtual datasets (P2 WF11), each through its own journal, once this
+        // file's reader, which may hold them open, is closed. One that fails is completed by a retry.
+        java.util.Iterator<Hdf5Writer> sources = sourceWriters.values().iterator();
+        while (sources.hasNext()) {
+            sources.next().close();
+            sources.remove();
+        }
     }
 
     /**
@@ -472,7 +489,8 @@ public final class Hdf5Writer implements AutoCloseable {
      * {@code path} is left as it was (a file being changed loses what was added after its end; data written
      * into its contiguous datasets stays). After a {@link #close()} of a file being changed failed while
      * writing over the file, its journal is kept instead, and the change is redone when the file is next
-     * opened. Use it when building the file failed part-way:
+     * opened. The other files written through its virtual datasets are left likewise. Use it when building
+     * the file failed part-way:
      *
      * <pre>{@code
      * Hdf5Writer w = Hdf5Writer.create(path);
@@ -486,23 +504,28 @@ public final class Hdf5Writer implements AutoCloseable {
      * }</pre>
      */
     public void abort() {
-        if (lifecycle.closed) {
-            return;
+        if (!lifecycle.closed) {
+            lifecycle.closed = true;
+            try {
+                closeExternalFiles(false);
+            } catch (UncheckedIOException e) {
+                // what was written there stays, as data written into the file's contiguous datasets does
+            }
+            if (existing != null) {
+                existing.close();
+            }
+            if (output != null && journal != null) {
+                output.closeKeepingJournal(); // interrupted while written over: redone when the file is next opened
+            } else if (output != null) {
+                output.discard();
+            }
         }
-        lifecycle.closed = true;
-        try {
-            closeExternalFiles(false);
-        } catch (UncheckedIOException e) {
-            // what was written there stays, as data written into the file's contiguous datasets does
+        // Then the files written through virtual datasets (P2 WF11), once this file's reader, which may hold
+        // them open (and so keep them from being cut back), is closed.
+        for (Hdf5Writer source : sourceWriters.values()) {
+            source.abort();
         }
-        if (existing != null) {
-            existing.close();
-        }
-        if (output != null && journal != null) {
-            output.closeKeepingJournal(); // interrupted while written over: redone when the file is next opened
-        } else if (output != null) {
-            output.discard();
-        }
+        sourceWriters.clear();
     }
 
     /** Closes the external raw data files written to, first flushing them to disk if {@code force}. */
@@ -1540,7 +1563,11 @@ public final class Hdf5Writer implements AutoCloseable {
          * datatype, shape limits, layout, and filters: it grows only within its maximum shape, and its chunks
          * are written with its filters, as libhdf5 would encode them (deflate, shuffle, fletcher32, szip,
          * n-bit, scale-offset; not the third-party ones), its partial edge chunks unfiltered if it keeps them
-         * so. Data in external raw files is written there; a virtual dataset is a view of others: write those.
+         * so. Data in external raw files is written there. A virtual dataset's elements are written into its
+         * sources (P2 WF11), as libhdf5's {@code H5Dwrite} writes them: each into the source element its
+         * mapping pairs it with, in this file or another (changed in a session of its own, completed when
+         * this writer closes). A write must cover only elements a mapping whose source exists covers, each
+         * once, or it is refused before anything is written.
          *
          * @throws IllegalArgumentException if the group has no dataset of that name (a soft or external link
          *         is not followed: open the dataset where it is)
@@ -1840,6 +1867,12 @@ public final class Hdf5Writer implements AutoCloseable {
             requireStreaming("write");
             requireBox(offset, count);
             long n = elementCount(count);
+            if (spec.virtual) {
+                VirtualDataset.requireFixedSize(spec.type);
+                ValueEncoder.Encoded encoded = ValueEncoder.encode(spec.type, n, values, writer.heaps, "dataset " + path);
+                writer.writeVirtual(spec, path, offset, count, encoded.bytes());
+                return this;
+            }
             ValueEncoder.Encoded encoded = ValueEncoder.encode(spec.type, n, values, writer.heaps, "dataset " + path);
             writer.storage(spec, path).write(offset, count, encoded);
             return this;
@@ -1861,8 +1894,29 @@ public final class Hdf5Writer implements AutoCloseable {
             if (bytes.length != expected) {
                 throw new IllegalArgumentException(bytes.length + " bytes given for " + expected);
             }
+            if (spec.virtual) {
+                writer.writeVirtual(spec, path, offset, count, bytes);
+                return this;
+            }
             writer.storage(spec, path).write(offset, count, new ValueEncoder.Encoded(bytes, List.of(), List.of()));
             return this;
+        }
+
+        /**
+         * Before a write through a virtual dataset writes into this dataset (P2 WF11): checks that the box
+         * from {@code low} to {@code high} lies in it, and that its data can be written (its storage made).
+         */
+        void prepareWrite(long[] low, long[] high) {
+            lifecycle.check();
+            for (int d = 0; d < low.length; d++) {
+                if (low[d] < 0 || high[d] >= spec.shape[d]) {
+                    throw new IllegalArgumentException("a virtual dataset maps elements past the extent of its source "
+                            + path + " (in dimension " + d + ", up to " + high[d] + " of " + spec.shape[d] + ")");
+                }
+            }
+            if (!spec.virtual) {
+                writer.storage(spec, path);
+            }
         }
 
         /**
@@ -1912,6 +1966,9 @@ public final class Hdf5Writer implements AutoCloseable {
             }
             if (java.util.Arrays.equals(shape, spec.shape)) {
                 return this;
+            }
+            if (spec.virtual) {
+                throw new IllegalStateException("dataset " + path + " is virtual: its sources set its extent; grow those");
             }
             if (spec.maxShape == null || spec.chunkShape == null) {
                 throw new IllegalStateException("dataset " + path + " cannot grow: give it a chunk shape and a larger maxShape");
@@ -2532,11 +2589,192 @@ public final class Hdf5Writer implements AutoCloseable {
                 }
             }
             case com.ebremer.falcon.hdf5.layout.DataLayout.Compact compact -> spec.compact = true;
+            case com.ebremer.falcon.hdf5.layout.DataLayout.Virtual virtual -> spec.virtual = true;
             default -> {
             }
         }
         spec.fillValue = dataset.fillValue();
         return spec;
+    }
+
+    /**
+     * Writes the box {@code [offset, offset + count)} of a virtual dataset of the file into its sources (P2
+     * WF11), as libhdf5's {@code H5Dwrite} on one does: each element into the source element its mapping
+     * pairs it with, converted to the source's byte order. A source in this file is written in this session;
+     * one in another file, in a session of that file's, completed when this one is. As libhdf5 does, the write
+     * is refused if an element is mapped by no mapping, or by one whose source is missing ("write requested
+     * to unmapped portion of virtual dataset"), or by several; and the check is made, and each source opened
+     * to write it, before anything is written.
+     */
+    private void writeVirtual(DatasetSpec spec, String path, long[] offset, long[] count, byte[] bytes) {
+        int[] nesting = VIRTUAL_NESTING.get();
+        if (nesting[0] >= MAX_VIRTUAL_NESTING) {
+            throw new HdfFormatException("virtual dataset sources nest more than " + MAX_VIRTUAL_NESTING
+                    + " levels deep (a virtual dataset that maps itself?)");
+        }
+        nesting[0]++;
+        try {
+            Dataset dataset = (Dataset) spec.object;
+            long wanted = elementCount(count);
+            long mapped = 0;
+            List<SourceWrite> writes = new ArrayList<>();
+            for (VirtualDataset.Part part : dataset.virtualDataset().parts(spec.shape, offset, count)) {
+                long n = part.pairs();
+                int rank = part.selected().rank();
+                long[] low = new long[rank];
+                long[] high = new long[rank];
+                java.util.Arrays.fill(low, Long.MAX_VALUE);
+                java.util.Arrays.fill(high, Long.MIN_VALUE);
+                long[] at = new long[rank];
+                long[] inBox = new long[1];
+                part.target().forEachInBox(offset, count, (position, coordinates) -> {
+                    if (position < n) {
+                        part.selected().coordinates(position, at);
+                        for (int d = 0; d < rank; d++) {
+                            low[d] = Math.min(low[d], at[d]);
+                            high[d] = Math.max(high[d], at[d]);
+                        }
+                        inBox[0]++;
+                    }
+                });
+                if (inBox[0] == 0) {
+                    continue;
+                }
+                mapped += inBox[0];
+                boolean swap = VirtualDataset.byteSwapNeeded(part.source().datatype(), spec.type, part.sourceName());
+                DatasetWriter source = sourceDataset(part.source(), path);
+                source.prepareWrite(low, high);
+                writes.add(new SourceWrite(part, swap, source));
+            }
+            if (mapped != wanted) {
+                throw new IllegalArgumentException("the box of virtual dataset " + path + " written holds " + wanted
+                        + " elements, but its mappings to sources found map " + mapped
+                        + (mapped < wanted ? " of them: write only elements a mapping covers, whose source exists"
+                        : ": elements mapped more than once are not written") + " (libhdf5 refuses such a write too)");
+            }
+            for (SourceWrite write : writes) {
+                write.write(offset, count, bytes, spec.elementSize);
+            }
+        } finally {
+            nesting[0]--;
+        }
+    }
+
+    /**
+     * A source dataset of a virtual dataset of the file, opened to write it (P2 WF11): in this file, in this
+     * session; in another, in a session of that file's, opened once.
+     */
+    private DatasetWriter sourceDataset(Dataset source, String virtualPath) {
+        Hdf5Writer writer = this;
+        if (source.ctx != existing.ctx) {
+            Path file = source.ctx.path();
+            if (file == null) {
+                throw new HdfUnsupportedException("virtual dataset " + virtualPath + " maps " + source.path()
+                        + " in a file read through a resolver: Falcon writes only files it opens from a path");
+            }
+            try {
+                Path real = file.toRealPath();
+                writer = sourceWriters.get(real);
+                if (writer == null) {
+                    writer = open(real);
+                    sourceWriters.put(real, writer);
+                }
+            } catch (IOException e) {
+                throw new UncheckedIOException("cannot open " + file + ", a source of virtual dataset " + virtualPath
+                        + ", to write it", e);
+            }
+        }
+        return writer.fileDataset(source.objectHeaderAddress(), source.path());
+    }
+
+    /** A dataset of the file being changed, by its header's address, opened (once) to write it. */
+    private DatasetWriter fileDataset(long address, String path) {
+        ObjectSpec spec = opened.get(address);
+        if (spec == null) {
+            int slash = path.lastIndexOf('/');
+            String name = path.substring(slash + 1);
+            if (!(existing.object(slash <= 0 ? "/" : path.substring(0, slash), name, address) instanceof Dataset dataset)) {
+                throw new IllegalArgumentException(path + " is not a dataset");
+            }
+            spec = existingDataset(name, dataset);
+            opened.put(address, spec);
+        }
+        if (!(spec instanceof DatasetSpec dataset)) {
+            throw new IllegalArgumentException(path + " is not a dataset");
+        }
+        return new DatasetWriter(this, dataset, display(path), legacy, lifecycle);
+    }
+
+    /** One source's share of a write through a virtual dataset: its mapping's part, and where it goes. */
+    private record SourceWrite(VirtualDataset.Part part, boolean swap, DatasetWriter source) {
+
+        /**
+         * Writes the elements of the box {@code [offset, offset + count)} (whose bytes are {@code bytes},
+         * row-major) that this part maps: in runs of elements next to each other both in the box and in the
+         * source's last dimension.
+         */
+        void write(long[] offset, long[] count, byte[] bytes, int size) {
+            SelectedElements selected = part.selected();
+            long n = part.pairs();
+            int rank = selected.rank();
+            long[] boxStride = rowMajorStride(count);
+            long[] at = new long[rank];
+            long[] runAt = new long[rank];
+            long[] run = new long[2]; // its length, and its first element's place in the box
+            part.target().forEachInBox(offset, count, (position, coordinates) -> {
+                if (position >= n) {
+                    return;
+                }
+                long place = 0;
+                for (int d = 0; d < coordinates.length; d++) {
+                    place += (coordinates[d] - offset[d]) * boxStride[d];
+                }
+                selected.coordinates(position, at);
+                if (run[0] > 0 && rank > 0 && place == run[1] + run[0] && continues(runAt, at, run[0])) {
+                    run[0]++;
+                    return;
+                }
+                if (run[0] > 0) {
+                    flush(runAt, run[0], run[1], bytes, size);
+                }
+                System.arraycopy(at, 0, runAt, 0, rank);
+                run[0] = 1;
+                run[1] = place;
+            });
+            if (run[0] > 0) {
+                flush(runAt, run[0], run[1], bytes, size);
+            }
+        }
+
+        /** True if {@code at} is the element {@code length} after {@code start} in the last dimension. */
+        private static boolean continues(long[] start, long[] at, long length) {
+            int last = start.length - 1;
+            for (int d = 0; d < last; d++) {
+                if (at[d] != start[d]) {
+                    return false;
+                }
+            }
+            return at[last] == start[last] + length;
+        }
+
+        private void flush(long[] start, long length, long place, byte[] bytes, int size) {
+            long[] runCount = new long[start.length];
+            java.util.Arrays.fill(runCount, 1);
+            if (runCount.length > 0) {
+                runCount[runCount.length - 1] = length;
+            }
+            byte[] run = java.util.Arrays.copyOfRange(bytes, (int) (place * size), (int) ((place + length) * size));
+            if (swap) {
+                for (int e = 0; e < run.length; e += size) {
+                    for (int b = 0; b < size / 2; b++) {
+                        byte t = run[e + b];
+                        run[e + b] = run[e + size - 1 - b];
+                        run[e + size - 1 - b] = t;
+                    }
+                }
+            }
+            source.writeRaw(start.clone(), runCount, run);
+        }
     }
 
     /**
@@ -2558,8 +2796,7 @@ public final class Hdf5Writer implements AutoCloseable {
         }
         switch (dataset.dataLayout()) {
             case com.ebremer.falcon.hdf5.layout.DataLayout.Virtual virtual ->
-                    throw new HdfUnsupportedException("dataset " + path + " is virtual, a view of other datasets: write"
-                            + " those");
+                    throw new IllegalStateException("dataset " + path + " is virtual: it is written into its sources");
             case com.ebremer.falcon.hdf5.layout.DataLayout.Compact compact -> {
                 if (compact.data().length != elementCount(spec.shape) * spec.elementSize) {
                     throw new HdfFormatException("dataset " + path + " holds " + compact.data().length + " bytes of compact data");
@@ -5190,6 +5427,7 @@ public final class Hdf5Writer implements AutoCloseable {
         final List<FilterSpec> filters = new ArrayList<>(); // the chunk filter pipeline, in write order
         int nbitPrecision = -1;         // -1 = no n-bit filter
         long[] fileShape;               // a dataset of the file: its shape there
+        boolean virtual;                // a virtual dataset of the file: written into its sources (P2 WF11)
 
         DatasetSpec(String name, byte[] datatype, int elementSize, long[] shape, long[] chunkShape,
                     byte[] data, List<byte[]> vlenStrings) {

@@ -53,12 +53,16 @@ import java.util.function.Supplier;
  * allows (see there); a refused one fails the read. A missing source file or dataset leaves the fill
  * value, as in libhdf5.
  *
- * <p><b>Reading part of it.</b> A read asks for a box of the virtual dataset. Mappings that do not reach
- * the box are skipped without opening their sources. For the others, the virtual elements inside the box
- * are paired with their source elements by position (arithmetic, for the regular selections nearly every
- * mapping uses), and only the source's bounding box of those is read, through the source's own selection
- * reads (a chunked source reads just its overlapping chunks). Source files stay open, and source datasets
- * found are kept, so a later read does not look them up again.
+ * <p><b>Reading part of it.</b> A read asks for a box of the virtual dataset, or for its elements a strided
+ * or point selection picks. Mappings that do not reach them are skipped without opening their sources. For
+ * the others, the virtual elements wanted are paired with their source elements by position (arithmetic,
+ * for the regular selections nearly every mapping uses), and only those source elements are read, through
+ * the source's own selection reads (a chunked source reads just the chunks that hold them): the box that
+ * bounds them, when they fill much of it, else the elements themselves (P2 PF7). Source files stay open,
+ * and source datasets found are kept, so a later read does not look them up again.
+ *
+ * <p><b>Writing through it</b> (P2 WF11): {@link #parts} gives a write the same pairs, which
+ * {@link Hdf5Writer} writes into the sources.
  */
 final class VirtualDataset {
 
@@ -247,21 +251,31 @@ final class VirtualDataset {
         });
     }
 
-    private byte[] readBox(long[] virtualDims, Datatype type, byte[] fill, long[] offset, long[] count) {
-        if (containsHeapData(type)) {
-            // Variable-length and reference elements point into their own file's heaps and objects.
-            throw new HdfUnsupportedException("virtual datasets of variable-length or reference data are not supported");
+    /**
+     * One mapping's share of a read or write (or, for a printf-style mapping, one source's): the source
+     * dataset, the virtual elements the mapping fills ({@code target}), and the source elements they take
+     * ({@code selected}): the <i>i</i>th of {@code target} pairs with the <i>i</i>th of {@code selected}, for
+     * the first {@link #pairs()} of them.
+     */
+    record Part(Dataset source, SelectedElements target, SelectedElements selected, String sourceName) {
+
+        long pairs() {
+            return Math.min(target.count(), selected.count());
         }
-        int elementSize = type.size();
-        long elements = 1;
-        for (long c : count) {
-            elements = Math.multiplyExact(elements, c);
-        }
-        byte[] output = new byte[com.ebremer.falcon.hdf5.data.Elements.checkedByteCount(elements, elementSize)];
-        tileFill(output, fill, elementSize);
-        if (elements == 0) {
-            return output;
-        }
+    }
+
+    /**
+     * The parts of the mappings that may reach the box {@code [offset, offset + count)} of the virtual
+     * dataset of extent {@code virtualDims}, for the sources found: mappings that miss the box are skipped
+     * before their sources are looked for, and a missing source has no part (its elements keep the fill value,
+     * as in libhdf5).
+     */
+    List<Part> parts(long[] virtualDims, long[] offset, long[] count) {
+        return nested(() -> findParts(virtualDims, offset, count));
+    }
+
+    private List<Part> findParts(long[] virtualDims, long[] offset, long[] count) {
+        List<Part> parts = new ArrayList<>();
         List<Mapping> all = mappings();
         for (int i = 0; i < all.size(); i++) {
             Mapping mapping = all.get(i);
@@ -280,8 +294,8 @@ final class VirtualDataset {
                     }
                     SelectedElements target = virtual.blockElements(virtualDims, block);
                     if (target.mayIntersect(offset, count)) {
-                        copy(output, offset, count, source, target,
-                                mapping.source().elements(source.dataspace().dimensions()), type, mapping.datasetName());
+                        parts.add(new Part(source, target, mapping.source().elements(source.dataspace().dimensions()),
+                                mapping.datasetName()));
                     }
                 }
                 continue;
@@ -318,73 +332,204 @@ final class VirtualDataset {
                 selected = mapping.source().elements(sourceDims);
                 target = reach;
             }
-            copy(output, offset, count, source, target, selected, type, datasetName);
+            parts.add(new Part(source, target, selected, datasetName));
+        }
+        return parts;
+    }
+
+    private byte[] readBox(long[] virtualDims, Datatype type, byte[] fill, long[] offset, long[] count) {
+        requireFixedSize(type);
+        int elementSize = type.size();
+        long elements = 1;
+        for (long c : count) {
+            elements = Math.multiplyExact(elements, c);
+        }
+        byte[] output = new byte[com.ebremer.falcon.hdf5.data.Elements.checkedByteCount(elements, elementSize)];
+        tileFill(output, fill, elementSize);
+        if (elements == 0) {
+            return output;
+        }
+        long[] outStride = strides(count);
+        for (Part part : findParts(virtualDims, offset, count)) {
+            long n = part.pairs();
+            // The virtual elements inside the box, each with its place in the box.
+            transfer(output, part, type, visitor -> part.target().forEachInBox(offset, count, (position, coordinates) -> {
+                if (position < n) {
+                    long to = 0;
+                    for (int d = 0; d < coordinates.length; d++) {
+                        to += (coordinates[d] - offset[d]) * outStride[d];
+                    }
+                    visitor.visit(position, to);
+                }
+            }));
         }
         return output;
     }
 
     /**
-     * Copies into {@code output} (the box {@code [offset, offset + count)}, row-major) the source elements
-     * that the virtual elements inside the box pair with: the <i>i</i>th of {@code target} takes the
-     * <i>i</i>th of {@code selected}. Only the bounding box of those source elements is read.
+     * The virtual dataset's elements that {@code elements} selects, in its order (P2 PF7): each mapping's
+     * part of them is read from its source, as the source elements they pair with, and nothing else.
      */
-    private static void copy(byte[] output, long[] offset, long[] count, Dataset source, SelectedElements target,
-                             SelectedElements selected, Datatype type, String sourceName) {
-        long n = Math.min(target.count(), selected.count());
-        if (n == 0) {
-            return;
-        }
+    byte[] gather(long[] virtualDims, Datatype type, byte[] fill, SelectedElements elements) {
+        return nested(() -> gatherElements(virtualDims, type, fill, elements));
+    }
+
+    private byte[] gatherElements(long[] virtualDims, Datatype type, byte[] fill, SelectedElements elements) {
+        requireFixedSize(type);
         int elementSize = type.size();
-        boolean swap = byteSwapNeeded(source.datatype(), type, sourceName);
+        byte[] output = new byte[com.ebremer.falcon.hdf5.data.Elements.checkedByteCount(elements.count(), elementSize)];
+        tileFill(output, fill, elementSize);
+        if (elements.count() == 0) {
+            return output;
+        }
+        int rank = virtualDims.length;
+        long[] low = elements.lowCorner();
+        long[] high = elements.highCorner();
+        long[] box = new long[rank];
+        for (int d = 0; d < rank; d++) {
+            box[d] = high[d] - low[d] + 1;
+        }
+        for (Part part : findParts(virtualDims, low, box)) {
+            long n = part.pairs();
+            // The elements asked for inside the box that bounds both them and the mapping's virtual elements,
+            // each paired with its place among those.
+            long[] targetLow = part.target().lowCorner();
+            long[] targetHigh = part.target().highCorner();
+            long[] from = new long[rank];
+            long[] span = new long[rank];
+            boolean empty = part.target().count() == 0;
+            for (int d = 0; d < rank && !empty; d++) {
+                from[d] = Math.max(low[d], targetLow[d]);
+                span[d] = Math.min(high[d], targetHigh[d]) - from[d] + 1;
+                empty = span[d] <= 0;
+            }
+            if (empty) {
+                continue;
+            }
+            transfer(output, part, type, visitor -> elements.forEachInBox(from, span, (position, coordinates) -> {
+                long p = part.target().positionOf(coordinates);
+                if (p >= 0 && p < n) {
+                    visitor.visit(p, position);
+                }
+            }));
+        }
+        return output;
+    }
+
+    /** Visits pairs of a part's target positions and output elements; replayable, the same pairs each time. */
+    @FunctionalInterface
+    private interface Pairs {
+        void forEach(PairVisitor visitor);
+    }
+
+    /** One pair: the target (and so source) element at {@code position}, for output element {@code to}. */
+    @FunctionalInterface
+    private interface PairVisitor {
+        void visit(long position, long to);
+    }
+
+    /** The most source elements read at once when a part's elements are scattered: a bound on memory. */
+    private static final int BATCH = 1 << 16;
+
+    /**
+     * Copies into {@code output} the source elements the pairs name, read as cheaply as the source elements'
+     * layout allows (P2 PF7): the box that bounds them, when they fill a quarter of it or more (a mapping of
+     * the same shape, or a little strided); else every element the source selection picks, when all are
+     * wanted; else the elements themselves, in batches, so a source strided far apart, or a mapping whose
+     * virtual and source shapes differ, reads only what it needs (for chunked data, only the chunks that hold
+     * them).
+     */
+    private static void transfer(byte[] output, Part part, Datatype type, Pairs pairs) {
+        SelectedElements selected = part.selected();
+        int elementSize = type.size();
+        boolean swap = byteSwapNeeded(part.source().datatype(), type, part.sourceName());
         int sourceRank = selected.rank();
         long[] low = new long[sourceRank];
         long[] high = new long[sourceRank];
         Arrays.fill(low, Long.MAX_VALUE);
         Arrays.fill(high, Long.MIN_VALUE);
         long[] at = new long[sourceRank];
-        boolean[] any = new boolean[1];
-        target.forEachInBox(offset, count, (position, coordinates) -> {
-            if (position < n) {
-                selected.coordinates(position, at);
-                for (int d = 0; d < sourceRank; d++) {
-                    low[d] = Math.min(low[d], at[d]);
-                    high[d] = Math.max(high[d], at[d]);
-                }
-                any[0] = true;
+        long[] wanted = new long[1];
+        pairs.forEach((position, to) -> {
+            selected.coordinates(position, at);
+            for (int d = 0; d < sourceRank; d++) {
+                low[d] = Math.min(low[d], at[d]);
+                high[d] = Math.max(high[d], at[d]);
             }
+            wanted[0]++;
         });
-        if (!any[0]) {
+        if (wanted[0] == 0) {
             return;
         }
         long[] shape = new long[sourceRank];
+        long volume = 1;
         for (int d = 0; d < sourceRank; d++) {
             shape[d] = high[d] - low[d] + 1;
+            volume = volume > Long.MAX_VALUE / shape[d] ? Long.MAX_VALUE : volume * shape[d];
         }
-        MemorySegment bytes = source.selectionData(low, shape);
-        long[] sourceStride = strides(shape);
-        long[] outStride = strides(count);
-        target.forEachInBox(offset, count, (position, coordinates) -> {
-            if (position >= n) {
-                return;
-            }
-            selected.coordinates(position, at);
-            long from = 0;
-            for (int d = 0; d < sourceRank; d++) {
-                from += (at[d] - low[d]) * sourceStride[d];
-            }
-            long to = 0;
-            for (int d = 0; d < coordinates.length; d++) {
-                to += (coordinates[d] - offset[d]) * outStride[d];
-            }
-            int out = (int) (to * elementSize);
-            if (swap) {
-                for (int b = 0; b < elementSize; b++) {
-                    output[out + b] = bytes.get(ValueLayout.JAVA_BYTE, from * elementSize + elementSize - 1 - b);
+        if (volume / 4 <= wanted[0]) {
+            MemorySegment bytes = part.source().selectionData(low, shape);
+            long[] sourceStride = strides(shape);
+            pairs.forEach((position, to) -> {
+                selected.coordinates(position, at);
+                long from = 0;
+                for (int d = 0; d < sourceRank; d++) {
+                    from += (at[d] - low[d]) * sourceStride[d];
                 }
-            } else {
-                MemorySegment.copy(bytes, ValueLayout.JAVA_BYTE, from * elementSize, output, out, elementSize);
+                put(bytes, from, output, to, elementSize, swap);
+            });
+            return;
+        }
+        long n = part.pairs();
+        if (n == selected.count() && wanted[0] >= n) {
+            MemorySegment bytes = part.source().selectedData(selected); // every element the selection picks, in order
+            pairs.forEach((position, to) -> put(bytes, position, output, to, elementSize, swap));
+            return;
+        }
+        int batch = (int) Math.min(BATCH, wanted[0]);
+        long[] positions = new long[batch];
+        long[] targets = new long[batch];
+        int[] held = new int[1];
+        Runnable flush = () -> {
+            long[][] points = new long[held[0]][sourceRank];
+            for (int i = 0; i < held[0]; i++) {
+                selected.coordinates(positions[i], points[i]);
+            }
+            MemorySegment bytes = part.source().selectedData(SelectedElements.points(points, sourceRank));
+            for (int i = 0; i < held[0]; i++) {
+                put(bytes, i, output, targets[i], elementSize, swap);
+            }
+            held[0] = 0;
+        };
+        pairs.forEach((position, to) -> {
+            positions[held[0]] = position;
+            targets[held[0]] = to;
+            if (++held[0] == batch) {
+                flush.run();
             }
         });
+        if (held[0] > 0) {
+            flush.run();
+        }
+    }
+
+    /** Copies source element {@code element} of {@code from} to output element {@code to}, byte-reversed if {@code swap}. */
+    private static void put(MemorySegment from, long element, byte[] output, long to, int elementSize, boolean swap) {
+        int out = (int) (to * elementSize);
+        if (swap) {
+            for (int b = 0; b < elementSize; b++) {
+                output[out + b] = from.get(ValueLayout.JAVA_BYTE, element * elementSize + elementSize - 1 - b);
+            }
+        } else {
+            MemorySegment.copy(from, ValueLayout.JAVA_BYTE, element * elementSize, output, out, elementSize);
+        }
+    }
+
+    /** Variable-length and reference elements point into their own file's heaps and objects. */
+    static void requireFixedSize(Datatype type) {
+        if (containsHeapData(type)) {
+            throw new HdfUnsupportedException("virtual datasets of variable-length or reference data are not supported");
+        }
     }
 
     private static long[] strides(long[] shape) {
@@ -557,7 +702,7 @@ final class VirtualDataset {
      * converts any other difference (size, sign, class); Falcon reports it instead of copying the source
      * bytes as if they were the virtual type.
      */
-    private static boolean byteSwapNeeded(Datatype source, Datatype target, String sourceName) {
+    static boolean byteSwapNeeded(Datatype source, Datatype target, String sourceName) {
         if (sameType(source, target)) {
             return false;
         }

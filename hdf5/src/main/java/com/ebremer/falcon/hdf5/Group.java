@@ -59,8 +59,8 @@ public final class Group extends Hdf5Object {
      */
     private static final int MAX_SOFT_LINKS = 16;
 
-    private volatile List<Link> links;          // loaded lazily, then cached (immutable)
-    private volatile Map<String, Link> linksByName; // built from links when a lookup finds them loaded
+    // Its links, and a map of them by name, are loaded lazily into the object's state, shared by its handles
+    // (P2 PF6). The objects they reach are named by this handle's path, so this handle keeps those.
     private volatile List<Hdf5Object> children;
 
     private Group(FileContext ctx, String name, String path, long objectHeaderAddress) {
@@ -83,10 +83,15 @@ public final class Group extends Hdf5Object {
     /** Every link in this group, of every kind, in the order the group indexes them. */
     public List<Link> links() {
         ctx.checkOpen();
-        List<Link> result = links;
+        List<Link> result = state.links;
         if (result == null) {
             result = List.copyOf(loadLinks());
-            links = result;
+            state.links = result;
+            long bytes = 0;
+            for (Link link : result) {
+                bytes += 128 + 2L * link.name().length();
+            }
+            state.charge(bytes);
         }
         return result;
     }
@@ -149,16 +154,17 @@ public final class Group extends Hdf5Object {
     /** This group's link called {@code name}: from the loaded links, or else through the name index. */
     private Optional<Link> named(String name) {
         ctx.checkOpen();
-        List<Link> loaded = links;
+        List<Link> loaded = state.links;
         if (loaded != null) {
-            Map<String, Link> byName = linksByName;
+            Map<String, Link> byName = state.linksByName;
             if (byName == null) {
                 Map<String, Link> map = new HashMap<>();
                 for (Link link : loaded) {
                     map.putIfAbsent(link.name(), link);
                 }
                 byName = Map.copyOf(map);
-                linksByName = byName;
+                state.linksByName = byName;
+                state.charge(48L * byName.size());
             }
             return Optional.ofNullable(byName.get(name));
         }

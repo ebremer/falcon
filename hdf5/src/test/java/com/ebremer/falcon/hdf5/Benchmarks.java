@@ -39,6 +39,8 @@ class Benchmarks {
     void runBenchmarks(@TempDir Path dir) throws IOException {
         Assumptions.assumeTrue("true".equals(System.getProperty("falcon.bench")),
                 "benchmark; run with -Dfalcon.bench=true");
+        // -Dtest=Benchmarks also selects it in the fuzz execution, whose 128 MB heap its 32 MiB datasets outgrow.
+        Assumptions.assumeTrue(Runtime.getRuntime().maxMemory() > 256L << 20, "benchmark; needs more than 256 MB of heap");
 
         int side = 2048;
         double[] data = new double[side * side];

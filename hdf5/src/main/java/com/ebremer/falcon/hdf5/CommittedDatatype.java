@@ -15,8 +15,6 @@ import com.ebremer.falcon.hdf5.message.DatatypeMessage;
  */
 public final class CommittedDatatype extends Hdf5Object {
 
-    private volatile Datatype datatype;
-
     private CommittedDatatype(FileContext ctx, String name, String path, long objectHeaderAddress) {
         super(ctx, name, path, objectHeaderAddress);
     }
@@ -32,14 +30,14 @@ public final class CommittedDatatype extends Hdf5Object {
 
     /** The committed datatype definition. */
     public Datatype datatype() {
-        Datatype result = datatype;
+        Datatype result = state.datatype;
         if (result == null) {
             HeaderMessage message = header().find(MessageType.DATATYPE);
             if (message == null) {
                 throw new HdfFormatException("committed datatype " + path() + " has no datatype message");
             }
             result = DatatypeMessage.resolve(ctx, message.bodyOffset(), SharedMessage.isShared(message));
-            datatype = result;
+            state.datatype = result;
         }
         return result;
     }

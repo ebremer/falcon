@@ -108,6 +108,15 @@ public final class ChunkGrid {
         return offset;
     }
 
+    /** The element offset of the chunk at grid coordinates {@code scaled}. */
+    public long[] offsetOf(long[] scaled) {
+        long[] offset = new long[scaled.length];
+        for (int d = 0; d < offset.length; d++) {
+            offset[d] = scaled[d] * chunkDims[d];
+        }
+        return offset;
+    }
+
     /** True if the chunk at element {@code offset} lies at least partly inside the current extent. */
     public boolean isWithinCurrentExtent(long[] offset) {
         for (int d = 0; d < offset.length; d++) {

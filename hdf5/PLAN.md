@@ -379,6 +379,10 @@ Each stage ends with a **milestone** and concrete **acceptance criteria**. "Refe
   unfiltered, and external raw data; changes attributes in the shared-message table; converts
   original-format groups for external links; returns shrunk dense storage to compact; and journals the
   writes over the file, redoing an interrupted change on the next open.
+- **Writing through virtual datasets ✓** (P2 WF11): a write into a virtual dataset of a file being
+  changed goes into its sources, as libhdf5's `H5Dwrite` puts it, through every kind of mapping, in the
+  same file and in others (each changed in a session of its own); elements no mapping covers are
+  refused before anything is written.
 
 ### H9 — API polish, performance, docs  (essentially complete)
 - **Robustness ✓**: a corrupt-input fuzz test truncates and byte-flips 19 fixtures and forces a full
@@ -392,7 +396,11 @@ Each stage ends with a **milestone** and concrete **acceptance criteria**. "Refe
 - **Performance ✓**: a hyperslab / `blocks()` read of a chunked dataset touches **only the chunks
   overlapping the selection** (`ChunkedReader.assembleSelection`) rather than assembling the whole
   dataset (contiguous selections extract zero-copy), and a per-file **decoded-chunk LRU cache**
-  (`io.ChunkCache`, ~16 MB) reuses filter-decode results across reads.
+  (`io.ChunkCache`, ~16 MB) reuses filter-decode results across reads. Since P2 PF5&ndash;PF7, a small
+  read looks its chunks up in the file's chunk index (an array entry, or a B-tree's path) rather than
+  reading the whole index; what objects read of themselves is shared by every handle of the same object,
+  in a bounded per-file cache; and a virtual dataset reads only the source elements a read needs, not
+  the box that bounds them.
 - **API ergonomics ✓**: scalar convenience reads (`Dataset.readInt/readLong/readDouble/readString`,
   `Attribute.readInt/…`) and **block streaming** (`Dataset.blocks(rows)` &rarr; `Stream<Selection>`) for
   processing a large dataset without materializing it whole.
