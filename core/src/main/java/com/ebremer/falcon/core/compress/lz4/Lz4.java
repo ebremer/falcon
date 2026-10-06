@@ -35,7 +35,7 @@ public final class Lz4 {
 
             int literalLength = token >>> 4;
             if (literalLength == 15) {
-                long continued = readLength(src, in, inEnd);
+                long continued = readLength(src, in, inEnd, outEnd - out - 15);
                 literalLength += (int) continued;
                 in = (int) (continued >>> 32);
             }
@@ -60,7 +60,7 @@ public final class Lz4 {
 
             int matchLength = token & 0xF;
             if (matchLength == 15) {
-                long continued = readLength(src, in, inEnd);
+                long continued = readLength(src, in, inEnd, outEnd - out - 15 - MIN_MATCH);
                 matchLength += (int) continued;
                 in = (int) (continued >>> 32);
             }
@@ -73,9 +73,13 @@ public final class Lz4 {
             if (matchLength > outEnd - out) {
                 throw new CompressionFormatException("LZ4 match overruns the block");
             }
-            // Overlapping matches are legal and must be copied byte by byte.
-            for (int i = 0; i < matchLength; i++) {
-                dst[out + i] = dst[from + i];
+            if (offset >= matchLength) {
+                System.arraycopy(dst, from, dst, out, matchLength);
+            } else {
+                // Overlapping matches are legal and must be copied byte by byte.
+                for (int i = 0; i < matchLength; i++) {
+                    dst[out + i] = dst[from + i];
+                }
             }
             out += matchLength;
         }
@@ -87,11 +91,13 @@ public final class Lz4 {
     }
 
     /**
-     * Reads a continued length: successive bytes are summed until one is not 255.
+     * Reads a continued length: successive bytes are summed until one is not 255. A sum larger than
+     * {@code room} (the output left, less what the token adds to the sum) is refused as it accumulates, so
+     * the length can neither overrun the block nor overflow an {@code int}.
      *
      * @return the added length in the low 32 bits and the new input position in the high 32 bits
      */
-    private static long readLength(byte[] src, int in, int inEnd) {
+    private static long readLength(byte[] src, int in, int inEnd, int room) {
         int extra = 0;
         int b;
         do {
@@ -100,8 +106,8 @@ public final class Lz4 {
             }
             b = src[in++] & 0xff;
             extra += b;
-            if (extra < 0) {
-                throw new CompressionFormatException("LZ4 length overflows");
+            if (extra > room) {
+                throw new CompressionFormatException("LZ4 length overruns the block");
             }
         } while (b == 255);
         return ((long) in << 32) | (extra & 0xffffffffL);

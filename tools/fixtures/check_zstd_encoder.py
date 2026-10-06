@@ -29,12 +29,21 @@ The EmitZstd helper (write once to /tmp/xz/EmitZstd.java):
         for (int i=0;i<big.length;i++) big[i]=(byte)((i*31+i/97)&0xff);
         cs.add(big);
         byte[] rnd = new byte[3000]; r.nextBytes(rnd); cs.add(rnd);
+        byte[] huge = new byte[150_000_000];  // over libzstd's 128 MiB streaming window limit
+        for (int i=0;i<huge.length;i++) huge[i]=(byte)(i/1000);
+        cs.add(huge);
         for (int i=0;i<cs.size();i++){
           Files.write(d.resolve("orig_"+i+".bin"), cs.get(i));
-          Files.write(d.resolve("frame_"+i+".zst"), ZstdEncoder.compress(cs.get(i)));
+          // odd cases carry the XXH64 content checksum (the zstd codec's "checksum": true)
+          Files.write(d.resolve("frame_"+i+".zst"), ZstdEncoder.compress(cs.get(i), i % 2 == 1));
         }
       }
     }
+
+When the zstandard package is installed, each frame is also decoded through libzstd's
+streaming API, which refuses a window over 128 MiB: a frame larger than 128 KiB must
+declare a 128 KiB window rather than be single-segment (window = whole content), and a
+frame with a content checksum has it verified.
 
 Note: numcodecs.Zstd cannot decode a zero-length frame (it rejects libzstd's own
 empty frame too), so the empty case is skipped here; Falcon never stores an empty
@@ -44,6 +53,11 @@ import glob
 import os
 import sys
 from numcodecs import Zstd
+
+try:
+    import zstandard
+except ImportError:  # the streaming check is skipped without it
+    zstandard = None
 
 
 def main(directory):
@@ -61,12 +75,23 @@ def main(directory):
             print(f"  case {index}: libzstd FAILED: {e}")
             failed += 1
             continue
-        if decoded == original:
-            print(f"  case {index}: OK ({len(original)} -> {len(frame)} bytes)")
-            ok += 1
-        else:
+        if decoded != original:
             print(f"  case {index}: MISMATCH")
             failed += 1
+            continue
+        if zstandard is not None:
+            try:
+                streamed = zstandard.ZstdDecompressor().decompressobj().decompress(frame)
+            except zstandard.ZstdError as e:
+                print(f"  case {index}: libzstd streaming FAILED: {e}")
+                failed += 1
+                continue
+            if streamed != original:
+                print(f"  case {index}: streaming MISMATCH")
+                failed += 1
+                continue
+        print(f"  case {index}: OK ({len(original)} -> {len(frame)} bytes)")
+        ok += 1
     print(f"\nlibzstd read {ok}/{ok + failed} Falcon-encoded frames correctly")
     return 0 if failed == 0 else 1
 

@@ -59,6 +59,15 @@ final class Fields {
         throw typeError(ctx, "number", v);
     }
 
+    /** A JSON integer that fits a {@code long}, or {@link ZarrFormatException}. */
+    static long integer(JsonValue v, String ctx) {
+        try {
+            return number(v, ctx).longValue();
+        } catch (JsonException e) {
+            throw new ZarrFormatException(ctx + ": expected an integer: " + e.getMessage(), e);
+        }
+    }
+
     /**
      * Parses a JSON array of integers into a {@code long[]}. When {@code positive} the values must be
      * &gt; 0 (a chunk shape); otherwise they must be &ge; 0 (an array shape).
@@ -89,7 +98,7 @@ final class Fields {
      * is malformed.
      */
     static void requireZarrFormat3(JsonObject o, String ctx) {
-        long format = number(require(o, "zarr_format", ctx), ctx + ".zarr_format").longValue();
+        long format = integer(require(o, "zarr_format", ctx), ctx + ".zarr_format");
         if (format == 2) {
             throw new ZarrUnsupportedException(
                     ctx + ": zarr_format 2 in zarr.json (Zarr v2 metadata is read from .zarray and .zgroup)");
@@ -100,9 +109,11 @@ final class Fields {
     }
 
     /**
-     * Enforces forward-compatibility policy for members outside {@code known}: an unknown member is
-     * ignored unless it is an object explicitly flagged {@code "must_understand": true}, in which case
-     * it is rejected as an unsupported extension.
+     * Enforces the v3 specification's rule for members outside {@code known}: an unknown member is an
+     * extension the reader must understand, so it fails to open, unless it is an object that says
+     * {@code "must_understand": false}, which may be ignored.
+     *
+     * @throws ZarrUnsupportedException for an unknown member that may not be ignored
      */
     static void checkUnknownFields(JsonObject o, Set<String> known, String ctx) {
         for (Map.Entry<String, JsonValue> e : o.members().entrySet()) {
@@ -111,10 +122,11 @@ final class Fields {
             }
             if (e.getValue() instanceof JsonObject ext
                     && ext.members().get("must_understand") instanceof JsonBool flag
-                    && flag.value()) {
-                throw new ZarrUnsupportedException(ctx + ": unknown extension field '" + e.getKey()
-                        + "' is marked must_understand=true and cannot be ignored");
+                    && !flag.value()) {
+                continue;
             }
+            throw new ZarrUnsupportedException(ctx + ": unknown field '" + e.getKey() + "' cannot be ignored"
+                    + " (only an object with \"must_understand\": false may be)");
         }
     }
 

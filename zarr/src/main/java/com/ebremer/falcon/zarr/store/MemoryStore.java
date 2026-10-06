@@ -1,21 +1,22 @@
 package com.ebremer.falcon.zarr.store;
 
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * An in-memory {@link Store} backed by a map from key to bytes. Always writable. Values are copied in
  * and out, so a stored array is immutable to callers.
  *
- * <p>Handy for tests and for building a store in memory before serializing it elsewhere. Not
- * thread-safe.
+ * <p>Handy for tests and for building a store in memory before serializing it elsewhere. Safe for use
+ * from several threads at once (see {@link Store}): parallel writers lost entries when this was a plain
+ * {@code HashMap}.
  */
 public final class MemoryStore implements Store {
 
-    private final Map<String, byte[]> data = new HashMap<>();
+    private final Map<String, byte[]> data = new ConcurrentHashMap<>();
 
     @Override
     public Optional<byte[]> get(String key) {
@@ -40,6 +41,20 @@ public final class MemoryStore implements Store {
         byte[] slice = new byte[to - from];
         System.arraycopy(value, from, slice, 0, slice.length);
         return Optional.of(slice);
+    }
+
+    @Override
+    public Optional<byte[]> getSuffix(String key, long length) {
+        StoreKeys.validate(key);
+        int len = checkedLength(0, length);
+        byte[] value = data.get(key);
+        if (value == null) {
+            return Optional.empty();
+        }
+        int from = Math.max(0, value.length - len);
+        byte[] tail = new byte[value.length - from];
+        System.arraycopy(value, from, tail, 0, tail.length);
+        return Optional.of(tail);
     }
 
     @Override

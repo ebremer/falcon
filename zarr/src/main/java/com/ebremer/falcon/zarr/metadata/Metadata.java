@@ -28,11 +28,23 @@ public final class Metadata {
         }
         JsonObject o = Fields.object(root, key);
         String nodeType = Fields.string(Fields.require(o, "node_type", key), key + ".node_type");
-        return switch (nodeType) {
+        return wrapJson(key, () -> switch (nodeType) {
             case "group" -> GroupMetadata.parse(o, key);
             case "array" -> ArrayMetadata.parse(o, key);
             default -> throw new ZarrFormatException(
                     key + ": node_type must be 'array' or 'group', was '" + nodeType + "'");
-        };
+        });
+    }
+
+    /**
+     * Runs {@code parse}, reporting a {@link JsonException} (a member of the wrong JSON type that a parser
+     * read without a typed helper) as the {@link ZarrFormatException} it is, so none escapes raw.
+     */
+    static <T> T wrapJson(String key, java.util.function.Supplier<T> parse) {
+        try {
+            return parse.get();
+        } catch (JsonException e) {
+            throw new ZarrFormatException(key + ": " + e.getMessage(), e);
+        }
     }
 }

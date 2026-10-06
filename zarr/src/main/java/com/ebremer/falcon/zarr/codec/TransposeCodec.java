@@ -7,14 +7,20 @@ import com.ebremer.falcon.zarr.json.JsonObject;
 /**
  * The {@code transpose} array&rarr;array codec: its {@code order} is a permutation of the axes applied
  * on the encode side (encoded axis {@code i} is input axis {@code order[i]}). Decoding applies the
- * inverse permutation, moving whole elements; within-element bytes are untouched.
+ * inverse permutation, moving whole elements; within-element bytes are untouched. It applies to fixed-size
+ * elements and to variable-length strings alike.
  */
 final class TransposeCodec implements ArrayArrayCodec {
 
     private final int[] order;
+    private final int[] inverse;
 
     private TransposeCodec(int[] order) {
         this.order = order;
+        this.inverse = new int[order.length];
+        for (int i = 0; i < order.length; i++) {
+            inverse[order[i]] = i;
+        }
     }
 
     static TransposeCodec parse(JsonObject configuration, int rank) {
@@ -43,31 +49,43 @@ final class TransposeCodec implements ArrayArrayCodec {
 
     @Override
     public int[] encodedShape(int[] inputShape) {
-        int[] out = new int[inputShape.length];
-        for (int i = 0; i < out.length; i++) {
-            out[i] = inputShape[order[i]];
-        }
-        return out;
+        return permutedShape(inputShape, order);
+    }
+
+    @Override
+    public int[] decodedShape(int[] encodedShape) {
+        return permutedShape(encodedShape, inverse);
     }
 
     @Override
     public ArrayValue encode(ArrayValue input, int elementSize) {
-        return new ArrayValue(permute(input.data, input.shape, order, elementSize),
-                permutedShape(input.shape, order));
+        byte[] out = new byte[input.data.length];
+        permute(input.data, out, input.shape, order, elementSize);
+        return new ArrayValue(out, permutedShape(input.shape, order));
     }
 
     @Override
     public ArrayValue decode(ArrayValue input, int elementSize) {
-        int[] inverse = new int[order.length];
-        for (int i = 0; i < order.length; i++) {
-            inverse[order[i]] = i;
-        }
-        int[] outShape = permutedShape(input.shape, inverse);
-        byte[] out = permute(input.data, input.shape, inverse, elementSize);
-        return new ArrayValue(out, outShape);
+        byte[] out = new byte[input.data.length];
+        permute(input.data, out, input.shape, inverse, elementSize);
+        return new ArrayValue(out, permutedShape(input.shape, inverse));
     }
 
-    /** The shape of {@code permute(_, shape, perm, _)}: {@code out[i] = shape[perm[i]]}. */
+    @Override
+    public String[] encodeStrings(String[] input, int[] shape) {
+        String[] out = new String[input.length];
+        permute(input, out, shape, order, 1);
+        return out;
+    }
+
+    @Override
+    public String[] decodeStrings(String[] input, int[] encodedShape) {
+        String[] out = new String[input.length];
+        permute(input, out, encodedShape, inverse, 1);
+        return out;
+    }
+
+    /** The shape of a permutation: {@code out[i] = shape[perm[i]]}. */
     private static int[] permutedShape(int[] shape, int[] perm) {
         int[] out = new int[shape.length];
         for (int i = 0; i < shape.length; i++) {
@@ -77,42 +95,52 @@ final class TransposeCodec implements ArrayArrayCodec {
     }
 
     /**
-     * Produces {@code transpose(src, perm)}: an array of shape {@code srcShape[perm[i]]} whose element at
-     * multi-index {@code j} is {@code src} at the multi-index {@code m} with {@code m[perm[i]] = j[i]}.
+     * Writes {@code transpose(src, perm)} to {@code out}: the array of shape {@code srcShape[perm[i]]} whose
+     * element at multi-index {@code j} is {@code src}'s at the multi-index {@code m} with
+     * {@code m[perm[i]] = j[i]}. {@code src} and {@code out} are byte[] (elements of {@code elementSize}
+     * bytes) or Object[] ({@code elementSize} 1).
+     *
+     * <p>The source offset is kept up to date as the output index advances, rather than recomputed per
+     * element; when the last axis stays last, whole runs are copied at once.
      */
-    private static byte[] permute(byte[] src, int[] srcShape, int[] perm, int elementSize) {
+    private static void permute(Object src, Object out, int[] srcShape, int[] perm, int elementSize) {
         int n = srcShape.length;
         int[] outShape = permutedShape(srcShape, perm);
-        int count = 1;
-        for (int d : outShape) {
-            count *= d;
+        int count = Pipelines.elementCount(outShape);
+        if (n == 0 || count == 0) {
+            System.arraycopy(src, 0, out, 0, count * elementSize);
+            return;
         }
-        int[] srcStride = cStrides(srcShape);
-        byte[] out = new byte[count * elementSize];
-        int[] index = new int[n]; // multi-index into the output, C order
-        for (int flat = 0; flat < count; flat++) {
-            int srcOffset = 0;
-            for (int i = 0; i < n; i++) {
-                srcOffset += index[i] * srcStride[perm[i]];
+        int[] srcStride = Pipelines.strides(srcShape);
+        int[] step = new int[n]; // source stride of output axis i
+        for (int i = 0; i < n; i++) {
+            step[i] = srcStride[perm[i]];
+        }
+        boolean runs = perm[n - 1] == n - 1; // the last axis is contiguous in both: copy it whole
+        int innerAxes = runs ? n - 1 : n;
+        int run = runs ? outShape[n - 1] : 1;
+        int[] index = new int[n];
+        int srcOffset = 0;
+        byte[] srcBytes = src instanceof byte[] b ? b : null;
+        byte[] outBytes = out instanceof byte[] b ? b : null;
+        for (int flat = 0; flat < count; flat += run) {
+            if (run > 1 || srcBytes == null || elementSize > 8) {
+                System.arraycopy(src, srcOffset * elementSize, out, flat * elementSize, run * elementSize);
+            } else {
+                int from = srcOffset * elementSize;
+                int to = flat * elementSize;
+                for (int k = 0; k < elementSize; k++) {
+                    outBytes[to + k] = srcBytes[from + k];
+                }
             }
-            System.arraycopy(src, srcOffset * elementSize, out, flat * elementSize, elementSize);
-            for (int i = n - 1; i >= 0; i--) {
+            for (int i = innerAxes - 1; i >= 0; i--) {
+                srcOffset += step[i];
                 if (++index[i] < outShape[i]) {
                     break;
                 }
+                srcOffset -= step[i] * outShape[i];
                 index[i] = 0;
             }
         }
-        return out;
-    }
-
-    private static int[] cStrides(int[] shape) {
-        int[] stride = new int[shape.length];
-        int acc = 1;
-        for (int i = shape.length - 1; i >= 0; i--) {
-            stride[i] = acc;
-            acc *= shape[i];
-        }
-        return stride;
     }
 }

@@ -1,0 +1,26 @@
+{
+ "name": "sharded_index_start",
+ "shape": [
+  16
+ ],
+ "dtype": "int32",
+ "attributes": {},
+ "values": [
+  1,
+  2,
+  3,
+  4,
+  5,
+  6,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0
+ ]
+}

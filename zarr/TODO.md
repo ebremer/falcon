@@ -48,8 +48,20 @@ tests and 39 core tests pass. Three fixes change behaviour, each as Erich chose:
   `IllegalArgumentException` (Z4).
 
 zarr-python 3.4 and numcodecs 0.17 (c-blosc) read every fixed case as Falcon now writes it. That was a
-one-off check; T1 is the committed version of it. What remains is P1 (interop, hardening, concurrency
-beyond the cache, remote performance, test gaps), P2, and P3.
+one-off check; T1 is the committed version of it.
+
+**Update (2026-10-06): P1 is done.** 350 Zarr tests, 15 more under a small heap (the `fuzz` execution),
+and 55 core tests pass. Every item below is done; each says what changed, then gives the original
+finding. Behaviour changes worth knowing:
+- `children()`/`arrays()`/`groups()` leave out a child that cannot be opened (I3);
+- an unknown `zarr.json` member fails unless it says `"must_understand": false` (I10);
+- new node names follow the specification (I12);
+- Blosc headers are checked as c-blosc checks them, so a version-1 Blosc buffer is refused (H4);
+- writes follow a codec's configuration (I9).
+
+New API: `HttpStore.builder(url)` with `missingStatuses(...)` (I7), `Store.getSuffix` (PF1), and in core
+`ZstdEncoder.compress(data, checksum)`, `BloscEncoder.compress(data, typeSize, shuffle, blockSize[, clevel])`,
+`BloscDecoder.decompress(src, maxSize)`. What remains is P2, and P3's D3, D4, and B1.
 
 ## Do these first — top 10
 
@@ -62,18 +74,11 @@ beyond the cache, remote performance, test gaps), P2, and P3.
 5. ~~**Z6/Z7 — the zstd decoder accepts corrupt frames and drops trailing frames.**~~ Done 2026-10-05 in
    core (below).
 6. ~~**Z8 — bounds and overflow.**~~ Done 2026-10-05 (below).
-7. **H1 — bound decompression.** Pass the expected size into every bytes→bytes codec; zip bombs and
-   bogus header sizes cause OOM today.
-8. **I1–I3 — interop.**
-   - Bare `NaN` / `Infinity` JSON makes a node unopenable.
-   - zarr-python's sharded string arrays fail.
-   - One bad child aborts the whole `children()` listing.
-9. **PF1 + F1/F2 — remote use.**
-   - Partial shard reads fetch and allocate whole shards.
-   - Add a shard-index cache.
-   - Then cloud stores and consolidated metadata.
-10. **T1/T2 — test gaps.** Put a zarr-python oracle in the loop for *writes*, add hierarchy fixtures,
-    and tighten `RobustnessTest`. It currently accepts AIOOBE.
+7. ~~**H1 — bound decompression.**~~ Done 2026-10-06 (below).
+8. ~~**I1–I3 — interop.**~~ Done 2026-10-06 (below).
+9. **PF1 + F1/F2 — remote use.** ~~Partial shard reads; a shard-index cache~~ (PF1, done 2026-10-06).
+   Cloud stores and consolidated metadata (F1/F2, P2) remain.
+10. ~~**T1/T2 — test gaps.**~~ Done 2026-10-06 (below).
 
 ---
 
@@ -268,43 +273,128 @@ All of P0 is done (2026-10-05). Each item says what was done, then gives the ori
 
 ## P1 — valid stores that fail; hardening; concurrency; remote performance; test gaps
 
+All of P1 is done (2026-10-06). Each item says what was done, then gives the original finding. The work
+was split four ways: the core codecs (I8, I11, H3–H4 in Blosc, PF6, the encoder options for I9), the
+stores (I7, PF3, PF4, getSuffix, MemoryStore), JSON and metadata (I1, I3, I5, I6, I10, I12, I13, PF5),
+and the codec pipeline and data path (the rest).
+
 ### Valid stores that fail to read (interop)
 
-- [ ] **I1 — the JSON reader rejects bare `NaN`, `Infinity`, and `-Infinity`.** ✔
+- [x] **I1 — the JSON reader rejects bare `NaN`, `Infinity`, and `-Infinity`.** ✔
+  **Done 2026-10-06.**
+    Bare `NaN`, `Infinity`, and `-Infinity` read as `JsonNumber`s whose literal is the token
+    (`doubleValue()` gives the non-finite value; `isFinite()` is false; `longValue()` throws). They are
+    written back as the same bare tokens, as Python does; metadata Falcon generates stays strict JSON.
+    - zarr-python 3.4 writes these tokens in v3 attributes too, not only v2 `.zattrs`.
+    - Tests: `JsonTest.pythonsNonFiniteTokensAreReadAndWrittenBack`, `MetadataTest.attributesMayHoldNaNAndInfinity`,
+      `HierarchyFixtureTest.readsNaNAndInfinityAttributes`.
+
+  The original finding follows.
   - **Where:** `json/JsonReader.java:46`.
   - **Defect:** Python's `json.dumps` writes these by default, so they appear in zarr-python 2 /
     xarray `.zattrs` (`_FillValue`, `valid_min`).
   - **Failure:** the node is unopenable, and so is any parent's `children()`.
   - **Fix:** accept them leniently on read.
-- [ ] **I2 — sharded string arrays fail.** ✔
+- [x] **I2 — sharded string arrays fail.** ✔
+  **Done 2026-10-06.**
+    Sharded string arrays read and write.
+    - `ShardingCodec` decodes and encodes shards of `vlen-utf8` sub-chunks through the inner pipeline;
+      `ChunkPipeline`'s string path (`decodeStringChunk`, `encodeStrings`) handles `vlen-utf8` or a shard of
+      it, so the outer pipeline needs no string codec.
+    - A partial read fetches only the sub-chunks it overlaps; a sub-chunk holding only the fill is omitted
+      on write. A write re-encodes the whole shard (PF2's reuse is for fixed-size elements).
+    - `ArraySpec` builds sharded string arrays (it used to refuse them).
+    - zarr-python 3.4 reads Falcon's sharded strings, and Falcon reads zarr-python's (`sharded_string`,
+      `sharded_string_partial` fixtures).
+    - Tests: `StringArrayTest.shardedStringsRoundTrip`, `DataFixturesTest.shardedStrings`.
+
+  The original finding follows.
   - **Where:** `codec/ChunkPipeline.java:110-115,162`.
   - **Defect:** zarr-python `create_array(dtype=str, shards=…)` builds a pipeline with no outer vlen
     codec.
   - **Failure:** both read and write throw a raw `IllegalStateException`.
   - **Fix:** support vlen-utf8 inside a shard, or reject the array with `ZarrUnsupportedException` when
     the pipeline is built.
-- [ ] **I3 — `children()`, `arrays()`, and `groups()` parse every child eagerly.** ✔
+- [x] **I3 — `children()`, `arrays()`, and `groups()` parse every child eagerly.** ✔
+  **Done 2026-10-06.**
+    `children()`, `arrays()`, and `groups()` leave out a child whose metadata is malformed
+    or unsupported (`ZarrFormatException`, `ZarrUnsupportedException`); any other failure, such as the store
+    failing, still propagates. `childNames()` lists every child, and `child`/`array`/`group(name)` throw that
+    child's reason. Documented on each method.
+    - Tests: `HierarchyFixtureTest.childrenThatCannotBeOpenedAreLeftOut` (a zarr-python `datetime64` array
+      and a v2 `<U8` array beside a good one), `ZarrHierarchyTest.childrenLeaveOutOnlyChildrenThatCannotBeOpened`.
+
+  The original finding follows.
   - **Where:** `ZarrGroup.java:64-92`.
   - **Failure:** one unsupported child (e.g. a v2 `<U8` array next to a `<f8` one) aborts the whole
     listing. This is common in xarray output.
   - **Fix:** return lazy handles, or skip and collect the failures.
-- [ ] **I4 — transpose before vlen-utf8 is rejected as a format error.** ✔
+- [x] **I4 — transpose before vlen-utf8 is rejected as a format error.** ✔
+  **Done 2026-10-06.**
+    `transpose` before `vlen-utf8`, zarr-python's order, works: `TransposeCodec` permutes a
+    `String[]` as well as bytes, and the string path undoes it after `vlen-utf8` (or a shard of it).
+    - A `transpose` after the array→bytes codec, `vlen-utf8` included, is now a format error (it used to be
+      accepted and ignored).
+    - zarr-python 3.4's transposed string array (`transposed_string` fixture) reads, and zarr-python reads
+      what Falcon writes into it.
+    - Tests: `StringArrayTest.transposeBeforeVlenUtf8RoundTripsAndAfterItIsRefused`,
+      `DataFixturesTest.transposedStrings`.
+
+  The original finding follows.
   - **Where:** `codec/ChunkPipeline.java:69,96-99`.
   - **Defect:** zarr-python writes this ordering. Meanwhile an *invalid* transpose after vlen-utf8 is
     accepted and silently ignored.
   - **Fix:** implement the object transpose or throw Unsupported, and validate `arrayBytesSet`.
-- [ ] **I5 — metadata forms the spec allows are rejected.** ✔ for codecs
+- [x] **I5 — metadata forms the spec allows are rejected.** ✔ for codecs
+  **Done 2026-10-06.**
+    The specification's shorthand is accepted: a codec, chunk grid, or chunk key encoding
+    given by its bare name (codec lists are normalized in `ArrayMetadata`, inside `sharding_indexed`'s
+    `codecs` and `index_codecs` too); a core data type as `{"name": "int32"}` with no or an empty
+    configuration. A data type with a configuration (an extension) is `ZarrUnsupportedException`; any
+    other non-string form is `ZarrFormatException`. `"dimension_names": null` means no names, as zarr-python
+    reads it.
+    - Tests: `MetadataTest.shorthandNamesAreAccepted` (through a pipeline, plain and sharded),
+      `anObjectDataTypeWithAConfigurationIsUnsupported`, `nullDimensionNamesMeanNone`.
+
+  The original finding follows.
   - **Where:** `metadata/ArrayMetadata.java:67-69,73,88,112`.
   - **Failure:** the shorthand `"codecs":["bytes"]` and an object-form core `data_type` such as
     `{"name":"int32"}` are both rejected.
   - **Fix:** have `NamedConfig.parse` accept a string, and resolve object data types by name.
-- [ ] **I6 — v2 translation bugs.**
+- [x] **I6 — v2 translation bugs.**
+  **Done 2026-10-06.**
+    `"dimension_separator": null` is `"."` (zarr-python 2 wrote it; 3.4 refuses it); a
+    non-numeric gzip/zlib level is a `ZarrFormatException`; a complex dtype with `fill_value: null` is
+    `[0.0, 0.0]`, which is how zarr-python 3.4 reads it. No raw `JsonException` escapes v2 or v3 parsing
+    (`Metadata.wrapJson`; `Fields.integer` refuses `zarr_format: 3.5` or `"3"`).
+    - Tests: the `MetadataTest.v2…` tests, `wrongJsonTypesAreFormatErrors`, `HierarchyFixtureTest.readsTheV2Cases`.
+
+  The original finding follows.
   - **Where:** `metadata/V2Metadata.java:84,148,177`.
   - **Failures:**
     - `"dimension_separator": null` throws. ✔
     - A non-numeric gzip `level` leaks a raw `JsonException`, which isn't a `ZarrException`. ✔
     - A complex dtype with `fill_value: null` is translated to `0`, then fails the two-element check.
-- [ ] **I7 — `HttpStore` problems.**
+- [x] **I7 — `HttpStore` problems.**
+  **Done 2026-10-06.**
+    `HttpStore` (still on `HttpURLConnection`: `java.net.http` would be a module beyond
+    `java.base`):
+    - **Keys:** every byte of a key's UTF-8 that is not unreserved is percent-encoded; `/` still separates
+      segments.
+    - **Size:** when a HEAD has no Content-Length (or answers 405/501), a `GET Range: bytes=0-0` gives it from
+      `Content-Range` (416: size 0; 200: the body's length).
+    - **Absent keys:** `HttpStore.builder(url).missingStatuses(404, 403).build()` opts in to more statuses;
+      the default stays 404, since treating a real denial as absent would read it as fill. Applied
+      everywhere (get, getRange, getSuffix, size, exists). `builder(url).timeoutMillis(int)` too.
+    - **Base URLs:** the query of a presigned or SAS URL is re-appended after each key.
+    - **Redirects:** followed by hand (up to 10; 301/302/303/307/308; relative Locations resolved; the
+      Range header kept); http→https yes, https→http never.
+    - **Bodies:** a whole value is capped at the 2 GB array limit; a 206 longer than asked for, or at the
+      wrong offset, fails; a server ignoring Range is read only up to the range.
+    - Tests: `HttpStoreTest`. An http URL on raw.githubusercontent.com now follows its 301 to https (P0:
+      "HTTP 301").
+
+  The original finding follows.
   - **Where:** `store/HttpStore.java:52,74,119,126,166,171,182`.
   - **Failures:**
     - Keys aren't percent-encoded: `a b`, `50%`, `a#b`, `q?x`, and `café` all fail or hit the wrong
@@ -317,34 +407,95 @@ All of P0 is done (2026-10-05). Each item says what was done, then gives the ori
     - The body read has no size cap.
   - **Fix:** encode each path segment; use a configurable missing-status set; split the base URL into
     path and query; follow redirects manually; bound the body read.
-- [ ] **I8 — interop of Falcon's own encoder output.** ✔
+- [x] **I8 — interop of Falcon's own encoder output.** ✔
+  **Done 2026-10-06.**
+    In core:
+    - **zstd:** a frame over 128 KiB declares a 128 KiB window (and an 8-byte content size) instead of
+      being single-segment. libzstd's streaming API rejected a 150 MB frame ("Frame requires too much
+      memory") and reads it now. Frames up to 128 KiB are byte-identical to before.
+    - **Blosc:** blocks follow c-blosc's `compute_blocksize` (256 KiB for zstd at clevel 5), equal to
+      c-blosc's own in 1,264 compared buffers; c-blosc decodes a 750 MB buffer. A buffer compression does
+      not shrink below memcpy is stored as memcpy.
+    - Tests: `ZstdEncoderTest.largeFramesDeclareA128KiBWindow`, `BloscEncoderTest.blocksAreSizedAsCBloscSizesThem`;
+      `check_zstd_encoder.py` now also decodes through libzstd's streaming API.
+
+  The original finding follows.
   - **zstd** (`ZstdEncoder.java:87`): always writes single-segment frames, so the window equals the
     content size. A 140 MB frame fails in libzstd's streaming API ("Frame requires too much memory").
     Fix: write a 2^17 window descriptor and keep the frame content size.
   - **blosc** (`BloscEncoder.java:52-57`): writes one block per chunk, and c-blosc rejects block sizes
     over ~715 MB. Fix: emit c-blosc-sized blocks.
-- [ ] **I9 — writes into an existing array ignore its codec configuration.**
+- [x] **I9 — writes into an existing array ignore its codec configuration.**
+  **Done 2026-10-06.**
+    Writing follows the configuration, whoever made the array: zstd's `checksum` (each frame
+    carries its content checksum; `ZstdEncoder.compress(data, checksum)`), and Blosc's `shuffle`
+    (`noshuffle`, `shuffle`, `bitshuffle`), `typesize`, `blocksize`, and `clevel` (the new 5-argument
+    `BloscEncoder.compress`). The configuration is validated when the pipeline is built (an unknown
+    `cname` or `shuffle`, a `clevel` outside 0..9, a non-positive `typesize`, a negative `blocksize`), and a
+    missing field (v2 metadata records none) takes the previous behaviour.
+    - **Still not honoured:** zstd's `level` (one encoder level, F12) and a Blosc `cname` other than `zstd`
+      (Falcon compresses with zstd inside Blosc; valid, self-describing Blosc, but not the named
+      compressor: F3). Documented in the guide.
+    - Tests: `CodecConfigurationTest` (the frame's checksum flag; Blosc's shuffle flags, type size, block
+      size, and memcpy at clevel 0); `check_zarr_writer.py` checks the stored bytes of arrays configured
+      that way, and zarr-python reads them.
+
+  The original finding follows.
   - **Where:** `codec/ZstdCodec.java:21-23`, `codec/BloscCodec.java:30-32`.
   - **Defect:** zstd `level` and `checksum`, and blosc `cname`, `clevel`, `shuffle`, and `blocksize`,
     are not honoured. Output is still readable (blosc is self-describing), but it doesn't match the
     metadata.
   - **Fix:** honour the configuration or reject it (see F3).
-- [ ] **I10 — `must_understand` is inverted.**
+- [x] **I10 — `must_understand` is inverted.**
+  **Done 2026-10-06.**
+    An unknown member fails to open (`ZarrUnsupportedException`) unless it is an object
+    with `"must_understand": false`. Groups allowlist `consolidated_metadata`, in any form, null included.
+    zarr-python 3.4 writes nothing else unknown (arrays add only `storage_transformers: []`, which Falcon
+    knows) and itself refuses extra keys, so Falcon is no stricter; every fixture still opens.
+    - Tests: `MetadataTest.anUnknownFieldIsIgnoredOnlyWithMustUnderstandFalse`,
+      `consolidatedMetadataInAGroupIsIgnored`, `HierarchyFixtureTest.readsAConsolidatedGroupTree`.
+
+  The original finding follows.
   - **Where:** `metadata/Fields.java:106-118`.
   - **Defect:** unknown members are ignored unless they say `must_understand: true`. The v3 spec's
     default is *true*: fail unless `must_understand: false`. ✔
   - **Fix:** invert the rule, with an allowlist for zarr-python's `consolidated_metadata`.
-- [ ] **I11 — zstd frame coverage.**
+- [x] **I11 — zstd frame coverage.**
+  **Done 2026-10-06.**
+    FSE accuracy logs above RFC 8878's limits (9 for literal and match lengths, 8 for
+    offsets) are refused. Offset codes 29–31 were already read since P0's Z6: real libzstd long-window
+    frames with codes 29 and 30 (600 MB, 1.1 GB) decode exactly; code 31 needs more than 2 GiB of output,
+    which no Java array holds. Dictionaries stay unsupported (rejected, correctly).
+    - Tests: `ZstdLimitsTest.accuracyLogsAboveTheFormatsLimitsAreRefused`, `offsetCodesUpTo31AreRead`.
+
+  The original finding follows.
   - Offset codes 29–31 in FSE mode (long-window frames such as `--long=29..31`) are rejected.
   - FSE accuracy logs above the RFC limits (LL/ML 9, OF 8) are accepted.
   - Dictionaries aren't supported (rejecting them is correct).
   - **Where:** `ZstdFse.java:77-80`, `ZstdDecoder.java:317-322`.
-- [ ] **I12 — node names.**
+- [x] **I12 — node names.**
+  **Done 2026-10-06.**
+    A new node (`createGroup`/`createArray`) refuses a name that is empty, contains `/`,
+    consists only of periods, starts with `__`, is a metadata key (`zarr.json`, `.zarray`, `.zgroup`,
+    `.zattrs`, `.zmetadata`), or ends in `.` or a space. Looking up an existing child keeps only the
+    structural rules, so an existing `__meta` child still opens. `FileSystemStore` refuses key segments
+    that end in `.` or a space or contain `\` (Windows splits paths at a backslash), on every platform,
+    and its listings leave such names out.
+    - Tests: `ZarrHierarchyTest.newNodeNamesFollowTheSpecification`, `StoreTest`.
+
+  The original finding follows.
   - **Where:** `ZarrGroup.java:142`.
   - **Defect:** spec-reserved names (`zarr.json`, `__…`) are accepted. ✔ On Windows, `FileSystemStore`
     treats `data./zarr.json` and `data/zarr.json` as the same file. ✔ There is no path escape.
   - **Fix:** validate names per the spec, and reject segments that end in `.` or a space.
-- [ ] **I13 — JSON fidelity.** ✔ for the surrogate
+- [x] **I13 — JSON fidelity.** ✔ for the surrogate
+  **Done 2026-10-06.**
+    A lone surrogate is written as a `\uXXXX` escape; a repeated key is a parse error
+    (`ZarrFormatException` for metadata); `Json.parse(byte[])` decodes UTF-8 strictly; `new JsonNumber(...)`
+    validates the RFC 8259 grammar (plus the three non-finite tokens).
+    - Tests: four in `JsonTest`; `MetadataTest.wrongJsonTypesAreFormatErrors`.
+
+  The original finding follows.
   - **Where:** `json/JsonWriter.java:108`, `json/Json.java:239`, `json/JsonNumber.java:146`.
   - **Defects:**
     - A lone surrogate is written as `?`.
@@ -355,7 +506,24 @@ All of P0 is done (2026-10-05). Each item says what was done, then gives the ori
 
 ### Corrupt-input hardening
 
-- [ ] **H1 — bound all decompression.**
+- [x] **H1 — bound all decompression.**
+  **Done 2026-10-06.**
+    Every bytes→bytes codec decodes against a limit (`BytesBytesCodec.decode(input, maxSize)`):
+    the array→bytes codec's encoded size (exact for `bytes`; for a shard, its sub-chunks' bounds plus the
+    index), grown stage by stage through each codec's `maxEncodedSize` (a compressor's bound is
+    2 × size + 64 KiB, generous on purpose; it only has to stop a bomb).
+    - gzip reads at most the limit (`readNBytes`), zstd passes it to the decoder, and Blosc refuses a header
+      claiming more before decoding (`BloscDecoder.decompress(src, maxSize)`, new in core, refuses before
+      allocating; even without a maximum, core now checks a memcpy header before allocating).
+    - A shard's sub-chunks are bounded by the sub-chunk size. zstd raw and RLE blocks were already capped
+      by Z6.
+    - **Not bounded:** a `vlen-utf8` chunk, whose decoded size is not known in advance; only the 2 GB a Java
+      array holds limits it. Documented.
+    - Tests: `DecodeBoundsTest` (a 256 MB gzip bomb, 8 KB of zstd RLE blocks claiming 256 MB, a Blosc
+      header claiming 2 GB, a bomb inside a shard, gzip inside gzip), run under `-Xmx128m`; core's
+      `aDeclaredSizeOverTheMaximumFailsBeforeAllocating`.
+
+  The original finding follows.
   - **Gap:** the pipeline knows the exact decoded chunk size but never passes it to
     `BytesBytesCodec.decode`.
   - **Failures (✔):**
@@ -366,7 +534,21 @@ All of P0 is done (2026-10-05). Each item says what was done, then gives the ori
     - blosc: a memcpy header with nbytes≈2^31 gives OOM, and so does a blocksize larger than nbytes
       (`BloscDecoder.java:82,120`).
   - **Fix:** thread `expectedSize` through the codec chain and fail as soon as output exceeds it.
-- [ ] **H2 — raw RuntimeExceptions escape instead of `ZarrFormatException`.** ✔
+- [x] **H2 — raw RuntimeExceptions escape instead of `ZarrFormatException`.** ✔
+  **Done 2026-10-06.**
+    The rest:
+    - **`VlenUtf8`:** lengths are compared without forming `off + length`.
+    - **Shard indexes:** each entry is checked when the index is read. Empty means both fields all-ones;
+      otherwise the offset and length must be non-negative as signed (below 2^63), must not overflow
+      `offset + length`, and the length must fit one array. A range past the end of the shard fails as
+      "truncated" when fetched.
+    - **Core:** an LZ4 length is refused as soon as it exceeds the output left (a literal length near
+      `Integer.MAX_VALUE` wrapped negative and threw a raw `IndexOutOfBoundsException`). BloscLZ's
+      accumulator was already safe.
+    - Tests: `DecodeBoundsTest.aVlenLengthThatOverflowsIsAFormatError`, `shardIndexEntriesAreChecked`,
+      core's `Lz4Test.aLiteralLengthNearIntMaxIsRefused`; the T2 fuzzing.
+
+  The original finding follows.
   - **zstd:**
     - Header bytes aren't bounds-checked, giving AIOOBE (`ZstdDecoder.java:190-414`).
     - The Huffman weight guard is off by one: 257 weights give AIOOBE, and symbol 256 aliases to 0
@@ -386,18 +568,52 @@ All of P0 is done (2026-10-05). Each item says what was done, then gives the ori
       over 2 GB.
   - **Fix:** validate every header field, do size arithmetic in `long`, and validate shard entries
     against the shard size and the index range.
-- [ ] **H3 — denial of service.** ✔
+- [x] **H3 — denial of service.** ✔
+  **Done 2026-10-06.**
+    Both:
+    - **JSON:** `bigIntegerValue()` refuses more than 4,300 integer digits (Python's bound,
+      `JsonNumber.MAX_INTEGER_DIGITS`), judged from precision and scale before building the integer, and
+      `longValue()` more than 19; a nonzero value below 1 fails at once (`1e-20000000` also built 10^N).
+      Messages quote at most 40 characters of a literal. `1e20000000` now fails in milliseconds.
+    - **Blosc:** the block-end lookup is a binary search (262,144 blocks: over 2 s, now 0.05 s).
+    - Tests: `JsonTest.anAbsurdIntegerIsRefusedQuickly`, `MetadataTest.anAbsurdExponentFailsFastWithAShortMessage`,
+      core's `BloscHeaderTest.manyBlocksDecodeInLinearithmicTime`.
+
+  The original finding follows.
   - `"fill_value": 1e20000000` (≈250 bytes of JSON) takes **25.7 s** to open and builds a 20 MB
     exception message (`json/JsonNumber.java:197-204`). Reject when `precision−scale` is greater than
     about 20.
   - Blosc `nextOffsetAbove` is quadratic: a 4 MB input runs for minutes (`BloscDecoder.java:225-232`).
     Sort once instead.
-- [ ] **H4 — mirror c-blosc's header sanity checks.**
+- [x] **H4 — mirror c-blosc's header sanity checks.**
+  **Done 2026-10-06.**
+    Blosc headers are checked as c-blosc 1.21.7 checks them, each rule probed with numcodecs:
+    format version exactly 2; the reserved flag bit 0x08 clear; type size at least 1 (memcpy too); block
+    size from 1 to `nbytes` and at most 715,827,542 (memcpy too); a memcpy buffer exactly `nbytes + 16`;
+    compressor codes 5–7 refused before decoding; `nbytes` 0 is empty before any other check. With both
+    shuffle flags set, a type size above 1 is byte-unshuffled, as c-blosc does. Every existing vector and
+    fixture still decodes.
+    - Tests: core's `BloscHeaderTest` (`headersCBloscRefusesAreRefused`,
+      `bothShuffleFlagsMeanTheByteShuffleForWideTypes`, `forOneByteTypesTheBitShuffleFlagApplies`).
+
+  The original finding follows.
   - **Where:** `BloscDecoder.java:64-101,131-137`.
   - **Checks:** typesize ≥ 1; the reserved 0x08 flag clear; version == 2; blocksize ≤ nbytes; not both
     shuffle flags.
   - **Failure:** with both shuffle flags set, Falcon bit-unshuffles while c-blosc byte-unshuffles.
-- [ ] **H5 — define the exception contract.**
+- [x] **H5 — define the exception contract.**
+  **Done 2026-10-06.**
+    The contract is in the `com.ebremer.falcon.zarr` package documentation and the guide's
+    *Errors and threads*:
+    - **The store:** a `ZarrException` (`ZarrFormatException`: malformed metadata, chunks, or compressed data;
+      `ZarrUnsupportedException`: a feature Falcon lacks; plain: I/O, a selection too large for one array,
+      a typed read or write the data type does not support).
+    - **The call:** the JDK's exceptions (`IllegalArgumentException`, `IndexOutOfBoundsException`,
+      `NoSuchElementException`, `IllegalStateException`, `UnsupportedOperationException`).
+    - The CME is gone with the cache (Z3/C1), and no `JsonException` escapes (I6). `RobustnessTest` now
+      accepts only `ZarrException` for bad stored data (T2).
+
+  The original finding follows.
   - **Gap:** callers can get IOOBE, IAE, `NoSuchElementException`, ISE, UOE, CME, and a leaked
     `JsonException`, alongside the documented `ZarrException`s.
   - **Fix:** decide which unchecked exceptions are legitimate for *caller* errors, versus `ZarrException`
@@ -405,7 +621,21 @@ All of P0 is done (2026-10-05). Each item says what was done, then gives the ori
 
 ### Concurrency
 
-- [ ] **C1 — the chunk cache is an unsynchronized, access-ordered `LinkedHashMap` that `get()` mutates.** ✔
+- [x] **C1 — the chunk cache is an unsynchronized, access-ordered `LinkedHashMap` that `get()` mutates.** ✔
+  **Done 2026-10-06.**
+    The remaining parts are done:
+    - **Lost updates:** writes to the same chunk, or the same shard, through the same `Store` object take
+      turns (`data/ChunkLocks`, striped monitors keyed by the store's identity and the chunk key), so a
+      partial write's read-modify-write no longer loses another's. Different store objects or processes
+      are not coordinated; documented.
+    - **`MemoryStore`** is backed by a `ConcurrentHashMap`; `Store`'s Javadoc states the contract (each call
+      atomic; all shipped stores safe for concurrent use).
+    - **The contract** is in the package documentation and the guide (*Errors and threads*).
+    - Tests (T4): `ConcurrencyTest` (element writes from 8 threads into one chunk, one shard, and one string
+      chunk all land; parallel block reads while a chunk is rewritten), `StoreTest` (parallel `MemoryStore`
+      writers).
+
+  The original finding follows.
   - **Partly done (2026-10-05, with Z3):** the cache is synchronized and held in a final field. A read
     racing a write can no longer re-cache old bytes, and `blocks().parallel()` on a cached handle no
     longer throws. Still open: `MemoryStore`, lost updates in a shard's read-modify-write, the documented
@@ -426,7 +656,18 @@ All of P0 is done (2026-10-05). Each item says what was done, then gives the ori
 
 Zarr's main use case is sharded data in object storage, so these matter more than usual.
 
-- [ ] **PF1 — partial shard reads.** ✔
+- [x] **PF1 — partial shard reads.** ✔
+  **Done 2026-10-06.**
+    A partial read of a shard allocates only the region (`ChunkPipeline.decodeRegion`), and
+    asks no size: the index at the end is a suffix read (`Store.getSuffix`, new; one `Range: bytes=-N`
+    request on `HttpStore`). A cached handle (`withChunkCache`) also keeps each shard's stored index, so
+    many small reads of one shard fetch it once; writes through the handle drop it with the chunk.
+    - Measured, 50 reads of one 256×256 sub-chunk of a 64 MiB shard: 3.4 GB allocated and 196 ms before,
+      66 MB and 18 ms now.
+    - Tests: `PartialChunkIoTest` (the exact store calls: index plus one sub-chunk, no size query; the index
+      fetched once on a cached handle).
+
+  The original finding follows.
   - **Where:** `codec/ShardingCodec.java:128-145`, `data/ChunkAssembler.java:135`.
   - **Defect:** every partial shard read allocates and fills a buffer the size of the *whole* shard, and
     re-fetches `size()` and the index each time.
@@ -434,26 +675,85 @@ Zarr's main use case is sharded data in object storage, so these matter more tha
     requests.
   - **Fix:** decode into a region-sized buffer; cache decoded shard indexes per key; fetch the index with
     a suffix range (`bytes=-N`) so no size query is needed.
-- [ ] **PF2 — partial shard writes decode and re-encode every inner chunk.** ✔
+- [x] **PF2 — partial shard writes decode and re-encode every inner chunk.** ✔
+  **Done 2026-10-06.**
+    A write to part of a shard decodes and re-encodes only the sub-chunks it touches; the
+    others keep their stored bytes (`ShardingCodec.update`). A shard left with no sub-chunk is deleted.
+    - Measured, 64 tile writes into one shard: 214–330 ms before, 14–48 ms now.
+    - Tests: `PartialChunkIoTest.aPartialShardWriteKeepsTheBytesOfUntouchedSubChunks` (re-encoding at another
+      gzip level would change them), `clearingEveryWrittenSubChunkDeletesTheShard`.
+
+  The original finding follows.
   - **Where:** `data/ChunkWriter.java:119-135`, `ShardingCodec.encode:241-305`.
   - **Failure:** writing 64 tiles one at a time into one shard took 376 ms; a single call took 6 ms.
   - **Fix:** reuse the byte ranges of untouched sub-chunks.
-- [ ] **PF3 — `FileSystemStore.listDir` / `listPrefix` run `Files.walk` over the entire store on every call.** ✔
+- [x] **PF3 — `FileSystemStore.listDir` / `listPrefix` run `Files.walk` over the entire store on every call.** ✔
+  **Done 2026-10-06.**
+    `listDir` reads only the prefix's directory; `listPrefix` walks only the directory the
+    prefix names. Next to 20k chunk files, `listDir("")` went from 955 ms to 0.8 ms and `listPrefix("g/")`
+    from 1088 ms to 1.0 ms. Results match a whole-tree walk for every prefix (`StoreTest`).
+
+  The original finding follows.
   - **Where:** `store/FileSystemStore.java:186-197`.
   - **Failure:** `childNames()` takes ~1 s next to an array with 20k chunks, and minutes at millions.
   - **Fix:** use `Files.list(dir)`, and walk only the prefix's directory.
-- [ ] **PF4 — `ZipStore` costs.**
+- [x] **PF4 — `ZipStore` costs.**
+  **Done 2026-10-06.**
+    `getRange`/`getSuffix` skip through an entry's stream: a STORED entry costs O(1) to reach
+    the range, a DEFLATED one inflates only up to the range's end (200 random 4 KiB reads from a 64 MiB
+    STORED entry: 8.7 s → 5.5 ms). `pack` writes STORED entries, as zarr-python does. zarr-python 3.4 reads
+    a zip Falcon packed, and Falcon reads one zarr-python wrote (`ZipStoreTest`).
+
+  The original finding follows.
   - `getRange` decompresses the whole entry on every call, so sharded data in a zip costs
     O(sub-chunks × shard size).
   - `pack` DEFLATEs entries where the zarr convention is STORED.
-- [ ] **PF5 — round trips.** Opening a node issues HEAD probes (`hasNode`) and then a GET, so a v2 array
+- [x] **PF5 — round trips.** Opening a node issues HEAD probes (`hasNode`) and then a GET, so a v2 array
   over HTTP costs ~5 round trips. Consolidated metadata (F2) is the structural fix.
-- [ ] **PF6 — zstd decode is 5–8× slower than libzstd** (95–144 vs 752–962 MB/s). ✔
+  **Done 2026-10-06.**
+    Nodes open by GET alone (`ZarrNode.tryOpen`: `zarr.json`, then `.zarray`, then `.zgroup`),
+    with no `exists()` probes: a v3 node is one request, a v2 array three (was five). `child(name)` makes
+    one attempt. `childNames()` still checks presence, which is what it reports.
+    - Test: `ZarrHierarchyTest.openingANodeFetchesWithoutProbing` (the exact requests).
+
+  The original finding follows.
+- [x] **PF6 — zstd decode is 5–8× slower than libzstd** (95–144 vs 752–962 MB/s). ✔
+  **Done 2026-10-06.**
+    In core: a register-based bit reader (checked against a bit-by-bit reference), the
+    predefined FSE tables built once, `arraycopy` for non-overlapping matches (zstd, LZ4, BloscLZ, Snappy)
+    and doubling chunks for overlapping zstd ones, and one Inflater and one bitshuffle buffer per Blosc
+    decode. Measured back to back (MB/s, P0 → now):
+
+    | Decode | P0 | Now |
+    |---|---|---|
+    | zstd, libzstd frame of float32 | 99 | 305 |
+    | zstd, libzstd frame of text | 133 | 212 |
+    | Blosc + zstd, byte shuffle | 362 | 541 |
+    | Blosc + zstd, bit shuffle | 245 | 435 |
+    | Blosc + LZ4, byte shuffle | 576 | 627 |
+
+    libzstd itself does 1,132 and 663 MB/s on the two frames, so zstd is now 2–4× slower than libzstd
+    rather than 5–8×. All 316 libzstd frames, 436 corruption vectors, and 500 c-blosc buffers still decode,
+    and a 960k-input fuzz of the old and new decoders differs only where H4 meant it to.
+
+  The original finding follows.
   - The bit reader loops once per bit (`ZstdBitReader.java:34-50`).
   - Predefined FSE tables are rebuilt per block.
   - Match copy goes byte by byte.
   - Blosc allocates a new `Inflater` per stream, and `BitShuffle` a temp buffer per block.
-- [ ] **PF7 — smaller costs:**
+- [x] **PF7 — smaller costs:**
+  **Done 2026-10-06.**
+    All four:
+    - **Edge chunks:** a write covering every element of a chunk that lies inside the array stores it
+      without reading it back (`PartialChunkIoTest.writingAWholeArrayDoesNotReadItsEdgeChunksBack`).
+    - **Transpose:** the source offset is updated as the index advances, and whole runs are copied when the
+      last axis stays last (2048×2048 int32 write+read: 86 → 72 ms; [64,256,256] with order [1,0,2]:
+      70 → 24 ms).
+    - **Typed readers:** the conversion is chosen once per call, then a loop over a typed buffer view
+      (readDoubles of 16M float64: 83 → 43 ms; float32: 49 → 28 ms).
+    - **`ZarrGroup.toString()`** does no I/O (`ZarrGroup[<path>]`).
+
+  The original finding follows.
   - Whole-array writes read each edge chunk as if it were partially covered (`ChunkWriter.java:110-125`).
   - Transpose does one `arraycopy` per element (`TransposeCodec.java:164-176`).
   - The typed converters switch per element (`Elements.java:26-35`).
@@ -462,12 +762,32 @@ Zarr's main use case is sharded data in object storage, so these matter more tha
 
 ### Test & oracle gaps (what let P0 through)
 
-- [ ] **T1 — put zarr-python in the loop for *writes*.**
+- [x] **T1 — put zarr-python in the loop for *writes*.**
+  **Done 2026-10-06.**
+    `tools/fixtures/WriteZarrCases.java` (run with the JDK's source launcher) writes 167 arrays
+    with Falcon: every core data type × 10 layouts (plain, gzip, zstd, blosc, gzip+crc32c, big-endian,
+    sharded, sharded with the index at the start + zstd, sharded + blosc + crc32c, v2 chunk keys), partial
+    writes into shards, five string layouts (sharded ones included), transposed arrays, and codec
+    configurations Falcon must honour in arrays it did not create. `tools/fixtures/check_zarr_writer.py`
+    reads every one with zarr-python 3.4 and checks each element against the same formula: all 167 match.
+
+  The original finding follows.
   - **Gap:** the hermetic tests never check Falcon-written arrays with zarr-python, so the bugs in Z4,
     Z5, and Z10 can't be caught.
   - **Fix:** add `tools/fixtures/check_zarr_writer.py` (like `check_zstd_encoder.py`) covering every
     dtype, codec, and sharding layout, and run it before every release.
-- [ ] **T2 — `RobustnessTest` is too permissive.**
+- [x] **T2 — `RobustnessTest` is too permissive.**
+  **Done 2026-10-06.**
+    `RobustnessTest` accepts only a `ZarrException` for bad stored data (the old
+    `IndexOutOfBoundsException` was the superclass of the AIOOBE it meant to catch). Added: mutated
+    `zarr.json` (600 one-byte flips, deletions, insertions), shard indexes without a checksum (random
+    entries, through whole reads, partial reads, and partial writes), damaged `vlen-utf8` lengths, and a
+    bit flipped in each chunk of 14 zarr-python stores (Blosc with lz4, blosclz, zlib, zstd, both
+    shuffles; type size 300; sharded and transposed strings; zstd with checksums and several frames). The
+    H1 bombs are `DecodeBoundsTest`. Both run in a new `fuzz` execution under `-Xmx128m -Xss256k`. The
+    codec decoders themselves are fuzzed in core's `CompressionRobustnessTest`.
+
+  The original finding follows.
   - **Defect:** `assertHandled` catches `IndexOutOfBoundsException` — the *superclass* of AIOOBE and
     SIOOBE, which its own Javadoc calls defects — plus IAE, ISE, and `ArithmeticException`. The codec
     truncation tests use `assertThrows(RuntimeException.class)`.
@@ -478,7 +798,17 @@ Zarr's main use case is sharded data in object storage, so these matter more tha
     - vlen length fields;
     - JSON;
     - the H1 bombs, under a small `-Xmx`.
-- [ ] **T3 — fixture coverage.** Every zarr-python fixture is a root array. Add:
+- [x] **T3 — fixture coverage.** Every zarr-python fixture is a root array. Add:
+  **Done 2026-10-06.**
+    New zarr-python 3.4 fixtures, from two new generators (the existing fixtures are untouched):
+    - `gen_zarr_p1_fixtures.py`: a group hierarchy, consolidated metadata, NaN/Infinity attributes, the v2
+      cases of I6, and unopenable children beside good ones (`HierarchyFixtureTest`).
+    - `gen_zarr_data_fixtures.py` (also numcodecs and zstandard): sharded strings (whole and partial),
+      transposed strings, `index_location: "start"`, zstd frames with checksums and two frames in a chunk,
+      c-blosc with a 300-byte type size, and a 140 MB chunk (17 KB stored; more than libzstd's block size)
+      (`DataFixturesTest`).
+
+  The original finding follows.
   - groups and hierarchies;
   - `consolidated_metadata`;
   - NaN / Infinity attributes;
@@ -487,7 +817,11 @@ Zarr's main use case is sharded data in object storage, so these matter more tha
   - zstd frames with checksums and multiple frames;
   - blosc with typesize > 255;
   - chunks over 128 MB.
-- [ ] **T4 — concurrency tests** for C1 once the contract is chosen.
+- [x] **T4 — concurrency tests** for C1 once the contract is chosen.
+  **Done 2026-10-06.**
+    `ConcurrencyTest` (see C1).
+
+  The original finding follows.
 
 ## P2 — features & API
 
@@ -540,19 +874,21 @@ Items 1–5 of the previous TODO's top-5 are F1–F5 below.
 
 ## P3 — docs, build, housekeeping
 
-- [ ] **D1 — fix docs that overclaim.**
-  - `USER_GUIDE.md` (*What is and isn't supported*) says "never … out-of-memory from a bogus declared
-    size" (false; see H1).
+- [x] **D1 — fix docs that overclaim.** Done 2026-10-06, with H1: the guide now says decompression is
+  bounded by what a chunk holds, except a string chunk, bounded only by the 2 GB a Java array holds.
+  - ~~`USER_GUIDE.md` (*What is and isn't supported*) says "never … out-of-memory from a bogus declared
+    size" (false; see H1).~~
   - ~~README says "corrupt input never … returns wrong data".~~ The README no longer says it; it was
     rewritten with HDF5's P3 D1.
   - ~~"reflects the store's current contents" (false; see Z3).~~ Only groups claim it (`ZarrGroup`, the
     guide), and that is true. After Z3, `ZarrArray`'s Javadoc says a plain handle reads the store each
     time, and a cached one doesn't.
-- [ ] **D2 — USER_GUIDE gaps.** Document:
-  - the thread-safety contract (so far only "a cached handle may be shared between threads");
+- [x] **D2 — USER_GUIDE gaps.** Done 2026-10-06: the guide's *Errors and threads* gives the
+  thread-safety and exception contracts (C1, H5), and *Stores* the `HttpStore` behaviour (I7).
+  - ~~the thread-safety contract~~;
   - ~~create/replace semantics~~ and ~~numeric conversion and narrowing rules~~: done with Z1 and Z4
     (*Writing*);
-  - `HttpStore` limitations (key encoding, 403 handling).
+  - ~~`HttpStore` limitations (key encoding, 403 handling)~~.
 - [ ] **D3 — `PLAN.md` is stale.**
   - The status block still says "Z0–Z7 complete; Z8/Z9 partially complete" and "228 tests green" (it is
     270).

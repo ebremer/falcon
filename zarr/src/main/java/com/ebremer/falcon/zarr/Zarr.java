@@ -32,11 +32,8 @@ public final class Zarr {
      * @throws ZarrUnsupportedException if the store uses an unimplemented feature
      */
     public static ZarrNode open(Store store) {
-        if (!ZarrNode.hasNode(store, "")) {
-            throw new ZarrFormatException(
-                    "no root zarr.json, .zarray, or .zgroup found: not a Zarr store");
-        }
-        return ZarrNode.open(store, "");
+        return ZarrNode.tryOpen(store, "").orElseThrow(() -> new ZarrFormatException(
+                "no root zarr.json, .zarray, or .zgroup found: not a Zarr store"));
     }
 
     /** Opens the root node of the hierarchy in the store directory at {@code directory} (read-only). */

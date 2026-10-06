@@ -99,9 +99,13 @@ final class Snappy {
                 if (offset <= 0 || from < dstOff || length > opEnd - op) {
                     throw new CompressionFormatException("snappy copy is out of range");
                 }
-                // Overlapping copies are legal and must be applied byte by byte.
-                for (int i = 0; i < length; i++) {
-                    dst[op + i] = dst[from + i];
+                if (offset >= length) {
+                    System.arraycopy(dst, from, dst, op, length);
+                } else {
+                    // Overlapping copies are legal and must be applied byte by byte.
+                    for (int i = 0; i < length; i++) {
+                        dst[op + i] = dst[from + i];
+                    }
                 }
                 op += length;
             }

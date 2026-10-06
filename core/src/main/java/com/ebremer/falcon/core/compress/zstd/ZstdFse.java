@@ -60,11 +60,13 @@ final class ZstdFse {
      * Reads a normalized-count header. Unlike the entropy streams, this is a forward bitstream, so it is
      * decoded with the reference algorithm's sliding 32-bit window.
      *
-     * @param counts     receives the normalized count per symbol
-     * @param header     {@code [maxSymbolValue, tableLog]} on return
+     * @param counts      receives the normalized count per symbol
+     * @param header      {@code [maxSymbolValue, tableLog]} on return
+     * @param maxTableLog the largest accuracy log the format allows for this table (RFC 8878: 9 for
+     *                    literal and match lengths, 8 for offsets, 6 for Huffman weights)
      * @return the number of bytes consumed
      */
-    static int readNCount(short[] counts, int[] header, byte[] in, int off, int len) {
+    static int readNCount(short[] counts, int[] header, byte[] in, int off, int len, int maxTableLog) {
         int maxSymbolValue = header[0];
         int start = off;
         int end = off + len;
@@ -77,8 +79,9 @@ final class ZstdFse {
         }
         int bitStream = readLe32(in, ip, end);
         int nbBits = (bitStream & 0xF) + 5;
-        if (nbBits > 15) {
-            throw new CompressionFormatException("FSE table log " + nbBits + " is out of range");
+        if (nbBits > maxTableLog) {
+            throw new CompressionFormatException("FSE accuracy log " + nbBits + " exceeds the format's limit of "
+                    + maxTableLog + " for this table");
         }
         bitStream >>>= 4;
         int bitCount = 4;

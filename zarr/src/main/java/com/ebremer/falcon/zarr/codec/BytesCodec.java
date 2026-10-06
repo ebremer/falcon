@@ -45,6 +45,11 @@ final class BytesCodec implements ArrayBytesCodec {
     }
 
     @Override
+    public long maxEncodedSize(int[] shape, int elementSize) {
+        return Pipelines.elementCount(shape) * (long) elementSize; // exact
+    }
+
+    @Override
     public ArrayValue decode(ChunkBytes source, int[] shape, int elementSize, byte[] fillElement,
                              int[] regionOrigin, int[] regionShape) {
         byte[] input = source.readAll().orElse(null);

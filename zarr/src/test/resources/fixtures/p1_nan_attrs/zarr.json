@@ -1,0 +1,13 @@
+{
+  "attributes": {
+    "nan": NaN,
+    "inf": Infinity,
+    "ninf": -Infinity,
+    "list": [
+      1.0,
+      NaN
+    ]
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

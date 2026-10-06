@@ -15,12 +15,21 @@ Usage (from the repo root, after `mvn -pl core compile`):
 
 EmitBlosc emits, per case, orig_<k>.bin / buf_<k>.blosc / ts_<k>.txt using
 com.ebremer.falcon.core.compress.blosc.BloscEncoder.compress(data, typeSize) over a
-mix of shuffled int16/int32/float64 arrays and incompressible bytes.
+mix of shuffled int16/int32/float64 arrays and incompressible bytes. Cover the
+filter and block options too, with compress(data, typeSize, shuffle, blockSize,
+clevel): shuffle 0, 1 (byte), 2 (bit); blockSize 0 (automatic) or a forced size;
+clevel 0 to 9.
+
+Each buffer's header block size must also be within c-blosc's BLOSC_MAX_BLOCKSIZE
+(about 715 MB), which c-blosc refuses to read past.
 """
 import glob
 import os
+import struct
 import sys
 from numcodecs import Blosc
+
+BLOSC_MAX_BLOCKSIZE = (2**31 - 1 - 255 * 4) // 3
 
 
 def main(directory):
@@ -30,6 +39,10 @@ def main(directory):
         k = os.path.basename(buf_path).split("_")[1].split(".")[0]
         original = open(os.path.join(directory, f"orig_{k}.bin"), "rb").read()
         buffer = open(buf_path, "rb").read()
+        if len(buffer) >= 16 and struct.unpack("<i", buffer[8:12])[0] > BLOSC_MAX_BLOCKSIZE:
+            print(f"  case {k}: block size over c-blosc's limit")
+            failed += 1
+            continue
         try:
             decoded = bytes(z.decode(buffer))
         except Exception as e:  # noqa: BLE001

@@ -10,7 +10,7 @@ import java.util.Map;
  * read.
  *
  * <p>Only whole, present chunks are cached (an absent chunk is cheap to regenerate as fill, and a
- * partially decoded shard region would be wrong to reuse). A write through the array handle that owns
+ * partially decoded shard region would be wrong to reuse), and the stored indexes of shards. A write through the array handle that owns
  * the cache invalidates the chunk's entry after the store has changed; a write through any other handle
  * or process is not seen. The cache is thread-safe: a read that started before an invalidation does not
  * cache what it read (see {@link #stamp()}).
@@ -72,12 +72,14 @@ public final class ChunkCache {
         evict();
     }
 
-    /** Drops {@code key}, after the chunk stored under it was written or deleted. */
+    /** Drops {@code key} (and its shard index), after the chunk stored under it was written or deleted. */
     synchronized void invalidate(String key) {
         invalidations++;
-        byte[] previous = entries.remove(key);
-        if (previous != null) {
-            bytes -= previous.length;
+        for (String k : new String[] {key, StoreChunkBytes.indexKey(key)}) {
+            byte[] previous = entries.remove(k);
+            if (previous != null) {
+                bytes -= previous.length;
+            }
         }
     }
 

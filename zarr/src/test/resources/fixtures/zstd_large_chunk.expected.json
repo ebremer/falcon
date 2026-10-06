@@ -1,0 +1,9 @@
+{
+ "name": "zstd_large_chunk",
+ "shape": [
+  140000000
+ ],
+ "dtype": "uint8",
+ "attributes": {},
+ "formula": "i % 251"
+}

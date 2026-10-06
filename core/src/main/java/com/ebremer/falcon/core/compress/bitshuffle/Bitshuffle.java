@@ -5,11 +5,12 @@ import com.ebremer.falcon.core.compress.lz4.Lz4;
 import com.ebremer.falcon.core.compress.zstd.ZstdDecoder;
 
 /**
- * The inverse of Kiyoshi Masui's bitshuffle (inverse only, for reading), translated from the scalar
- * reference in {@code bitshuffle_core.c}. Bitshuffle transposes a block of elements as a bit matrix, so
- * that bit <i>k</i> of every element is stored together; this compresses better than a byte shuffle for
- * many numeric arrays. Blosc uses the transpose on its blocks, and the bitshuffle library (HDF5 filter
- * 32008) applies it to blocks of elements on its own or followed by LZ4 or zstd:
+ * Kiyoshi Masui's bitshuffle, translated from the scalar reference in {@code bitshuffle_core.c}: the
+ * inverse for reading, and the forward transpose ({@link #transpose}) for Blosc's bit-shuffle filter on
+ * write. Bitshuffle transposes a block of elements as a bit matrix, so that bit <i>k</i> of every element
+ * is stored together; this compresses better than a byte shuffle for many numeric arrays. Blosc uses the
+ * transpose on its blocks, and the bitshuffle library (HDF5 filter 32008) applies it to blocks of
+ * elements on its own or followed by LZ4 or zstd:
  *
  * <ul>
  *   <li>{@link #unshuffle}: whole blocks of {@code blockSize} elements, then the remaining elements
@@ -126,12 +127,57 @@ public final class Bitshuffle {
      * ({@code bshuf_untrans_bit_elem}).
      */
     public static void untranspose(byte[] src, int srcOff, byte[] dst, int dstOff, int elements, int elementSize) {
+        untranspose(src, srcOff, dst, dstOff, elements, elementSize, new byte[elements * elementSize]);
+    }
+
+    /**
+     * Un-transposes one block as {@link #untranspose(byte[], int, byte[], int, int, int)} does, using
+     * {@code tmp} (at least {@code elements * elementSize} bytes) as its scratch space, so a caller decoding
+     * many blocks allocates it once.
+     */
+    public static void untranspose(byte[] src, int srcOff, byte[] dst, int dstOff, int elements, int elementSize,
+                                   byte[] tmp) {
         if (elements % BLOCKED_MULT != 0) {
             throw new IllegalArgumentException("bitshuffle blocks hold a multiple of 8 elements, not " + elements);
         }
-        byte[] tmp = new byte[elements * elementSize];
         transByteBitRow(src, srcOff, tmp, elements, elementSize);
         shuffleBitEightElem(tmp, dst, dstOff, elements, elementSize);
+    }
+
+    /**
+     * Transposes one block, the inverse of {@link #untranspose}: {@code elements} (a multiple of 8) elements
+     * of {@code elementSize} bytes ({@code bshuf_trans_bit_elem}). {@code dst} must not overlap {@code src};
+     * {@code tmp} holds at least {@code elements * elementSize} bytes.
+     */
+    public static void transpose(byte[] src, int srcOff, byte[] dst, int dstOff, int elements, int elementSize,
+                                 byte[] tmp) {
+        if (elements % BLOCKED_MULT != 0) {
+            throw new IllegalArgumentException("bitshuffle blocks hold a multiple of 8 elements, not " + elements);
+        }
+        int nbyte = elements * elementSize;
+        // bshuf_trans_byte_elem: group byte k of every element (a byte shuffle), into dst for now.
+        for (int ii = 0; ii < elements; ii++) {
+            for (int jj = 0; jj < elementSize; jj++) {
+                dst[dstOff + jj * elements + ii] = src[srcOff + ii * elementSize + jj];
+            }
+        }
+        // bshuf_trans_bit_byte: transpose the bits of each run of 8 bytes, writing bit row k of every run
+        // together.
+        int bitRow = nbyte / 8;
+        for (int ii = 0; ii < bitRow; ii++) {
+            long x = transposeBit8x8(readLe64(dst, dstOff + ii * 8));
+            for (int kk = 0; kk < 8; kk++) {
+                tmp[kk * bitRow + ii] = (byte) x;
+                x >>>= 8;
+            }
+        }
+        // bshuf_trans_bitrow_eight: reorder the rows so the 8 bit rows of each byte position sit together.
+        int row = elements / 8;
+        for (int ii = 0; ii < 8; ii++) {
+            for (int jj = 0; jj < elementSize; jj++) {
+                System.arraycopy(tmp, (ii * elementSize + jj) * row, dst, dstOff + (jj * 8 + ii) * row, row);
+            }
+        }
     }
 
     /** The elements the next block holds: a whole block, else what remains rounded down to a multiple of 8. */

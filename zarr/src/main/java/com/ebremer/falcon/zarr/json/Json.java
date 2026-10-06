@@ -1,5 +1,8 @@
 package com.ebremer.falcon.zarr.json;
 
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 
 /**
@@ -19,9 +22,24 @@ public final class Json {
         return JsonReader.parse(text);
     }
 
-    /** Parses one JSON value from UTF-8 {@code bytes}. */
+    /**
+     * Parses one JSON value from UTF-8 {@code bytes}.
+     *
+     * @throws JsonException if the bytes are not valid UTF-8 (malformed bytes are not replaced, which
+     *                       would change the text silently), or not valid JSON
+     */
     public static JsonValue parse(byte[] bytes) {
-        return JsonReader.parse(new String(bytes, StandardCharsets.UTF_8));
+        String text;
+        try {
+            text = StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(ByteBuffer.wrap(bytes))
+                    .toString();
+        } catch (CharacterCodingException e) {
+            throw new JsonException("JSON is not valid UTF-8: " + e.getMessage());
+        }
+        return JsonReader.parse(text);
     }
 
     /** Serializes {@code value} to canonical compact JSON (no insignificant whitespace). */

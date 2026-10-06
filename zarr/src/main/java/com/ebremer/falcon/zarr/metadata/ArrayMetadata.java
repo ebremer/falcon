@@ -15,6 +15,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
@@ -63,12 +64,7 @@ public final class ArrayMetadata implements NodeMetadata {
         long[] shape = Fields.intArray(Fields.require(o, "shape", ctx), ctx + ".shape", false);
         int rank = shape.length;
 
-        JsonValue dataTypeValue = Fields.require(o, "data_type", ctx);
-        if (!(dataTypeValue instanceof JsonString)) {
-            throw new ZarrUnsupportedException(
-                    ctx + ".data_type: extension (object) data types are not yet supported");
-        }
-        DataType dataType = DataType.of(Fields.string(dataTypeValue, ctx + ".data_type"));
+        DataType dataType = parseDataType(Fields.require(o, "data_type", ctx), ctx + ".data_type");
 
         NamedConfig chunkGrid = NamedConfig.parse(Fields.require(o, "chunk_grid", ctx), ctx + ".chunk_grid");
         if (!chunkGrid.name().equals("regular")) {
@@ -111,14 +107,7 @@ public final class ArrayMetadata implements NodeMetadata {
             }
         }
 
-        JsonArray codecArray = Fields.array(Fields.require(o, "codecs", ctx), ctx + ".codecs");
-        List<JsonObject> codecs = new ArrayList<>(codecArray.size());
-        for (int i = 0; i < codecArray.size(); i++) {
-            String codecCtx = ctx + ".codecs[" + i + "]";
-            JsonObject codec = Fields.object(codecArray.get(i), codecCtx);
-            Fields.string(Fields.require(codec, "name", codecCtx), codecCtx + ".name"); // validate name
-            codecs.add(codec);
-        }
+        List<JsonObject> codecs = codecSpecs(Fields.require(o, "codecs", ctx), ctx + ".codecs");
 
         JsonObject attributes = o.find("attributes")
                 .map(v -> Fields.object(v, ctx + ".attributes"))
@@ -131,6 +120,61 @@ public final class ArrayMetadata implements NodeMetadata {
 
         return new ArrayMetadata(grid, dataType, chunkKeyEncoding, fillValue, List.copyOf(codecs),
                 attributes, dimensionNames);
+    }
+
+    /**
+     * The {@code data_type}: a core type's name, or the object form of one ({@code {"name": "int32"}},
+     * without a configuration). A data type with a configuration is an extension Falcon does not
+     * implement.
+     */
+    private static DataType parseDataType(JsonValue v, String ctx) {
+        if (v instanceof JsonString s) {
+            return DataType.of(s.value());
+        }
+        NamedConfig named = NamedConfig.parse(v, ctx);
+        if (!named.configuration().members().isEmpty()) {
+            throw new ZarrUnsupportedException(ctx + ": data type '" + named.name()
+                    + "' with a configuration is an extension data type, which is not supported");
+        }
+        return DataType.of(named.name());
+    }
+
+    /**
+     * The codec specs, each as an object: a codec named by a bare string ({@code "bytes"}) becomes
+     * {@code {"name": "bytes"}}, inside a {@code sharding_indexed} codec's own {@code codecs} and
+     * {@code index_codecs} lists too, so the codec layer reads one form.
+     */
+    private static List<JsonObject> codecSpecs(JsonValue v, String ctx) {
+        JsonArray array = Fields.array(v, ctx);
+        List<JsonObject> codecs = new ArrayList<>(array.size());
+        for (int i = 0; i < array.size(); i++) {
+            codecs.add(codecSpec(array.get(i), ctx + "[" + i + "]"));
+        }
+        return codecs;
+    }
+
+    private static JsonObject codecSpec(JsonValue v, String ctx) {
+        if (v instanceof JsonString s) {
+            return JsonObject.builder().put("name", s.value()).build();
+        }
+        JsonObject codec = Fields.object(v, ctx);
+        String name = Fields.string(Fields.require(codec, "name", ctx), ctx + ".name");
+        if (!name.equals("sharding_indexed")
+                || !(codec.find("configuration").orElse(null) instanceof JsonObject config)) {
+            return codec;
+        }
+        JsonObject.Builder newConfig = JsonObject.builder();
+        for (Map.Entry<String, JsonValue> e : config.members().entrySet()) {
+            boolean list = e.getKey().equals("codecs") || e.getKey().equals("index_codecs");
+            newConfig.put(e.getKey(), list && e.getValue() instanceof JsonArray
+                    ? new JsonArray(List.copyOf(codecSpecs(e.getValue(), ctx + ".configuration." + e.getKey())))
+                    : e.getValue());
+        }
+        JsonObject.Builder newCodec = JsonObject.builder();
+        for (Map.Entry<String, JsonValue> e : codec.members().entrySet()) {
+            newCodec.put(e.getKey(), e.getKey().equals("configuration") ? newConfig.build() : e.getValue());
+        }
+        return newCodec.build();
     }
 
     private static String parseSeparator(NamedConfig encoding, String ctx) {
@@ -151,8 +195,8 @@ public final class ArrayMetadata implements NodeMetadata {
     }
 
     private static String[] parseDimensionNames(JsonObject o, int rank, String ctx) {
-        if (!o.has("dimension_names")) {
-            return null;
+        if (!o.has("dimension_names") || o.get("dimension_names").isNull()) {
+            return null; // null, as zarr-python reads it, means no names
         }
         JsonArray names = Fields.array(o.get("dimension_names"), ctx + ".dimension_names");
         if (names.size() != rank) {

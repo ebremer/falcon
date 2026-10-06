@@ -2,6 +2,7 @@ package com.ebremer.falcon.core.compress.blosc;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.ByteBuffer;
@@ -100,5 +101,76 @@ class BloscEncoderTest {
             byte[] empty = BloscEncoder.compress(new byte[0], ts);
             assertEquals(ts > 255 ? 1 : ts, empty[3] & 0xff, "empty buffer's type size for " + ts);
         }
+    }
+
+    private static int le32(byte[] b, int off) {
+        return (b[off] & 0xff) | ((b[off + 1] & 0xff) << 8) | ((b[off + 2] & 0xff) << 16) | ((b[off + 3] & 0xff) << 24);
+    }
+
+    /**
+     * The encoder wrote one block per buffer, and c-blosc refuses blocks over about 715 MB (Zarr P1 I8). It
+     * now sizes blocks as c-blosc's compute_blocksize does for zstd. Each expected value is what c-blosc
+     * 1.21.7 (numcodecs 0.17) writes for the same type size, length, clevel, and forced size.
+     */
+    @Test
+    void blocksAreSizedAsCBloscSizesThem() {
+        int[][] automatic = { // clevel, type size, nbytes, c-blosc's block size
+            {5, 4, 1000, 1000}, {5, 4, 100_000, 100_000}, {5, 4, 1 << 20, 262_144}, {5, 17, 1_048_560, 262_140},
+            {5, 255, 2_999_820, 262_140}, {1, 4, 3_000_000, 32_768}, {1, 255, 1_048_560, 32_640},
+            {3, 17, 2_999_990, 131_070}, {9, 4, 20_000_000, 1_048_576}, {9, 17, 1_048_560, 1_048_560}};
+        for (int[] c : automatic) {
+            assertEquals(c[3], BloscEncoder.blockSize(c[0], c[1], c[2], 0), java.util.Arrays.toString(c));
+        }
+        int[][] forced = { // type size, nbytes, requested, c-blosc's block size
+            {4, 1 << 20, 100, 128}, {17, 17_000, 1000, 986}, {4, 4000, 100_000, 4000}, {4, 1 << 22, 1 << 20, 1 << 20},
+            {8, 1 << 20, 65_537, 65_536}};
+        for (int[] c : forced) {
+            assertEquals(c[3], BloscEncoder.blockSize(5, c[0], c[1], c[2]), java.util.Arrays.toString(c));
+        }
+
+        // A 1 MiB buffer is four 256 KiB blocks, not one.
+        ByteBuffer buf = ByteBuffer.allocate(1 << 20).order(ByteOrder.LITTLE_ENDIAN);
+        for (int i = 0; i < (1 << 18); i++) {
+            buf.putInt(i % 1000);
+        }
+        byte[] buffer = BloscEncoder.compress(buf.array(), 4);
+        assertEquals(262_144, le32(buffer, 8));
+        assertEquals(le32(buffer, 12), buffer.length);
+        assertArrayEquals(buf.array(), BloscDecoder.decompress(buffer));
+    }
+
+    /** The options Zarr's blosc codec configuration names: the shuffle, the block size, and clevel (I9). */
+    @Test
+    void roundTripsEveryShuffleModeBlockSizeAndLevel() {
+        Random random = new Random(5);
+        for (int ts : new int[] {1, 2, 4, 8, 12}) {
+            byte[] data = new byte[ts * 5000 + 3]; // a partial element at the end, too
+            for (int i = 0; i < data.length; i++) {
+                data[i] = (byte) (i % ts == 0 ? random.nextInt(4) : i / ts / 7);
+            }
+            for (int shuffle = BloscEncoder.NOSHUFFLE; shuffle <= BloscEncoder.BITSHUFFLE; shuffle++) {
+                for (int blockSize : new int[] {0, 128, 1000, 8192}) {
+                    for (int clevel : new int[] {0, 1, 5, 9}) {
+                        byte[] buffer = BloscEncoder.compress(data, ts, shuffle, blockSize, clevel);
+                        String what = "ts " + ts + " shuffle " + shuffle + " block " + blockSize + " clevel " + clevel;
+                        assertArrayEquals(data, BloscDecoder.decompress(buffer), what);
+                        if (clevel == 0) {
+                            assertEquals(0x02, buffer[2] & 0x02, what + ": clevel 0 stores the data");
+                        }
+                    }
+                }
+            }
+            // A whole number of elements keeps the bit shuffle; a partial one switches to the byte shuffle,
+            // whose trailing bytes c-blosc restores (it cannot restore a bit-shuffled block's).
+            byte[] whole = java.util.Arrays.copyOf(data, ts * 5000);
+            assertEquals(0x04, BloscEncoder.compress(whole, ts, BloscEncoder.BITSHUFFLE, 0)[2] & 0x05);
+            if (ts > 1) {
+                assertEquals(0x01, BloscEncoder.compress(data, ts, BloscEncoder.BITSHUFFLE, 0)[2] & 0x05);
+            }
+            assertEquals(0x00, BloscEncoder.compress(whole, ts, BloscEncoder.NOSHUFFLE, 0)[2] & 0x05);
+        }
+        assertThrows(IllegalArgumentException.class, () -> BloscEncoder.compress(new byte[8], 4, 3, 0));
+        assertThrows(IllegalArgumentException.class, () -> BloscEncoder.compress(new byte[8], 4, 1, -1));
+        assertThrows(IllegalArgumentException.class, () -> BloscEncoder.compress(new byte[8], 4, 1, 0, 10));
     }
 }

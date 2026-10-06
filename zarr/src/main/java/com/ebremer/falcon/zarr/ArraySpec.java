@@ -327,9 +327,6 @@ public final class ArraySpec {
          *                                  and write
          */
         public ArraySpec build() {
-            if (dataType.isVariableLength() && subChunkShape != null) {
-                throw new IllegalArgumentException("sharding is not supported for the 'string' data type");
-            }
             ArraySpec spec = new ArraySpec(this);
             try {
                 NodeMetadata parsed = Metadata.parse(Json.writeBytes(spec.toJson()), "zarr.json");

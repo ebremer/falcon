@@ -183,4 +183,103 @@ class JsonTest {
                 + "\"codecs\":[{\"name\":\"bytes\",\"configuration\":{\"endian\":\"little\"}}]}";
         assertEquals(doc, Json.write(Json.parse(doc)));
     }
+
+    // ---- P1 ---------------------------------------------------------------------------------------
+
+    /**
+     * P1 I1: Python's json.dumps writes the bare tokens NaN, Infinity, and -Infinity (zarr-python does, in
+     * attributes and v2 .zattrs). They are read as numbers and written back as they came.
+     */
+    @Test
+    void pythonsNonFiniteTokensAreReadAndWrittenBack() {
+        String doc = "{\"a\":NaN,\"b\":Infinity,\"c\":-Infinity,\"d\":[NaN,1]}";
+        JsonObject o = Json.parse(doc).asObject();
+        assertTrue(Double.isNaN(o.get("a").asNumber().doubleValue()));
+        assertEquals(Double.POSITIVE_INFINITY, o.get("b").asNumber().doubleValue());
+        assertEquals(Double.NEGATIVE_INFINITY, o.get("c").asNumber().doubleValue());
+        assertFalse(o.get("a").asNumber().isFinite());
+        assertTrue(o.get("d").asArray().get(1).asNumber().isFinite());
+        assertEquals(doc, Json.write(Json.parse(doc)));
+        assertThrows(JsonException.class, () -> o.get("a").asNumber().longValue());
+        assertThrows(JsonException.class, () -> o.get("b").asNumber().bigIntegerValue());
+        // only the exact tokens
+        for (String bad : new String[] {"nan", "NaNa", "Inf", "-Inf", "+Infinity", "-NaN", "Infinityx"}) {
+            assertThrows(JsonException.class, () -> Json.parse(bad), bad);
+        }
+        // Falcon's own numbers stay finite: JsonNumber.of refuses non-finite values
+        assertThrows(JsonException.class, () -> JsonNumber.of(Double.POSITIVE_INFINITY));
+    }
+
+    /** P1 I13: a lone surrogate was written as '?' once encoded as UTF-8; it is now a \\u escape. */
+    @Test
+    void aLoneSurrogateSurvivesWriteAndRead() {
+        for (String text : new String[] {"a\uD800b", "\uDC00", "x\uD83D", "\uDE00\uD83D"}) {
+            JsonString value = new JsonString(text);
+            byte[] bytes = Json.writeBytes(value);
+            assertEquals(text, Json.parse(bytes).asString(), "lone surrogate in " + Json.write(value));
+        }
+        // a proper pair stays raw UTF-8
+        assertEquals("\"\uD83D\uDE00\"", Json.write(new JsonString("\uD83D\uDE00")));
+        assertEquals("\"\\ud800\"", Json.write(new JsonString("\uD800")));
+    }
+
+    /** P1 I13: a repeated key was silently last-wins, so one document read two ways. */
+    @Test
+    void aRepeatedKeyIsAnError() {
+        JsonException e = assertThrows(JsonException.class, () -> Json.parse("{\"a\":1,\"b\":2,\"a\":3}"));
+        assertTrue(e.getMessage().contains("duplicate key \"a\""), e.getMessage());
+        assertThrows(JsonException.class, () -> Json.parse("{\"x\":{\"k\":1,\"k\":1}}"));
+        assertEquals(2, Json.parse("{\"a\":{\"k\":1},\"b\":{\"k\":1}}").asObject().members().size());
+    }
+
+    /** P1 I13: invalid UTF-8 was replaced with U+FFFD, changing the text silently. */
+    @Test
+    void invalidUtf8IsAnError() {
+        byte[][] bad = {
+            {'"', (byte) 0xff, '"'},                  // never valid
+            {'"', (byte) 0xc3, '"'},                  // truncated two-byte sequence
+            {'"', (byte) 0xed, (byte) 0xa0, (byte) 0x80, '"'}, // an encoded surrogate
+            {'"', (byte) 0xc0, (byte) 0xaf, '"'},     // overlong '/'
+        };
+        for (byte[] bytes : bad) {
+            JsonException e = assertThrows(JsonException.class, () -> Json.parse(bytes));
+            assertTrue(e.getMessage().contains("UTF-8"), e.getMessage());
+        }
+        assertEquals("é", Json.parse(new byte[] {'"', (byte) 0xc3, (byte) 0xa9, '"'}).asString());
+    }
+
+    /** P1 I13: new JsonNumber("1.2.3") was accepted and then written as invalid JSON. */
+    @Test
+    void aNumberLiteralMustBeAJsonNumber() {
+        for (String bad : new String[] {"1.2.3", "", "01", "+1", "1.", ".5", "1e", "0x10", "1 ", "--1", "nan"}) {
+            assertThrows(JsonException.class, () -> new JsonNumber(bad), bad);
+        }
+        for (String good : new String[] {"0", "-0", "1.5", "-12.5e-3", "1E+9", "NaN", "Infinity", "-Infinity"}) {
+            assertEquals(good, new JsonNumber(good).literal());
+        }
+    }
+
+    /**
+     * P1 H3: bigIntegerValue() built the whole integer before any check, so 1e20000000 took 25 s and a
+     * 20 MB message. An integer of more than MAX_INTEGER_DIGITS digits is refused first, in a short message.
+     */
+    @Test
+    void anAbsurdIntegerIsRefusedQuickly() {
+        long start = System.nanoTime();
+        for (String literal : new String[] {"1e20000000", "-7e20000000", "1e-20000000", "2e99999999999"}) {
+            JsonException e = assertThrows(JsonException.class, () -> new JsonNumber(literal).bigIntegerValue());
+            assertTrue(e.getMessage().length() < 200, e.getMessage());
+            assertThrows(JsonException.class, () -> new JsonNumber(literal).longValue());
+        }
+        assertTrue(System.nanoTime() - start < 2_000_000_000L);
+        String longLiteral = "9".repeat(5000);
+        JsonException e = assertThrows(JsonException.class, () -> new JsonNumber(longLiteral).bigIntegerValue());
+        assertTrue(e.getMessage().length() < 200, e.getMessage());
+        assertEquals(BigInteger.TEN.pow(JsonNumber.MAX_INTEGER_DIGITS - 1),
+                new JsonNumber("1e" + (JsonNumber.MAX_INTEGER_DIGITS - 1)).bigIntegerValue());
+        assertEquals(BigInteger.valueOf(120), new JsonNumber("1.2e2").bigIntegerValue());
+        assertEquals(0, new JsonNumber("0e-20000000").bigIntegerValue().signum());
+        assertEquals(Long.MAX_VALUE, new JsonNumber("9223372036854775807").longValue());
+        assertThrows(JsonException.class, () -> new JsonNumber("9223372036854775808").longValue());
+    }
 }

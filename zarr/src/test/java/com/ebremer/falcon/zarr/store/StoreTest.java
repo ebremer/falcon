@@ -9,7 +9,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
+import java.util.OptionalLong;
+import java.util.TreeSet;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -87,6 +93,168 @@ class StoreTest {
         runRangeContract(FileSystemStore.open(tmp.resolve("store")));
     }
 
+    // ---- suffix reads -----------------------------------------------------------------------------
+
+    private static void runSuffixContract(Store store) {
+        store.set("data", new byte[] {0, 1, 2, 3, 4, 5, 6, 7, 8, 9});
+        store.set("empty", new byte[0]);
+        assertArrayEquals(new byte[] {7, 8, 9}, store.getSuffix("data", 3).orElseThrow());
+        assertArrayEquals(new byte[] {0, 1, 2, 3, 4, 5, 6, 7, 8, 9}, store.getSuffix("data", 10).orElseThrow());
+        assertArrayEquals(new byte[] {0, 1, 2, 3, 4, 5, 6, 7, 8, 9}, store.getSuffix("data", 50).orElseThrow());
+        assertArrayEquals(new byte[0], store.getSuffix("data", 0).orElseThrow());
+        assertArrayEquals(new byte[0], store.getSuffix("empty", 4).orElseThrow());
+        assertTrue(store.getSuffix("absent", 4).isEmpty());
+        assertThrows(IllegalArgumentException.class, () -> store.getSuffix("data", -1));
+        assertThrows(IllegalArgumentException.class, () -> store.getSuffix("data", (long) Integer.MAX_VALUE + 1));
+    }
+
+    @Test
+    void memoryStoreSuffixes() {
+        runSuffixContract(new MemoryStore());
+    }
+
+    @Test
+    void fileSystemStoreSuffixes(@TempDir Path tmp) {
+        runSuffixContract(FileSystemStore.open(tmp.resolve("store")));
+    }
+
+    /** {@code Store.getSuffix}'s default, through size() and getRange(), for a store that does not override it. */
+    @Test
+    void theDefaultSuffixRead() {
+        runSuffixContract(new Delegating(new MemoryStore()));
+    }
+
+    /** A store that only delegates, so it uses every default method of {@link Store}. */
+    private record Delegating(Store store) implements Store {
+        @Override
+        public Optional<byte[]> get(String key) {
+            return store.get(key);
+        }
+
+        @Override
+        public Optional<byte[]> getRange(String key, long offset, long length) {
+            return store.getRange(key, offset, length);
+        }
+
+        @Override
+        public boolean exists(String key) {
+            return store.exists(key);
+        }
+
+        @Override
+        public OptionalLong size(String key) {
+            return store.size(key);
+        }
+
+        @Override
+        public List<String> list() {
+            return store.list();
+        }
+
+        @Override
+        public List<String> listPrefix(String prefix) {
+            return store.listPrefix(prefix);
+        }
+
+        @Override
+        public List<String> listDir(String prefix) {
+            return store.listDir(prefix);
+        }
+
+        @Override
+        public boolean isWritable() {
+            return store.isWritable();
+        }
+
+        @Override
+        public void set(String key, byte[] value) {
+            store.set(key, value);
+        }
+
+        @Override
+        public void delete(String key) {
+            store.delete(key);
+        }
+    }
+
+    // ---- threads (C1) -----------------------------------------------------------------------------
+
+    /**
+     * {@code MemoryStore} was a plain {@code HashMap}: parallel block writes lost keys, zarr.json among
+     * them, and a listing beside a write threw {@code ConcurrentModificationException} (P1 C1).
+     */
+    @Test
+    void memoryStoreTakesParallelWritersAndReaders() throws Exception {
+        for (int round = 0; round < 5; round++) {
+            MemoryStore store = new MemoryStore();
+            ConcurrentLinkedQueue<Throwable> errors = new ConcurrentLinkedQueue<>();
+            List<Thread> threads = new ArrayList<>();
+            for (int t = 0; t < 8; t++) {
+                int id = t;
+                threads.add(new Thread(() -> {
+                    try {
+                        for (int i = 0; i < 2000; i++) {
+                            store.set("w" + id + "/c/" + i, new byte[] {(byte) i});
+                            if (i % 50 == 0) {
+                                store.listDir("");
+                                store.listPrefix("w" + id + "/");
+                                store.get("w" + id + "/c/" + (i / 2)).orElseThrow();
+                            }
+                        }
+                    } catch (Throwable e) {
+                        errors.add(e);
+                    }
+                }));
+            }
+            threads.forEach(Thread::start);
+            for (Thread thread : threads) {
+                thread.join();
+            }
+            assertTrue(errors.isEmpty(), () -> "a thread failed: " + errors.peek());
+            assertEquals(16_000, store.list().size(), "keys were lost");
+        }
+    }
+
+    // ---- FileSystemStore listings (PF3) -----------------------------------------------------------
+
+    /**
+     * Listings walked the whole store on every call, about a second next to 20,000 chunks (P1 PF3); they
+     * now read only the prefix's directory. They must still list exactly what a whole-tree walk filtered
+     * by prefix lists, for every prefix.
+     */
+    @Test
+    void fileSystemStoreListingsMatchAWholeTreeWalk(@TempDir Path tmp) throws Exception {
+        Path root = tmp.resolve("store");
+        FileSystemStore store = FileSystemStore.open(root);
+        for (String key : new String[] {"zarr.json", "a/zarr.json", "a/c/0/0", "a/c/0/1", "a/c/1/0", "ab/zarr.json",
+                "ab/x", "b/deep/er/k", "c.json", ".zattrs"}) {
+            store.set(key, bytes(key));
+        }
+        Files.createDirectories(root.resolve("empty/inside")); // holds no key: not a child prefix
+        Files.createDirectories(root.resolve("a/c/hollow"));
+
+        List<String> all = new ArrayList<>();
+        try (Stream<Path> walk = Files.walk(root)) {
+            walk.filter(Files::isRegularFile).forEach(p -> all.add(root.relativize(p).toString().replace('\\', '/')));
+        }
+        assertEquals(StoreKeys.listPrefix(all, ""), store.list());
+        TreeSet<String> prefixes = new TreeSet<>(List.of("", "/", "//", "a//", "./", "../", "a/../", "zz/", "zarr.json/",
+                "a/c/0/1/", "A/", "a/C/"));
+        for (String key : all) {
+            for (int i = 0; i <= key.length(); i++) {
+                prefixes.add(key.substring(0, i));
+            }
+        }
+        for (String prefix : prefixes) {
+            assertEquals(StoreKeys.listPrefix(all, prefix), store.listPrefix(prefix), "listPrefix(\"" + prefix + "\")");
+            assertEquals(StoreKeys.listDir(all, prefix), store.listDir(prefix), "listDir(\"" + prefix + "\")");
+        }
+        assertEquals(List.of(".zattrs", "a/", "ab/", "b/", "c.json", "zarr.json"), store.listDir(""));
+        assertEquals(List.of("a/c/0/", "a/c/1/"), store.listDir("a/c"));
+        assertEquals(List.of("ab/x", "ab/zarr.json"), store.listPrefix("ab"));
+        assertEquals(List.of(), store.listDir("A/")); // keys are case-sensitive, even where files are not
+    }
+
     // ---- key validation ---------------------------------------------------------------------------
 
     @Test
@@ -99,6 +267,48 @@ class StoreTest {
         // A '.' inside a segment is fine — "zarr.json" is a normal key.
         store.set("zarr.json", bytes("ok"));
         assertTrue(store.exists("zarr.json"));
+    }
+
+    /**
+     * Windows drops a trailing dot or space from a file name and splits at a backslash, so
+     * {@code FileSystemStore} read and wrote "data./zarr.json" as data/zarr.json (P1 I12). Such segments
+     * are refused on every platform, so a store reads the same everywhere.
+     */
+    @Test
+    void fileSystemStoreRefusesSegmentsWindowsWouldAlias(@TempDir Path tmp) {
+        FileSystemStore store = FileSystemStore.open(tmp.resolve("store"));
+        store.set("data/zarr.json", bytes("good"));
+        for (String bad : new String[] {"data./zarr.json", "data /zarr.json", "data/zarr.json.", "a\\b", "x/y ",
+                "..."}) {
+            assertThrows(IllegalArgumentException.class, () -> store.set(bad, bytes("bad")), bad);
+            assertThrows(IllegalArgumentException.class, () -> store.get(bad), bad);
+        }
+        assertArrayEquals(bytes("good"), store.get("data/zarr.json").orElseThrow());
+        // A dot inside or at the start of a segment is fine, and other stores take any segment.
+        store.set(".zattrs", bytes("ok"));
+        store.set("v2/0.0", bytes("ok"));
+        MemoryStore memory = new MemoryStore();
+        memory.set("data./zarr.json", bytes("ok"));
+        assertTrue(memory.exists("data./zarr.json"));
+    }
+
+    /**
+     * Where the file system allows such names, a listing leaves them out: no key can reach them. Windows
+     * cannot hold them, so there this checks nothing (the Linux CI leg runs it).
+     */
+    @Test
+    void fileSystemStoreListingsSkipNamesNoKeyCanReach(@TempDir Path tmp) throws Exception {
+        if (System.getProperty("os.name").startsWith("Windows")) {
+            return; // not skipped: a skip prints a build warning
+        }
+        Path root = tmp.resolve("store");
+        FileSystemStore store = FileSystemStore.open(root);
+        store.set("a/zarr.json", bytes("ok"));
+        Files.createDirectories(root.resolve("data."));
+        Files.write(root.resolve("data./zarr.json"), bytes("x"));
+        Files.write(root.resolve("a/trailing "), bytes("x"));
+        assertEquals(List.of("a/"), store.listDir(""));
+        assertEquals(List.of("a/zarr.json"), store.list());
     }
 
     @Test

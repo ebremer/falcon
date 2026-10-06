@@ -8,7 +8,13 @@ import java.util.Set;
  */
 public final class GroupMetadata implements NodeMetadata {
 
-    private static final Set<String> KNOWN = Set.of("zarr_format", "node_type", "attributes");
+    /**
+     * The members Falcon reads, plus {@code consolidated_metadata}, which zarr-python writes into a
+     * consolidated group's {@code zarr.json} (as an object with {@code "must_understand": false}, or as
+     * {@code null} in older releases). Falcon does not use it yet: each node's own metadata is read.
+     */
+    private static final Set<String> KNOWN =
+            Set.of("zarr_format", "node_type", "attributes", "consolidated_metadata");
 
     private final JsonObject attributes;
 

@@ -8,9 +8,12 @@ import java.util.Map;
  *
  * <ul>
  *   <li>emit object members in their stored insertion order (so metadata round-trips stably);</li>
- *   <li>emit each {@link JsonNumber} from its exact literal;</li>
+ *   <li>emit each {@link JsonNumber} from its exact literal (so a {@code NaN}, {@code Infinity}, or
+ *       {@code -Infinity} that was read is written back as that bare token, as Python writes it);</li>
  *   <li>escape only what JSON requires ({@code "}, {@code \\}, and control characters), leaving
- *       {@code /} and non-ASCII characters as raw UTF-8.</li>
+ *       {@code /} and non-ASCII characters as raw UTF-8, except a lone surrogate, which UTF-8 cannot
+ *       encode: it is written as a six-character escape ({@code \} {@code u} and four hex digits), so
+ *       the string reads back unchanged.</li>
  * </ul>
  */
 final class JsonWriter {
@@ -104,6 +107,11 @@ final class JsonWriter {
                 default -> {
                     if (c < 0x20) {
                         sb.append("\\u").append(String.format("%04x", (int) c));
+                    } else if (Character.isHighSurrogate(c) && i + 1 < value.length()
+                            && Character.isLowSurrogate(value.charAt(i + 1))) {
+                        sb.append(c).append(value.charAt(++i)); // a pair: one supplementary character
+                    } else if (Character.isSurrogate(c)) {
+                        sb.append("\\u").append(String.format("%04x", (int) c)); // lone: UTF-8 has no form
                     } else {
                         sb.append(c);
                     }

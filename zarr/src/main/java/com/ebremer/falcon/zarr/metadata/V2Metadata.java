@@ -47,15 +47,21 @@ public final class V2Metadata {
 
     /** Translates a v2 group ({@code .zgroup} + optional {@code .zattrs}) into v3 group metadata. */
     public static GroupMetadata parseGroup(byte[] zgroup, byte[] zattrs, String key) {
-        checkFormat(object(zgroup, key), key);
-        JsonObject attributes = zattrs == null ? Fields.EMPTY_OBJECT : object(zattrs, key + " (.zattrs)");
-        return GroupMetadata.parse(JsonObject.builder()
-                .put("zarr_format", 3).put("node_type", "group").put("attributes", attributes)
-                .build(), key);
+        return Metadata.wrapJson(key, () -> {
+            checkFormat(object(zgroup, key), key);
+            JsonObject attributes = zattrs == null ? Fields.EMPTY_OBJECT : object(zattrs, key + " (.zattrs)");
+            return GroupMetadata.parse(JsonObject.builder()
+                    .put("zarr_format", 3).put("node_type", "group").put("attributes", attributes)
+                    .build(), key);
+        });
     }
 
     /** Translates a v2 array ({@code .zarray} + optional {@code .zattrs}) into v3 array metadata. */
     public static ArrayMetadata parseArray(byte[] zarray, byte[] zattrs, String key) {
+        return Metadata.wrapJson(key, () -> translateArray(zarray, zattrs, key));
+    }
+
+    private static ArrayMetadata translateArray(byte[] zarray, byte[] zattrs, String key) {
         JsonObject meta = object(zarray, key);
         checkFormat(meta, key);
 
@@ -80,7 +86,8 @@ public final class V2Metadata {
         });
 
         DType dtype = parseDtype(Fields.string(Fields.require(meta, "dtype", key), key + ".dtype"), key);
-        String separator = meta.find("dimension_separator")
+        // null, as zarr-python 2 writes when none was chosen, means the default "."
+        String separator = meta.find("dimension_separator").filter(v -> !v.isNull())
                 .map(v -> Fields.string(v, key + ".dimension_separator")).orElse(".");
 
         JsonValue fillValue = translateFill(meta.find("fill_value").orElse(JsonNull.INSTANCE), dtype);
@@ -145,7 +152,9 @@ public final class V2Metadata {
             String id = Fields.string(Fields.require(c, "id", key + ".compressor"), key + ".compressor.id");
             codecs.add(switch (id) {
                 case "gzip" -> named("gzip", JsonObject.builder()
-                        .put("level", c.find("level").map(v -> v.asNumber().intValue()).orElse(5)).build());
+                        .put("level", c.find("level")
+                                .map(v -> Fields.integer(v, key + ".compressor.level")).orElse(5L))
+                        .build());
                 case "zstd" -> named("zstd", null);
                 case "blosc" -> named("blosc", null); // blosc self-describes in its own header
                 default -> throw new ZarrUnsupportedException(
@@ -170,10 +179,17 @@ public final class V2Metadata {
         return b.build();
     }
 
-    /** Maps a v2 fill value onto what the v3 data type expects (null becomes zero; bool accepts 0/1). */
+    /**
+     * Maps a v2 fill value onto what the v3 data type expects. A v2 {@code null} means no fill value was
+     * set, and unwritten chunks read as zeros, as zarr-python reads them: {@code false} for bool,
+     * {@code [0.0, 0.0]} for a complex type, else {@code 0}. A bool accepts 0/1.
+     */
     private static JsonValue translateFill(JsonValue fill, DType dtype) {
         boolean isBool = dtype.name.equals("bool");
         if (fill instanceof JsonNull) {
+            if (dtype.name.startsWith("complex")) {
+                return JsonArray.of(JsonNumber.of(0.0), JsonNumber.of(0.0));
+            }
             return isBool ? JsonBool.FALSE : JsonNumber.of(0);
         }
         if (isBool && fill instanceof JsonNumber n) {
@@ -183,7 +199,7 @@ public final class V2Metadata {
     }
 
     private static void checkFormat(JsonObject meta, String key) {
-        long format = Fields.number(Fields.require(meta, "zarr_format", key), key + ".zarr_format").longValue();
+        long format = Fields.integer(Fields.require(meta, "zarr_format", key), key + ".zarr_format");
         if (format != 2) {
             throw new ZarrFormatException(key + ": expected zarr_format 2, was " + format);
         }

@@ -11,6 +11,9 @@ interface ArrayBytesCodec {
     /** The byte order of each primitive in a decoded element. */
     ByteOrder elementByteOrder();
 
+    /** An upper bound on the encoded size of a chunk of {@code shape}: the limit for decoding it. */
+    long maxEncodedSize(int[] shape, int elementSize);
+
     /**
      * Decodes the chunk read through {@code source} into an array of {@code shape}.
      *

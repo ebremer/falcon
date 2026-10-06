@@ -22,11 +22,19 @@ final class Crc32cCodec implements BytesBytesCodec {
     }
 
     @Override
-    public byte[] decode(byte[] input) {
+    public long maxEncodedSize(long decodedSize) {
+        return decodedSize > Long.MAX_VALUE - 4 ? Long.MAX_VALUE : decodedSize + 4;
+    }
+
+    @Override
+    public byte[] decode(byte[] input, int maxSize) {
         if (input.length < 4) {
             throw new ZarrFormatException("crc32c: chunk is shorter than the 4-byte checksum");
         }
         int dataLength = input.length - 4;
+        if (dataLength > maxSize) {
+            throw new ZarrFormatException("crc32c: chunk holds " + dataLength + " bytes, more than " + maxSize);
+        }
         CRC32C crc = new CRC32C();
         crc.update(input, 0, dataLength);
         long computed = crc.getValue() & 0xffffffffL;

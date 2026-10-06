@@ -13,6 +13,12 @@ import java.io.ByteArrayOutputStream;
  * chunks usually are). Input is split into blocks of at most 64&nbsp;KiB, which keeps every literal and
  * match length inside the predefined code ranges. A block that would not shrink is stored raw.
  *
+ * <p>A frame no larger than 128&nbsp;KiB is single-segment (its window is its content), as libzstd writes
+ * small frames. A larger one declares a 128&nbsp;KiB window, which covers every block and match, and keeps
+ * its content size: a streaming decoder then needs a 128&nbsp;KiB window, not one the size of the frame
+ * (libzstd's streaming API refuses a window over 128&nbsp;MiB by default). The XXH64 content checksum is
+ * optional.
+ *
  * <p>Frames it produces are read by {@link ZstdDecoder} and by libzstd (zarr-python), verified by
  * round-trip and conformance tests.
  */
@@ -20,6 +26,11 @@ public final class ZstdEncoder {
 
     private static final int MAGIC = 0xFD2FB528;
     private static final int BLOCK_SIZE = 64 * 1024;
+    /** The window a frame larger than it declares; it covers the blocks, and matches never leave a block. */
+    private static final int WINDOW_LOG = 17;
+    private static final int FLAG_SINGLE_SEGMENT = 0x20;
+    private static final int FLAG_CHECKSUM = 0x04;
+    private static final int FCS_8_BYTES = 0xC0;
     private static final int MIN_MATCH = 3;
     private static final int MAX_MATCH = 65535;
     private static final int HASH_LOG = 15;
@@ -69,27 +80,47 @@ public final class ZstdEncoder {
     private ZstdEncoder() {
     }
 
-    /** Compresses {@code input} into a single Zstandard frame. */
+    /** Compresses {@code input} into a single Zstandard frame, without a content checksum. */
     public static byte[] compress(byte[] input) {
-        return new ZstdEncoder().encodeFrame(input);
+        return compress(input, false);
     }
 
-    private byte[] encodeFrame(byte[] input) {
+    /**
+     * Compresses {@code input} into a single Zstandard frame, ending it with the XXH64 content checksum
+     * when {@code checksum} is true (the {@code checksum} option of zstd and of Zarr's {@code zstd} codec).
+     */
+    public static byte[] compress(byte[] input, boolean checksum) {
+        return new ZstdEncoder().encodeFrame(input, checksum);
+    }
+
+    private byte[] encodeFrame(byte[] input, boolean checksum) {
         ByteArrayOutputStream out = new ByteArrayOutputStream(Math.max(64, input.length / 2));
         writeLe(out, MAGIC, 4);
+        int checksumFlag = checksum ? FLAG_CHECKSUM : 0;
         if (input.length == 0) {
             // Match libzstd's minimal frame: single-segment, 1-byte content size 0, one empty raw block.
-            out.write(0x20);
+            out.write(FLAG_SINGLE_SEGMENT | checksumFlag);
             out.write(0x00);
             writeLe(out, 1, 3);
-            return out.toByteArray();
+        } else {
+            if (input.length <= 1 << WINDOW_LOG) {
+                // Single-segment, 8-byte content size, no dictionary.
+                out.write(FCS_8_BYTES | FLAG_SINGLE_SEGMENT | checksumFlag);
+            } else {
+                // A window descriptor (RFC 8878 3.1.1.1.2: exponent WINDOW_LOG - 10, mantissa 0), then the
+                // 8-byte content size.
+                out.write(FCS_8_BYTES | checksumFlag);
+                out.write((WINDOW_LOG - 10) << 3);
+            }
+            writeLe(out, input.length, 8);
+            for (int start = 0; start < input.length; start += BLOCK_SIZE) {
+                int end = Math.min(start + BLOCK_SIZE, input.length);
+                boolean last = end == input.length;
+                writeBlock(out, input, start, end, last);
+            }
         }
-        out.write(0xE0); // descriptor: single-segment, 8-byte content size, no checksum, no dictionary
-        writeLe(out, input.length, 8);
-        for (int start = 0; start < input.length; start += BLOCK_SIZE) {
-            int end = Math.min(start + BLOCK_SIZE, input.length);
-            boolean last = end == input.length;
-            writeBlock(out, input, start, end, last);
+        if (checksum) {
+            writeLe(out, Xxh64.hash(input, 0, input.length, 0), 4); // the low 32 bits
         }
         return out.toByteArray();
     }

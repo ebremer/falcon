@@ -31,6 +31,12 @@ import java.util.zip.Inflater;
  * block format), {@code zlib} (via {@code java.util.zip}), {@code zstd} (via Falcon's own decoder), and
  * {@code snappy}; and both the byte- and bit-shuffle filters. A buffer using an undefined internal codec
  * or an unsupported format version is reported as a format/unsupported error rather than decoded wrongly.
+ *
+ * <p>The header is checked as c-blosc 1.x checks it before decoding: format version 2, the reserved flag
+ * bit clear, a type size of at least 1, a block size from 1 to the buffer's size (and c-blosc's
+ * {@code BLOSC_MAX_BLOCKSIZE}), a memcpy'ed buffer exactly 16 bytes longer than its data, and an offset
+ * table that fits. With both shuffle flags set, a block is byte-unshuffled when its type size exceeds 1
+ * and bit-unshuffled otherwise, as c-blosc does.
  */
 public final class BloscDecoder {
 
@@ -40,6 +46,12 @@ public final class BloscDecoder {
     private static final int FLAG_SHUFFLE = 0x01;
     private static final int FLAG_MEMCPYED = 0x02;
     private static final int FLAG_BITSHUFFLE = 0x04;
+    private static final int FLAG_RESERVED = 0x08;
+
+    /** The only format version c-blosc 1.x reads ({@code BLOSC_VERSION_FORMAT}). */
+    private static final int VERSION_FORMAT = 2;
+    /** c-blosc's {@code BLOSC_MAX_BLOCKSIZE}: {@code (INT_MAX - BLOSC_MAX_TYPESIZE * 4) / 3}. */
+    static final int MAX_BLOCKSIZE = (Integer.MAX_VALUE - 255 * 4) / 3;
 
     private static final int COMPRESSOR_BLOSCLZ = 0;
     private static final int COMPRESSOR_LZ4 = 1;
@@ -63,6 +75,18 @@ public final class BloscDecoder {
      * @throws UnsupportedCompressionException if it uses an internal codec or filter that is not implemented
      */
     public static byte[] decompress(byte[] src) {
+        return decompress(src, Integer.MAX_VALUE - 8);
+    }
+
+    /**
+     * Decompresses a Blosc buffer that should hold at most {@code maxSize} bytes. A header declaring more
+     * fails before anything is allocated, so a corrupt or hostile size cannot exhaust memory.
+     *
+     * @throws CompressionFormatException     if the buffer is malformed, or declares more than {@code maxSize}
+     *                                        bytes
+     * @throws UnsupportedCompressionException if it uses an internal codec or filter that is not implemented
+     */
+    public static byte[] decompress(byte[] src, int maxSize) {
         requireHeader(src);
         int version = src[0] & 0xff;
         int flags = src[2] & 0xff;
@@ -71,9 +95,6 @@ public final class BloscDecoder {
         int blocksize = le32(src, 8);
         int cbytes = le32(src, 12);
 
-        if (version > 2) {
-            throw new UnsupportedCompressionException("Blosc format version " + version + " is not supported");
-        }
         if (nbytes < 0 || blocksize < 0 || cbytes < 0) {
             throw new CompressionFormatException("Blosc header has a negative size");
         }
@@ -81,38 +102,58 @@ public final class BloscDecoder {
             throw new CompressionFormatException(
                     "Blosc buffer declares " + cbytes + " bytes but only " + src.length + " are present");
         }
-
-        byte[] out = new byte[nbytes];
         if (nbytes == 0) {
-            return out;
+            return new byte[0]; // c-blosc returns before checking anything else
+        }
+        if (nbytes > maxSize) {
+            throw new CompressionFormatException(
+                    "Blosc buffer declares " + nbytes + " bytes, more than the " + maxSize + " expected");
+        }
+        // c-blosc 1.x's checks (blosc_run_decompression_with_context), memcpy'ed buffers included.
+        if (blocksize == 0 || blocksize > nbytes || blocksize > MAX_BLOCKSIZE) {
+            throw new CompressionFormatException(
+                    "Blosc block size " + blocksize + " is not between 1 and the " + nbytes + "-byte buffer");
+        }
+        if (typeSize == 0) {
+            throw new CompressionFormatException("Blosc type size of zero");
+        }
+        if (version > VERSION_FORMAT) {
+            throw new UnsupportedCompressionException("Blosc format version " + version + " is not supported");
+        }
+        if (version != VERSION_FORMAT) {
+            throw new CompressionFormatException("Blosc format version " + version + " (c-blosc writes 2)");
+        }
+        if ((flags & FLAG_RESERVED) != 0) {
+            throw new CompressionFormatException("Blosc header sets the reserved flag bit 0x08");
         }
 
         // A memcpy'ed buffer holds the original bytes verbatim: no blocks, no filter.
         if ((flags & FLAG_MEMCPYED) != 0) {
-            if (nbytes > src.length - HEADER_LENGTH) {
-                throw new CompressionFormatException("Blosc memcpy payload is truncated");
+            if (cbytes != HEADER_LENGTH + (long) nbytes) {
+                throw new CompressionFormatException("Blosc memcpy buffer of " + cbytes + " bytes does not hold "
+                        + nbytes + " bytes after its header");
             }
+            byte[] out = new byte[nbytes];
             System.arraycopy(src, HEADER_LENGTH, out, 0, nbytes);
             return out;
         }
 
-        if (blocksize > nbytes) {
-            // c-blosc never makes a block larger than the buffer; refusing one bounds the allocation below.
-            throw new CompressionFormatException("Blosc block size " + blocksize + " exceeds the " + nbytes + "-byte buffer");
-        }
-        if (blocksize == 0) {
-            throw new CompressionFormatException("Blosc block size of zero");
-        }
         int compressor = (flags & 0xe0) >>> 5;
-        boolean shuffle = (flags & FLAG_SHUFFLE) != 0;
-        boolean bitShuffle = (flags & FLAG_BITSHUFFLE) != 0;
+        if (compressor > COMPRESSOR_ZSTD) {
+            throw new CompressionFormatException("unknown Blosc internal codec " + compressor);
+        }
+        // As c-blosc's blosc_d decides: the byte shuffle wins when both flags are set and the type is wider
+        // than a byte; otherwise the bit-shuffle flag applies (to a block holding at least one element).
+        boolean shuffle = (flags & FLAG_SHUFFLE) != 0 && typeSize > 1;
+        boolean bitShuffle = !shuffle && (flags & FLAG_BITSHUFFLE) != 0;
 
         int wholeBlocks = nbytes / blocksize;
         int leftover = nbytes % blocksize;
         int blockCount = wholeBlocks + (leftover > 0 ? 1 : 0);
-        if (blockCount > (src.length - HEADER_LENGTH) / 4) {
+        if (blockCount > (cbytes - HEADER_LENGTH) / 4) {
             throw new CompressionFormatException("Blosc block offset table is truncated");
         }
+        byte[] out = new byte[nbytes];
 
         // c-blosc may compress blocks in parallel and write them out of order, so a block's payload ends
         // at the nearest offset above its own, not at the next block's.
@@ -124,25 +165,58 @@ public final class BloscDecoder {
         java.util.Arrays.sort(ascending);
 
         byte[] block = new byte[blocksize];
-        for (int b = 0; b < blockCount; b++) {
-            int start = offsets[b];
-            int end = nextOffsetAbove(ascending, start, cbytes);
-            if (start < HEADER_LENGTH + 4 * blockCount || end > cbytes || end < start) {
-                throw new CompressionFormatException("Blosc block " + b + " has an invalid extent");
-            }
-            int blockBytes = (b == wholeBlocks && leftover > 0) ? leftover : blocksize;
-            decodeBlock(src, start, end - start, block, blockBytes, typeSize, compressor);
+        Scratch scratch = new Scratch();
+        try {
+            for (int b = 0; b < blockCount; b++) {
+                int start = offsets[b];
+                int end = nextOffsetAbove(ascending, start, cbytes);
+                if (start < HEADER_LENGTH + 4 * blockCount || end > cbytes || end < start) {
+                    throw new CompressionFormatException("Blosc block " + b + " has an invalid extent");
+                }
+                int blockBytes = (b == wholeBlocks && leftover > 0) ? leftover : blocksize;
+                decodeBlock(src, start, end - start, block, blockBytes, typeSize, compressor, scratch);
 
-            int destination = b * blocksize;
-            if (bitShuffle) {
-                bitUnshuffle(block, out, destination, blockBytes, typeSize);
-            } else if (shuffle) {
-                Shuffle.unshuffle(block, 0, out, destination, blockBytes, typeSize);
-            } else {
-                System.arraycopy(block, 0, out, destination, blockBytes);
+                int destination = b * blocksize;
+                if (bitShuffle && blockBytes >= typeSize) {
+                    bitUnshuffle(block, out, destination, blockBytes, typeSize, scratch);
+                } else if (shuffle) {
+                    Shuffle.unshuffle(block, 0, out, destination, blockBytes, typeSize);
+                } else {
+                    System.arraycopy(block, 0, out, destination, blockBytes);
+                }
             }
+        } finally {
+            scratch.close();
         }
         return out;
+    }
+
+    /** What one decode reuses from block to block: zlib's Inflater and the bit-unshuffle's scratch buffer. */
+    private static final class Scratch {
+        private Inflater inflater;
+        private byte[] bitTmp;
+
+        Inflater inflater() {
+            if (inflater == null) {
+                inflater = new Inflater();
+            } else {
+                inflater.reset();
+            }
+            return inflater;
+        }
+
+        byte[] bitTmp(int size) {
+            if (bitTmp == null || bitTmp.length < size) {
+                bitTmp = new byte[size];
+            }
+            return bitTmp;
+        }
+
+        void close() {
+            if (inflater != null) {
+                inflater.end();
+            }
+        }
     }
 
     /**
@@ -150,23 +224,21 @@ public final class BloscDecoder {
      * element count is a multiple of 8 is un-transposed, any trailing partial element copied through; any
      * other block was stored as it was.
      */
-    private static void bitUnshuffle(byte[] block, byte[] out, int destination, int length, int typeSize) {
-        if (typeSize < 1) {
-            throw new CompressionFormatException("Blosc bit-shuffle with a type size of " + typeSize);
-        }
+    private static void bitUnshuffle(byte[] block, byte[] out, int destination, int length, int typeSize,
+                                     Scratch scratch) {
         int elements = length / typeSize;
         if (elements % 8 != 0) {
             System.arraycopy(block, 0, out, destination, length);
             return;
         }
-        Bitshuffle.untranspose(block, 0, out, destination, elements, typeSize);
+        Bitshuffle.untranspose(block, 0, out, destination, elements, typeSize, scratch.bitTmp(elements * typeSize));
         int shuffled = elements * typeSize;
         System.arraycopy(block, shuffled, out, destination + shuffled, length - shuffled);
     }
 
     /** Decodes one block, which may be stored as a single stream or split one stream per byte position. */
     private static void decodeBlock(byte[] src, int offset, int length, byte[] block, int blockBytes,
-                                    int typeSize, int compressor) {
+                                    int typeSize, int compressor, Scratch scratch) {
         if (length < 4) {
             throw new CompressionFormatException("Blosc block is too short to hold a stream length");
         }
@@ -195,33 +267,33 @@ public final class BloscDecoder {
                 // Incompressible: stored as-is.
                 System.arraycopy(src, cursor, block, target, streamBytes);
             } else {
-                inflate(compressor, src, cursor, compressed, block, target, streamBytes);
+                inflate(compressor, src, cursor, compressed, block, target, streamBytes, scratch);
             }
             cursor += compressed;
         }
     }
 
     private static void inflate(int compressor, byte[] src, int srcOff, int srcLen,
-                                byte[] dst, int dstOff, int dstLen) {
+                                byte[] dst, int dstOff, int dstLen, Scratch scratch) {
         switch (compressor) {
             case COMPRESSOR_LZ4 -> Lz4.decompress(src, srcOff, srcLen, dst, dstOff, dstLen);
             case COMPRESSOR_ZSTD -> {
-                byte[] decoded = ZstdDecoder.decompress(src, srcOff, srcLen);
+                byte[] decoded = ZstdDecoder.decompress(src, srcOff, srcLen, dstLen);
                 if (decoded.length != dstLen) {
                     throw new CompressionFormatException("Blosc zstd stream produced " + decoded.length
                             + " bytes, expected " + dstLen);
                 }
                 System.arraycopy(decoded, 0, dst, dstOff, dstLen);
             }
-            case COMPRESSOR_ZLIB -> zlib(src, srcOff, srcLen, dst, dstOff, dstLen);
+            case COMPRESSOR_ZLIB -> zlib(src, srcOff, srcLen, dst, dstOff, dstLen, scratch.inflater());
             case COMPRESSOR_BLOSCLZ -> BloscLz.decompress(src, srcOff, srcLen, dst, dstOff, dstLen);
             case COMPRESSOR_SNAPPY -> Snappy.decompress(src, srcOff, srcLen, dst, dstOff, dstLen);
             default -> throw new CompressionFormatException("unknown Blosc internal codec " + compressor);
         }
     }
 
-    private static void zlib(byte[] src, int srcOff, int srcLen, byte[] dst, int dstOff, int dstLen) {
-        Inflater inflater = new Inflater();
+    private static void zlib(byte[] src, int srcOff, int srcLen, byte[] dst, int dstOff, int dstLen,
+                             Inflater inflater) {
         try {
             inflater.setInput(src, srcOff, srcLen);
             int produced = 0;
@@ -241,19 +313,25 @@ public final class BloscDecoder {
             }
         } catch (DataFormatException e) {
             throw new CompressionFormatException("Blosc zlib stream is corrupt: " + e.getMessage());
-        } finally {
-            inflater.end();
         }
     }
 
-    /** The smallest block offset strictly greater than {@code offset}, or {@code cbytes} if there is none. */
+    /**
+     * The smallest block offset strictly greater than {@code offset}, or {@code cbytes} if there is none: a
+     * binary search, since a linear one made decoding quadratic in the number of blocks.
+     */
     private static int nextOffsetAbove(int[] ascending, int offset, int cbytes) {
-        for (int candidate : ascending) {
-            if (candidate > offset) {
-                return candidate;
+        int lo = 0;
+        int hi = ascending.length; // the answer's index lies in [lo, hi]
+        while (lo < hi) {
+            int mid = (lo + hi) >>> 1;
+            if (ascending[mid] > offset) {
+                hi = mid;
+            } else {
+                lo = mid + 1;
             }
         }
-        return cbytes;
+        return lo < ascending.length ? ascending[lo] : cbytes;
     }
 
     private static void requireHeader(byte[] src) {

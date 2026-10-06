@@ -61,6 +61,33 @@
                     <argLine>@{argLine} --add-modules jdk.httpserver
                         --add-reads com.ebremer.falcon.zarr=jdk.httpserver</argLine>
                 </configuration>
+                <executions>
+                    <!-- The corrupt-input tests run on their own, under a small stack and heap: unbounded
+                         recursion or allocation on hostile input then fails them instead of passing on a
+                         generously sized JVM. -->
+                    <execution>
+                        <id>default-test</id>
+                        <configuration>
+                            <excludes>
+                                <exclude>**/RobustnessTest.java</exclude>
+                                <exclude>**/DecodeBoundsTest.java</exclude>
+                            </excludes>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>fuzz</id>
+                        <goals>
+                            <goal>test</goal>
+                        </goals>
+                        <configuration>
+                            <includes>
+                                <include>**/RobustnessTest.java</include>
+                                <include>**/DecodeBoundsTest.java</include>
+                            </includes>
+                            <argLine>@{argLine} -Xss256k -Xmx128m</argLine>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>

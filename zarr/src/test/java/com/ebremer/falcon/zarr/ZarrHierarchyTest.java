@@ -173,4 +173,168 @@ class ZarrHierarchyTest {
         assertEquals(List.of("later"), root.childNames()); // read on demand, not cached
         assertFalse(root.arrays().isEmpty());
     }
+
+    // ---- P1 ---------------------------------------------------------------------------------------
+
+    /** Counts the store requests a call makes: over HTTP, each is a round trip. */
+    private static final class CountingStore implements Store {
+        private final MemoryStore delegate = new MemoryStore();
+        final List<String> calls = new java.util.ArrayList<>();
+        boolean failListing;
+
+        @Override
+        public java.util.Optional<byte[]> get(String key) {
+            calls.add("get " + key);
+            return delegate.get(key);
+        }
+
+        @Override
+        public java.util.Optional<byte[]> getRange(String key, long offset, long length) {
+            calls.add("getRange " + key);
+            return delegate.getRange(key, offset, length);
+        }
+
+        @Override
+        public boolean exists(String key) {
+            calls.add("exists " + key);
+            return delegate.exists(key);
+        }
+
+        @Override
+        public java.util.OptionalLong size(String key) {
+            calls.add("size " + key);
+            return delegate.size(key);
+        }
+
+        @Override
+        public List<String> list() {
+            return listPrefix("");
+        }
+
+        @Override
+        public List<String> listPrefix(String prefix) {
+            if (failListing) {
+                throw new UnsupportedOperationException("no listing");
+            }
+            return delegate.listPrefix(prefix);
+        }
+
+        @Override
+        public List<String> listDir(String prefix) {
+            if (failListing) {
+                throw new UnsupportedOperationException("no listing");
+            }
+            return delegate.listDir(prefix);
+        }
+
+        @Override
+        public boolean isWritable() {
+            return true;
+        }
+
+        @Override
+        public void set(String key, byte[] value) {
+            delegate.set(key, value);
+        }
+
+        @Override
+        public void delete(String key) {
+            delegate.delete(key);
+        }
+    }
+
+    /**
+     * P1 PF5: opening a node probed with exists() (a HEAD over HTTP) and then fetched: a v2 array cost five
+     * requests. It now fetches zarr.json, then .zarray, then .zgroup, stopping at the first present.
+     */
+    @Test
+    void openingANodeFetchesWithoutProbing() {
+        CountingStore store = new CountingStore();
+        populate(store);
+        store.calls.clear();
+        Zarr.open(store);
+        assertEquals(List.of("get zarr.json"), store.calls);
+
+        store.calls.clear();
+        ZarrGroup root = Zarr.openGroup(store);
+        store.calls.clear();
+        assertTrue(root.child("temperature").isPresent());
+        assertEquals(List.of("get temperature/zarr.json"), store.calls);
+
+        store.calls.clear();
+        assertTrue(root.child("absent").isEmpty());
+        assertEquals(List.of("get absent/zarr.json", "get absent/.zarray", "get absent/.zgroup"), store.calls);
+
+        CountingStore v2 = new CountingStore();
+        put(v2, ".zarray", "{\"zarr_format\":2,\"shape\":[2],\"chunks\":[2],\"dtype\":\"<i4\",\"fill_value\":0,"
+                + "\"order\":\"C\",\"filters\":null,\"compressor\":null}");
+        v2.calls.clear();
+        assertTrue(Zarr.open(v2).isArray());
+        assertEquals(List.of("get zarr.json", "get .zarray", "get .zattrs"), v2.calls);
+    }
+
+    /** P1 PF7: ZarrGroup.toString() listed the children: a full store walk, and an exception on HTTP. */
+    @Test
+    void toStringDoesNoIo() {
+        CountingStore store = new CountingStore();
+        populate(store);
+        ZarrGroup root = Zarr.openGroup(store);
+        ZarrGroup nested = root.group("nested");
+        store.failListing = true;
+        store.calls.clear();
+        assertEquals("ZarrGroup[/]", root.toString());
+        assertEquals("ZarrGroup[nested]", nested.toString());
+        assertEquals(List.of(), store.calls);
+    }
+
+    /**
+     * P1 I3: a child whose metadata is malformed or unsupported is left out of children(); other failures,
+     * such as the store failing, still surface.
+     */
+    @Test
+    void childrenLeaveOutOnlyChildrenThatCannotBeOpened() {
+        MemoryStore store = new MemoryStore();
+        populate(store);
+        put(store, "broken/zarr.json", "{\"zarr_format\":3,\"node_type\":\"array\"");          // malformed JSON
+        put(store, "future/zarr.json", "{\"zarr_format\":3,\"node_type\":\"group\",\"x\":{}}"); // must understand x
+        ZarrGroup root = Zarr.openGroup(store);
+        assertEquals(List.of("broken", "future", "nested", "temperature"), root.childNames());
+        assertEquals(List.of("nested", "temperature"), root.children().stream().map(ZarrNode::name).toList());
+        assertThrows(ZarrFormatException.class, () -> root.child("broken"));
+        assertThrows(ZarrUnsupportedException.class, () -> root.group("future"));
+
+        CountingStore failing = new CountingStore();
+        populate(failing);
+        ZarrGroup failingRoot = Zarr.openGroup(failing);
+        failing.failListing = true;
+        assertThrows(UnsupportedOperationException.class, failingRoot::children);
+    }
+
+    /**
+     * P1 I12: names the v3 specification reserves, names that collide with metadata keys, and names
+     * Windows would alias (a trailing '.' or space) are refused for new nodes; lookups keep only the rules
+     * that make a name one path segment.
+     */
+    @Test
+    void newNodeNamesFollowTheSpecification() {
+        MemoryStore store = new MemoryStore();
+        ZarrGroup root = Zarr.createGroup(store);
+        ArraySpec spec = ArraySpec.builder(new long[] {2}, com.ebremer.falcon.zarr.datatype.DataType.INT8).build();
+        for (String name : new String[] {"", "a/b", ".", "..", "...", "__meta", "__", "zarr.json", ".zarray",
+                ".zgroup", ".zattrs", ".zmetadata", "data.", "data "}) {
+            assertThrows(IllegalArgumentException.class, () -> root.createGroup(name), "group '" + name + "'");
+            assertThrows(IllegalArgumentException.class, () -> root.createArray(name, spec), "array '" + name + "'");
+        }
+        assertEquals(List.of("zarr.json"), store.list()); // nothing was written
+        for (String name : new String[] {"a.b", "_x", "x__", ".hidden", "with space", "ünïcode", "c"}) {
+            assertEquals(name, root.createGroup(name).name());
+        }
+        // a lookup only needs a single path segment
+        for (String name : new String[] {"", "a/b", ".", ".."}) {
+            assertThrows(IllegalArgumentException.class, () -> root.child(name), "'" + name + "'");
+        }
+        assertTrue(root.child("__meta").isEmpty());
+        put(store, "__meta/zarr.json", PLAIN_GROUP); // written by another tool
+        assertTrue(root.child("__meta").isPresent());
+    }
 }

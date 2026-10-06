@@ -32,6 +32,8 @@ public final class ZstdDecoder {
     /** Skippable frames have magic numbers 0x184D2A50 to 0x184D2A5F. */
     private static final int SKIPPABLE_MAGIC = 0x184D2A50;
     private static final int MAX_BLOCK_SIZE = 128 * 1024;
+    /** Copies up to this long are done byte by byte, where System.arraycopy's call costs more than it saves. */
+    private static final int SHORT_COPY = 16;
 
     // Predefined distributions (RFC 8878 section 3.1.1.3.2.2).
     private static final short[] LL_DEFAULT = {
@@ -46,6 +48,16 @@ public final class ZstdDecoder {
     private static final short[] OF_DEFAULT = {
         1, 1, 1, 1, 1, 1, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1,
         1, 1, 1, 1, 1, 1, 1, 1, -1, -1, -1, -1, -1};
+
+    // RFC 8878 section 4.1.1: the largest accuracy log each sequence table may declare.
+    private static final int LL_MAX_LOG = 9;
+    private static final int OF_MAX_LOG = 8;
+    private static final int ML_MAX_LOG = 9;
+
+    // The predefined tables never change, so they are built once.
+    private static final ZstdFse.Table LL_PREDEFINED = ZstdFse.predefined(LL_DEFAULT, 6);
+    private static final ZstdFse.Table OF_PREDEFINED = ZstdFse.predefined(OF_DEFAULT, 5);
+    private static final ZstdFse.Table ML_PREDEFINED = ZstdFse.predefined(ML_DEFAULT, 6);
 
     private static final int[] LL_BASE = {
         0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
@@ -431,11 +443,11 @@ public final class ZstdDecoder {
             throw new CompressionFormatException("reserved bits set in the sequence compression modes");
         }
         literalLengthTable = readSequenceTable((modes >>> 6) & 3, literalLengthTable,
-                LL_DEFAULT, 6, 35, "literal lengths", blockEnd);
+                LL_PREDEFINED, LL_MAX_LOG, 35, "literal lengths", blockEnd);
         offsetTable = readSequenceTable((modes >>> 4) & 3, offsetTable,
-                OF_DEFAULT, 5, 31, "offsets", blockEnd);
+                OF_PREDEFINED, OF_MAX_LOG, 31, "offsets", blockEnd);
         matchLengthTable = readSequenceTable((modes >>> 2) & 3, matchLengthTable,
-                ML_DEFAULT, 6, 52, "match lengths", blockEnd);
+                ML_PREDEFINED, ML_MAX_LOG, 52, "match lengths", blockEnd);
 
         int streamLength = blockEnd - ip;
         if (streamLength <= 0) {
@@ -458,9 +470,9 @@ public final class ZstdDecoder {
             }
 
             // Extra bits are read offset-first, then match length, then literal length.
-            long offsetValue = (1L << ofCode) + (ofCode == 0 ? 0 : bits.readBits(ofCode));
-            int matchLength = ML_BASE[mlCode] + (ML_BITS[mlCode] == 0 ? 0 : bits.readBits(ML_BITS[mlCode]));
-            int literalLength = LL_BASE[llCode] + (LL_BITS[llCode] == 0 ? 0 : bits.readBits(LL_BITS[llCode]));
+            long offsetValue = (1L << ofCode) + bits.readBits(ofCode);
+            int matchLength = ML_BASE[mlCode] + bits.readBits(ML_BITS[mlCode]);
+            int literalLength = LL_BASE[llCode] + bits.readBits(LL_BITS[llCode]);
 
             int offset = resolveOffset(offsetValue, literalLength);
 
@@ -523,11 +535,11 @@ public final class ZstdDecoder {
         return offset;
     }
 
-    private ZstdFse.Table readSequenceTable(int mode, ZstdFse.Table previous, short[] predefined,
-                                            int predefinedLog, int maxSymbol, String what, int blockEnd) {
+    private ZstdFse.Table readSequenceTable(int mode, ZstdFse.Table previous, ZstdFse.Table predefined,
+                                            int maxLog, int maxSymbol, String what, int blockEnd) {
         switch (mode) {
             case 0 -> {
-                return ZstdFse.predefined(predefined, predefinedLog);
+                return predefined;
             }
             case 1 -> {
                 need(1, blockEnd, what + " table");
@@ -540,7 +552,7 @@ public final class ZstdDecoder {
             case 2 -> {
                 short[] counts = new short[maxSymbol + 2];
                 int[] header = {maxSymbol, 0};
-                int used = ZstdFse.readNCount(counts, header, in, ip, blockEnd - ip);
+                int used = ZstdFse.readNCount(counts, header, in, ip, blockEnd - ip, maxLog);
                 ip += used;
                 return ZstdFse.buildTable(counts, header[0], header[1]);
             }
@@ -560,7 +572,13 @@ public final class ZstdDecoder {
             return;
         }
         ensure(length);
-        System.arraycopy(literals, off, out, op, length);
+        if (length <= SHORT_COPY) {
+            for (int i = 0; i < length; i++) {
+                out[op + i] = literals[off + i];
+            }
+        } else {
+            System.arraycopy(literals, off, out, op, length);
+        }
         op += length;
     }
 
@@ -570,9 +588,24 @@ public final class ZstdDecoder {
         }
         ensure(length);
         int from = op - offset;
-        // Overlapping matches are legal and must be copied byte by byte.
-        for (int i = 0; i < length; i++) {
-            out[op + i] = out[from + i];
+        if (length <= SHORT_COPY) {
+            // A short copy is cheaper by hand; forward, byte by byte, it is right for overlapping matches too.
+            for (int i = 0; i < length; i++) {
+                out[op + i] = out[from + i];
+            }
+        } else if (offset >= length) {
+            System.arraycopy(out, from, out, op, length);
+        } else {
+            // An overlapping match repeats its last `offset` bytes: copy in chunks that never read bytes
+            // this copy has not written yet, each twice the size of the last.
+            int done = 0;
+            int chunk = offset;
+            while (done < length) {
+                int n = Math.min(chunk, length - done);
+                System.arraycopy(out, from, out, op + done, n);
+                done += n;
+                chunk = done + offset;
+            }
         }
         op += length;
     }

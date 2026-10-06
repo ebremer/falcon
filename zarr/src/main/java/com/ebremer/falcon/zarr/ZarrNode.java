@@ -89,7 +89,10 @@ public abstract sealed class ZarrNode permits ZarrGroup, ZarrArray {
         return path.isEmpty() ? name : path + "/" + name;
     }
 
-    /** Whether a node (v3 or v2) exists at {@code path}. */
+    /**
+     * Whether a node (v3 or v2) exists at {@code path}. Up to three {@link Store#exists} probes; to open a
+     * node, call {@link #tryOpen}, which needs none.
+     */
     static boolean hasNode(Store store, String path) {
         return store.exists(key(path, "zarr.json"))
                 || store.exists(key(path, V2Metadata.ZARRAY))
@@ -146,30 +149,46 @@ public abstract sealed class ZarrNode permits ZarrGroup, ZarrArray {
         return path.isEmpty() ? store.list() : store.listPrefix(path + "/");
     }
 
-    /** Reads and classifies the node at {@code path}: v3 {@code zarr.json} first, then v2 metadata. */
+    /**
+     * Reads and classifies the node at {@code path}: v3 {@code zarr.json} first, then v2 metadata.
+     *
+     * @throws ZarrFormatException if there is no node there, or its metadata is malformed
+     */
     static ZarrNode open(Store store, String path) {
-        NodeMetadata meta = loadMetadata(store, path);
-        return switch (meta) {
-            case GroupMetadata g -> new ZarrGroup(store, path, g);
-            case ArrayMetadata a -> new ZarrArray(store, path, a);
-        };
+        return tryOpen(store, path).orElseThrow(() -> new ZarrFormatException(
+                "no zarr.json, .zarray, or .zgroup at '" + (path.isEmpty() ? "/" : path) + "'"));
     }
 
-    private static NodeMetadata loadMetadata(Store store, String path) {
+    /**
+     * Reads and classifies the node at {@code path}, or empty if no node metadata is stored there. It
+     * fetches {@code zarr.json}, then {@code .zarray}, then {@code .zgroup}, stopping at the first that is
+     * present, with no {@link Store#exists} probes first: over HTTP each probe is a round trip, so a v3
+     * node costs one request and a v2 array three (with its {@code .zattrs}), not five.
+     *
+     * @throws ZarrFormatException      if the node's metadata is malformed
+     * @throws ZarrUnsupportedException if the node uses an unimplemented feature
+     */
+    static Optional<ZarrNode> tryOpen(Store store, String path) {
         Optional<byte[]> v3 = store.get(key(path, "zarr.json"));
+        NodeMetadata meta;
         if (v3.isPresent()) {
-            return Metadata.parse(v3.get(), metadataKey(path));
+            meta = Metadata.parse(v3.get(), metadataKey(path));
+        } else {
+            Optional<byte[]> zarray = store.get(key(path, V2Metadata.ZARRAY));
+            if (zarray.isPresent()) {
+                meta = V2Metadata.parseArray(zarray.get(), attrs(store, path), key(path, V2Metadata.ZARRAY));
+            } else {
+                Optional<byte[]> zgroup = store.get(key(path, V2Metadata.ZGROUP));
+                if (zgroup.isEmpty()) {
+                    return Optional.empty();
+                }
+                meta = V2Metadata.parseGroup(zgroup.get(), attrs(store, path), key(path, V2Metadata.ZGROUP));
+            }
         }
-        Optional<byte[]> zarray = store.get(key(path, V2Metadata.ZARRAY));
-        if (zarray.isPresent()) {
-            return V2Metadata.parseArray(zarray.get(), attrs(store, path), key(path, V2Metadata.ZARRAY));
-        }
-        Optional<byte[]> zgroup = store.get(key(path, V2Metadata.ZGROUP));
-        if (zgroup.isPresent()) {
-            return V2Metadata.parseGroup(zgroup.get(), attrs(store, path), key(path, V2Metadata.ZGROUP));
-        }
-        throw new ZarrFormatException(
-                "no zarr.json, .zarray, or .zgroup at '" + (path.isEmpty() ? "/" : path) + "'");
+        return Optional.of(switch (meta) {
+            case GroupMetadata g -> new ZarrGroup(store, path, g);
+            case ArrayMetadata a -> new ZarrArray(store, path, a);
+        });
     }
 
     private static byte[] attrs(Store store, String path) {

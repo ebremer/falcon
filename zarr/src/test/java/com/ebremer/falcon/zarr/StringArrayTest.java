@@ -150,9 +150,66 @@ class StringArrayTest {
         assertThrows(ZarrException.class, a::readStrings);
     }
 
+    /**
+     * Sharded string arrays (P1 I2): zarr-python writes them with {@code vlen-utf8} inside the shard and no
+     * outer string codec, which made both reads and writes throw a raw IllegalStateException. Falcon now
+     * reads and writes them, and a partial read fetches only the sub-chunks it needs.
+     */
     @Test
-    void shardingIsRejectedForStrings() {
-        assertThrows(IllegalArgumentException.class, () ->
-                ArraySpec.builder(new long[] {8}, DataType.STRING).chunkShape(4).sharding(2).build());
+    void shardedStringsRoundTrip() {
+        MemoryStore store = new MemoryStore();
+        ZarrArray a = Zarr.createArray(store, ArraySpec.builder(new long[] {4, 6}, DataType.STRING)
+                .chunkShape(4, 6).sharding(2, 3).zstd().fillValue(new JsonString("-")).build());
+        String[] values = new String[24];
+        for (int i = 0; i < values.length; i++) {
+            values[i] = i % 7 == 0 ? "-" : WORDS[i % WORDS.length] + i;
+        }
+        a.writeStrings(values);
+        ZarrArray reopened = Zarr.openArray(store);
+        assertArrayEquals(values, reopened.readStrings());
+        assertArrayEquals(new String[] {values[9], values[10], values[15], values[16]},
+                reopened.select(new long[] {1, 3}, new long[] {2, 2}).readStrings());
+
+        reopened.select(new long[] {2, 0}, new long[] {2, 3}).writeStrings(new String[] {"-", "-", "-", "-", "-", "-"});
+        String[] expected = values.clone();
+        for (int r = 2; r < 4; r++) {
+            for (int c = 0; c < 3; c++) {
+                expected[r * 6 + c] = "-";
+            }
+        }
+        assertArrayEquals(expected, Zarr.openArray(store).readStrings());
+    }
+
+    /**
+     * {@code transpose} before {@code vlen-utf8} (P1 I4), the ordering zarr-python writes, was refused as a
+     * format error, while an invalid transpose after it was accepted and ignored. The first now works and
+     * the second is refused.
+     */
+    @Test
+    void transposeBeforeVlenUtf8RoundTripsAndAfterItIsRefused() {
+        String codecs = "[{\"name\":\"transpose\",\"configuration\":{\"order\":[1,0]}},"
+                + "{\"name\":\"vlen-utf8\"},{\"name\":\"gzip\"}]";
+        MemoryStore store = new MemoryStore();
+        store.set("zarr.json", stringArrayJson("[3,4]", "[2,4]", codecs).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        String[] values = new String[12];
+        for (int i = 0; i < values.length; i++) {
+            values[i] = "v" + i;
+        }
+        Zarr.openArray(store).writeStrings(values);
+        assertArrayEquals(values, Zarr.openArray(store).readStrings());
+        assertArrayEquals(new String[] {"v5", "v6", "v9", "v10"},
+                Zarr.openArray(store).select(new long[] {1, 1}, new long[] {2, 2}).readStrings());
+
+        MemoryStore bad = new MemoryStore();
+        bad.set("zarr.json", stringArrayJson("[3,4]", "[2,4]",
+                "[{\"name\":\"vlen-utf8\"},{\"name\":\"transpose\",\"configuration\":{\"order\":[1,0]}}]")
+                .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        assertThrows(ZarrFormatException.class, () -> Zarr.openArray(bad).readStrings());
+    }
+
+    private static String stringArrayJson(String shape, String chunks, String codecs) {
+        return "{\"zarr_format\":3,\"node_type\":\"array\",\"shape\":" + shape + ",\"data_type\":\"string\","
+                + "\"chunk_grid\":{\"name\":\"regular\",\"configuration\":{\"chunk_shape\":" + chunks + "}},"
+                + "\"chunk_key_encoding\":{\"name\":\"default\"},\"fill_value\":\"\",\"codecs\":" + codecs + "}";
     }
 }

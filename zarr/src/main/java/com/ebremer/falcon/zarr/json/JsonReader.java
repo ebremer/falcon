@@ -8,6 +8,15 @@ import java.util.List;
  * A strict recursive-descent JSON parser (RFC&nbsp;8259). Zarr metadata documents are small, so the
  * whole text is parsed from an in-memory {@code String}. Nesting depth is bounded to keep pathological
  * input from overflowing the stack.
+ *
+ * <p>Two departures from RFC&nbsp;8259, both about what real metadata holds:
+ * <ul>
+ *   <li>the bare tokens {@code NaN}, {@code Infinity}, and {@code -Infinity}, which Python's
+ *       {@code json.dumps} writes (zarr-python writes them in attributes), are read as
+ *       {@link JsonNumber}s whose literal is the token;</li>
+ *   <li>a key repeated within one object is an error (RFC&nbsp;8259 leaves its meaning open; taking the
+ *       last silently would read a document two ways).</li>
+ * </ul>
  */
 final class JsonReader {
 
@@ -43,7 +52,12 @@ final class JsonReader {
             case '"' -> new JsonString(readString());
             case 't', 'f' -> readBool();
             case 'n' -> readNull();
+            case 'N' -> readToken("NaN");
+            case 'I' -> readToken("Infinity");
             default -> {
+                if (c == '-' && s.startsWith("-Infinity", pos)) {
+                    yield readToken("-Infinity");
+                }
                 if (c == '-' || (c >= '0' && c <= '9')) {
                     yield readNumber();
                 }
@@ -66,12 +80,16 @@ final class JsonReader {
             if (peek() != '"') {
                 throw error("expected string key in object");
             }
+            int keyAt = pos;
             String key = readString();
             skipWhitespace();
             expect(':');
             skipWhitespace();
             JsonValue value = readValue(depth + 1);
-            members.put(key, value);
+            if (members.putIfAbsent(key, value) != null) {
+                pos = keyAt;
+                throw error("duplicate key \"" + JsonNumber.quote(key) + "\" in object");
+            }
             skipWhitespace();
             char c = next();
             if (c == '}') {
@@ -201,6 +219,15 @@ final class JsonReader {
             }
         }
         return new JsonNumber(s.substring(start, pos));
+    }
+
+    /** One of the non-finite number tokens Python writes ({@code NaN}, {@code Infinity}, {@code -Infinity}). */
+    private JsonNumber readToken(String token) {
+        if (!s.startsWith(token, pos)) {
+            throw error("invalid literal");
+        }
+        pos += token.length();
+        return new JsonNumber(token);
     }
 
     private JsonBool readBool() {

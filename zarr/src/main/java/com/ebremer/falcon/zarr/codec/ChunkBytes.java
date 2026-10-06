@@ -20,6 +20,27 @@ public interface ChunkBytes {
     /** {@code length} bytes of the chunk from {@code offset}, or empty if it is absent. */
     Optional<byte[]> readRange(long offset, long length);
 
+    /**
+     * The last {@code length} bytes of the chunk (all of it, if shorter), or empty if it is absent. A shard
+     * index stored at the end is read this way, without asking the chunk's size first.
+     */
+    default Optional<byte[]> readSuffix(long length) {
+        OptionalLong size = size();
+        if (size.isEmpty()) {
+            return Optional.empty();
+        }
+        long start = Math.max(0, size.getAsLong() - length);
+        return readRange(start, size.getAsLong() - start);
+    }
+
+    /**
+     * The stored bytes of a shard's index, {@code length} bytes at the start or the end of the chunk (fewer
+     * if the chunk is shorter), or empty if it is absent. A source may cache them.
+     */
+    default Optional<byte[]> readShardIndex(boolean atStart, long length) {
+        return atStart ? readRange(0, length) : readSuffix(length);
+    }
+
     /** A source over an in-memory chunk, used when the bytes have already been fetched. */
     static ChunkBytes of(byte[] bytes) {
         return new ChunkBytes() {

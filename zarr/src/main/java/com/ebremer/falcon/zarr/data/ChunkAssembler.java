@@ -3,14 +3,11 @@ package com.ebremer.falcon.zarr.data;
 import com.ebremer.falcon.zarr.ZarrException;
 import com.ebremer.falcon.zarr.chunk.ChunkKeyEncoding;
 import com.ebremer.falcon.zarr.chunk.RegularChunkGrid;
-import com.ebremer.falcon.zarr.codec.ChunkBytes;
 import com.ebremer.falcon.zarr.codec.ChunkPipeline;
 import com.ebremer.falcon.zarr.datatype.DataType;
 import com.ebremer.falcon.zarr.metadata.ArrayMetadata;
 import com.ebremer.falcon.zarr.store.Store;
 import java.nio.ByteOrder;
-import java.util.Optional;
-import java.util.OptionalLong;
 
 /**
  * Reads a hyperslab from a chunked array by touching only the chunks that overlap the selection.
@@ -18,7 +15,8 @@ import java.util.OptionalLong;
  * <p>For each overlapping chunk it fetches and decodes the stored bytes (an absent chunk becomes the fill
  * value) and copies the chunk's intersection with the selection into the output buffer. The output is a
  * flat buffer of the selected elements in C (row-major) order, each primitive in the pipeline's
- * {@linkplain ChunkPipeline#elementOrder() element order}.
+ * {@linkplain ChunkPipeline#elementOrder() element order}. A chunk the selection covers only in part is
+ * decoded whole, unless it is a shard: then only the selected region is fetched, decoded, and allocated.
  */
 public final class ChunkAssembler {
 
@@ -62,6 +60,12 @@ public final class ChunkAssembler {
     /** The end of a chunk's part of a selection: {@code min(selEnd, origin + extent)}, without overflow. */
     static long overlapEnd(long chunkOrigin, long chunkExtent, long selEnd) {
         return chunkOrigin + Math.min(chunkExtent, selEnd - chunkOrigin);
+    }
+
+    /** The store key of the chunk at {@code coord}. */
+    static String chunkKey(String arrayPath, ChunkKeyEncoding encoding, long[] coord) {
+        String relative = encoding.encode(coord);
+        return arrayPath.isEmpty() ? relative : arrayPath + "/" + relative;
     }
 
     /** Reads the selection {@code [offset, offset+selShape)} as a flat element buffer. */
@@ -111,9 +115,9 @@ public final class ChunkAssembler {
                 regionOrigin[i] = (int) (lo - chunkOrigin);
                 regionShape[i] = (int) (hi - lo);
             }
-            byte[] chunk = readChunk(store, arrayPath, pipeline, encoding, cache, coord,
+            Block block = readChunk(store, chunkKey(arrayPath, encoding, coord), pipeline, cache,
                     fillElement, chunkShape, elementSize, regionOrigin, regionShape);
-            copyIntersection(out, selShape, offset, selEnd, coord, chunkShapeL, chunk, elementSize);
+            copyIntersection(out, selShape, offset, selEnd, coord, chunkShapeL, block, elementSize);
 
             int d = rank - 1;
             for (; d >= 0; d--) {
@@ -129,47 +133,47 @@ public final class ChunkAssembler {
         return out;
     }
 
-    /**
-     * Decodes chunk {@code coord}, passing the needed region through so a sharding codec can fetch only
-     * the sub-chunks that overlap it. An absent chunk yields a fill-valued block.
-     */
-    private static byte[] readChunk(Store store, String arrayPath, ChunkPipeline pipeline,
-                                    ChunkKeyEncoding encoding, ChunkCache cache, long[] coord,
-                                    byte[] fillElement, int[] chunkShape, int elementSize,
-                                    int[] regionOrigin, int[] regionShape) {
-        String relative = encoding.encode(coord);
-        String key = arrayPath.isEmpty() ? relative : arrayPath + "/" + relative;
+    /** Decoded elements of part of a chunk: {@code data} holds the box {@code [origin, origin + shape)}. */
+    private record Block(byte[] data, int[] origin, int[] shape) {
+    }
 
-        // A whole-chunk decode is cacheable; a partial shard region is not (only its region is valid).
-        // Non-sharded pipelines always decode the whole chunk, so force the full region to cache it.
-        boolean wholeChunk = !pipeline.isSharded() || isFullChunk(regionOrigin, regionShape, chunkShape);
-        int[] origin = regionOrigin;
-        int[] shape = regionShape;
+    /**
+     * Decodes the part of the chunk under {@code key} that the selection needs. A chunk is decoded whole
+     * (and, with a cache, cached), except a shard that the selection covers only in part: then just the
+     * region is fetched and decoded. An absent chunk yields fill.
+     */
+    private static Block readChunk(Store store, String key, ChunkPipeline pipeline, ChunkCache cache,
+                                   byte[] fillElement, int[] chunkShape, int elementSize,
+                                   int[] regionOrigin, int[] regionShape) {
+        StoreChunkBytes source = new StoreChunkBytes(store, key, cache);
+        int[] zero = new int[chunkShape.length];
+        if (pipeline.isSharded() && !isFullChunk(regionOrigin, regionShape, chunkShape)) {
+            byte[] region = pipeline.decodeRegion(source, fillElement, regionOrigin, regionShape);
+            if (region == null) {
+                region = new byte[elementCount(regionShape) * elementSize];
+                tile(region, fillElement);
+            }
+            return new Block(region, regionOrigin.clone(), regionShape.clone());
+        }
+
         long stamp = 0;
-        if (wholeChunk && cache != null) {
+        if (cache != null) {
             byte[] hit = cache.get(key);
             if (hit != null) {
-                return hit;
+                return new Block(hit, zero, chunkShape);
             }
             stamp = cache.stamp(); // before the store read, so a write racing it keeps this read uncached
-            origin = new int[chunkShape.length];
-            shape = chunkShape;
         }
-
-        byte[] decoded = pipeline.decodeChunk(new StoreChunkBytes(store, key), fillElement, origin, shape);
+        byte[] decoded = pipeline.decodeChunk(source, fillElement, zero, chunkShape);
         if (decoded != null) {
-            if (wholeChunk && cache != null) {
+            if (cache != null) {
                 cache.put(key, decoded, stamp);
             }
-            return decoded;
+            return new Block(decoded, zero, chunkShape);
         }
-        int count = 1;
-        for (int c : chunkShape) {
-            count *= c;
-        }
-        byte[] fill = new byte[count * elementSize];
+        byte[] fill = new byte[elementCount(chunkShape) * elementSize];
         tile(fill, fillElement);
-        return fill;
+        return new Block(fill, zero, chunkShape);
     }
 
     /**
@@ -178,51 +182,29 @@ public final class ChunkAssembler {
      */
     static byte[] readChunkOrNull(Store store, String key, ChunkPipeline pipeline,
                                   byte[] fillElement, long[] chunkShape) {
-        int rank = chunkShape.length;
-        int[] origin = new int[rank];
-        int[] extent = new int[rank];
-        for (int i = 0; i < rank; i++) {
-            extent[i] = (int) chunkShape[i];
-        }
-        return pipeline.decodeChunk(new StoreChunkBytes(store, key), fillElement, origin, extent);
+        int[] extent = toInt(chunkShape);
+        return pipeline.decodeChunk(new StoreChunkBytes(store, key, null), fillElement, new int[extent.length],
+                extent);
     }
 
-    /** Byte-range access to one chunk in a store. */
-    private record StoreChunkBytes(Store store, String key) implements ChunkBytes {
-
-        @Override
-        public OptionalLong size() {
-            return store.size(key);
-        }
-
-        @Override
-        public Optional<byte[]> readAll() {
-            return store.get(key);
-        }
-
-        @Override
-        public Optional<byte[]> readRange(long offset, long length) {
-            return store.getRange(key, offset, length);
-        }
-    }
-
-    /** Copies chunk {@code coord}'s overlap with the selection into {@code out}. */
+    /** Copies chunk {@code coord}'s overlap with the selection from {@code block} into {@code out}. */
     private static void copyIntersection(byte[] out, long[] selShape, long[] selOffset, long[] selEnd,
-                                         long[] coord, long[] chunkShape, byte[] chunk, int elementSize) {
+                                         long[] coord, long[] chunkShape, Block block, int elementSize) {
         int rank = selShape.length;
-        long[] chunkOrigin = new long[rank];
+        long[] blockShape = new long[rank];
         long[] srcOrigin = new long[rank];
         long[] dstOrigin = new long[rank];
-        long[] block = new long[rank];
+        long[] extent = new long[rank];
         for (int i = 0; i < rank; i++) {
-            chunkOrigin[i] = coord[i] * chunkShape[i];
-            long lo = Math.max(selOffset[i], chunkOrigin[i]);
-            long hi = overlapEnd(chunkOrigin[i], chunkShape[i], selEnd[i]);
-            srcOrigin[i] = lo - chunkOrigin[i];
+            long chunkOrigin = coord[i] * chunkShape[i];
+            long lo = Math.max(selOffset[i], chunkOrigin);
+            long hi = overlapEnd(chunkOrigin, chunkShape[i], selEnd[i]);
+            blockShape[i] = block.shape[i];
+            srcOrigin[i] = lo - chunkOrigin - block.origin[i];
             dstOrigin[i] = lo - selOffset[i];
-            block[i] = hi - lo;
+            extent[i] = hi - lo;
         }
-        Blocks.copy(chunk, chunkShape, srcOrigin, out, selShape, dstOrigin, block, elementSize);
+        Blocks.copy(block.data, blockShape, srcOrigin, out, selShape, dstOrigin, extent, elementSize);
     }
 
     static void tile(byte[] buffer, byte[] element) {
@@ -241,12 +223,20 @@ public final class ChunkAssembler {
         }
     }
 
-    private static int[] toInt(long[] shape) {
+    static int[] toInt(long[] shape) {
         int[] out = new int[shape.length];
         for (int i = 0; i < shape.length; i++) {
             out[i] = Math.toIntExact(shape[i]);
         }
         return out;
+    }
+
+    private static int elementCount(int[] shape) {
+        int count = 1;
+        for (int d : shape) {
+            count *= d;
+        }
+        return count;
     }
 
     private static boolean isFullChunk(int[] regionOrigin, int[] regionShape, int[] chunkShape) {

@@ -1,0 +1,8 @@
+{
+  "attributes": {
+    "title": "hierarchy",
+    "version": 1
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

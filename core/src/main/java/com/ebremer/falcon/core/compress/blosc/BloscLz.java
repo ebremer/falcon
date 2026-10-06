@@ -75,9 +75,13 @@ final class BloscLz {
                 }
                 ctrl = src[ip++] & 0xff;
                 ref--;
-                // Overlapping matches are legal and must be copied byte by byte.
-                for (int i = 0; i < len; i++) {
-                    dst[op + i] = dst[ref + i];
+                if (op - ref >= len) {
+                    System.arraycopy(dst, ref, dst, op, len);
+                } else {
+                    // Overlapping matches are legal and must be copied byte by byte.
+                    for (int i = 0; i < len; i++) {
+                        dst[op + i] = dst[ref + i];
+                    }
                 }
                 op += len;
             } else {

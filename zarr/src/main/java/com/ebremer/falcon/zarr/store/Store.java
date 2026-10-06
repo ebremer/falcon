@@ -18,6 +18,13 @@ import java.util.OptionalLong;
  * {@link java.io.IOException} on every access.
  *
  * <p>Listing methods return sorted, de-duplicated results for deterministic iteration.
+ *
+ * <p><b>Threads.</b> A store may be used from several threads at once: an array's blocks are often read
+ * in parallel. Every store this package ships is safe for that ({@link MemoryStore}, {@link FileSystemStore},
+ * {@link ZipStore}, {@link HttpStore}), and an implementation of your own should be too. Safe means each
+ * call is atomic on its own, as a {@code ConcurrentHashMap} is: a {@link #get} running beside a
+ * {@link #set} of the same key returns the old value or the new one, never a mix, and a listing running
+ * beside writes may or may not include them. A sequence of calls is not atomic.
  */
 public interface Store {
 
@@ -33,6 +40,26 @@ public interface Store {
      *                                  exceeds {@link Integer#MAX_VALUE}
      */
     Optional<byte[]> getRange(String key, long offset, long length);
+
+    /**
+     * The last {@code length} bytes of the value under {@code key}, or all of it if it is shorter; empty
+     * only if the key is absent. A shard index stored at the end of a shard is read this way, without
+     * asking for the shard's size first.
+     *
+     * <p>The default asks for the size and then reads the range, two calls that are not atomic together;
+     * a store that can read a suffix in one step overrides it ({@link HttpStore} sends one request with
+     * {@code Range: bytes=-length}).
+     *
+     * @throws IllegalArgumentException if {@code length} is negative or exceeds {@link Integer#MAX_VALUE}
+     */
+    default Optional<byte[]> getSuffix(String key, long length) {
+        MemoryStore.checkedLength(0, length);
+        OptionalLong size = size(key);
+        if (size.isEmpty()) {
+            return Optional.empty();
+        }
+        return getRange(key, Math.max(0, size.getAsLong() - length), length);
+    }
 
     /** True if {@code key} is present. */
     boolean exists(String key);

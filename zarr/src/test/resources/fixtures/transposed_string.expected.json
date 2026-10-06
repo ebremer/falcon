@@ -1,0 +1,23 @@
+{
+ "name": "transposed_string",
+ "shape": [
+  3,
+  4
+ ],
+ "dtype": "string",
+ "attributes": {},
+ "values": [
+  "alpha0",
+  "1",
+  "gamma-δ2",
+  "中文3",
+  "emoji-😀4",
+  "x5",
+  "alpha6",
+  "7",
+  "gamma-δ8",
+  "中文9",
+  "emoji-😀10",
+  "x11"
+ ]
+}

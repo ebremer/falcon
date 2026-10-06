@@ -5,6 +5,11 @@ import com.ebremer.falcon.zarr.datatype.DataType;
 import com.ebremer.falcon.zarr.datatype.DataTypeKind;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.DoubleBuffer;
+import java.nio.FloatBuffer;
+import java.nio.IntBuffer;
+import java.nio.LongBuffer;
+import java.nio.ShortBuffer;
 
 /**
  * Interprets a flat buffer of decoded elements (C order, {@code order} byte order) as a typed Java array,
@@ -21,80 +26,161 @@ public final class Elements {
     private Elements() {
     }
 
+    // Each reader picks its conversion once, by kind and size, and then runs a plain loop over a typed
+    // view of the buffer (PF7: the kind used to be switched on for every element).
+
     public static double[] toDoubles(byte[] buf, DataType dt, ByteOrder order, int count) {
         ByteBuffer bb = ByteBuffer.wrap(buf).order(order);
-        int es = dt.byteCount();
         double[] out = new double[count];
-        for (int i = 0; i < count; i++) {
-            int off = i * es;
-            out[i] = switch (dt.kind()) {
-                case BOOL -> buf[off] != 0 ? 1.0 : 0.0;
-                case INT -> (double) signed(bb, off, es);
-                case UINT -> es == 8 ? unsignedToDouble(bb.getLong(off)) : (double) unsigned(bb, off, es);
-                case FLOAT -> floatValue(bb, off, es);
-                case COMPLEX, RAW, STRING -> throw cannotRead(dt, "double");
-            };
+        boolean unsigned = dt.kind() == DataTypeKind.UINT;
+        switch (dt.kind()) {
+            case BOOL -> {
+                for (int i = 0; i < count; i++) {
+                    out[i] = buf[i] != 0 ? 1.0 : 0.0;
+                }
+            }
+            case INT, UINT -> {
+                switch (dt.byteCount()) {
+                    case 1 -> {
+                        for (int i = 0; i < count; i++) {
+                            out[i] = unsigned ? buf[i] & 0xff : buf[i];
+                        }
+                    }
+                    case 2 -> {
+                        ShortBuffer v = bb.asShortBuffer();
+                        for (int i = 0; i < count; i++) {
+                            out[i] = unsigned ? v.get(i) & 0xffff : v.get(i);
+                        }
+                    }
+                    case 4 -> {
+                        IntBuffer v = bb.asIntBuffer();
+                        for (int i = 0; i < count; i++) {
+                            out[i] = unsigned ? v.get(i) & 0xffffffffL : v.get(i);
+                        }
+                    }
+                    default -> {
+                        LongBuffer v = bb.asLongBuffer();
+                        for (int i = 0; i < count; i++) {
+                            out[i] = unsigned ? unsignedToDouble(v.get(i)) : v.get(i);
+                        }
+                    }
+                }
+            }
+            case FLOAT -> {
+                switch (dt.byteCount()) {
+                    case 2 -> {
+                        ShortBuffer v = bb.asShortBuffer();
+                        for (int i = 0; i < count; i++) {
+                            out[i] = Float.float16ToFloat(v.get(i));
+                        }
+                    }
+                    case 4 -> {
+                        FloatBuffer v = bb.asFloatBuffer();
+                        for (int i = 0; i < count; i++) {
+                            out[i] = v.get(i);
+                        }
+                    }
+                    default -> bb.asDoubleBuffer().get(out);
+                }
+            }
+            case COMPLEX, RAW, STRING -> throw cannotRead(dt, "double");
         }
         return out;
     }
 
     public static float[] toFloats(byte[] buf, DataType dt, ByteOrder order, int count) {
+        if (dt.kind() != DataTypeKind.FLOAT) {
+            throw cannotRead(dt, "float");
+        }
         ByteBuffer bb = ByteBuffer.wrap(buf).order(order);
-        int es = dt.byteCount();
         float[] out = new float[count];
-        for (int i = 0; i < count; i++) {
-            int off = i * es;
-            out[i] = switch (dt.kind()) {
-                case FLOAT -> (float) floatValue(bb, off, es);
-                default -> throw cannotRead(dt, "float");
-            };
+        switch (dt.byteCount()) {
+            case 2 -> {
+                ShortBuffer v = bb.asShortBuffer();
+                for (int i = 0; i < count; i++) {
+                    out[i] = Float.float16ToFloat(v.get(i));
+                }
+            }
+            case 4 -> bb.asFloatBuffer().get(out);
+            default -> {
+                DoubleBuffer v = bb.asDoubleBuffer();
+                for (int i = 0; i < count; i++) {
+                    out[i] = (float) v.get(i);
+                }
+            }
         }
         return out;
     }
 
     public static long[] toLongs(byte[] buf, DataType dt, ByteOrder order, int count) {
-        ByteBuffer bb = ByteBuffer.wrap(buf).order(order);
-        int es = dt.byteCount();
-        long[] out = new long[count];
-        for (int i = 0; i < count; i++) {
-            int off = i * es;
-            out[i] = switch (dt.kind()) {
-                case BOOL -> buf[off] != 0 ? 1L : 0L;
-                case INT -> signed(bb, off, es);
-                case UINT -> {
-                    if (es == 8) {
-                        throw new ZarrException("uint64 values may exceed long; read as double or raw bytes");
-                    }
-                    yield unsigned(bb, off, es);
+        boolean unsigned = dt.kind() == DataTypeKind.UINT;
+        switch (dt.kind()) {
+            case BOOL, INT, UINT -> {
+                if (unsigned && dt.byteCount() == 8) {
+                    throw new ZarrException("uint64 values may exceed long; read as double or raw bytes");
                 }
-                case FLOAT, COMPLEX, RAW, STRING -> throw cannotRead(dt, "long");
-            };
+            }
+            case FLOAT, COMPLEX, RAW, STRING -> throw cannotRead(dt, "long");
+        }
+        ByteBuffer bb = ByteBuffer.wrap(buf).order(order);
+        long[] out = new long[count];
+        switch (dt.byteCount()) {
+            case 1 -> {
+                boolean bool = dt.kind() == DataTypeKind.BOOL;
+                for (int i = 0; i < count; i++) {
+                    out[i] = bool ? (buf[i] != 0 ? 1 : 0) : unsigned ? buf[i] & 0xff : buf[i];
+                }
+            }
+            case 2 -> {
+                ShortBuffer v = bb.asShortBuffer();
+                for (int i = 0; i < count; i++) {
+                    out[i] = unsigned ? v.get(i) & 0xffff : v.get(i);
+                }
+            }
+            case 4 -> {
+                IntBuffer v = bb.asIntBuffer();
+                for (int i = 0; i < count; i++) {
+                    out[i] = unsigned ? v.get(i) & 0xffffffffL : v.get(i);
+                }
+            }
+            default -> bb.asLongBuffer().get(out);
         }
         return out;
     }
 
     public static int[] toInts(byte[] buf, DataType dt, ByteOrder order, int count) {
+        boolean unsigned = dt.kind() == DataTypeKind.UINT;
+        switch (dt.kind()) {
+            case BOOL -> {
+            }
+            case INT -> {
+                if (dt.byteCount() > 4) {
+                    throw new ZarrException("int64 exceeds int; read as long");
+                }
+            }
+            case UINT -> {
+                if (dt.byteCount() > 2) {
+                    throw new ZarrException("uint32/uint64 may exceed int; read as long or double");
+                }
+            }
+            case FLOAT, COMPLEX, RAW, STRING -> throw cannotRead(dt, "int");
+        }
         ByteBuffer bb = ByteBuffer.wrap(buf).order(order);
-        int es = dt.byteCount();
         int[] out = new int[count];
-        for (int i = 0; i < count; i++) {
-            int off = i * es;
-            out[i] = switch (dt.kind()) {
-                case BOOL -> buf[off] != 0 ? 1 : 0;
-                case INT -> {
-                    if (es > 4) {
-                        throw new ZarrException("int64 exceeds int; read as long");
-                    }
-                    yield (int) signed(bb, off, es);
+        switch (dt.byteCount()) {
+            case 1 -> {
+                boolean bool = dt.kind() == DataTypeKind.BOOL;
+                for (int i = 0; i < count; i++) {
+                    out[i] = bool ? (buf[i] != 0 ? 1 : 0) : unsigned ? buf[i] & 0xff : buf[i];
                 }
-                case UINT -> {
-                    if (es > 2) {
-                        throw new ZarrException("uint32/uint64 may exceed int; read as long or double");
-                    }
-                    yield (int) unsigned(bb, off, es);
+            }
+            case 2 -> {
+                ShortBuffer v = bb.asShortBuffer();
+                for (int i = 0; i < count; i++) {
+                    out[i] = unsigned ? v.get(i) & 0xffff : v.get(i);
                 }
-                case FLOAT, COMPLEX, RAW, STRING -> throw cannotRead(dt, "int");
-            };
+            }
+            default -> bb.asIntBuffer().get(out);
         }
         return out;
     }
@@ -296,34 +382,6 @@ public final class Elements {
     private static IllegalArgumentException cannotStore(String value, int index, DataType dt, String reason) {
         return new IllegalArgumentException("cannot store " + value + (index < 0 ? "" : " (index " + index + ")")
                 + " as " + dt.name() + (reason == null ? "" : ": " + reason));
-    }
-
-    private static long signed(ByteBuffer bb, int off, int es) {
-        return switch (es) {
-            case 1 -> bb.get(off);
-            case 2 -> bb.getShort(off);
-            case 4 -> bb.getInt(off);
-            case 8 -> bb.getLong(off);
-            default -> throw new IllegalStateException("integer size " + es);
-        };
-    }
-
-    private static long unsigned(ByteBuffer bb, int off, int es) {
-        return switch (es) {
-            case 1 -> bb.get(off) & 0xffL;
-            case 2 -> bb.getShort(off) & 0xffffL;
-            case 4 -> bb.getInt(off) & 0xffffffffL;
-            default -> throw new IllegalStateException("unsigned size " + es);
-        };
-    }
-
-    private static double floatValue(ByteBuffer bb, int off, int es) {
-        return switch (es) {
-            case 2 -> Float.float16ToFloat(bb.getShort(off));
-            case 4 -> bb.getFloat(off);
-            case 8 -> bb.getDouble(off);
-            default -> throw new IllegalStateException("float size " + es);
-        };
     }
 
     /**

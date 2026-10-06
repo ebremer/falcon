@@ -1,0 +1,103 @@
+package com.ebremer.falcon.zarr;
+
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
+import com.ebremer.falcon.zarr.json.Json;
+import com.ebremer.falcon.zarr.json.JsonObject;
+import com.ebremer.falcon.zarr.json.JsonValue;
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.net.URISyntaxException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.HexFormat;
+import java.util.List;
+import org.junit.jupiter.api.Test;
+
+/**
+ * Stores written by zarr-python 3.4, numcodecs 0.17 (c-blosc), and zstandard 0.25 for the data-path cases
+ * P1 added (T3); see {@code tools/fixtures/gen_zarr_data_fixtures.py}. Each has a {@code .expected.json}
+ * sidecar in the format of {@link ConformanceTest}'s fixtures.
+ */
+class DataFixturesTest {
+
+    private static Path fixture(String name) {
+        try {
+            return Path.of(DataFixturesTest.class.getResource("/fixtures/" + name).toURI());
+        } catch (URISyntaxException | NullPointerException e) {
+            throw new AssertionError("missing fixture " + name + " (regenerate with tools/fixtures/gen_zarr_data_fixtures.py)", e);
+        }
+    }
+
+    private static JsonObject expected(String name) {
+        try {
+            return Json.parse(Files.readAllBytes(fixture(name + ".expected.json"))).asObject();
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    private static ZarrArray open(String name) {
+        return Zarr.open(fixture(name)).asArray();
+    }
+
+    private static String[] strings(JsonObject meta) {
+        List<JsonValue> values = meta.get("values").asArray().values();
+        return values.stream().map(JsonValue::asString).toArray(String[]::new);
+    }
+
+    private static long[] longs(JsonObject meta) {
+        return meta.get("values").asArray().values().stream().mapToLong(v -> v.asNumber().longValue()).toArray();
+    }
+
+    /** zarr-python's sharded string array: vlen-utf8 inside the shard, no outer string codec (I2). */
+    @Test
+    void shardedStrings() {
+        ZarrArray a = open("sharded_string");
+        String[] want = strings(expected("sharded_string"));
+        assertArrayEquals(want, a.readStrings());
+        // A region inside one sub-chunk, and one across four.
+        assertArrayEquals(new String[] {want[8 + 5], want[8 + 6]}, a.select(new long[] {1, 5}, new long[] {1, 2}).readStrings());
+        assertArrayEquals(new String[] {want[8 + 3], want[8 + 4], want[16 + 3], want[16 + 4]},
+                a.select(new long[] {1, 3}, new long[] {2, 2}).readStrings());
+        assertArrayEquals(strings(expected("sharded_string_partial")), open("sharded_string_partial").readStrings());
+    }
+
+    /** transpose before vlen-utf8, zarr-python's order (I4). */
+    @Test
+    void transposedStrings() {
+        assertArrayEquals(strings(expected("transposed_string")), open("transposed_string").readStrings());
+    }
+
+    @Test
+    void shardIndexAtTheStart() {
+        assertArrayEquals(longs(expected("sharded_index_start")), open("sharded_index_start").readLongs());
+    }
+
+    @Test
+    void zstdFramesWithChecksumsAndSeveralFramesInAChunk() {
+        assertArrayEquals(longs(expected("zstd_checksum")), open("zstd_checksum").readLongs());
+        assertArrayEquals(longs(expected("zstd_multiframe")), open("zstd_multiframe").readLongs());
+    }
+
+    /** c-blosc writes a 300-byte type size as 1 (what Falcon's encoder now does too, Z5). */
+    @Test
+    void bloscWithATypeSizeAbove255() {
+        byte[] want = HexFormat.of().parseHex(expected("blosc_r2400").get("hex").asString());
+        assertArrayEquals(want, open("blosc_r2400").readRawBytes());
+    }
+
+    /** A 140 MB chunk: more than one libzstd block, and well past any small fixed buffer. */
+    @Test
+    void aChunkOver128Megabytes() {
+        ZarrArray a = open("zstd_large_chunk");
+        byte[] all = a.readRawBytes();
+        assertEquals(140_000_000, all.length);
+        for (int i = 0; i < all.length; i++) {
+            if ((all[i] & 0xff) != i % 251) {
+                throw new AssertionError("element " + i + " is " + (all[i] & 0xff) + ", expected " + i % 251);
+            }
+        }
+    }
+}

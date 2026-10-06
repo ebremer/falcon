@@ -12,6 +12,7 @@ reader for Zarr v2 stores. Everything below is the public API in `com.ebremer.fa
 - [Data types and fill values](#data-types-and-fill-values)
 - [Codecs and compression](#codecs-and-compression)
 - [Stores](#stores)
+- [Errors and threads](#errors-and-threads)
 - [What is and isn't supported](#what-is-and-isnt-supported)
 
 ## Opening a store
@@ -54,7 +55,9 @@ Values are returned in **C (row-major) order**. A whole-array read must fit in o
 ## Selections and streaming
 
 A **selection** is a rectangular region `[offset, offset+shape)`. Reading one touches only the chunks it
-overlaps, so a small window into a large array is cheap.
+overlaps, so a small window into a large array is cheap. In a sharded array it fetches only the shard's
+index and the sub-chunks it overlaps, and allocates no more than the window (the index at the end of a
+shard is read with one suffix request, without asking the shard's size).
 
 ```java
 // rows 100..199, columns 0..49
@@ -82,7 +85,8 @@ ZarrArray cached = array.withChunkCache(64L << 20);   // up to 64 MB of decoded 
 ```
 
 A cached handle sees its own writes, but not writes made through other handles or by other processes
-while a chunk stays cached; `cached.clearChunkCache()` empties it. It may be shared between threads.
+while a chunk stays cached; `cached.clearChunkCache()` empties it. It also keeps shards' indexes, so many
+small reads of one shard fetch its index once. It may be shared between threads.
 
 ## Writing
 
@@ -106,9 +110,11 @@ a.select(new long[] {500}, new long[] {100})             // or a region
         .writeInts(...);
 ```
 
-Writes are chunk-aligned: a chunk the write covers completely is stored directly; a partially covered one
-(including every edge chunk) is read back, updated, and re-encoded. A chunk that ends up holding only the
-fill value is **not stored** — its absence *is* the fill, which is how Zarr represents empty chunks.
+Writes are chunk-aligned: a chunk the write covers completely (for an edge chunk, every element inside
+the array) is stored directly; a partially covered one is read back, updated, and re-encoded. In a shard
+covered in part, only the sub-chunks the write touches are decoded and re-encoded; the others keep their
+stored bytes. A chunk that ends up holding only the fill value is **not stored** — its absence *is* the
+fill, which is how Zarr represents empty chunks.
 
 `build()` checks the whole spec as opening the array would (shapes, fill value, dimension names, chunk
 key encoding, codecs, and that a chunk fits one Java array), so a bad spec fails with
@@ -154,8 +160,19 @@ ZarrGroup g = Zarr.createGroup(store);
 g.createGroup("model").createArray("weights", spec).writeFloats(...);
 ```
 
-Navigation reads the store on demand, so a group reflects the store's current contents. Creating a node
-where one exists needs `overwrite` (see [Writing](#writing)).
+Navigation reads the store on demand, so a group reflects the store's current contents. Opening a node
+fetches its metadata directly, without probing first: one request for a v3 node. Creating a node where
+one exists needs `overwrite` (see [Writing](#writing)).
+
+`children()`, `arrays()`, and `groups()` leave out a child Falcon cannot open (malformed metadata, or a
+feature it does not implement); `childNames()` still lists it, and `child(name)` throws the reason. A new
+node's name must not be empty, contain `/`, consist only of periods, start with `__` (reserved by the
+specification), be a metadata key name (`zarr.json`, `.zarray`, …), or end in `.` or a space.
+
+Metadata is read as the v3 specification says: a `zarr.json` member Falcon does not know fails to open
+unless it is an object with `"must_understand": false` (zarr-python's `consolidated_metadata` is accepted
+and ignored). The specification's shorthand is accepted too: a codec, chunk grid, or chunk key encoding
+given by its bare name (`"codecs": ["bytes"]`), and a core data type as `{"name": "int32"}`.
 
 ## Data types and fill values
 
@@ -171,6 +188,10 @@ than the canonical quiet NaN is written as a hex string of its bits (`"0x7fc0000
 it in the type's own form (`1` for an integer type, `true` for `bool`); `fillValue(JsonValue)` writes the
 JSON as given.
 
+Attributes may hold the bare `NaN`, `Infinity`, and `-Infinity` that Python's `json` writes (zarr-python
+writes them in v2 and v3 attributes alike); they read as `JsonNumber`s whose `isFinite()` is false, and
+are written back unchanged. Metadata Falcon generates itself stays strict JSON.
+
 ### Variable-length strings
 
 `DataType.STRING` is a variable-length UTF-8 string type, serialized by the `vlen-utf8` array→bytes codec
@@ -185,8 +206,10 @@ String[] back = Zarr.openArray(store).readStrings();   // and Selection.readStri
 ```
 
 The numeric accessors (`readDoubles`/`writeInts`/…) reject a string array, and `readStrings`/`writeStrings`
-reject a numeric one. Strings compress with the `bytes→bytes` codecs (`gzip`, `zstd`, `blosc`) but cannot
-be sharded. A `null` element is written as `""`, as numcodecs writes Python's `None`.
+reject a numeric one. Strings compress with the `bytes→bytes` codecs (`gzip`, `zstd`, `blosc`), can be
+sharded (`vlen-utf8` inside the shard, as zarr-python writes sharded string arrays), and can be
+transposed (`transpose` before `vlen-utf8`, zarr-python's order). A `null` element is written as `""`, as
+numcodecs writes Python's `None`.
 
 ## Codecs and compression
 
@@ -200,12 +223,18 @@ Falcon implements the Zarr v3 codec pipeline `(array→array)* (array→bytes) (
 | `gzip` | ✅ | ✅ |
 | `crc32c` (checksum) | ✅ | ✅ |
 | `sharding_indexed` | ✅ (byte-range) | ✅ |
-| `zstd` | ✅ | ✅ (pure-Java LZ77+FSE; libzstd reads it) |
-| `blosc` (blosclz/lz4/lz4hc/zlib/zstd/snappy + byte/bit shuffle) | ✅ | ✅ (byte shuffle + zstd; c-blosc reads it) |
+| `zstd` | ✅ | ✅ (pure-Java LZ77+FSE, with the content checksum when configured; libzstd reads it) |
+| `blosc` (blosclz/lz4/lz4hc/zlib/zstd/snappy + byte/bit shuffle) | ✅ | ✅ (no, byte, or bit shuffle, the configured block size and type size, c-blosc-sized blocks; zstd internally; c-blosc reads it) |
 
 `zstd` and `blosc` are read *and* written by pure-Java implementations (zarr-python compresses with zstd by default; libzstd reads Falcon's
 zstd frames). All compression codecs are hand-written in pure Java. All of blosc's internal codecs (blosclz/lz4/lz4hc/zlib/zstd/snappy) and both shuffle filters are
 supported on the read side.
+
+Writing into an array follows its codecs' configuration, whoever created it: a zstd `checksum`, and a
+blosc `shuffle`, `typesize`, `blocksize`, and `clevel`. Two settings have no effect: the zstd `level`
+(Falcon's encoder has one level) and a blosc `cname` other than `zstd` (Falcon compresses with zstd
+inside Blosc whatever the name; the result is valid Blosc, which every reader decodes from its own
+header, but not the compressor the metadata names).
 
 ## Stores
 
@@ -224,27 +253,62 @@ HttpStore.openReadOnly("https://host/data/store");  // read-only over HTTP(S)
 
 `HttpStore` uses HTTP `Range` requests, so a remote sharded array reads only the bytes it needs. Plain
 HTTP has no directory listing, so a group's children cannot be *enumerated* over HTTP (a named child still
-opens fine). Implement `Store` yourself for other backends (object stores, databases).
+opens fine). Implement `Store` yourself for other backends (object stores, databases); `getSuffix`, which
+reads the last bytes of a value, has a default you can override with a single request.
+
+`HttpStore` percent-encodes keys, keeps a base URL's query (presigned or SAS URLs) on every request, and
+follows redirects (http to https, never back). Only 404 means a key is absent. For an S3 or GCS bucket
+that answers 403 for absent keys, build the store with
+`HttpStore.builder(url).missingStatuses(404, 403).build()`; a denied key then reads as fill, so do this
+only for public buckets. Bodies are bounded: a response longer than asked for fails rather than being
+buffered.
+
+`ZipStore` reads a range of an uncompressed (STORED) entry directly, so sharded arrays in a ZIP read only
+what they need; `ZipStore.pack` writes STORED entries, as zarr-python does.
 
 `FileSystemStore` writes each value to a temporary file beside it and renames it into place, so a reader
 never sees part of a write, and a process that dies mid-write leaves the old value. It does not force the
 bytes to disk, so a value written just before a power loss may be lost. On Windows, where a file cannot be
-replaced while another handle has it open, a write waits briefly for readers to close it.
+replaced while another handle has it open, a write waits briefly for readers to close it. It refuses key
+segments that end in `.` or a space or contain `\` (Windows would alias them), and its listings read only
+the directory asked for.
+
+Every shipped store may be used from several threads at once.
+
+## Errors and threads
+
+What is wrong with the store and what is wrong with the call are told apart. Anything wrong with what is
+stored is a `ZarrException`: `ZarrFormatException` for malformed metadata, chunks, or compressed data
+(including a failed checksum, and a chunk that decodes to more than it should hold);
+`ZarrUnsupportedException` for a valid store using a feature Falcon does not implement; and a plain
+`ZarrException` for I/O failures, a selection too large for one Java array, or a typed read or write the
+array's data type does not support. A mistaken call gets the JDK's own exceptions:
+`IllegalArgumentException` (a wrong rank or number of values, an invalid name or spec, a value the type
+cannot hold, a node that exists), `IndexOutOfBoundsException` (outside the array),
+`NoSuchElementException` (a missing child), `IllegalStateException` (`asArray()` of a group),
+`UnsupportedOperationException` (writing to a read-only store).
+
+Handles hold no mutable state except a cached handle's cache, and every shipped store is safe for
+concurrent use, so one handle can serve several threads. Reads run in parallel with each other and with
+writes; writes to different chunks run in parallel. Writes that touch the same chunk, or the same shard,
+through the same `Store` object take turns, so neither update is lost. Writes to one chunk through
+different `Store` objects or processes are not coordinated: the last to store the chunk wins.
 
 ## What is and isn't supported
 
 **Supported:** Zarr v3 read *and* write; Zarr v2 read; all core data types plus variable-length `string`;
 the regular chunk grid; both chunk key encodings; every codec in the table above (including `zstd` and
 `blosc` written by Falcon's own encoders, and all of blosc's internal codecs + both shuffle filters on
-read); sharding with efficient byte-range reads; selections and block streaming; the memory, filesystem,
-ZIP, and HTTP stores.
+read); sharding with efficient byte-range reads and writes, for strings too; selections and block
+streaming; the memory, filesystem, ZIP, and HTTP stores.
 
 **Not supported** (see [`TODO.md`](TODO.md)): the `vlen-bytes` data type; Zarr v2 *writing*, Fortran
-(`"F"`) order, and v2 filters; unrecognized `must_understand` metadata, non-`regular` chunk grids,
-object/extension data types, and storage transformers; and cloud object stores (implement the `Store` SPI
+(`"F"`) order, and v2 filters; extension metadata that must be understood, non-`regular` chunk grids,
+extension data types, and storage transformers; and cloud object stores (implement the `Store` SPI
 yourself — the byte-range contract fits). The `zstd`/`blosc` encoders are correct and interoperable but
 single-level (not tuned for ratio).
 
 Corrupt input (bad metadata, truncated or damaged chunks, malformed compressed streams) fails with a typed
-exception — `ZarrFormatException`, `ZarrUnsupportedException`, or `ZarrException` — never a JVM crash or an
-out-of-memory from a bogus declared size.
+exception — `ZarrFormatException`, `ZarrUnsupportedException`, or `ZarrException`. Decompression is bounded
+by what the chunk can hold, so a few bytes claiming gigabytes fail at once. A string chunk is the
+exception: its decoded size is not known in advance, so only the 2 GB a Java array holds bounds it.

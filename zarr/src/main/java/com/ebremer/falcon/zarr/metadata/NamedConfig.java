@@ -1,12 +1,14 @@
 package com.ebremer.falcon.zarr.metadata;
 
 import com.ebremer.falcon.zarr.json.JsonObject;
+import com.ebremer.falcon.zarr.json.JsonString;
 import com.ebremer.falcon.zarr.json.JsonValue;
 
 /**
  * A named, configurable extension point: an object with a {@code "name"} and an optional
- * {@code "configuration"} object. This is the shape Zarr v3 uses for a chunk grid, a chunk key
- * encoding, and each codec, so one parser serves all three.
+ * {@code "configuration"} object, or, when there is no configuration, just the name as a string
+ * ({@code "bytes"} for {@code {"name": "bytes"}}), as the v3 specification allows. This is the shape
+ * Zarr v3 uses for a chunk grid, a chunk key encoding, and each codec, so one parser serves all three.
  *
  * @param name          the extension name (for example {@code "regular"}, {@code "default"},
  *                      {@code "bytes"})
@@ -16,6 +18,9 @@ import com.ebremer.falcon.zarr.json.JsonValue;
 public record NamedConfig(String name, JsonObject configuration) {
 
     static NamedConfig parse(JsonValue v, String ctx) {
+        if (v instanceof JsonString s) {
+            return new NamedConfig(s.value(), Fields.EMPTY_OBJECT);
+        }
         JsonObject o = Fields.object(v, ctx);
         String name = Fields.string(Fields.require(o, "name", ctx), ctx + ".name");
         JsonObject configuration = o.find("configuration")

@@ -46,9 +46,18 @@ final class GzipCodec implements BytesBytesCodec {
     }
 
     @Override
-    public byte[] decode(byte[] input) {
+    public long maxEncodedSize(long decodedSize) {
+        return BytesBytesCodec.compressorBound(decodedSize);
+    }
+
+    @Override
+    public byte[] decode(byte[] input, int maxSize) {
         try (GZIPInputStream in = new GZIPInputStream(new ByteArrayInputStream(input))) {
-            return in.readAllBytes();
+            byte[] out = in.readNBytes(maxSize); // allocates as it reads, not maxSize up front
+            if (in.read() >= 0) {
+                throw new ZarrFormatException("gzip chunk decodes to more than the " + maxSize + " bytes it may hold");
+            }
+            return out;
         } catch (IOException e) {
             throw new ZarrFormatException("gzip decode failed: " + e.getMessage(), e);
         }

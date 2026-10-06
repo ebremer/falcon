@@ -31,12 +31,12 @@ final class VlenUtf8 {
         String[] out = new String[count];
         int off = 4;
         for (int i = 0; i < count; i++) {
-            if (off + 4 > in.length) {
+            if (4 > in.length - off) {
                 throw new ZarrFormatException("vlen-utf8 element " + i + " length is truncated");
             }
             int length = le32(in, off);
             off += 4;
-            if (length < 0 || off + length > in.length) {
+            if (length < 0 || length > in.length - off) { // not off + length, which can overflow
                 throw new ZarrFormatException("vlen-utf8 element " + i + " overruns the chunk");
             }
             out[i] = new String(in, off, length, StandardCharsets.UTF_8);

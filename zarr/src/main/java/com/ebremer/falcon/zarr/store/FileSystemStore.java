@@ -5,14 +5,21 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.AccessDeniedException;
+import java.nio.file.DirectoryStream;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
+import java.nio.file.LinkOption;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalLong;
-import java.util.stream.Stream;
 
 /**
  * A {@link Store} over a directory tree: a key maps to a file at the same relative path under a root,
@@ -20,7 +27,13 @@ import java.util.stream.Stream;
  * zarr-python and other implementations read and write.
  *
  * <p>Keys are validated (see {@link StoreKeys#validate}) and the resolved path is confirmed to stay
- * within the root, so a crafted key cannot escape the store.
+ * within the root, so a crafted key cannot escape the store. A key segment must also not end in
+ * {@code '.'} or a space, nor contain a {@code '\'}: Windows drops a trailing dot or space and splits at
+ * a backslash, so {@code "data./zarr.json"} or {@code "a\b"} would reach the file of another key there.
+ * They are refused on every platform, so a store reads the same everywhere, and a listing leaves out a
+ * file or directory so named (one made outside Falcon), since no key can reach it.
+ *
+ * <p>A listing reads only the directory its prefix names, and below it, not the whole tree.
  *
  * <p>{@link #set} writes a temporary file beside the target and renames it into place, so a reader sees
  * either the old value or the new one, never part of a write, and a process that dies mid-write leaves
@@ -82,30 +95,49 @@ public final class FileSystemStore implements Store {
             return Optional.empty();
         }
         try (FileChannel channel = FileChannel.open(path, StandardOpenOption.READ)) {
-            long size = channel.size();
-            if (offset >= size) {
-                return Optional.of(new byte[0]);
-            }
-            int toRead = (int) Math.min((long) len, size - offset);
-            ByteBuffer buffer = ByteBuffer.allocate(toRead);
-            long position = offset;
-            while (buffer.hasRemaining()) {
-                int n = channel.read(buffer, position);
-                if (n < 0) {
-                    break;
-                }
-                position += n;
-            }
-            byte[] result = buffer.array();
-            if (buffer.position() == toRead) {
-                return Optional.of(result);
-            }
-            byte[] trimmed = new byte[buffer.position()];
-            System.arraycopy(result, 0, trimmed, 0, trimmed.length);
-            return Optional.of(trimmed);
+            return Optional.of(read(channel, offset, len));
         } catch (IOException e) {
             throw new ZarrException("failed to read range of key '" + key + "'", e);
         }
+    }
+
+    @Override
+    public Optional<byte[]> getSuffix(String key, long length) {
+        int len = MemoryStore.checkedLength(0, length);
+        Path path = resolve(key);
+        if (!Files.isRegularFile(path)) {
+            return Optional.empty();
+        }
+        try (FileChannel channel = FileChannel.open(path, StandardOpenOption.READ)) {
+            return Optional.of(read(channel, Math.max(0, channel.size() - len), len));
+        } catch (IOException e) {
+            throw new ZarrException("failed to read the end of key '" + key + "'", e);
+        }
+    }
+
+    /** Up to {@code len} bytes from {@code offset}, clamped to the file's size. */
+    private static byte[] read(FileChannel channel, long offset, int len) throws IOException {
+        long size = channel.size();
+        if (offset >= size) {
+            return new byte[0];
+        }
+        int toRead = (int) Math.min((long) len, size - offset);
+        ByteBuffer buffer = ByteBuffer.allocate(toRead);
+        long position = offset;
+        while (buffer.hasRemaining()) {
+            int n = channel.read(buffer, position);
+            if (n < 0) {
+                break;
+            }
+            position += n;
+        }
+        byte[] result = buffer.array();
+        if (buffer.position() == toRead) {
+            return result;
+        }
+        byte[] trimmed = new byte[buffer.position()];
+        System.arraycopy(result, 0, trimmed, 0, trimmed.length);
+        return trimmed;
     }
 
     @Override
@@ -133,12 +165,55 @@ public final class FileSystemStore implements Store {
 
     @Override
     public List<String> listPrefix(String prefix) {
-        return StoreKeys.listPrefix(allKeys(), prefix);
+        // Walk only the deepest directory the prefix names: "a/b/c" walks a/b and keeps what starts with it.
+        String dirKey = prefix.substring(0, prefix.lastIndexOf('/') + 1);
+        Path dir = directory(dirKey);
+        if (dir == null) {
+            return List.of();
+        }
+        List<String> keys = new ArrayList<>();
+        for (String key : keysUnder(dir)) {
+            if (key.startsWith(prefix)) {
+                keys.add(key);
+            }
+        }
+        keys.sort(null);
+        return keys;
     }
 
     @Override
     public List<String> listDir(String prefix) {
-        return StoreKeys.listDir(allKeys(), prefix);
+        String dirKey = StoreKeys.asDirPrefix(prefix);
+        Path dir = directory(dirKey);
+        if (dir == null) {
+            return List.of();
+        }
+        List<String> out = new ArrayList<>();
+        try (DirectoryStream<Path> entries = Files.newDirectoryStream(dir)) {
+            for (Path entry : entries) {
+                String name = entry.getFileName().toString();
+                if (!portableSegment(name)) {
+                    continue;
+                }
+                BasicFileAttributes attributes;
+                try {
+                    attributes = Files.readAttributes(entry, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+                } catch (NoSuchFileException gone) {
+                    continue; // deleted while listing
+                }
+                if (isKey(entry, attributes)) {
+                    out.add(dirKey + name);
+                } else if (attributes.isDirectory() && holdsAKey(entry)) {
+                    out.add(dirKey + name + "/"); // a child prefix: it has keys deeper down
+                }
+            }
+        } catch (NoSuchFileException gone) {
+            return List.of(); // the directory was deleted while listing
+        } catch (IOException e) {
+            throw new ZarrException("failed to list store directory: " + dir, e);
+        }
+        out.sort(null);
+        return out;
     }
 
     @Override
@@ -216,6 +291,10 @@ public final class FileSystemStore implements Store {
         StoreKeys.validate(key);
         Path path = root;
         for (String segment : key.split("/", -1)) {
+            if (!portableSegment(segment)) {
+                throw new IllegalArgumentException("key segment '" + segment + "' of '" + key
+                        + "' ends in '.' or a space, or holds a '\\', which Windows would read as another key's file");
+            }
             path = path.resolve(segment);
         }
         path = path.normalize();
@@ -225,17 +304,120 @@ public final class FileSystemStore implements Store {
         return path;
     }
 
-    /** Every key in the store: the relative path of every regular file under the root, using '/'. */
-    private List<String> allKeys() {
+    /**
+     * Whether a key may use {@code segment} on any platform: it must not end in {@code '.'} or a space
+     * (Windows drops them, so {@code "data."} is {@code "data"} there), nor hold a {@code '\'} (a Windows
+     * separator). {@code "."} and {@code ".."} end in a dot too.
+     */
+    private static boolean portableSegment(String segment) {
+        return !segment.isEmpty() && !segment.endsWith(".") && !segment.endsWith(" ") && segment.indexOf('\\') < 0;
+    }
+
+    /**
+     * The directory a listing prefix names ({@code ""} for the root, else a prefix ending in {@code '/'}),
+     * or {@code null} when no key can lie under it: a segment no key may use, or a path that is missing,
+     * not a directory, or a symbolic link (a listing does not follow links into directories).
+     */
+    private Path directory(String dirKey) {
         if (!Files.isDirectory(root)) {
-            return List.of();
+            return null;
         }
-        try (Stream<Path> walk = Files.walk(root)) {
-            return walk.filter(Files::isRegularFile)
-                    .map(p -> root.relativize(p).toString().replace(java.io.File.separatorChar, '/'))
-                    .toList();
+        if (dirKey.isEmpty()) {
+            return root;
+        }
+        String[] segments = dirKey.substring(0, dirKey.length() - 1).split("/", -1);
+        Path dir = root;
+        try {
+            for (String segment : segments) {
+                if (!portableSegment(segment)) {
+                    return null;
+                }
+                dir = dir.resolve(segment);
+                if (!Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS)) {
+                    return null;
+                }
+            }
+            // On a case-insensitive file system a prefix in another case reaches the same directory, but
+            // the keys under it are spelled as stored, so none starts with that prefix.
+            Path real = dir.toRealPath(LinkOption.NOFOLLOW_LINKS);
+            int first = real.getNameCount() - segments.length;
+            for (int i = 0; i < segments.length; i++) {
+                if (first + i < 0 || !real.getName(first + i).toString().equals(segments[i])) {
+                    return null;
+                }
+            }
+        } catch (InvalidPathException | IOException e) {
+            return null; // a name the file system cannot hold, or a directory deleted while looking
+        }
+        return dir;
+    }
+
+    /** Every key under {@code dir}: the root-relative path of each regular file, with {@code '/'}. */
+    private List<String> keysUnder(Path dir) {
+        List<String> keys = new ArrayList<>();
+        try {
+            Files.walkFileTree(dir, new SimpleFileVisitor<>() {
+                @Override
+                public FileVisitResult preVisitDirectory(Path d, BasicFileAttributes attributes) {
+                    return d.equals(dir) || portableSegment(d.getFileName().toString())
+                            ? FileVisitResult.CONTINUE : FileVisitResult.SKIP_SUBTREE;
+                }
+
+                @Override
+                public FileVisitResult visitFile(Path file, BasicFileAttributes attributes) {
+                    if (portableSegment(file.getFileName().toString()) && isKey(file, attributes)) {
+                        keys.add(root.relativize(file).toString().replace(java.io.File.separatorChar, '/'));
+                    }
+                    return FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public FileVisitResult visitFileFailed(Path file, IOException e) throws IOException {
+                    if (e instanceof NoSuchFileException) {
+                        return FileVisitResult.CONTINUE; // deleted while listing
+                    }
+                    throw e;
+                }
+            });
         } catch (IOException e) {
-            throw new ZarrException("failed to list store: " + root, e);
+            throw new ZarrException("failed to list store: " + dir, e);
         }
+        return keys;
+    }
+
+    /** Whether some key lies under {@code dir}; stops at the first. */
+    private boolean holdsAKey(Path dir) {
+        boolean[] found = {false};
+        try {
+            Files.walkFileTree(dir, new SimpleFileVisitor<>() {
+                @Override
+                public FileVisitResult preVisitDirectory(Path d, BasicFileAttributes attributes) {
+                    return d.equals(dir) || portableSegment(d.getFileName().toString())
+                            ? FileVisitResult.CONTINUE : FileVisitResult.SKIP_SUBTREE;
+                }
+
+                @Override
+                public FileVisitResult visitFile(Path file, BasicFileAttributes attributes) {
+                    found[0] = portableSegment(file.getFileName().toString()) && isKey(file, attributes);
+                    return found[0] ? FileVisitResult.TERMINATE : FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public FileVisitResult visitFileFailed(Path file, IOException e) throws IOException {
+                    if (e instanceof NoSuchFileException) {
+                        return FileVisitResult.CONTINUE;
+                    }
+                    throw e;
+                }
+            });
+        } catch (IOException e) {
+            throw new ZarrException("failed to list store: " + dir, e);
+        }
+        return found[0];
+    }
+
+    /** Whether a file is a key: a regular file, or a symbolic link to one (a link to a directory is not entered). */
+    private static boolean isKey(Path file, BasicFileAttributes attributes) {
+        return attributes.isRegularFile() || (attributes.isSymbolicLink() && Files.isRegularFile(file));
     }
 }

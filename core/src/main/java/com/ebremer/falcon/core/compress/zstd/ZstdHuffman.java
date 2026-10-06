@@ -74,12 +74,9 @@ final class ZstdHuffman {
     private static int readFseWeights(byte[] in, int off, int size, int[] weights) {
         short[] counts = new short[256];
         int[] header = {255, 0};
-        int headerBytes = ZstdFse.readNCount(counts, header, in, off, size);
+        int headerBytes = ZstdFse.readNCount(counts, header, in, off, size, 6); // RFC 8878 4.2.1.2: at most 6
         int maxSymbol = header[0];
         int tableLog = header[1];
-        if (tableLog > 6) {
-            throw new CompressionFormatException("Huffman weight table log " + tableLog + " exceeds 6");
-        }
         ZstdFse.Table table = ZstdFse.buildTable(counts, maxSymbol, tableLog);
 
         int streamStart = off + headerBytes;
