@@ -39,11 +39,29 @@ public final class ChunkAssembler {
                     "selection rank must be " + rank + ", got offset " + offset.length + " / shape " + shape.length);
         }
         for (int i = 0; i < rank; i++) {
-            if (offset[i] < 0 || shape[i] < 0 || offset[i] + shape[i] > arrayShape[i]) {
-                throw new IndexOutOfBoundsException("selection [" + offset[i] + "," + (offset[i] + shape[i])
-                        + ") is out of bounds [0," + arrayShape[i] + ") in dimension " + i);
+            // Compared without forming offset + shape, which can overflow.
+            if (offset[i] < 0 || shape[i] < 0 || offset[i] > arrayShape[i] || shape[i] > arrayShape[i] - offset[i]) {
+                throw new IndexOutOfBoundsException("selection of " + shape[i] + " at offset " + offset[i]
+                        + " is out of bounds [0," + arrayShape[i] + ") in dimension " + i);
             }
         }
+    }
+
+    /**
+     * The size in bytes of {@code count} elements of {@code elementSize} bytes, which must fit one Java array.
+     *
+     * @throws ZarrException if it does not
+     */
+    static int bufferSize(long count, int elementSize, String what) {
+        if (count > Integer.MAX_VALUE / elementSize) {
+            throw new ZarrException(what + " of " + count + " elements is too large for a single array");
+        }
+        return (int) count * elementSize;
+    }
+
+    /** The end of a chunk's part of a selection: {@code min(selEnd, origin + extent)}, without overflow. */
+    static long overlapEnd(long chunkOrigin, long chunkExtent, long selEnd) {
+        return chunkOrigin + Math.min(chunkExtent, selEnd - chunkOrigin);
     }
 
     /** Reads the selection {@code [offset, offset+selShape)} as a flat element buffer. */
@@ -57,16 +75,8 @@ public final class ChunkAssembler {
         DataType dataType = meta.dataType();
         int elementSize = dataType.byteCount();
 
-        long total = 1;
-        for (long s : selShape) {
-            total *= s;
-        }
-        long totalBytes = total * elementSize;
-        if (totalBytes > Integer.MAX_VALUE) {
-            throw new ZarrException(
-                    "selection of " + total + " elements is too large to read into a single array");
-        }
-        byte[] out = new byte[(int) totalBytes];
+        long total = RegularChunkGrid.elementCount(selShape); // within the array, so it fits a long
+        byte[] out = new byte[bufferSize(total, elementSize, "selection")];
         if (total == 0) {
             return out;
         }
@@ -97,7 +107,7 @@ public final class ChunkAssembler {
             for (int i = 0; i < rank; i++) {
                 long chunkOrigin = coord[i] * chunkShapeL[i];
                 long lo = Math.max(offset[i], chunkOrigin);
-                long hi = Math.min(selEnd[i], chunkOrigin + chunkShapeL[i]);
+                long hi = overlapEnd(chunkOrigin, chunkShapeL[i], selEnd[i]);
                 regionOrigin[i] = (int) (lo - chunkOrigin);
                 regionShape[i] = (int) (hi - lo);
             }
@@ -135,11 +145,13 @@ public final class ChunkAssembler {
         boolean wholeChunk = !pipeline.isSharded() || isFullChunk(regionOrigin, regionShape, chunkShape);
         int[] origin = regionOrigin;
         int[] shape = regionShape;
+        long stamp = 0;
         if (wholeChunk && cache != null) {
             byte[] hit = cache.get(key);
             if (hit != null) {
                 return hit;
             }
+            stamp = cache.stamp(); // before the store read, so a write racing it keeps this read uncached
             origin = new int[chunkShape.length];
             shape = chunkShape;
         }
@@ -147,7 +159,7 @@ public final class ChunkAssembler {
         byte[] decoded = pipeline.decodeChunk(new StoreChunkBytes(store, key), fillElement, origin, shape);
         if (decoded != null) {
             if (wholeChunk && cache != null) {
-                cache.put(key, decoded);
+                cache.put(key, decoded, stamp);
             }
             return decoded;
         }
@@ -205,7 +217,7 @@ public final class ChunkAssembler {
         for (int i = 0; i < rank; i++) {
             chunkOrigin[i] = coord[i] * chunkShape[i];
             long lo = Math.max(selOffset[i], chunkOrigin[i]);
-            long hi = Math.min(selEnd[i], chunkOrigin[i] + chunkShape[i]);
+            long hi = overlapEnd(chunkOrigin[i], chunkShape[i], selEnd[i]);
             srcOrigin[i] = lo - chunkOrigin[i];
             dstOrigin[i] = lo - selOffset[i];
             block[i] = hi - lo;

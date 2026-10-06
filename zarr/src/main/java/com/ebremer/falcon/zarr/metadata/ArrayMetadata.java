@@ -82,7 +82,13 @@ public final class ArrayMetadata implements NodeMetadata {
             throw new ZarrFormatException(ctx + ": chunk_shape rank " + chunkShape.length
                     + " does not match array rank " + rank);
         }
-        RegularChunkGrid grid = new RegularChunkGrid(shape, chunkShape);
+        RegularChunkGrid grid;
+        try {
+            grid = new RegularChunkGrid(shape, chunkShape);
+        } catch (IllegalArgumentException e) {
+            // Ranks, signs, and positivity are checked above, so the array has more elements than a long counts.
+            throw new ZarrUnsupportedException(ctx + ".shape: " + e.getMessage());
+        }
 
         NamedConfig encodingConfig =
                 NamedConfig.parse(Fields.require(o, "chunk_key_encoding", ctx), ctx + ".chunk_key_encoding");

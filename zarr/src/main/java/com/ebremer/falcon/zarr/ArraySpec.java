@@ -1,11 +1,16 @@
 package com.ebremer.falcon.zarr;
 
+import com.ebremer.falcon.zarr.data.Elements;
 import com.ebremer.falcon.zarr.datatype.DataType;
+import com.ebremer.falcon.zarr.json.Json;
 import com.ebremer.falcon.zarr.json.JsonArray;
 import com.ebremer.falcon.zarr.json.JsonNumber;
 import com.ebremer.falcon.zarr.json.JsonObject;
 import com.ebremer.falcon.zarr.json.JsonString;
 import com.ebremer.falcon.zarr.json.JsonValue;
+import com.ebremer.falcon.zarr.metadata.ArrayMetadata;
+import com.ebremer.falcon.zarr.metadata.Metadata;
+import com.ebremer.falcon.zarr.metadata.NodeMetadata;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.List;
@@ -17,7 +22,8 @@ import java.util.Map;
  *
  * <p>Build one with {@link #builder(long[], DataType)}; everything but the shape and data type has a
  * sensible default (one chunk covering the array, a zero fill value, and a little-endian {@code bytes}
- * codec).
+ * codec). {@link Builder#build()} checks the whole description, as opening the array would, so a spec
+ * that exists is one Falcon can create, read, and write.
  */
 public final class ArraySpec {
 
@@ -35,9 +41,7 @@ public final class ArraySpec {
         this.shape = b.shape.clone();
         this.dataType = b.dataType;
         this.chunkShape = b.chunkShape != null ? b.chunkShape.clone() : defaultChunkShape(b.shape);
-        this.fillValue = b.fillValue != null ? b.fillValue
-                : b.dataType.isVariableLength() ? new JsonString("")
-                : b.dataType.encodeFillValue(new byte[b.dataType.byteCount()], ByteOrder.LITTLE_ENDIAN);
+        this.fillValue = fillJson(b);
         this.codecs = buildCodecs(b);
         this.attributes = b.attributes;
         this.dimensionNames = b.dimensionNames == null ? null : b.dimensionNames.clone();
@@ -56,6 +60,35 @@ public final class ArraySpec {
             chunks[i] = Math.max(shape[i], 1); // a chunk dimension must be positive
         }
         return chunks;
+    }
+
+    /**
+     * The fill value's JSON. A number set with {@code fillValue(long)} or {@code fillValue(double)} is
+     * converted to the data type as a write would convert it, then written in the type's own form: an
+     * integer type gets an integer, bool gets {@code true}/{@code false}, and a float keeps its bits ("NaN"
+     * for the canonical NaN, a hex string for any other).
+     */
+    private static JsonValue fillJson(Builder b) {
+        DataType dt = b.dataType;
+        if (b.fillValue != null) {
+            return b.fillValue;
+        }
+        if (b.fillNumber == null) {
+            return dt.isVariableLength() ? new JsonString("")
+                    : dt.encodeFillValue(new byte[dt.byteCount()], ByteOrder.LITTLE_ENDIAN);
+        }
+        byte[] element;
+        try {
+            element = b.fillNumber instanceof Long l
+                    ? Elements.fromLong(l, dt, ByteOrder.LITTLE_ENDIAN)
+                    : Elements.fromDouble(b.fillNumber.doubleValue(), dt, ByteOrder.LITTLE_ENDIAN);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("invalid fill value: " + e.getMessage(), e);
+        } catch (ZarrException e) {
+            throw new IllegalArgumentException("a numeric fill value needs a bool, integer, or float data type, not '"
+                    + dt.name() + "': use fillValue(JsonValue)", e);
+        }
+        return dt.encodeFillValue(element, ByteOrder.LITTLE_ENDIAN);
     }
 
     private static List<JsonValue> buildCodecs(Builder b) {
@@ -165,7 +198,8 @@ public final class ArraySpec {
         private final long[] shape;
         private final DataType dataType;
         private long[] chunkShape;
-        private JsonValue fillValue;
+        private JsonValue fillValue;   // set by fillValue(JsonValue), else
+        private Number fillNumber;     // a Long or Double, converted to the data type by build()
         private JsonObject attributes = new JsonObject(Map.of());
         private String[] dimensionNames;
         private String encodingName = "default";
@@ -189,26 +223,34 @@ public final class ArraySpec {
             return this;
         }
 
-        /** Sets the fill value as raw JSON. */
+        /** Sets the fill value as raw JSON, written to {@code zarr.json} as given. */
         public Builder fillValue(JsonValue fillValue) {
             this.fillValue = fillValue;
+            this.fillNumber = null;
             return this;
         }
 
-        /** Sets an integer fill value. */
+        /**
+         * Sets the fill value from an integer, converted to the data type as {@code writeLongs} converts:
+         * an integer type must hold it exactly, a float type rounds it, and bool takes nonzero as true.
+         * {@link #build()} rejects a value the type cannot hold.
+         */
         public Builder fillValue(long fillValue) {
-            return fillValue(JsonNumber.of(fillValue));
+            this.fillNumber = fillValue;
+            this.fillValue = null;
+            return this;
         }
 
-        /** Sets a floating-point fill value (NaN and infinities are encoded as the spec's strings). */
+        /**
+         * Sets the fill value from a {@code double}, converted to the data type as {@code writeDoubles}
+         * converts: an integer type takes only a whole number in its range (written as an integer), a float
+         * type rounds it (NaN and the infinities included, a NaN keeping its bits), and bool takes nonzero
+         * as true. {@link #build()} rejects a value the type cannot hold.
+         */
         public Builder fillValue(double fillValue) {
-            if (Double.isNaN(fillValue)) {
-                return fillValue(new JsonString("NaN"));
-            }
-            if (Double.isInfinite(fillValue)) {
-                return fillValue(new JsonString(fillValue > 0 ? "Infinity" : "-Infinity"));
-            }
-            return fillValue(JsonNumber.of(fillValue));
+            this.fillNumber = fillValue;
+            this.fillValue = null;
+            return this;
         }
 
         /** Sets the element byte order used by the {@code bytes} codec (default little-endian). */
@@ -277,12 +319,25 @@ public final class ArraySpec {
             return this;
         }
 
-        /** The finished spec. */
+        /**
+         * The finished spec, checked as opening the array would check it: the shapes, fill value, dimension
+         * names, chunk key encoding, and codecs (including that a chunk fits one buffer).
+         *
+         * @throws IllegalArgumentException if the spec does not describe an array Falcon can create, read,
+         *                                  and write
+         */
         public ArraySpec build() {
             if (dataType.isVariableLength() && subChunkShape != null) {
                 throw new IllegalArgumentException("sharding is not supported for the 'string' data type");
             }
-            return new ArraySpec(this);
+            ArraySpec spec = new ArraySpec(this);
+            try {
+                NodeMetadata parsed = Metadata.parse(Json.writeBytes(spec.toJson()), "zarr.json");
+                ((ArrayMetadata) parsed).pipeline();
+            } catch (ZarrException e) {
+                throw new IllegalArgumentException("invalid array spec: " + e.getMessage(), e);
+            }
+            return spec;
         }
     }
 }

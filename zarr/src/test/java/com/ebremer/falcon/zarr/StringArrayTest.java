@@ -113,6 +113,27 @@ class StringArrayTest {
         assertArrayEquals(new String[] {"a", "", "c"}, Zarr.openArray(store).readStrings());
     }
 
+    /**
+     * A null is stored as "" (as numcodecs stores None). It used to count as the fill value when deciding
+     * whether a chunk was all fill: with fill "zz", nulls in a mixed chunk read back as "", but a chunk of
+     * nothing but nulls was deleted and read back as "zz" (P0 Z10).
+     */
+    @Test
+    void nullIsTheEmptyStringWhateverTheChunkHolds() {
+        MemoryStore store = new MemoryStore();
+        ZarrArray a = Zarr.createArray(store, ArraySpec.builder(new long[] {4}, DataType.STRING)
+                .chunkShape(2).fillValue(new JsonString("zz")).build());
+        a.writeStrings(new String[] {"a", null, null, null});
+        assertArrayEquals(new String[] {"a", "", "", ""}, Zarr.openArray(store).readStrings());
+        assertTrue(store.exists("c/1")); // "" is not the fill, so the chunk is stored
+
+        ZarrArray b = Zarr.createArray(new MemoryStore(),
+                ArraySpec.builder(new long[] {2}, DataType.STRING).chunkShape(2).build());
+        b.writeStrings(new String[] {"x", "y"});
+        b.writeStrings(new String[] {null, null}); // with fill "", all nulls is all fill
+        assertArrayEquals(new String[] {"", ""}, b.readStrings());
+    }
+
     @Test
     void numericReadOnStringArrayIsRejected() {
         MemoryStore store = new MemoryStore();

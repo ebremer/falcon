@@ -7,7 +7,10 @@ import com.ebremer.falcon.zarr.metadata.Metadata;
 import com.ebremer.falcon.zarr.metadata.NodeMetadata;
 import com.ebremer.falcon.zarr.metadata.V2Metadata;
 import com.ebremer.falcon.zarr.store.Store;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * A node in a Zarr hierarchy: either a {@link ZarrGroup} or a {@link ZarrArray}. Every node is located
@@ -91,6 +94,56 @@ public abstract sealed class ZarrNode permits ZarrGroup, ZarrArray {
         return store.exists(key(path, "zarr.json"))
                 || store.exists(key(path, V2Metadata.ZARRAY))
                 || store.exists(key(path, V2Metadata.ZGROUP));
+    }
+
+    /**
+     * Readies {@code path} for a new node, before its metadata is written. Without {@code overwrite} it
+     * refuses a path that holds a node, and, for an array, a path with any key under it: the array would
+     * read those keys as its chunks. With {@code overwrite} it deletes every key under the path (for the
+     * root, every key in the store), the node's own metadata first, so a delete cut short leaves no node
+     * that reads what is left.
+     *
+     * @throws UnsupportedOperationException if the store is read-only
+     * @throws IllegalArgumentException      if the path is taken and {@code overwrite} is false
+     */
+    static void prepareCreate(Store store, String path, boolean array, boolean overwrite) {
+        if (!store.isWritable()) {
+            throw new UnsupportedOperationException("store is read-only");
+        }
+        String display = path.isEmpty() ? "/" : path;
+        if (!overwrite) {
+            if (hasNode(store, path)) {
+                throw new IllegalArgumentException(
+                        "a node already exists at '" + display + "'; pass overwrite = true to replace it");
+            }
+            if (array) {
+                List<String> keys = keysUnder(store, path);
+                if (!keys.isEmpty()) {
+                    throw new IllegalArgumentException("'" + display + "' already holds " + keys.size()
+                            + " key(s), such as '" + keys.get(0) + "', which a new array would read as its"
+                            + " chunks; pass overwrite = true to delete them");
+                }
+            }
+            return;
+        }
+        List<String> keys = keysUnder(store, path);
+        Set<String> metadata = Set.of(metadataKey(path), key(path, V2Metadata.ZARRAY), key(path, V2Metadata.ZGROUP));
+        List<String> ordered = new ArrayList<>(keys.size());
+        for (String key : keys) {
+            if (metadata.contains(key)) {
+                ordered.add(0, key);
+            } else {
+                ordered.add(key);
+            }
+        }
+        for (String key : ordered) {
+            store.delete(key);
+        }
+    }
+
+    /** Every key under the node at {@code path}: for the root, every key in the store. */
+    private static List<String> keysUnder(Store store, String path) {
+        return path.isEmpty() ? store.list() : store.listPrefix(path + "/");
     }
 
     /** Reads and classifies the node at {@code path}: v3 {@code zarr.json} first, then v2 metadata. */

@@ -1,5 +1,6 @@
 package com.ebremer.falcon.zarr;
 
+import com.ebremer.falcon.zarr.chunk.RegularChunkGrid;
 import com.ebremer.falcon.zarr.data.ChunkAssembler;
 import com.ebremer.falcon.zarr.data.ChunkWriter;
 import com.ebremer.falcon.zarr.data.Elements;
@@ -39,11 +40,7 @@ public final class Selection {
 
     /** The number of selected elements (the product of the shape). */
     public long elementCount() {
-        long count = 1;
-        for (long s : shape) {
-            count *= s;
-        }
-        return count;
+        return RegularChunkGrid.elementCount(shape); // no larger than the array's size, so it fits a long
     }
 
     /** The raw decoded element bytes of the selection, in C order, each primitive in the array's byte order. */

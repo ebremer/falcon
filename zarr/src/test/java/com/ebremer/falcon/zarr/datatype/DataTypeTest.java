@@ -224,4 +224,29 @@ class DataTypeTest {
         assertEquals(0xde, raw.get(0).asNumber().intValue());
         assertEquals(0xad, raw.get(1).asNumber().intValue());
     }
+
+    /** Every NaN was written as "NaN", which decodes to the canonical NaN, losing the payload (P0 Z10). */
+    @Test
+    void aNaNOtherThanTheCanonicalOneIsWrittenInHex() {
+        assertEquals("0x7fc00001", DataType.FLOAT32.encodeFillValue(bytes(0x01, 0x00, 0xc0, 0x7f), LITTLE_ENDIAN).asString());
+        assertEquals("0xffc00000", DataType.FLOAT32.encodeFillValue(bytes(0xff, 0xc0, 0x00, 0x00), BIG_ENDIAN).asString());
+        assertEquals("0x7e01", DataType.FLOAT16.encodeFillValue(bytes(0x01, 0x7e), LITTLE_ENDIAN).asString());
+        assertEquals("NaN", DataType.FLOAT16.encodeFillValue(bytes(0x00, 0x7e), LITTLE_ENDIAN).asString());
+        assertEquals("0xfff8000000000000",
+                DataType.FLOAT64.encodeFillValue(bytes(0, 0, 0, 0, 0, 0, 0xf8, 0xff), LITTLE_ENDIAN).asString());
+        assertEquals("NaN",
+                DataType.FLOAT64.encodeFillValue(bytes(0, 0, 0, 0, 0, 0, 0xf8, 0x7f), LITTLE_ENDIAN).asString());
+        assertRoundTrips(DataType.FLOAT32, str("0x7fc00001"));
+        JsonValue payload = DataType.FLOAT32.encodeFillValue(bytes(0x01, 0x00, 0xc0, 0x7f), LITTLE_ENDIAN);
+        assertArrayEquals(bytes(0x01, 0x00, 0xc0, 0x7f), DataType.FLOAT32.decodeFillValue(payload, LITTLE_ENDIAN));
+        assertArrayEquals(bytes(0x00, 0x00, 0xc0, 0x7f), DataType.FLOAT32.decodeFillValue(str("NaN"), LITTLE_ENDIAN));
+    }
+
+    /** A float16 fill was rounded to float and then to half: twice (P0 Z4). */
+    @Test
+    void aFloat16FillRoundsOnce() {
+        // 1 + 2^-11 + 2^-40: via float it is the tie 1 + 2^-11, which rounds to even, 0x3c00 (1.0).
+        assertArrayEquals(bytes(0x01, 0x3c),
+                DataType.FLOAT16.decodeFillValue(num(1 + 0x1p-11 + 0x1p-40), LITTLE_ENDIAN));
+    }
 }

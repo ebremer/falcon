@@ -2,6 +2,7 @@ package com.ebremer.falcon.zarr;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.ebremer.falcon.zarr.datatype.DataType;
 import com.ebremer.falcon.zarr.store.MemoryStore;
@@ -12,7 +13,13 @@ import java.util.Optional;
 import java.util.OptionalLong;
 import org.junit.jupiter.api.Test;
 
-/** The decoded-chunk cache must speed re-reads without changing results, and stay correct across writes. */
+/**
+ * The decoded-chunk cache must speed re-reads without changing results, and stay correct across writes.
+ *
+ * <p>It is opt-in (P0 Z3): each handle had a cache that writes through other handles never invalidated,
+ * so a long-lived reader kept returning old data. A plain handle now reads the store every time; a handle
+ * from {@code withChunkCache} caches, sees its own writes, and is documented not to see others'.
+ */
 class ChunkCacheTest {
 
     /** Counts how many times each key is fetched, to prove a cached chunk is not re-read. */
@@ -85,7 +92,7 @@ class ChunkCacheTest {
         array.writeInts(new int[] {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11});
 
         // reopen so nothing is warm, then read overlapping selections that all hit chunk 1 (indices 4..7)
-        ZarrArray reopened = Zarr.openArray(store);
+        ZarrArray reopened = Zarr.openArray(store).withChunkCache(1 << 20);
         store.gets.clear();
         assertArrayEquals(new int[] {4, 5}, reopened.select(new long[] {4}, new long[] {2}).readInts());
         assertArrayEquals(new int[] {6, 7}, reopened.select(new long[] {6}, new long[] {2}).readInts());
@@ -95,10 +102,76 @@ class ChunkCacheTest {
     }
 
     @Test
+    void aPlainHandleReadsTheStoreEveryTime() {
+        CountingStore store = new CountingStore();
+        Zarr.createArray(store, ArraySpec.builder(new long[] {12}, DataType.INT32).chunkShape(4).build())
+                .writeInts(new int[] {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11});
+        ZarrArray reopened = Zarr.openArray(store);
+        store.gets.clear();
+        reopened.select(new long[] {4}, new long[] {2}).readInts();
+        reopened.select(new long[] {6}, new long[] {2}).readInts();
+        assertEquals(2, store.countOf("c/1"));
+    }
+
+    @Test
+    void aReaderSeesWritesMadeThroughAnotherHandle() {
+        MemoryStore store = new MemoryStore();
+        ZarrGroup root = Zarr.createGroup(store);
+        root.createArray("x", ArraySpec.builder(new long[] {4}, DataType.INT32).chunkShape(2).build())
+                .writeInts(new int[] {1, 2, 3, 4});
+        ZarrArray reader = root.array("x");
+        assertArrayEquals(new int[] {1, 2, 3, 4}, reader.readInts());
+
+        root.array("x").writeInts(new int[] {5, 6, 7, 8}); // another handle on the same array
+        // Before the fix the reader's own cache still returned [1, 2, 3, 4].
+        assertArrayEquals(new int[] {5, 6, 7, 8}, reader.readInts());
+    }
+
+    @Test
+    void aCachedHandleSeesItsOwnWritesAndOthersAfterClearing() {
+        MemoryStore store = new MemoryStore();
+        ZarrArray plain = Zarr.createArray(store,
+                ArraySpec.builder(new long[] {4}, DataType.INT32).chunkShape(2).build());
+        plain.writeInts(new int[] {1, 2, 3, 4});
+        ZarrArray cached = plain.withChunkCache(1 << 20);
+        assertArrayEquals(new int[] {1, 2, 3, 4}, cached.readInts());
+
+        cached.select(new long[] {0}, new long[] {2}).writeInts(new int[] {10, 20});
+        assertArrayEquals(new int[] {10, 20, 3, 4}, cached.readInts());
+
+        plain.writeInts(new int[] {5, 6, 7, 8});
+        assertArrayEquals(new int[] {10, 20, 3, 4}, cached.readInts()); // documented: not seen while cached
+        cached.clearChunkCache();
+        assertArrayEquals(new int[] {5, 6, 7, 8}, cached.readInts());
+
+        assertThrows(IllegalArgumentException.class, () -> plain.withChunkCache(0));
+    }
+
+    @Test
+    void aCachedHandleCanBeReadFromManyThreads() {
+        MemoryStore store = new MemoryStore();
+        ZarrArray array = Zarr.createArray(store, ArraySpec.builder(new long[] {64, 64}, DataType.INT32)
+                .chunkShape(8, 8).gzip(1).build());
+        int[] data = new int[64 * 64];
+        for (int i = 0; i < data.length; i++) {
+            data[i] = i;
+        }
+        array.writeInts(data);
+        // A budget of a few chunks keeps the cache evicting while threads read; unsynchronized, this threw
+        // ConcurrentModificationException.
+        ZarrArray cached = Zarr.openArray(store).withChunkCache(4 * 8 * 8 * 4);
+        for (int round = 0; round < 20; round++) {
+            long sum = cached.blocks().parallel()
+                    .mapToLong(b -> java.util.Arrays.stream(b.readInts()).asLongStream().sum()).sum();
+            assertEquals((long) data.length * (data.length - 1) / 2, sum);
+        }
+    }
+
+    @Test
     void cacheIsInvalidatedOnWrite() {
         MemoryStore store = new MemoryStore();
         ZarrArray array = Zarr.createArray(store,
-                ArraySpec.builder(new long[] {8}, DataType.INT32).chunkShape(4).build());
+                ArraySpec.builder(new long[] {8}, DataType.INT32).chunkShape(4).build()).withChunkCache(1 << 20);
         array.writeInts(new int[] {0, 1, 2, 3, 4, 5, 6, 7});
 
         assertArrayEquals(new int[] {0, 1, 2, 3}, array.select(new long[] {0}, new long[] {4}).readInts());
@@ -111,7 +184,7 @@ class ChunkCacheTest {
     void clearingTheCacheKeepsResultsCorrect() {
         MemoryStore store = new MemoryStore();
         ZarrArray array = Zarr.createArray(store,
-                ArraySpec.builder(new long[] {6}, DataType.INT32).chunkShape(3).gzip(3).build());
+                ArraySpec.builder(new long[] {6}, DataType.INT32).chunkShape(3).gzip(3).build()).withChunkCache(1 << 20);
         array.writeInts(new int[] {1, 2, 3, 4, 5, 6});
         assertArrayEquals(new int[] {1, 2, 3, 4, 5, 6}, array.readInts());
         array.clearChunkCache();
@@ -129,7 +202,7 @@ class ChunkCacheTest {
         }
         array.writeInts(data);
 
-        ZarrArray reopened = Zarr.openArray(store);
+        ZarrArray reopened = Zarr.openArray(store).withChunkCache(1 << 20);
         // a partial shard region, then the whole thing, then another partial -- all must agree
         assertArrayEquals(new int[] {2, 3, 4, 5}, reopened.select(new long[] {2}, new long[] {4}).readInts());
         assertArrayEquals(data, reopened.readInts());

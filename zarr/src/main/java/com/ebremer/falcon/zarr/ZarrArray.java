@@ -15,18 +15,25 @@ import java.util.Optional;
 /**
  * An array in a Zarr hierarchy: an N-dimensional grid of elements of one data type, stored in chunks.
  *
- * <p>Z1 exposes the array's description &mdash; shape, data type, chunk shape, fill value, codecs, and
- * dimension names. Reading element data lands in Z5, once the data-type, chunk-grid, and codec stages
- * are in place.
+ * <p>A handle holds the array's metadata (shape, data type, chunk shape, fill value, codecs, dimension
+ * names) as read when it was opened. Its reads and writes go to the store's chunks each time, so a read
+ * sees every write made before it, through any handle. A handle from {@link #withChunkCache(long)} instead
+ * keeps decoded chunks in memory: it sees its own writes, but not writes made through other handles or
+ * processes until {@link #clearChunkCache()}.
  */
 public final class ZarrArray extends ZarrNode {
 
     private final ArrayMetadata metadata;
-    private ChunkCache chunkCache; // decoded-chunk LRU, shared by this array's reads and writes
+    private final ChunkCache chunkCache; // decoded-chunk LRU, or null: see withChunkCache
 
     ZarrArray(Store store, String path, ArrayMetadata metadata) {
+        this(store, path, metadata, null);
+    }
+
+    private ZarrArray(Store store, String path, ArrayMetadata metadata, ChunkCache chunkCache) {
         super(store, path);
         this.metadata = metadata;
+        this.chunkCache = chunkCache;
     }
 
     @Override
@@ -114,13 +121,12 @@ public final class ZarrArray extends ZarrNode {
         return metadata.dimensionNames();
     }
 
-    /** The total number of elements: the product of the shape (1 for a scalar array). */
+    /**
+     * The total number of elements: the product of the shape (1 for a scalar array). Opening an array
+     * whose element count overflows {@code long} fails, so this is exact.
+     */
     public long size() {
-        long count = 1;
-        for (long dimension : metadata.shape()) {
-            count *= dimension;
-        }
-        return count;
+        return metadata.grid().size();
     }
 
     /**
@@ -214,7 +220,24 @@ public final class ZarrArray extends ZarrNode {
         });
     }
 
-    /** Discards this array's decoded-chunk cache. */
+    /**
+     * A handle on this array that keeps up to {@code maxBytes} of decoded chunks in memory (least recently
+     * used first out), so overlapping or repeated reads of a compressed array decode each chunk once. Each
+     * call makes a new handle with its own empty cache.
+     *
+     * <p>Its writes update the cache, so its reads see them. Writes made through any other handle, or by
+     * another process, are not seen while a chunk stays cached: call {@link #clearChunkCache()} to read
+     * them. The handle may be shared between threads.
+     *
+     * @param maxBytes the cache's budget of decoded bytes; a chunk larger than it is never cached
+     * @return a new handle on the same array, with its own cache
+     * @throws IllegalArgumentException if {@code maxBytes} is not positive
+     */
+    public ZarrArray withChunkCache(long maxBytes) {
+        return new ZarrArray(store, path, metadata, new ChunkCache(maxBytes));
+    }
+
+    /** Empties this handle's decoded-chunk cache; a handle without one has nothing to clear. */
     public void clearChunkCache() {
         if (chunkCache != null) {
             chunkCache.clear();
@@ -226,14 +249,9 @@ public final class ZarrArray extends ZarrNode {
         return metadata;
     }
 
-    /** This array's decoded-chunk cache, created on first use. */
+    /** This handle's decoded-chunk cache, or {@code null} if it has none. */
     ChunkCache chunkCache() {
-        ChunkCache cache = chunkCache;
-        if (cache == null) {
-            cache = new ChunkCache();
-            chunkCache = cache;
-        }
-        return cache;
+        return chunkCache;
     }
 
     @Override

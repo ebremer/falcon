@@ -12,12 +12,16 @@ import com.ebremer.falcon.core.compress.zstd.ZstdEncoder;
  * A block that would not shrink, or a whole buffer that compression does not help, is stored raw
  * (the {@code memcpy} path). Bit-shuffle encoding and the other internal codecs are not offered on the
  * write side; reading still supports them.
+ *
+ * <p>The header holds the type size in one byte, so, as c-blosc does, a type size above 255 is written
+ * as 1 and its data is not shuffled.
  */
 public final class BloscEncoder {
 
     private static final int HEADER = 16;
     private static final int VERSION = 2;
     private static final int VERSION_LZ = 1;
+    private static final int MAX_TYPE_SIZE = 255; // the header's type size is one byte (BLOSC_MAX_TYPESIZE)
     private static final int COMPRESSOR_ZSTD = 4;
     private static final int FLAG_SHUFFLE = 0x01;
     private static final int FLAG_MEMCPYED = 0x02;
@@ -31,10 +35,11 @@ public final class BloscEncoder {
     /** Compresses {@code data} whose elements are {@code typeSize} bytes into a Blosc buffer. */
     public static byte[] compress(byte[] data, int typeSize) {
         int nbytes = data.length;
+        // c-blosc treats a type size too large for the header as a stream of single bytes.
+        int ts = typeSize > MAX_TYPE_SIZE ? 1 : Math.max(typeSize, 1);
         if (nbytes == 0) {
-            return memcpy(data, Math.max(typeSize, 1));
+            return memcpy(data, ts);
         }
-        int ts = Math.max(typeSize, 1);
         boolean shuffle = ts > 1;
 
         byte[] blockData = data;

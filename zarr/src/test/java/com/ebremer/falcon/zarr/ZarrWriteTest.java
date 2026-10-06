@@ -31,6 +31,26 @@ class ZarrWriteTest {
 
     // ---- round trips ------------------------------------------------------------------------------
 
+    /**
+     * Blosc wrote the element size into its one-byte header field modulo 256 but shuffled with the full
+     * size, so raw types of 256 bytes or more (r2048 and up) read back wrong, even in Falcon (P0 Z5).
+     */
+    @Test
+    void bloscRoundTripsElementsOf256BytesAndMore() {
+        for (String type : new String[] {"r2040", "r2048", "r2400", "r8000"}) {
+            DataType dt = DataType.of(type);
+            MemoryStore store = new MemoryStore();
+            ZarrArray a = Zarr.createArray(store,
+                    ArraySpec.builder(new long[] {12}, dt).chunkShape(5).blosc().build());
+            byte[] data = new byte[12 * dt.byteCount()];
+            for (int i = 0; i < data.length; i++) {
+                data[i] = (byte) (i % dt.byteCount() * 3 + i / dt.byteCount()); // differs in every element byte
+            }
+            a.writeRawBytes(data);
+            assertArrayEquals(data, Zarr.openArray(store).readRawBytes(), type);
+        }
+    }
+
     @Test
     void writesAndReadsWholeArray() {
         MemoryStore store = new MemoryStore();

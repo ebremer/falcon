@@ -52,6 +52,12 @@ public final class ChunkPipeline {
      */
     public static ChunkPipeline of(DataType dataType, long[] chunkShape, List<JsonObject> codecSpecs) {
         int[] shape = Pipelines.toIntShape(chunkShape);
+        if (!dataType.isVariableLength()
+                && (long) Pipelines.elementCount(shape) * dataType.byteCount() > Integer.MAX_VALUE) {
+            // A decoded chunk is one Java array; every size computed from it below then fits in an int.
+            throw new ZarrFormatException("a chunk of " + Arrays.toString(chunkShape) + " " + dataType.name()
+                    + " elements is larger than the 2 GB a single buffer holds");
+        }
         List<ArrayArrayCodec> arrayCodecs = new ArrayList<>();
         ArrayBytesCodec bytesCodec = null;
         boolean vlen = false;

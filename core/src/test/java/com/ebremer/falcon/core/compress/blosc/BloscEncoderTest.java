@@ -1,6 +1,7 @@
 package com.ebremer.falcon.core.compress.blosc;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.ByteBuffer;
@@ -77,6 +78,27 @@ class BloscEncoderTest {
             byte[] rnd = new byte[ts * 100];
             random.nextBytes(rnd);
             roundTrip("ts" + ts + "-random", rnd, ts);
+        }
+    }
+
+    /**
+     * The header stores the type size in one byte. A larger type size was written modulo 256 while the data
+     * was shuffled with the full size, so 256 read back as 0 and 300 as 44: wrong bytes. Like c-blosc, the
+     * encoder now writes 1 and does not shuffle.
+     */
+    @Test
+    void typeSizesAbove255AreWrittenAsOne() {
+        for (int ts : new int[] {255, 256, 300, 1000}) {
+            byte[] data = new byte[ts * 40];
+            for (int i = 0; i < data.length; i++) {
+                data[i] = (byte) ((i % ts) * 7 + i / ts); // compressible, and different in every element byte
+            }
+            byte[] buffer = BloscEncoder.compress(data, ts);
+            assertEquals(ts > 255 ? 1 : ts, buffer[3] & 0xff, "header type size for " + ts);
+            assertEquals(ts > 255 ? 0 : 1, buffer[2] & 0x01, "shuffle flag for " + ts);
+            assertArrayEquals(data, BloscDecoder.decompress(buffer), "ts" + ts);
+            byte[] empty = BloscEncoder.compress(new byte[0], ts);
+            assertEquals(ts > 255 ? 1 : ts, empty[3] & 0xff, "empty buffer's type size for " + ts);
         }
     }
 }

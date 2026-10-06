@@ -138,6 +138,45 @@ class StoreTest {
         assertThrows(UnsupportedOperationException.class, () -> store.delete("zarr.json"));
     }
 
+    /**
+     * {@code set} truncated the file and wrote it in place, so a concurrent reader could see a short or
+     * mixed value (P0 Z9). It now writes a temporary file and renames it over the old one.
+     */
+    @Test
+    void aConcurrentReaderSeesWholeValuesOnly(@TempDir Path tmp) throws Exception {
+        FileSystemStore store = FileSystemStore.open(tmp);
+        byte[] big = new byte[256 * 1024];
+        java.util.Arrays.fill(big, (byte) 'a');
+        byte[] small = new byte[1000];
+        java.util.Arrays.fill(small, (byte) 'b');
+        store.set("c/0", small);
+
+        java.util.concurrent.atomic.AtomicBoolean done = new java.util.concurrent.atomic.AtomicBoolean();
+        java.util.concurrent.atomic.AtomicReference<String> torn = new java.util.concurrent.atomic.AtomicReference<>();
+        Thread reader = new Thread(() -> {
+            while (!done.get() && torn.get() == null) {
+                byte[] value = store.get("c/0").orElse(null);
+                if (value == null || !(java.util.Arrays.equals(value, big) || java.util.Arrays.equals(value, small))) {
+                    torn.set(value == null ? "absent" : value.length + " bytes");
+                }
+            }
+        });
+        reader.start();
+        try {
+            for (int i = 0; i < 300 && torn.get() == null; i++) {
+                store.set("c/0", i % 2 == 0 ? big : small);
+            }
+        } finally {
+            done.set(true);
+            reader.join();
+        }
+        assertEquals(null, torn.get(), "a reader saw part of a write");
+        // No temporary file is left behind.
+        try (java.util.stream.Stream<Path> files = Files.list(tmp.resolve("c"))) {
+            assertEquals(List.of("0"), files.map(p -> p.getFileName().toString()).toList());
+        }
+    }
+
     @Test
     void listingAnAbsentRootIsEmpty(@TempDir Path tmp) {
         FileSystemStore store = FileSystemStore.openReadOnly(tmp.resolve("missing"));

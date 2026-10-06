@@ -4,8 +4,10 @@ import com.ebremer.falcon.zarr.ZarrException;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.file.AccessDeniedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.util.List;
 import java.util.Optional;
@@ -19,8 +21,16 @@ import java.util.stream.Stream;
  *
  * <p>Keys are validated (see {@link StoreKeys#validate}) and the resolved path is confirmed to stay
  * within the root, so a crafted key cannot escape the store.
+ *
+ * <p>{@link #set} writes a temporary file beside the target and renames it into place, so a reader sees
+ * either the old value or the new one, never part of a write, and a process that dies mid-write leaves
+ * the old value. It does not force the bytes to the disk: after a power loss, a value written just before
+ * may be lost. A temporary file left by a process that died mid-write is named
+ * {@code .<name>.<random>.tmp}.
  */
 public final class FileSystemStore implements Store {
+
+    private static final int REPLACE_ATTEMPTS = 20;
 
     private final Path root;
     private final boolean writable;
@@ -140,14 +150,47 @@ public final class FileSystemStore implements Store {
     public void set(String key, byte[] value) {
         requireWritable();
         Path path = resolve(key);
+        Path temp = null;
         try {
-            Path parent = path.getParent();
-            if (parent != null) {
-                Files.createDirectories(parent);
-            }
-            Files.write(path, value);
+            Path parent = path.getParent(); // never null: the path is under the root
+            Files.createDirectories(parent);
+            // Written beside the target, so the rename stays within one file system and is atomic.
+            temp = Files.createTempFile(parent, "." + path.getFileName() + ".", ".tmp");
+            Files.write(temp, value);
+            replace(temp, path);
+            temp = null;
         } catch (IOException e) {
             throw new ZarrException("failed to write key '" + key + "'", e);
+        } finally {
+            if (temp != null) {
+                try {
+                    Files.deleteIfExists(temp);
+                } catch (IOException ignored) {
+                    // the write already failed; that error is the one to report
+                }
+            }
+        }
+    }
+
+    /** Renames {@code temp} over {@code path} in one step. */
+    private static void replace(Path temp, Path path) throws IOException {
+        // Windows refuses to replace a file while any handle has it open, even a reader's, which holds it
+        // for moments: so retry for a while (about 0.75 s in all) before giving up.
+        for (int attempt = 1; ; attempt++) {
+            try {
+                Files.move(temp, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+                return;
+            } catch (AccessDeniedException e) {
+                if (attempt == REPLACE_ATTEMPTS) {
+                    throw e;
+                }
+                try {
+                    Thread.sleep(Math.min(1L << attempt, 50));
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw e;
+                }
+            }
         }
     }
 

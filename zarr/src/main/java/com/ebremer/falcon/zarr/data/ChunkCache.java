@@ -10,41 +10,59 @@ import java.util.Map;
  * read.
  *
  * <p>Only whole, present chunks are cached (an absent chunk is cheap to regenerate as fill, and a
- * partially decoded shard region would be wrong to reuse). Writes evict the affected key so a read after
- * a write sees fresh data. Not thread-safe, matching the rest of the read path.
+ * partially decoded shard region would be wrong to reuse). A write through the array handle that owns
+ * the cache invalidates the chunk's entry after the store has changed; a write through any other handle
+ * or process is not seen. The cache is thread-safe: a read that started before an invalidation does not
+ * cache what it read (see {@link #stamp()}).
  *
- * <p>This type is module-internal (the {@code data} package is not exported); an array owns one and
- * threads it into its reads and writes.
+ * <p>This type is module-internal (the {@code data} package is not exported); an array handle made with
+ * {@code ZarrArray.withChunkCache} owns one and threads it into its reads and writes.
  */
 public final class ChunkCache {
-
-    /** Default budget: enough for a handful of typical chunks without holding much memory. */
-    public static final long DEFAULT_MAX_BYTES = 16L * 1024 * 1024;
 
     private final long maxBytes;
     private final LinkedHashMap<String, byte[]> entries;
     private long bytes;
+    private long invalidations; // counts invalidate() and clear() calls; see stamp()
 
-    /** A cache with the {@linkplain #DEFAULT_MAX_BYTES default} budget. */
-    public ChunkCache() {
-        this(DEFAULT_MAX_BYTES);
-    }
-
-    /** A cache bounded by {@code maxBytes} of decoded chunk data. */
+    /**
+     * A cache bounded by {@code maxBytes} of decoded chunk data.
+     *
+     * @throws IllegalArgumentException if {@code maxBytes} is not positive
+     */
     public ChunkCache(long maxBytes) {
+        if (maxBytes <= 0) {
+            throw new IllegalArgumentException("chunk cache size must be positive, was " + maxBytes);
+        }
         this.maxBytes = maxBytes;
         this.entries = new LinkedHashMap<>(16, 0.75f, true); // access-order: eldest is least-recently-used
     }
 
+    /** The cache's budget in bytes of decoded chunk data. */
+    public long maxBytes() {
+        return maxBytes;
+    }
+
     /** The decoded chunk for {@code key}, or {@code null} if not cached. */
-    byte[] get(String key) {
+    synchronized byte[] get(String key) {
         return entries.get(key);
     }
 
-    /** Caches a decoded chunk, evicting least-recently-used entries to stay within the budget. */
-    void put(String key, byte[] chunk) {
-        if (chunk.length > maxBytes) {
-            return; // a single chunk larger than the whole budget is not worth caching
+    /**
+     * A stamp to take before reading a chunk from the store and to pass to {@link #put}: the put is then
+     * dropped if anything was invalidated in between, since what was read may predate that write.
+     */
+    synchronized long stamp() {
+        return invalidations;
+    }
+
+    /**
+     * Caches a decoded chunk read after {@code stamp} was taken, evicting least-recently-used entries to
+     * stay within the budget.
+     */
+    synchronized void put(String key, byte[] chunk, long stamp) {
+        if (stamp != invalidations || chunk.length > maxBytes) {
+            return; // possibly stale, or a single chunk larger than the whole budget
         }
         byte[] previous = entries.put(key, chunk);
         if (previous != null) {
@@ -54,8 +72,9 @@ public final class ChunkCache {
         evict();
     }
 
-    /** Removes {@code key} (after it is written or deleted). */
-    void remove(String key) {
+    /** Drops {@code key}, after the chunk stored under it was written or deleted. */
+    synchronized void invalidate(String key) {
+        invalidations++;
         byte[] previous = entries.remove(key);
         if (previous != null) {
             bytes -= previous.length;
@@ -63,7 +82,8 @@ public final class ChunkCache {
     }
 
     /** Empties the cache. */
-    public void clear() {
+    public synchronized void clear() {
+        invalidations++;
         entries.clear();
         bytes = 0;
     }

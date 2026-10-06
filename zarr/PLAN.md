@@ -13,7 +13,7 @@ It is **Falcon Phase 2**; the HDF5 module (Phase 1) is the sibling and the templ
 > **Blosc** decoder (container + `blosclz`/`lz4`/`lz4hc`/`zlib`/`zstd` + byte- and bit-shuffle,
 > validated against 51 c-blosc buffers). Zarr **v2 stores are read** too (`.zarray`/`.zgroup`/`.zattrs` translated to the v3 model).
 > Corrupt-input fuzzing is in place. Stores: memory, filesystem,
-> **ZIP** archive, and read-only **HTTP** (byte-range requests). A per-array decoded-chunk cache,
+> **ZIP** archive, and read-only **HTTP** (byte-range requests). An opt-in decoded-chunk cache,
 > a streaming `blocks()` API, and a user guide round out the Z9 polish. 228 tests green.
 >
 > **Remaining** (tracked in [`TODO.md`](TODO.md)): and benchmarks and byte-range coalescing for sharding.

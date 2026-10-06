@@ -144,17 +144,16 @@ class Benchmarks {
 
         // 10 overlapping selections that all revisit chunk row 3
         long cached = median(() -> {
-            ZarrArray a = Zarr.openArray(store);
+            ZarrArray a = Zarr.openArray(store).withChunkCache(16L << 20);
             for (int i = 0; i < 10; i++) {
                 sink += a.select(new long[] {3, i * 100}, new long[] {1, 4000}).readInts()[0];
             }
             return 0;
         });
         long uncached = median(() -> {
-            ZarrArray a = Zarr.openArray(store);
+            ZarrArray a = Zarr.openArray(store); // no cache: every read decodes the chunk again
             for (int i = 0; i < 10; i++) {
                 sink += a.select(new long[] {3, i * 100}, new long[] {1, 4000}).readInts()[0];
-                a.clearChunkCache();
             }
             return 0;
         });

@@ -2,6 +2,7 @@ package com.ebremer.falcon.zarr.datatype;
 
 import com.ebremer.falcon.zarr.ZarrFormatException;
 import com.ebremer.falcon.zarr.ZarrUnsupportedException;
+import com.ebremer.falcon.zarr.data.Float16;
 import com.ebremer.falcon.zarr.json.JsonArray;
 import com.ebremer.falcon.zarr.json.JsonBool;
 import com.ebremer.falcon.zarr.json.JsonException;
@@ -228,7 +229,7 @@ public final class DataType {
     private static byte[] floatBits(double value, int size, ByteOrder order) {
         byte[] out = new byte[size];
         long bits = switch (size) {
-            case 2 -> Float.floatToFloat16((float) value) & 0xffffL;
+            case 2 -> Float16.fromDouble(value) & 0xffffL; // not via float, which would round twice
             case 4 -> Float.floatToRawIntBits((float) value) & 0xffffffffL;
             case 8 -> Double.doubleToRawLongBits(value);
             default -> throw new IllegalStateException("float size " + size);
@@ -255,7 +256,16 @@ public final class DataType {
             default -> throw new IllegalStateException("float size " + size);
         }
         if (Double.isNaN(value)) {
-            return new JsonString("NaN");
+            // "NaN" decodes to the canonical quiet NaN; any other NaN keeps its bits as a hex string.
+            long canonical = switch (size) {
+                case 2 -> 0x7e00L;
+                case 4 -> 0x7fc00000L;
+                default -> 0x7ff8000000000000L;
+            };
+            if (bits == canonical) {
+                return new JsonString("NaN");
+            }
+            return new JsonString("0x" + String.format("%0" + (2 * size) + "x", bits));
         }
         if (value == Double.POSITIVE_INFINITY) {
             return new JsonString("Infinity");

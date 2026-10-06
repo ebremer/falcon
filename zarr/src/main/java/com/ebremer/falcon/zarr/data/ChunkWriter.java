@@ -37,29 +37,22 @@ public final class ChunkWriter {
         DataType dataType = meta.dataType();
         int elementSize = dataType.byteCount();
 
-        long total = 1;
-        for (long s : selShape) {
-            total *= s;
-        }
-        long expected = total * elementSize;
-        if (elements.length != expected) {
+        long total = RegularChunkGrid.elementCount(selShape); // within the array, so it fits a long
+        if (total > Integer.MAX_VALUE / elementSize || elements.length != total * elementSize) {
             throw new IllegalArgumentException(
-                    "selection holds " + total + " elements (" + expected + " bytes) but got " + elements.length);
+                    "selection holds " + total + " elements of " + elementSize + " bytes but got " + elements.length
+                            + " bytes");
         }
         if (total == 0) {
             return;
         }
 
-        ChunkPipeline pipeline = meta.pipeline();
+        ChunkPipeline pipeline = meta.pipeline(); // checks that a chunk fits one buffer
         ByteOrder order = pipeline.elementOrder();
         ChunkKeyEncoding encoding = meta.chunkKeyEncoding();
         byte[] fillElement = meta.fillValueBytes(order);
 
-        int chunkElements = 1;
-        for (long c : chunkShape) {
-            chunkElements *= (int) c;
-        }
-        int chunkBytes = chunkElements * elementSize;
+        int chunkBytes = (int) grid.elementsPerChunk() * elementSize;
         byte[] emptyChunk = new byte[chunkBytes];
         ChunkAssembler.tile(emptyChunk, fillElement);
 
@@ -103,7 +96,7 @@ public final class ChunkWriter {
         for (int i = 0; i < rank; i++) {
             chunkOrigin[i] = coord[i] * chunkShape[i];
             long lo = Math.max(selOffset[i], chunkOrigin[i]);
-            long hi = Math.min(selEnd[i], chunkOrigin[i] + chunkShape[i]);
+            long hi = ChunkAssembler.overlapEnd(chunkOrigin[i], chunkShape[i], selEnd[i]);
             srcOrigin[i] = lo - selOffset[i];
             dstOrigin[i] = lo - chunkOrigin[i];
             block[i] = hi - lo;
@@ -125,13 +118,14 @@ public final class ChunkWriter {
         }
         Blocks.copy(elements, selShape, srcOrigin, chunk, chunkShape, dstOrigin, block, elementSize);
 
-        if (cache != null) {
-            cache.remove(key); // a cached decode of this chunk is now stale
-        }
         if (Arrays.equals(chunk, emptyChunk)) {
             store.delete(key); // an all-fill chunk is represented by its absence
-            return;
+        } else {
+            store.set(key, pipeline.encode(chunk, fillElement));
         }
-        store.set(key, pipeline.encode(chunk, fillElement));
+        if (cache != null) {
+            // After the store changes, so a read racing this write cannot cache the old bytes afterwards.
+            cache.invalidate(key);
+        }
     }
 }

@@ -17,9 +17,12 @@ public final class RegularChunkGrid {
     private final long[] arrayShape;
     private final long[] chunkShape;
     private final long[] gridShape;
+    private final long size;
 
     /**
-     * @throws IllegalArgumentException if the shapes differ in rank or a chunk dimension is not positive
+     * @throws IllegalArgumentException if the shapes differ in rank, a chunk dimension is not positive, an
+     *                                  array dimension is negative, or the array has more than
+     *                                  {@code Long.MAX_VALUE} elements
      */
     public RegularChunkGrid(long[] arrayShape, long[] chunkShape) {
         if (arrayShape.length != chunkShape.length) {
@@ -36,12 +39,33 @@ public final class RegularChunkGrid {
             if (arrayShape[i] < 0) {
                 throw new IllegalArgumentException("array dimension " + i + " must be non-negative");
             }
-            gridShape[i] = ceilDiv(arrayShape[i], chunkShape[i]);
+            gridShape[i] = Math.ceilDiv(arrayShape[i], chunkShape[i]);
+        }
+        try {
+            this.size = elementCount(arrayShape);
+        } catch (ArithmeticException e) {
+            throw new IllegalArgumentException("array shape " + Arrays.toString(arrayShape)
+                    + " has more than " + Long.MAX_VALUE + " elements");
         }
     }
 
-    private static long ceilDiv(long a, long b) {
-        return (a + b - 1) / b;
+    /**
+     * The number of elements in a block of {@code shape}: the product of its dimensions, 1 for rank 0, and
+     * 0 if any dimension is 0 (even when the others multiply past {@code long}).
+     *
+     * @throws ArithmeticException if the product overflows {@code long}
+     */
+    public static long elementCount(long[] shape) {
+        for (long d : shape) {
+            if (d == 0) {
+                return 0;
+            }
+        }
+        long count = 1;
+        for (long d : shape) {
+            count = Math.multiplyExact(count, d);
+        }
+        return count;
     }
 
     /** The number of dimensions. */
@@ -64,22 +88,26 @@ public final class RegularChunkGrid {
         return gridShape.clone();
     }
 
-    /** The total number of chunks (1 for a scalar array; 0 if any dimension is empty). */
-    public long chunkCount() {
-        long count = 1;
-        for (long g : gridShape) {
-            count *= g;
-        }
-        return count;
+    /** The number of elements in the array (1 for a scalar array; 0 if any dimension is empty). */
+    public long size() {
+        return size;
     }
 
-    /** The number of elements in a full chunk (the product of the chunk shape). */
+    /**
+     * The total number of chunks (1 for a scalar array; 0 if any dimension is empty). It never exceeds
+     * {@link #size()}, so it cannot overflow.
+     */
+    public long chunkCount() {
+        return elementCount(gridShape);
+    }
+
+    /**
+     * The number of elements in a full chunk (the product of the chunk shape).
+     *
+     * @throws ArithmeticException if the product overflows {@code long}
+     */
     public long elementsPerChunk() {
-        long count = 1;
-        for (long c : chunkShape) {
-            count *= c;
-        }
-        return count;
+        return elementCount(chunkShape);
     }
 
     /** Whether {@code coords} names a chunk in this grid. */

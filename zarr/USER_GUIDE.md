@@ -73,8 +73,16 @@ array.blocks().forEach(block -> {
 });
 ```
 
-Overlapping or repeated selections reuse a per-array **decoded-chunk cache** (LRU, ~16&nbsp;MB), so each
-chunk is decompressed once. Call `array.clearChunkCache()` to release it.
+Every read goes to the store, so it sees every write made before it, through any handle. For overlapping
+or repeated selections of a compressed array, ask for a handle with a **decoded-chunk cache**, which
+decompresses each chunk once:
+
+```java
+ZarrArray cached = array.withChunkCache(64L << 20);   // up to 64 MB of decoded chunks, LRU
+```
+
+A cached handle sees its own writes, but not writes made through other handles or by other processes
+while a chunk stays cached; `cached.clearChunkCache()` empties it. It may be shared between threads.
 
 ## Writing
 
@@ -102,6 +110,30 @@ Writes are chunk-aligned: a chunk the write covers completely is stored directly
 (including every edge chunk) is read back, updated, and re-encoded. A chunk that ends up holding only the
 fill value is **not stored** — its absence *is* the fill, which is how Zarr represents empty chunks.
 
+`build()` checks the whole spec as opening the array would (shapes, fill value, dimension names, chunk
+key encoding, codecs, and that a chunk fits one Java array), so a bad spec fails with
+`IllegalArgumentException` before anything is stored.
+
+**Creating where something exists.** `createArray` and `createGroup` refuse a path that already holds a
+node, and `createArray` also refuses one with any key under it (an array would read stray keys as its
+chunks); both throw `IllegalArgumentException`. To replace, pass `overwrite = true`, which first deletes
+everything under the path, an old array's chunks or an old group's whole subtree:
+
+```java
+ZarrArray fresh = root.createArray("x", spec, true);          // child: delete x/..., then create
+Zarr.createGroup(store, attributes, true);                    // root: delete every key in the store
+```
+
+**Numeric conversion.** The typed writers never wrap, saturate, or truncate a value:
+
+- an integer type takes only a whole number in its range: 200 into `int8`, `2.9` or `NaN` into `int32`,
+  and `-1` into `uint64` all throw `IllegalArgumentException`, naming the value and its index (and
+  nothing is written);
+- `uint64` takes doubles below 2<sup>64</sup>, so `writeDoubles` can store values above `Long.MAX_VALUE`;
+- a float type rounds to nearest (ties to even, once, even for `float16`), and refuses a finite value
+  beyond its range (`1e40` into `float32`); NaN and the infinities are stored as they are;
+- `bool` stores any nonzero value, NaN included, as true, as numpy does.
+
 `ArraySpec.builder` also offers `endian`, `gzip(level)`, `zstd()`, `blosc()`, `crc32c()`,
 `sharding(subChunkShape)`, `dimensionNames(...)`, and `chunkKeyEncoding("default"|"v2")`. The `zstd` and
 `blosc` compressors are written by Falcon's own pure-Java encoders (libzstd / c-blosc read the output).
@@ -122,7 +154,8 @@ ZarrGroup g = Zarr.createGroup(store);
 g.createGroup("model").createArray("weights", spec).writeFloats(...);
 ```
 
-Navigation reads the store on demand, so a group reflects the store's current contents.
+Navigation reads the store on demand, so a group reflects the store's current contents. Creating a node
+where one exists needs `overwrite` (see [Writing](#writing)).
 
 ## Data types and fill values
 
@@ -132,7 +165,11 @@ of the data type — it lives in the `bytes` codec (`ArraySpec.endian`, or the v
 v2).
 
 A fill value is stored as JSON; `array.fillValue()` returns it, and `array.fillValueBytes(order)` decodes
-it to element bytes. Non-finite floats use the strings `"NaN"`, `"Infinity"`, `"-Infinity"`.
+it to element bytes. Non-finite floats use the strings `"NaN"`, `"Infinity"`, `"-Infinity"`; a NaN other
+than the canonical quiet NaN is written as a hex string of its bits (`"0x7fc00001"`), so it survives.
+`ArraySpec.Builder.fillValue(long)` and `fillValue(double)` convert the number as the writers do and write
+it in the type's own form (`1` for an integer type, `true` for `bool`); `fillValue(JsonValue)` writes the
+JSON as given.
 
 ### Variable-length strings
 
@@ -149,7 +186,7 @@ String[] back = Zarr.openArray(store).readStrings();   // and Selection.readStri
 
 The numeric accessors (`readDoubles`/`writeInts`/…) reject a string array, and `readStrings`/`writeStrings`
 reject a numeric one. Strings compress with the `bytes→bytes` codecs (`gzip`, `zstd`, `blosc`) but cannot
-be sharded.
+be sharded. A `null` element is written as `""`, as numcodecs writes Python's `None`.
 
 ## Codecs and compression
 
@@ -188,6 +225,11 @@ HttpStore.openReadOnly("https://host/data/store");  // read-only over HTTP(S)
 `HttpStore` uses HTTP `Range` requests, so a remote sharded array reads only the bytes it needs. Plain
 HTTP has no directory listing, so a group's children cannot be *enumerated* over HTTP (a named child still
 opens fine). Implement `Store` yourself for other backends (object stores, databases).
+
+`FileSystemStore` writes each value to a temporary file beside it and renames it into place, so a reader
+never sees part of a write, and a process that dies mid-write leaves the old value. It does not force the
+bytes to disk, so a value written just before a power loss may be lost. On Windows, where a file cannot be
+replaced while another handle has it open, a write waits briefly for readers to close it.
 
 ## What is and isn't supported
 

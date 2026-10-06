@@ -111,21 +111,66 @@ public final class ZarrGroup extends ZarrNode {
         return kind.cast(node);
     }
 
-    /** Creates (or replaces) a child group. */
+    /**
+     * Creates a child group.
+     *
+     * @throws IllegalArgumentException      if the name is invalid or a node already has it
+     * @throws UnsupportedOperationException if the store is read-only
+     */
     public ZarrGroup createGroup(String name) {
-        return createGroup(name, new JsonObject(java.util.Map.of()));
+        return createGroup(name, new JsonObject(java.util.Map.of()), false);
     }
 
-    /** Creates (or replaces) a child group with the given attributes. */
+    /**
+     * Creates a child group with the given attributes.
+     *
+     * @throws IllegalArgumentException      if the name is invalid or a node already has it
+     * @throws UnsupportedOperationException if the store is read-only
+     */
     public ZarrGroup createGroup(String name, JsonObject attributes) {
+        return createGroup(name, attributes, false);
+    }
+
+    /**
+     * Creates a child group with the given attributes. With {@code overwrite}, everything stored under the
+     * name is deleted first: an old array's chunks, or an old group and all its descendants. Without it, a
+     * name that a node already has is refused.
+     *
+     * @throws IllegalArgumentException      if the name is invalid, or a node has it and {@code overwrite}
+     *                                       is false
+     * @throws UnsupportedOperationException if the store is read-only
+     */
+    public ZarrGroup createGroup(String name, JsonObject attributes, boolean overwrite) {
         String childPath = childPath(name);
+        ZarrNode.prepareCreate(store, childPath, false, overwrite);
         store.set(ZarrNode.metadataKey(childPath), Json.writeBytes(groupJson(attributes)));
         return ZarrNode.open(store, childPath).asGroup();
     }
 
-    /** Creates (or replaces) a child array described by {@code spec}. */
+    /**
+     * Creates a child array described by {@code spec}.
+     *
+     * @throws IllegalArgumentException      if the name is invalid, or anything is stored under it (a node,
+     *                                       or keys a new array would read as its chunks)
+     * @throws UnsupportedOperationException if the store is read-only
+     */
     public ZarrArray createArray(String name, ArraySpec spec) {
+        return createArray(name, spec, false);
+    }
+
+    /**
+     * Creates a child array described by {@code spec}. With {@code overwrite}, everything stored under the
+     * name is deleted first: an old array's chunks, or an old group and all its descendants. Without it,
+     * the name is refused if anything is stored under it, a node or keys a new array would read as its
+     * chunks.
+     *
+     * @throws IllegalArgumentException      if the name is invalid, or anything is stored under it and
+     *                                       {@code overwrite} is false
+     * @throws UnsupportedOperationException if the store is read-only
+     */
+    public ZarrArray createArray(String name, ArraySpec spec, boolean overwrite) {
         String childPath = childPath(name);
+        ZarrNode.prepareCreate(store, childPath, true, overwrite);
         store.set(ZarrNode.metadataKey(childPath), Json.writeBytes(spec.toJson()));
         return ZarrNode.open(store, childPath).asArray();
     }

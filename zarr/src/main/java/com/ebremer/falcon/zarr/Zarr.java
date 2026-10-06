@@ -62,19 +62,61 @@ public final class Zarr {
         return open(store).asArray();
     }
 
-    /** Creates (or replaces) the root group of {@code store} and returns it. */
+    /**
+     * Creates the root group of {@code store} and returns it.
+     *
+     * @throws IllegalArgumentException      if the store already has a root node
+     * @throws UnsupportedOperationException if the store is read-only
+     */
     public static ZarrGroup createGroup(Store store) {
-        return createGroup(store, new JsonObject(Map.of()));
+        return createGroup(store, new JsonObject(Map.of()), false);
     }
 
-    /** Creates (or replaces) the root group of {@code store} with the given attributes. */
+    /**
+     * Creates the root group of {@code store} with the given attributes.
+     *
+     * @throws IllegalArgumentException      if the store already has a root node
+     * @throws UnsupportedOperationException if the store is read-only
+     */
     public static ZarrGroup createGroup(Store store, JsonObject attributes) {
+        return createGroup(store, attributes, false);
+    }
+
+    /**
+     * Creates the root group of {@code store} with the given attributes. With {@code overwrite}, every key
+     * in the store is deleted first, the old hierarchy and anything else stored there alike; without it, a
+     * store that already has a root node is refused.
+     *
+     * @throws IllegalArgumentException      if the store has a root node and {@code overwrite} is false
+     * @throws UnsupportedOperationException if the store is read-only
+     */
+    public static ZarrGroup createGroup(Store store, JsonObject attributes, boolean overwrite) {
+        ZarrNode.prepareCreate(store, "", false, overwrite);
         store.set("zarr.json", Json.writeBytes(ZarrGroup.groupJson(attributes)));
         return ZarrNode.open(store, "").asGroup();
     }
 
-    /** Creates (or replaces) an array at the root of {@code store} and returns it. */
+    /**
+     * Creates an array at the root of {@code store} and returns it.
+     *
+     * @throws IllegalArgumentException      if the store holds any key (a root array would read stray
+     *                                       keys as its chunks)
+     * @throws UnsupportedOperationException if the store is read-only
+     */
     public static ZarrArray createArray(Store store, ArraySpec spec) {
+        return createArray(store, spec, false);
+    }
+
+    /**
+     * Creates an array at the root of {@code store}. With {@code overwrite}, every key in the store is
+     * deleted first; without it, a store that holds any key is refused, since a root array would read stray
+     * keys as its chunks.
+     *
+     * @throws IllegalArgumentException      if the store holds any key and {@code overwrite} is false
+     * @throws UnsupportedOperationException if the store is read-only
+     */
+    public static ZarrArray createArray(Store store, ArraySpec spec, boolean overwrite) {
+        ZarrNode.prepareCreate(store, "", true, overwrite);
         store.set("zarr.json", Json.writeBytes(spec.toJson()));
         return ZarrNode.open(store, "").asArray();
     }

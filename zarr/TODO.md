@@ -38,17 +38,30 @@ consequences:
   - For **H1**, core's zstd and LZF decoders take a maximum size, but Zarr's pipeline does not pass one
     yet.
 
+**Update (2026-10-05): P0 is done.** Every silent-wrong-data and data-loss finding is fixed; 286 Zarr
+tests and 39 core tests pass. Three fixes change behaviour, each as Erich chose:
+- creating a node where one exists is refused, unless `overwrite = true`, which deletes the old node's
+  keys first (Z1);
+- the decoded-chunk cache is opt-in, per handle (`withChunkCache`), so a plain handle always reads the
+  store (Z3);
+- the typed writers store a value exactly (a float type rounds to nearest) or throw
+  `IllegalArgumentException` (Z4).
+
+zarr-python 3.4 and numcodecs 0.17 (c-blosc) read every fixed case as Falcon now writes it. That was a
+one-off check; T1 is the committed version of it. What remains is P1 (interop, hardening, concurrency
+beyond the cache, remote performance, test gaps), P2, and P3.
+
 ## Do these first — top 10
 
-1. **Z1/Z2 — node replacement destroys or corrupts data.** Re-creating an array keeps its old chunks,
-   and a bad spec overwrites good metadata.
-2. **Z3/C1 — chunk cache.** Reads are stale across handles, and concurrent use throws
-   `ConcurrentModificationException`.
-3. **Z4 — silent numeric conversion on write.** `uint64` values saturate and narrowing wraps.
-4. **Z5 — the blosc encoder corrupts data when the element size is ≥ 256 bytes** (`r2048` and up).
+1. ~~**Z1/Z2 — node replacement destroys or corrupts data.**~~ Done 2026-10-05 (below).
+2. **Z3/C1 — chunk cache.** ~~Reads are stale across handles~~ (Z3, done 2026-10-05), ~~and concurrent use
+   throws `ConcurrentModificationException`~~ (the cache part of C1, done with Z3). The rest of C1 is open.
+3. ~~**Z4 — silent numeric conversion on write.**~~ Done 2026-10-05 (below).
+4. ~~**Z5 — the blosc encoder corrupts data when the element size is ≥ 256 bytes.**~~ Done 2026-10-05 in
+   core (below).
 5. ~~**Z6/Z7 — the zstd decoder accepts corrupt frames and drops trailing frames.**~~ Done 2026-10-05 in
    core (below).
-6. **Z8 — bounds and overflow.** An offset near `Long.MAX` passes validation, and a size can wrap to 0.
+6. ~~**Z8 — bounds and overflow.**~~ Done 2026-10-05 (below).
 7. **H1 — bound decompression.** Pass the expected size into every bytes→bytes codec; zip bombs and
    bogus header sizes cause OOM today.
 8. **I1–I3 — interop.**
@@ -66,7 +79,21 @@ consequences:
 
 ## P0 — silent wrong data / data loss
 
-- [ ] **Z1 — `createArray` / `createGroup` "replace" a node by overwriting only `zarr.json`.** ✔
+All of P0 is done (2026-10-05). Each item says what was done, then gives the original finding.
+
+- [x] **Z1 — `createArray` / `createGroup` "replace" a node by overwriting only `zarr.json`.** ✔ **Done
+  2026-10-05.** Erich chose refuse-by-default over replace:
+    - `createArray` and `createGroup`, on `Zarr` (the root) and `ZarrGroup`, refuse with
+      `IllegalArgumentException` a path that holds a node. `createArray` also refuses a path with any key
+      under it, since stray chunks would read as the new array's data.
+    - New overloads take `overwrite`. It deletes every key under the path (for the root, the whole store),
+      the node's metadata first, then writes the new node.
+    - zarr-python 3.4 does the same: `ContainsArrayError` by default, and `overwrite=True` deletes the
+      prefix.
+    - `FileSystemStore` leaves the emptied directories behind; nothing reads them.
+    - Tests: `ZarrCreateTest`.
+
+  The original finding follows.
   - **Where:** `ZarrGroup.java:127-131`, `Zarr.java:77-79`.
   - **Defect:** the old chunk keys survive.
   - **Failure:**
@@ -74,7 +101,15 @@ consequences:
     - Re-creating it as float32 reads `[1.4E-45, …]` (the old int bits reinterpreted).
   - **Fix:** delete the node's prefix before writing new metadata, or refuse unless an explicit
     `overwrite` flag is passed (see F6).
-- [ ] **Z2 — `ArraySpec.build()` validates almost nothing, and `zarr.json` is written before it is parsed.** ✔
+- [x] **Z2 — `ArraySpec.build()` validates almost nothing, and `zarr.json` is written before it is parsed.** ✔
+  **Done 2026-10-05.**
+    - `build()` serializes the spec's `zarr.json`, parses it as opening would, and builds the codec
+      pipeline. Any failure throws `IllegalArgumentException` before anything touches the store.
+    - The pipeline now also refuses a chunk larger than one Java array (2 GB). So the default single chunk
+      of a huge array fails at `build()`, not at the first write.
+    - Tests: `ZarrCreateTest`.
+
+  The original finding follows.
   - **Where:** `ArraySpec.java:281`, `ZarrGroup.java:129`, `Zarr.java:78`.
   - **Failure:** a bad spec overwrites a good array's metadata and leaves the node unopenable, and the
     parent's `children()` then throws too. Examples:
@@ -85,13 +120,37 @@ consequences:
     - `gzip(42)`.
   - **Fix:** parse `spec.toJson()` and build the pipeline inside `build()`, throwing
     `IllegalArgumentException` *before* anything touches the store.
-- [ ] **Z3 — the chunk cache is per-instance and never invalidated by writes through other handles.** ✔
+- [x] **Z3 — the chunk cache is per-instance and never invalidated by writes through other handles.** ✔
+  **Done 2026-10-05.** Erich chose opt-in:
+    - A plain `ZarrArray` handle has no cache: every read goes to the store.
+    - `withChunkCache(maxBytes)` returns a handle with its own LRU. It is documented to see its own writes,
+      but not other handles' or processes' until `clearChunkCache()`.
+    - The cache is synchronized, and a write invalidates its key *after* the store changes.
+    - A read stamps the cache before it fetches, and its put is dropped if anything was invalidated since.
+      So a read that races a write cannot re-cache the old bytes.
+    - Tests: `ChunkCacheTest`, `ChunkCacheStampTest`.
+
+  The original finding follows.
   - **Where:** `data/ChunkCache.java`, `ZarrArray.java:25,229-236`, `data/ChunkAssembler.java:138-141`.
   - **Failure:** a reader handle keeps returning old data after `g.array("x").writeInts(...)`, contrary
     to "reflects the store's current contents".
   - **Fix:** share one cache per (store, path), or validate entries by size or etag, or make caching
     opt-in. Evict *after* `store.set`, not before. Concurrency is C1.
-- [ ] **Z4 — writes convert numbers silently and lossily.** ✔
+- [x] **Z4 — writes convert numbers silently and lossily.** ✔ **Done 2026-10-05.** Erich chose exact or
+  error:
+    - **Integer types:** a value must be a whole number in range. Otherwise `IllegalArgumentException`
+      names the value and its index, and nothing is written.
+    - **uint64:** takes doubles in [0, 2^64) exactly.
+    - **Float types:** round to nearest, and refuse a finite value beyond the type's range.
+      - `float16` rounds once, from the double (`data/Float16`). It matches numpy on 1.6M doubles,
+        ties included, and the JDK's `floatToFloat16` on all 2^32 floats.
+      - `long` → `float32` rounds once too.
+    - **bool:** stores any nonzero value, NaN included, as true, as numpy does.
+    - **Also fixed:** `readDoubles` on uint64 misrounded when halving dropped the low bit (2^63 + 1025
+      read as 2^63). It now keeps that bit (round to odd).
+    - Tests: `ConversionTest`, `Float16Test`.
+
+  The original finding follows.
   - **Where:** `data/Elements.java:106,115,139-153`, `datatype/DataType.java:231`.
   - **Failures:**
     - `writeDoubles` / `writeFloats` into `uint64` saturates at 2^63−1, so `1.8e19` is stored as
@@ -104,7 +163,13 @@ consequences:
     - Range-check and throw a typed error, or document an explicit clamp policy.
     - Fix the uint64 conversion (`v ≥ 2^63 → (long)(v−2^63) ^ Long.MIN_VALUE`).
     - Round double→half directly.
-- [ ] **Z5 — `BloscEncoder` writes the element size into a 1-byte header field as `(byte) typeSize`, but shuffles with the full size.** ✔
+- [x] **Z5 — `BloscEncoder` writes the element size into a 1-byte header field as `(byte) typeSize`, but shuffles with the full size.** ✔
+  **Done 2026-10-05, in core** (`core/.../compress/blosc/BloscEncoder.java`):
+    - As c-blosc does, a type size above 255 is written as 1 and the data is not shuffled.
+    - c-blosc (numcodecs 0.17) decodes Falcon's 256-, 300-, and 1000-byte-element chunks exactly.
+    - Tests: `BloscEncoderTest`, `ZarrWriteTest.bloscRoundTripsElementsOf256BytesAndMore`.
+
+  The original finding follows.
   - **Where:** `codec/blosc/BloscEncoder.java:37-38,76`.
   - **Failure:** for raw types with 256-byte or larger elements (`r2048`+), data is corrupted — even in
     Falcon's *own* round trip. c-blosc decodes the 300- and 1000-byte cases to wrong bytes and fails on
@@ -149,7 +214,16 @@ consequences:
     `BytesCodec`'s length check catches this for fixed-size types, but **vlen-utf8 loses data silently**.
     Skippable frames are rejected.
   - **Fix:** loop over frames, skip `0x184D2A5?` frames, and error on trailing bytes.
-- [ ] **Z8 — bounds and overflow in selections and sizes.** ✔
+- [x] **Z8 — bounds and overflow in selections and sizes.** ✔ **Done 2026-10-05.**
+    - **Selections** are checked as `shape > arrayShape − offset`, never forming `offset + shape`.
+    - **Chunk overlaps** end at `origin + min(extent, selEnd − origin)`. `origin + extent` overflowed in
+      the last chunk of an array near `Long.MAX_VALUE`.
+    - **Grid arithmetic:** `ceilDiv` is `Math.ceilDiv`. Element and chunk counts come from
+      `RegularChunkGrid.elementCount`, which is exact and 0 when any dimension is 0.
+    - **Opening** an array of more than 2^63 − 1 elements fails with `ZarrUnsupportedException`.
+    - Tests: `BoundsTest`. An array of shape `[Long.MAX_VALUE]` reads and writes its last chunk.
+
+  The original finding follows.
   - **Selections:** `offset+shape > arrayShape` overflows (`data/ChunkAssembler.java:42`).
     `select([Long.MAX_VALUE],[1])` is accepted: reads return fill, and writes store a stray key
     `c/2305843009213693951`.
@@ -157,12 +231,33 @@ consequences:
     `ZarrArray.java:118-124`, `Selection.java:285-291`). Shape `[2^32,2^32]` gives `size()==0`, and
     `blocks()` yields nothing, silently skipping all data.
   - **Fix:** check `shape[i] > arrayShape[i] − offset[i]`; use `Math.*Exact`; reject at parse time.
-- [ ] **Z9 — `FileSystemStore.set` truncates the file in place.** ✔
+- [x] **Z9 — `FileSystemStore.set` truncates the file in place.** ✔ **Done 2026-10-05.**
+    - `set` writes `.<name>.<random>.tmp` beside the target, then renames it over the target with
+      `ATOMIC_MOVE`.
+    - Windows refuses to replace a file that another handle has open, a reader's included, so the rename
+      retries for about 0.75 s.
+    - It does not fsync; the class Javadoc and the guide say so.
+    - Test: `StoreTest.aConcurrentReaderSeesWholeValuesOnly`. It fails on the old in-place write (a reader
+      saw 0 bytes) and passes now.
+
+  The original finding follows.
   - **Where:** `store/FileSystemStore.java:148`.
   - **Failure:** a concurrent reader sees half-written chunks (2 of 169 reads failed with "gzip decode
     failed"). A crash leaves a truncated chunk or `zarr.json`.
   - **Fix:** write a temp file in the same directory, then `Files.move(ATOMIC_MOVE, REPLACE_EXISTING)`.
-- [ ] **Z10 — strings and fill values:**
+- [x] **Z10 — strings and fill values.** **Done 2026-10-05.**
+    - **null** is `""` everywhere, as numcodecs writes `None`. A chunk of nulls counts as all fill only
+      when the fill is `""`.
+    - **NaN payloads:** a NaN other than the canonical quiet NaN is written as a hex fill
+      (`"0x7fc00001"`). It survives the round trip, and zarr-python 3.4 reads the bits back.
+    - **Numeric fills:** `fillValue(long)` and `fillValue(double)` convert as the writers do, then write
+      the type's own JSON: `1` for an integer type, `true` for bool, hex for a NaN payload. A value the type
+      can't hold fails `build()`.
+      - zarr-python 3.4 turned out to read an integer fill of `1.0` as well, so this was less urgent than
+        the review thought.
+    - Tests: `ConversionTest`, `StringArrayTest`, `DataTypeTest`.
+
+  The original finding follows.
   - **`null` handling is inconsistent** (`data/StringChunks.java:425-431` vs `codec/VlenUtf8.java:370`). ✔
     With fill `"zz"`, a null in a mixed chunk is stored as `""`, but the nulls in an all-null chunk read
     back as `"zz"`.
@@ -286,8 +381,9 @@ consequences:
     - Shard index entries are never validated (`ShardingCodec.java:169-176,208-228`). An entry counts as
       empty only if *both* fields are all-ones. Offsets ≥ 2^63, `off+len` overflow, and ranges past the
       shard all pass.
-    - Chunk byte size (`count × elementSize`) can overflow (`codec/Pipelines.java:311-325`). A `[2^29]`
-      float64 chunk gives `byte[0]`, then AIOOBE.
+    - ~~Chunk byte size (`count × elementSize`) can overflow (`codec/Pipelines.java:311-325`). A `[2^29]`
+      float64 chunk gives `byte[0]`, then AIOOBE.~~ Done with Z2/Z8: building the pipeline refuses a chunk
+      over 2 GB.
   - **Fix:** validate every header field, do size arithmetic in `long`, and validate shard entries
     against the shard size and the index range.
 - [ ] **H3 — denial of service.** ✔
@@ -310,6 +406,10 @@ consequences:
 ### Concurrency
 
 - [ ] **C1 — the chunk cache is an unsynchronized, access-ordered `LinkedHashMap` that `get()` mutates.** ✔
+  - **Partly done (2026-10-05, with Z3):** the cache is synchronized and held in a final field. A read
+    racing a write can no longer re-cache old bytes, and `blocks().parallel()` on a cached handle no
+    longer throws. Still open: `MemoryStore`, lost updates in a shard's read-modify-write, the documented
+    contract, and T4.
   - **Where:** `data/ChunkCache.java:36`; the lazy cache creation in `ZarrArray.java:230` isn't safely
     published.
   - **Failures:**
@@ -412,7 +512,7 @@ Items 1–5 of the previous TODO's top-5 are F1–F5 below.
   - resize;
   - update attributes;
   - delete a node;
-  - an explicit `overwrite` flag for create (see Z1).
+  - ~~an explicit `overwrite` flag for create~~: done with Z1.
 - [ ] **F7 — `write_empty_chunks` option.** Writing an all-fill chunk deletes it today, which is correct;
   expose the zarr-python knob.
 - [ ] **F8 — exact unsigned and complex reads.**
@@ -441,13 +541,17 @@ Items 1–5 of the previous TODO's top-5 are F1–F5 below.
 ## P3 — docs, build, housekeeping
 
 - [ ] **D1 — fix docs that overclaim.**
-  - `USER_GUIDE.md:205-207` says "never … out-of-memory from a bogus declared size" (false; see H1).
-  - README says "corrupt input never … returns wrong data" (false; see Z1–Z5 and Z8; Z6/Z7 are fixed).
-  - `ZarrArray`'s Javadoc says it "reflects the store's current contents" (false; see Z3).
+  - `USER_GUIDE.md` (*What is and isn't supported*) says "never … out-of-memory from a bogus declared
+    size" (false; see H1).
+  - ~~README says "corrupt input never … returns wrong data".~~ The README no longer says it; it was
+    rewritten with HDF5's P3 D1.
+  - ~~"reflects the store's current contents" (false; see Z3).~~ Only groups claim it (`ZarrGroup`, the
+    guide), and that is true. After Z3, `ZarrArray`'s Javadoc says a plain handle reads the store each
+    time, and a cached one doesn't.
 - [ ] **D2 — USER_GUIDE gaps.** Document:
-  - the thread-safety contract;
-  - create/replace semantics;
-  - numeric conversion and narrowing rules;
+  - the thread-safety contract (so far only "a cached handle may be shared between threads");
+  - ~~create/replace semantics~~ and ~~numeric conversion and narrowing rules~~: done with Z1 and Z4
+    (*Writing*);
   - `HttpStore` limitations (key encoding, 403 handling).
 - [ ] **D3 — `PLAN.md` is stale.**
   - The status block still says "Z0–Z7 complete; Z8/Z9 partially complete" and "228 tests green" (it is

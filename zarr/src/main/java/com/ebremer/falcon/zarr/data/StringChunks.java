@@ -34,10 +34,7 @@ public final class StringChunks {
         int rank = grid.rank();
         long[] chunkShape = grid.chunkShape();
 
-        long total = 1;
-        for (long s : selShape) {
-            total *= s;
-        }
+        long total = RegularChunkGrid.elementCount(selShape); // within the array, so it fits a long
         if (total > Integer.MAX_VALUE) {
             throw new IllegalArgumentException(
                     "selection of " + total + " elements is too large to read into a single array");
@@ -92,10 +89,7 @@ public final class StringChunks {
         int rank = grid.rank();
         long[] chunkShape = grid.chunkShape();
 
-        long total = 1;
-        for (long s : selShape) {
-            total *= s;
-        }
+        long total = RegularChunkGrid.elementCount(selShape);
         if (elements.length != total) {
             throw new IllegalArgumentException(
                     "selection holds " + total + " elements but got " + elements.length);
@@ -171,7 +165,7 @@ public final class StringChunks {
         for (int i = 0; i < rank; i++) {
             chunkOrigin[i] = coord[i] * chunkShape[i];
             long lo = Math.max(selOffset[i], chunkOrigin[i]);
-            long hi = Math.min(selEnd[i], chunkOrigin[i] + chunkShape[i]);
+            long hi = ChunkAssembler.overlapEnd(chunkOrigin[i], chunkShape[i], selEnd[i]);
             srcOrigin[i] = lo - selOffset[i];
             dstOrigin[i] = lo - chunkOrigin[i];
             block[i] = hi - lo;
@@ -214,7 +208,7 @@ public final class StringChunks {
         for (int i = 0; i < rank; i++) {
             chunkOrigin[i] = coord[i] * chunkShape[i];
             long lo = Math.max(selOffset[i], chunkOrigin[i]);
-            long hi = Math.min(selEnd[i], chunkOrigin[i] + chunkShape[i]);
+            long hi = ChunkAssembler.overlapEnd(chunkOrigin[i], chunkShape[i], selEnd[i]);
             srcOrigin[i] = lo - chunkOrigin[i];
             dstOrigin[i] = lo - selOffset[i];
             block[i] = hi - lo;
@@ -222,9 +216,10 @@ public final class StringChunks {
         Blocks.copyObjects(chunk, chunkShape, srcOrigin, out, selShape, dstOrigin, block);
     }
 
+    /** Whether every element equals {@code fill}; a {@code null} counts as the empty string it is stored as. */
     private static boolean isAllFill(String[] chunk, String fill) {
         for (String s : chunk) {
-            if (!Objects.equals(s == null ? fill : s, fill)) {
+            if (!Objects.equals(s == null ? "" : s, fill)) {
                 return false;
             }
         }

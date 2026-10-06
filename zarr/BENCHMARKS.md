@@ -49,7 +49,8 @@ Through the public `ZarrArray` API, over a 16 MiB `int32` array (64 × 65536, on
 
 ### Decoded-chunk cache
 
-Ten overlapping selections that all revisit the same chunk, with vs. without the per-array cache:
+Ten overlapping selections that all revisit the same chunk, through a handle with a cache
+(`array.withChunkCache(...)`) vs. a plain handle, which decodes the chunk on every read:
 
 ```
 cached 0.39 ms   uncached 3.21 ms   (8.3x)
