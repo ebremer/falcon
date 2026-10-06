@@ -7,13 +7,14 @@ import com.ebremer.falcon.zarr.datatype.DataType;
 import com.ebremer.falcon.zarr.datatype.DataTypeKind;
 import com.ebremer.falcon.zarr.json.Json;
 import com.ebremer.falcon.zarr.json.JsonArray;
+import com.ebremer.falcon.zarr.json.JsonNull;
 import com.ebremer.falcon.zarr.json.JsonNumber;
 import com.ebremer.falcon.zarr.json.JsonObject;
 import com.ebremer.falcon.zarr.json.JsonString;
 import com.ebremer.falcon.zarr.json.JsonValue;
 import com.ebremer.falcon.zarr.metadata.ArrayMetadata;
 import com.ebremer.falcon.zarr.metadata.Metadata;
-import com.ebremer.falcon.zarr.metadata.NodeMetadata;
+import com.ebremer.falcon.zarr.metadata.V2Metadata;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -29,6 +30,10 @@ import java.util.Map;
  * zero, or NaT for a time type; see {@link DataType#defaultFillValue()} &mdash; and a little-endian
  * {@code bytes} codec). {@link Builder#build()} checks the whole description, as opening the array would,
  * so a spec that exists is one Falcon can create, read, and write.
+ *
+ * <p>A spec describes a Zarr v3 array, or with {@link Builder#zarrFormat(int) zarrFormat(2)} a Zarr v2 one
+ * (a {@code .zarray}, its attributes in {@code .zattrs}). A spec that names no format takes the format of
+ * the group it is created in, and Zarr v3 at a store's root.
  */
 public final class ArraySpec {
 
@@ -41,6 +46,10 @@ public final class ArraySpec {
     private final String[] dimensionNames;
     private final String encodingName;
     private final String separator;
+    private final Integer zarrFormat; // 2 or 3, or null: the format of the group the array is created in
+    private final String v3Problem;   // why the spec cannot be a Zarr v3 array, or null if it can
+    private final String v2Problem;   // why the spec cannot be a Zarr v2 array, or null if it can
+    private final JsonObject zarray;  // the Zarr v2 .zarray, or null if v2Problem says why there is none
 
     private ArraySpec(Builder b) {
         this.shape = b.shape.clone();
@@ -50,8 +59,21 @@ public final class ArraySpec {
         this.codecs = buildCodecs(b);
         this.attributes = b.attributes;
         this.dimensionNames = b.dimensionNames == null ? null : b.dimensionNames.clone();
-        this.encodingName = b.encodingName;
+        this.encodingName = b.encodingName != null ? b.encodingName : "default";
         this.separator = b.separator;
+        this.zarrFormat = b.zarrFormat;
+        this.v3Problem = v3Problem(b);
+        String problem = v2Problem(b);
+        JsonObject v2 = null;
+        if (problem == null) {
+            try {
+                v2 = zarrayJson(b, fillValue);
+            } catch (IllegalArgumentException | ZarrException e) {
+                problem = e.getMessage();
+            }
+        }
+        this.v2Problem = problem;
+        this.zarray = v2;
     }
 
     /**
@@ -198,6 +220,135 @@ public final class ArraySpec {
         return List.copyOf(outer);
     }
 
+    /** The settings a Zarr v3 array cannot have, or {@code null} if it can have them all. */
+    private static String v3Problem(Builder b) {
+        List<String> v2Only = new ArrayList<>();
+        if (b.order == 'F') {
+            v2Only.add("order 'F'");
+        }
+        if (b.filters != null) {
+            v2Only.add("filters");
+        }
+        if (b.compressor != null) {
+            v2Only.add("compressor(...)");
+        }
+        return v2Only.isEmpty() ? null : String.join(", ", v2Only) + (v2Only.size() == 1 ? " applies" : " apply")
+                + " only to a Zarr v2 array: call zarrFormat(2)";
+    }
+
+    /**
+     * The settings a Zarr v2 array cannot have, or {@code null} if it can have them all: the v3 codecs and
+     * grids, dimension names, a chunk key encoding but {@code v2}, more than one compressor, and
+     * {@code zfpy}, which Falcon does not write.
+     */
+    private static String v2Problem(Builder b) {
+        List<String> v3Only = new ArrayList<>();
+        if (b.subChunkShape != null) {
+            v3Only.add("sharding");
+        }
+        if (b.castType != null) {
+            v3Only.add("cast_value");
+        }
+        if (b.reshape != null) {
+            v3Only.add("reshape");
+        }
+        if (b.crc32c) {
+            v3Only.add("the crc32c codec (in v2, a numcodecs checksum such as {\"id\": \"crc32c\"} is a filter)");
+        }
+        if (!b.chunkLengths.isEmpty()) {
+            v3Only.add("a rectilinear chunk grid (chunkLengths)");
+        }
+        if (b.dimensionNames != null) {
+            v3Only.add("dimension names");
+        }
+        if (b.encodingName != null && !b.encodingName.equals("v2")) {
+            v3Only.add("the '" + b.encodingName + "' chunk key encoding (its keys are the v2 encoding's)");
+        }
+        if (!v3Only.isEmpty()) {
+            return "a Zarr v2 array cannot have " + String.join(", ", v3Only);
+        }
+        List<String> compressors = new ArrayList<>();
+        if (b.gzipLevel != null) {
+            compressors.add("gzip");
+        }
+        if (b.zstd) {
+            compressors.add("zstd");
+        }
+        if (b.blosc) {
+            compressors.add("blosc");
+        }
+        if (b.bz2Level != null) {
+            compressors.add("bz2");
+        }
+        if (b.compressor != null) {
+            compressors.add("compressor(...)");
+        }
+        if (compressors.size() > 1) {
+            return "a Zarr v2 array has one compressor, but " + String.join(" and ", compressors)
+                    + " were chosen (filters(...) takes more codecs, applied before it)";
+        }
+        List<JsonObject> v2Codecs = new ArrayList<>(b.filters != null ? b.filters : List.of());
+        if (b.compressor != null) {
+            v2Codecs.add(b.compressor);
+        }
+        for (JsonObject codec : v2Codecs) {
+            if (codec.members().get("id") instanceof JsonString id && id.value().equals("zfpy")) {
+                return "Falcon reads zfpy but cannot write it (it has no zfp encoder)";
+            }
+        }
+        return null;
+    }
+
+    /**
+     * The {@code .zarray} of a Zarr v2 array, with its members in the order zarr-python 3.4 writes them: the
+     * data type as a NumPy dtype, the fill value in its v2 form, the object codec ({@code vlen-utf8} or
+     * {@code vlen-bytes}) first among the filters of a variable-length type, and the compressor.
+     */
+    private static JsonObject zarrayJson(Builder b, JsonValue fill) {
+        List<JsonValue> filters = new ArrayList<>();
+        if (b.dataType.isVariableLength()) {
+            filters.add(JsonObject.builder().put("id", VlenCodec.of(b.dataType).codecName()).build());
+        }
+        if (b.filters != null) {
+            filters.addAll(b.filters);
+        }
+        return JsonObject.builder()
+                .put("shape", numbers(b.shape))
+                .put("chunks", numbers(b.chunkShape != null ? b.chunkShape : defaultChunkShape(b.shape)))
+                .put("dtype", V2Metadata.dtype(b.dataType, b.endian))
+                .put("fill_value", V2Metadata.fillValue(b.dataType, fill, b.endian))
+                .put("order", String.valueOf(b.order))
+                .put("filters", filters.isEmpty() ? JsonNull.INSTANCE : new JsonArray(filters))
+                .put("dimension_separator", b.separator != null ? b.separator : ".")
+                .put("compressor", v2Compressor(b))
+                .put("zarr_format", 2)
+                .build();
+    }
+
+    /** A Zarr v2 array's compressor, as numcodecs configures it, or JSON {@code null} for none. */
+    private static JsonValue v2Compressor(Builder b) {
+        if (b.compressor != null) {
+            return b.compressor;
+        }
+        if (b.gzipLevel != null) {
+            return JsonObject.builder().put("id", "gzip").put("level", b.gzipLevel).build();
+        }
+        if (b.zstd) {
+            return JsonObject.builder().put("id", "zstd").put("level", b.zstdLevel).build();
+        }
+        if (b.blosc) {
+            int typeSize = Math.max(b.dataType.byteCount(), 1); // variable-length elements reach it as bytes
+            String shuffle = b.bloscShuffle != null ? b.bloscShuffle : typeSize > 1 ? "shuffle" : "noshuffle";
+            return JsonObject.builder().put("id", "blosc").put("cname", b.bloscCname).put("clevel", b.bloscClevel)
+                    .put("shuffle", List.of("noshuffle", "shuffle", "bitshuffle").indexOf(shuffle))
+                    .put("blocksize", 0).build();
+        }
+        if (b.bz2Level != null) {
+            return JsonObject.builder().put("id", "bz2").put("level", b.bz2Level).build();
+        }
+        return JsonNull.INSTANCE;
+    }
+
     private static JsonValue bytesCodec(DataType dataType, ByteOrder endian) {
         // Byte order is meaningless for single-byte elements and byte strings; r* keeps its endian, as before.
         if (dataType.kind() == DataTypeKind.RAW ? dataType.byteCount() == 1 : !dataType.hasByteOrder()) {
@@ -234,10 +385,65 @@ public final class ArraySpec {
     }
 
     /**
-     * {@return this spec as a {@code zarr.json} document, with fields in the order the specification lists
-     * them} An extension data type is written as zarr-python writes it ({@link DataType#toJson()}).
+     * {@return this spec as the array's metadata document: a {@code zarr.json}, with fields in the order the
+     * specification lists them, or for a Zarr v2 spec ({@link Builder#zarrFormat(int) zarrFormat(2)}) a
+     * {@code .zarray}, in the order zarr-python 3.4 writes it, the attributes left for {@code .zattrs}} An
+     * extension data type is written as zarr-python writes it ({@link DataType#toJson()}).
      */
     public JsonObject toJson() {
+        return zarrFormat != null && zarrFormat == 2 ? zarray : v3Json();
+    }
+
+    /** The user attributes: a v3 document's {@code attributes}, or a v2 array's {@code .zattrs}. */
+    JsonObject attributes() {
+        return attributes;
+    }
+
+    /**
+     * The format the array takes when created in a group of {@code groupFormat}: the group's, which a
+     * format the spec names must match, as zarr-python lists only the children of a group's own format.
+     *
+     * @throws IllegalArgumentException if the spec names the other format
+     */
+    int formatIn(int groupFormat, String group) {
+        if (zarrFormat != null && zarrFormat != groupFormat) {
+            throw new IllegalArgumentException("a Zarr v" + zarrFormat + " array cannot be created in the Zarr v"
+                    + groupFormat + " group '" + group + "': zarr-python lists only the children of a group's"
+                    + " own format");
+        }
+        return groupFormat;
+    }
+
+    /** The format the array takes at a store's root: the spec's, or Zarr v3. */
+    int rootFormat() {
+        return zarrFormat != null ? zarrFormat : Zarr.ZARR_FORMAT;
+    }
+
+    /**
+     * The array's metadata document in {@code format} ({@code zarr.json}, or a v2 {@code .zarray}), checked
+     * as opening the array would check it: the shapes, fill value, codecs (including that a chunk fits one
+     * buffer), and the rest.
+     *
+     * @throws IllegalArgumentException if the spec does not describe a Zarr {@code format} array Falcon can
+     *                                  create, read, and write
+     */
+    JsonObject metadata(int format) {
+        String problem = format == 2 ? v2Problem : v3Problem;
+        if (problem != null) {
+            throw new IllegalArgumentException("invalid array spec: " + problem);
+        }
+        JsonObject json = format == 2 ? zarray : v3Json();
+        try {
+            ArrayMetadata parsed = format == 2 ? V2Metadata.parseArray(json, attributes, V2Metadata.ZARRAY)
+                    : (ArrayMetadata) Metadata.parse(Json.writeBytes(json), "zarr.json");
+            parsed.checkPipelines();
+        } catch (ZarrException e) {
+            throw new IllegalArgumentException("invalid array spec: " + e.getMessage(), e);
+        }
+        return json;
+    }
+
+    private JsonObject v3Json() {
         JsonObject.Builder json = JsonObject.builder()
                 .put("zarr_format", Zarr.ZARR_FORMAT)
                 .put("node_type", "array")
@@ -277,7 +483,7 @@ public final class ArraySpec {
         private Number fillNumber;     // a Long or Double, converted to the data type by build()
         private JsonObject attributes = new JsonObject(Map.of());
         private String[] dimensionNames;
-        private String encodingName = "default";
+        private String encodingName;   // null: "default" for Zarr v3
         private String separator;
         private ByteOrder endian = ByteOrder.LITTLE_ENDIAN;
         private Integer gzipLevel;
@@ -296,6 +502,10 @@ public final class ArraySpec {
         private String castRounding;
         private String castOutOfRange; // null: an element out of range fails the write
         private JsonObject castScalarMap;
+        private Integer zarrFormat;    // null: the format of the group the array is created in
+        private char order = 'C';
+        private List<JsonObject> filters;
+        private JsonObject compressor;
 
         private Builder(long[] shape, DataType dataType) {
             this.shape = shape.clone();
@@ -346,7 +556,9 @@ public final class ArraySpec {
          * {@link DataType} describes: a JSON string for {@code string} and {@code fixed_length_utf32}; the
          * bytes in base64 for {@code variable_length_bytes}, {@code null_terminated_bytes}, and
          * {@code raw_bytes}; an integer or {@code "NaT"} for a time type; and for a {@code struct} an object
-         * holding each field's fill value.
+         * holding each field's fill value. A Zarr v2 array is written the {@code .zarray} form of it (see
+         * {@link #zarrFormat(int)}), and may also take JSON {@code null}, v2's "no fill value", which zarr-python
+         * reads as the type's default.
          *
          * @param fillValue the fill value's JSON
          * @return this builder
@@ -639,7 +851,8 @@ public final class ArraySpec {
         }
 
         /**
-         * Selects the chunk key encoding: {@code "default"} (the default) or {@code "v2"}.
+         * Selects the chunk key encoding: {@code "default"} (the default) or {@code "v2"}. A Zarr v2 array
+         * has the {@code v2} encoding's keys: it takes {@code "v2"} here, or nothing, and refuses any other.
          *
          * @param name the encoding's name
          * @return this builder
@@ -651,7 +864,8 @@ public final class ArraySpec {
 
         /**
          * Sets the chunk key separator ({@code "/"} or {@code "."}). Without one, the encoding's own default
-         * applies: {@code "/"} for {@code "default"}, {@code "."} for {@code "v2"}.
+         * applies: {@code "/"} for {@code "default"}, {@code "."} for {@code "v2"} and a Zarr v2 array (its
+         * {@code dimension_separator}).
          *
          * @param separator the separator
          * @return this builder
@@ -662,8 +876,88 @@ public final class ArraySpec {
         }
 
         /**
+         * Sets the Zarr format of the array, as zarr-python's {@code zarr_format}: 3, a {@code zarr.json}; or
+         * 2, a {@code .zarray} with the array's attributes in {@code .zattrs}. Without it, the array takes the
+         * format of the group it is created in, and Zarr v3 at a store's root ({@link Zarr#createArray}); a
+         * format named here must be its group's.
+         *
+         * <p>A Zarr v2 array is written as zarr-python 3.4 writes one, and zarr-python reads it: the data type
+         * as a NumPy dtype in the {@link #endian} byte order ({@code "<f8"}, {@code "|b1"}, {@code "<U3"},
+         * {@code "<M8[ns]"}, a struct's list of fields, {@code "|O"} with the {@code vlen-utf8} or
+         * {@code vlen-bytes} filter for the variable-length types); the fill value in v2's form; the
+         * {@link #order}; the {@link #filters}; one compressor ({@link #gzip}, {@link #zstd}, {@link #blosc()},
+         * {@link #bz2}, or {@link #compressor}); and the chunk {@link #separator} as its
+         * {@code dimension_separator}. Zarr v2 has no sharding, {@code cast_value}, {@code reshape},
+         * {@code crc32c} codec, rectilinear grid, dimension names, or {@code default} chunk key encoding, and
+         * no {@code r<N>} data type ({@link DataType#rawBytes} is NumPy's {@code V<n>}): {@link #build()}
+         * refuses them. A NaN fill value is written {@code "NaN"}, losing any other bits.
+         *
+         * @param zarrFormat 2 or 3
+         * @return this builder
+         * @throws IllegalArgumentException if {@code zarrFormat} is neither
+         */
+        public Builder zarrFormat(int zarrFormat) {
+            if (zarrFormat != 2 && zarrFormat != 3) {
+                throw new IllegalArgumentException("the Zarr format must be 2 or 3, not " + zarrFormat);
+            }
+            this.zarrFormat = zarrFormat;
+            return this;
+        }
+
+        /**
+         * Sets the order of the elements within each chunk of a Zarr v2 array, its {@code order}: {@code 'C'}
+         * (the default; row-major) or {@code 'F'} (column-major, NumPy's Fortran order). Reads and writes see
+         * the array the same either way. Zarr v3 has no order, and {@link #build()} refuses {@code 'F'} for it.
+         *
+         * @param order {@code 'C'} or {@code 'F'}
+         * @return this builder
+         * @throws IllegalArgumentException if {@code order} is neither
+         */
+        public Builder order(char order) {
+            if (order != 'C' && order != 'F') {
+                throw new IllegalArgumentException("order must be 'C' or 'F', not '" + order + "'");
+            }
+            this.order = order;
+            return this;
+        }
+
+        /**
+         * Sets the filters of a Zarr v2 array: numcodecs codec configurations, each with its {@code "id"}, as
+         * a {@code .zarray} lists them, applied in order before the compressor, such as
+         * {@code {"id": "delta", "dtype": "<i4"}}. Falcon writes the filters numcodecs 0.17 does, byte for
+         * byte: {@code delta}, {@code fixedscaleoffset}, {@code quantize}, {@code bitround}, {@code astype},
+         * {@code packbits}, {@code shuffle}, the checksums {@code crc32}, {@code crc32c}, {@code adler32},
+         * {@code fletcher32}, and {@code jenkins_lookup3}, and the compressors {@code zlib}, {@code lz4},
+         * {@code gzip}, {@code zstd}, {@code blosc}, and {@code bz2}. A variable-length data type's object
+         * codec comes first by itself. Zarr v3 has no filters, and {@link #build()} refuses them for it.
+         *
+         * @param filters the filters' configurations, replacing any set before; none for no filters
+         * @return this builder
+         */
+        public Builder filters(JsonObject... filters) {
+            this.filters = List.of(filters);
+            return this;
+        }
+
+        /**
+         * Sets the compressor of a Zarr v2 array as a numcodecs configuration with its {@code "id"}, such as
+         * {@code {"id": "zlib", "level": 1}} or {@code {"id": "lz4", "acceleration": 1}}: one of the codecs
+         * {@link #filters} lists. {@link #gzip}, {@link #zstd}, {@link #blosc()}, and {@link #bz2} set it as
+         * well, and a v2 array has one compressor, so {@link #build()} refuses two. Zarr v3 has no
+         * compressor, and {@link #build()} refuses one for it.
+         *
+         * @param compressor the compressor's configuration
+         * @return this builder
+         */
+        public Builder compressor(JsonObject compressor) {
+            this.compressor = compressor;
+            return this;
+        }
+
+        /**
          * The finished spec, checked as opening the array would check it: the shapes, fill value, dimension
-         * names, chunk key encoding, and codecs (including that a chunk fits one buffer).
+         * names, chunk key encoding, and codecs (including that a chunk fits one buffer). A spec that names no
+         * {@link #zarrFormat} is checked as a Zarr v3 array, and as a v2 one too if it is created in a v2 group.
          *
          * @return the spec
          * @throws IllegalArgumentException if the spec does not describe an array Falcon can create, read,
@@ -671,12 +965,7 @@ public final class ArraySpec {
          */
         public ArraySpec build() {
             ArraySpec spec = new ArraySpec(this);
-            try {
-                NodeMetadata parsed = Metadata.parse(Json.writeBytes(spec.toJson()), "zarr.json");
-                ((ArrayMetadata) parsed).checkPipelines();
-            } catch (ZarrException e) {
-                throw new IllegalArgumentException("invalid array spec: " + e.getMessage(), e);
-            }
+            spec.metadata(spec.rootFormat());
             return spec;
         }
     }

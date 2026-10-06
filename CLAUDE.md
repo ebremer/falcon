@@ -6,7 +6,7 @@ writers of scientific-data formats:
 - **`hdf5`** module (`com.ebremer.falcon.hdf5`) — an HDF5 reader/writer implementing the
   [HDF5 File Format Specification, Version 4.0](https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html)
   (HDF5 2.0). **Built** (Falcon Phase 1).
-- **`zarr`** module (`com.ebremer.falcon.zarr`) — a Zarr reader/writer: reads v2 and v3, writes v3.
+- **`zarr`** module (`com.ebremer.falcon.zarr`) — a Zarr reader/writer: reads and writes v2 and v3.
   **Built** (Falcon Phase 2).
 - **`core`** module (`com.ebremer.falcon.core`) — the pure-Java compression codecs both formats use
   (zstd, Blosc, LZ4, LZF, bitshuffle, bzip2, ZFP, SZ, zlib, byte shuffle) and their shared checksums

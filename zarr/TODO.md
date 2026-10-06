@@ -140,7 +140,8 @@ Behaviour changes worth knowing:
 New API: `ArraySpec.Builder.blosc(cname, clevel, shuffle)`. In core: `BloscEncoder`'s compressor constants,
 `compressor(cname)`, and `compress(data, typeSize, shuffle, blockSize, clevel, compressor)`; and
 `Lz4.compress`, `compressHc`, and `maxCompressedLength`. Nothing remains open in P0–P3; what is left are the
-non-goals below (creating v2 arrays, the extension data types zarr-python does not write, and the rest).
+non-goals below (the extension data types zarr-python does not write, and the rest; creating v2 arrays, once
+one of them, is F17).
 
 **F15, F16 (2026-10-06)** add four codecs: the zarr-extensions `cast_value` and `reshape`, read and written,
 and numcodecs' `bz2` (read and written) and `zfpy` (read). Tests: zarr 854 + 19, core 131.
@@ -152,7 +153,17 @@ and numcodecs' `bz2` (read and written) and `zfpy` (read). Tests: zarr 854 + 19,
     `cast_value` see the stored type.
   - A write to an array with `zfpy` in its codecs throws `ZarrUnsupportedException` before anything changes.
 
-## Do these first — top 10
+**F17 (2026-10-06)** creates Zarr v2 arrays and groups, and consolidates v2 hierarchies, as zarr-python 3.4
+does. Tests: zarr 921 + 19.
+- New API: `ArraySpec.Builder.zarrFormat(int)`, `order(char)`, `filters(JsonObject...)`, and
+  `compressor(JsonObject)`; `Zarr.createGroup(store, attributes, overwrite, zarrFormat)`; and
+  `ZarrNode.zarrFormat()`.
+- Behaviour changes:
+  - A group creates its children in its own format: a v2 group's new child is a v2 node, where it used to
+    be a v3 one, which zarr-python does not list. A spec naming the other format is refused.
+  - `consolidate()` on a v2 group writes its `.zmetadata` (it was refused). A node of the other format
+    below a group stops the consolidation, in v3 as before and now in v2.
+
 
 1. ~~**Z1/Z2 — node replacement destroys or corrupts data.**~~ Done 2026-10-05 (below).
 2. ~~**Z3/C1 — chunk cache.**~~ ~~Reads are stale across handles~~ (Z3, done 2026-10-05), ~~and concurrent
@@ -966,7 +977,8 @@ what was done, then gives the original finding.
     - **Writing:** `ZarrGroup.consolidate()` walks every node below by its own metadata and writes zarr-python
       3.4's layout: each node's stored document, flat keys ordered by depth and then by NFKC casefold, child
       groups with an empty marker. It refuses v2 nodes (Falcon writes v3 only) and fails, before writing,
-      on a malformed node.
+      on a malformed node. (Since F17 a v2 group consolidates into its `.zmetadata`; a v2 node below a v3
+      group is still refused.)
     - **Staleness:** creating, resizing, or changing attributes leaves a snapshot stale until `consolidate()`
       runs again; deleting a child also removes it from the group's stored and in-memory snapshot, as
       zarr-python does.
@@ -1452,8 +1464,41 @@ what was done, then gives the original finding.
   - **Still open:** a zfp encoder, which would make zfpy writable (HDF5's ZFP filter would gain it too); the
     `lzma` and `pcodec` compressors.
 
+- [x] **F17 — creating Zarr v2 arrays and groups.** Done 2026-10-06. It was out of scope; Falcon now creates
+  what it already read and wrote into.
+  - **Arrays:** `ArraySpec.Builder.zarrFormat(2)` writes a `.zarray`, its members in zarr-python 3.4's
+    order, and a `.zattrs` (`{{}}` when empty, as zarr-python writes it), the attributes first, so the array
+    appears only whole.
+    - The data type becomes its NumPy dtype in the spec's byte order: `|b1`, `<f8`, `>U3`, `|S4`, `|V2`,
+      `<M8[10s]` (a bare `<M8` for the generic unit; `μs` written `us`), a struct's list of fields, and
+      `|O` with `vlen-utf8` or `vlen-bytes` as the first filter. An `r<N>` type has no dtype and is refused.
+    - The fill value takes v2's form: `"NaN"` for any NaN (its other bits are lost), a time's int64 count
+      (NaT the minimum), and base64 of a struct's whole element in the array's byte order. JSON `null`,
+      v2's "no fill value", is accepted.
+    - New v2 settings: `order('F')`, numcodecs `filters(...)` and `compressor(...)` as `.zarray` lists
+      them. `gzip`, `zstd`, `blosc`, and `bz2` set the compressor, as numcodecs configures each.
+    - Refused for v2: sharding, `cast_value`, `reshape`, `crc32c`, a rectilinear grid, dimension names, the
+      `default` chunk key encoding, two compressors, and `zfpy` (Falcon has no zfp encoder). Refused for v3:
+      the v2 settings, which need `zarrFormat(2)`.
+  - **Groups:** `Zarr.createGroup(store, attributes, overwrite, 2)` writes a `.zgroup` and `.zattrs`. A
+    group creates its children in its own format, as zarr-python does; a spec that names the other format
+    is refused, and one that names none is checked for the group's. `ZarrNode.zarrFormat()` reports a
+    node's format, consolidated snapshots' children included.
+  - **Consolidation:** `consolidate()` on a v2 group writes its `.zmetadata` as zarr-python does
+    (`{{"metadata": {{...}}, "zarr_consolidated_format": 1}}`, this group's `.zgroup` and `.zattrs` and every
+    node's below), and `Zarr.open` then answers from it.
+  - **Oracles:**
+    - `V2CreateTest` creates each of zarr-python's 57 writable v2 fixtures again from a spec built with the
+      public API. Each has zarr-python's `.zarray` (members in its order) and `.zattrs`. Writing the same
+      values stores what writing into zarr-python's own metadata stores, and for the 26 exact fixtures,
+      zarr-python's chunks byte for byte.
+    - `WriteZarrV2Cases.java` + `check_zarr_v2_writes.py`: zarr-python 3.4 reads all 117 v2 nodes Falcon
+      wrote, 58 of them created by Falcon: 57 arrays whose `.zarray` and `.zattrs` equal zarr-python's, and a
+      hierarchy (groups with attributes, Fortran-ordered strings, blosc, delta with zlib) opened through its
+      `.zmetadata`. The written-into arrays now include the 12 `v2_*` fixtures.
+  - Tests: `V2CreateTest`; `ConsolidatedTest.consolidateRefusesMixedFormatsAndReadOnlyStores`.
+
 **Out of scope / deferred:**
-- **Creating Zarr v2 arrays** — Falcon creates v3 only. Writing into an existing v2 array works (F4).
 - **A shared data model in `com.ebremer.falcon.core`** — investigated and deferred (`PLAN.md` §10): data
   types, byte I/O, and chunk indexing stay format-specific. The compression codecs did move to `core`
   (2026-10-05), when HDF5's S4 (third-party HDF5 filters) needed Falcon's zstd, Blosc, and LZ4. So, on

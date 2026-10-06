@@ -68,6 +68,11 @@ public final class ZarrGroup extends ZarrNode {
     }
 
     @Override
+    public int zarrFormat() {
+        return metadata.zarrFormat();
+    }
+
+    @Override
     public JsonObject attributes() {
         return metadata.attributes();
     }
@@ -301,9 +306,10 @@ public final class ZarrGroup extends ZarrNode {
     }
 
     /**
-     * Creates a child group with the given attributes. With {@code overwrite}, everything stored under the
-     * name is deleted first: an old array's chunks, or an old group and all its descendants. Without it, a
-     * name that a node already has is refused.
+     * Creates a child group with the given attributes, in this group's Zarr format ({@link #zarrFormat()}), as
+     * zarr-python does: a Zarr v2 group's child is a {@code .zgroup} with its attributes in {@code .zattrs}.
+     * With {@code overwrite}, everything stored under the name is deleted first: an old array's chunks, or an
+     * old group and all its descendants. Without it, a name that a node already has is refused.
      *
      * @param name       the child's name, a single path segment
      * @param attributes the group's attributes
@@ -314,9 +320,10 @@ public final class ZarrGroup extends ZarrNode {
      * @throws UnsupportedOperationException if the store is read-only
      */
     public ZarrGroup createGroup(String name, JsonObject attributes, boolean overwrite) {
+        Objects.requireNonNull(attributes, "attributes");
         String childPath = newChildPath(name);
         ZarrNode.prepareCreate(store, childPath, false, overwrite);
-        store.set(ZarrNode.metadataKey(childPath), Json.writeBytes(groupJson(attributes)));
+        ZarrNode.writeGroup(store, childPath, attributes, zarrFormat());
         return ZarrNode.open(store, childPath, useConsolidated).asGroup();
     }
 
@@ -335,23 +342,28 @@ public final class ZarrGroup extends ZarrNode {
     }
 
     /**
-     * Creates a child array described by {@code spec}. With {@code overwrite}, everything stored under the
-     * name is deleted first: an old array's chunks, or an old group and all its descendants. Without it,
-     * the name is refused if anything is stored under it, a node or keys a new array would read as its
-     * chunks.
+     * Creates a child array described by {@code spec}, in this group's Zarr format ({@link #zarrFormat()}), as
+     * zarr-python does: a spec that names a format ({@link ArraySpec.Builder#zarrFormat(int)}) must name this
+     * group's, and one that names none is checked as an array of this group's format. With
+     * {@code overwrite}, everything stored under the name is deleted first: an old array's chunks, or an old
+     * group and all its descendants. Without it, the name is refused if anything is stored under it, a node
+     * or keys a new array would read as its chunks.
      *
      * @param name      the child's name, a single path segment
      * @param spec      the array's description
      * @param overwrite whether to delete everything stored under the name first
      * @return the new array
-     * @throws IllegalArgumentException      if the name is invalid, or anything is stored under it and
-     *                                       {@code overwrite} is false
+     * @throws IllegalArgumentException      if the name is invalid; if anything is stored under it and
+     *                                       {@code overwrite} is false; or if the spec names the other Zarr
+     *                                       format, or (naming none) describes no array of this group's
      * @throws UnsupportedOperationException if the store is read-only
      */
     public ZarrArray createArray(String name, ArraySpec spec, boolean overwrite) {
         String childPath = newChildPath(name);
+        int format = spec.formatIn(zarrFormat(), display());
+        JsonObject metadata = spec.metadata(format);
         ZarrNode.prepareCreate(store, childPath, true, overwrite);
-        store.set(ZarrNode.metadataKey(childPath), Json.writeBytes(spec.toJson()));
+        ZarrNode.writeArray(store, childPath, spec, metadata, format);
         return ZarrNode.open(store, childPath, useConsolidated).asArray();
     }
 
@@ -425,14 +437,19 @@ public final class ZarrGroup extends ZarrNode {
      * metadata is malformed stops the consolidation, since a snapshot without it would hide it from every
      * reader of the snapshot.
      *
+     * <p>A Zarr v2 group's metadata is consolidated into its {@code .zmetadata} instead, as zarr-python
+     * writes it: {@code {"metadata": {...}, "zarr_consolidated_format": 1}}, holding this group's
+     * {@code .zgroup} and {@code .zattrs} and those of every node below it, keyed by their paths relative to
+     * the group ({@code "a/.zarray"}). A node of the other format below the group stops the consolidation,
+     * as zarr-python lists only the children of a group's own format.
+     *
      * <p>The result is a snapshot: see the class description for what later changes do to it. The walk and
      * the write are separate store calls, not one atomic step, so consolidate when nothing else is changing
      * the hierarchy.
      *
      * @return a handle on this group that answers from the new consolidated metadata
-     * @throws UnsupportedOperationException if the store is read-only, or cannot list its keys; or if this
-     *                                       group or a node below it is a Zarr v2 node (Falcon writes v3
-     *                                       metadata only)
+     * @throws UnsupportedOperationException if the store is read-only, or cannot list its keys; or if a node
+     *                                       below this group is of the other Zarr format
      * @throws ZarrFormatException           if the metadata of this group or a node below it is malformed
      */
     public ZarrGroup consolidate() {
@@ -442,11 +459,11 @@ public final class ZarrGroup extends ZarrNode {
         String key = metadataKey(path);
         Optional<byte[]> stored = store.get(key);
         if (stored.isEmpty()) {
-            if (store.exists(key(path, V2Metadata.ZGROUP))) {
-                throw new UnsupportedOperationException("'" + display()
-                        + "' is a Zarr v2 group; consolidate() writes v3 consolidated metadata only");
+            Optional<byte[]> zgroup = store.get(key(path, V2Metadata.ZGROUP));
+            if (zgroup.isPresent()) {
+                return consolidateV2(zgroup.get());
             }
-            throw new ZarrFormatException("no zarr.json at '" + display() + "'");
+            throw new ZarrFormatException("no zarr.json or .zgroup at '" + display() + "'");
         }
         JsonObject doc = parseObject(stored.get(), key);
         Map<String, JsonObject> documents = new LinkedHashMap<>();
@@ -474,8 +491,8 @@ public final class ZarrGroup extends ZarrNode {
             Optional<byte[]> bytes = store.get(key);
             if (bytes.isEmpty()) {
                 if (store.exists(key(childPath, V2Metadata.ZARRAY)) || store.exists(key(childPath, V2Metadata.ZGROUP))) {
-                    throw new UnsupportedOperationException("'" + childPath
-                            + "' is a Zarr v2 node; consolidate() writes v3 consolidated metadata only");
+                    throw new UnsupportedOperationException("'" + childPath + "' is a Zarr v2 node below the Zarr"
+                            + " v3 group '" + display() + "'; consolidated metadata holds one format's nodes");
                 }
                 continue; // no node here, as childNames() leaves such a directory out
             }
@@ -488,6 +505,73 @@ public final class ZarrGroup extends ZarrNode {
             out.put(childRelative, doc);
             if (doc.members().get("node_type") instanceof JsonString type && type.value().equals("group")) {
                 collect(childPath, childRelative, out);
+            }
+        }
+    }
+
+    /**
+     * Consolidates a Zarr v2 group, whose {@code .zgroup} holds {@code zgroupBytes}, into its
+     * {@code .zmetadata}; see {@link #consolidate()}.
+     */
+    private ZarrGroup consolidateV2(byte[] zgroupBytes) {
+        String zgroupKey = key(path, V2Metadata.ZGROUP);
+        JsonObject zgroup = parseObject(zgroupBytes, zgroupKey);
+        Optional<byte[]> zattrsBytes = store.get(key(path, V2Metadata.ZATTRS));
+        JsonObject zattrs = zattrsBytes.map(b -> parseObject(b, key(path, V2Metadata.ZATTRS)))
+                .orElse(JsonObject.builder().build());
+        GroupMetadata group = V2Metadata.parseGroup(zgroup, zattrs, zgroupKey);
+        Map<String, JsonValue> entries = new LinkedHashMap<>();
+        entries.put(V2Metadata.ZGROUP, zgroup);
+        entries.put(V2Metadata.ZATTRS, zattrs);
+        collectV2(path, "", entries);
+        byte[] written = Json.writeBytes(JsonObject.builder()
+                .put("metadata", new JsonObject(entries))
+                .put("zarr_consolidated_format", 1)
+                .build());
+        String zmetadataKey = key(path, V2Metadata.ZMETADATA);
+        ConsolidatedMetadata consolidated = ConsolidatedMetadata.parseV2(written, zmetadataKey).orElseThrow();
+        store.set(zmetadataKey, written);
+        return new ZarrGroup(store, path, group, new Snapshot(consolidated, zmetadataKey), "", true);
+    }
+
+    /**
+     * Adds the {@code .zattrs} ({@code {}} if none is stored, as zarr-python writes it) and {@code .zarray} or
+     * {@code .zgroup} of every Zarr v2 node below the group at {@code groupPath} to {@code out}, keyed by
+     * their paths relative to the consolidating group ({@code relative} is the group's own).
+     */
+    private void collectV2(String groupPath, String relative, Map<String, JsonValue> out) {
+        for (String childPath : subdirectories(groupPath)) {
+            String name = childPath.substring(childPath.lastIndexOf('/') + 1);
+            String childRelative = relative.isEmpty() ? name : relative + "/" + name;
+            String zarrayKey = key(childPath, V2Metadata.ZARRAY);
+            Optional<byte[]> zarray = store.get(zarrayKey);
+            String zgroupKey = key(childPath, V2Metadata.ZGROUP);
+            Optional<byte[]> zgroup = zarray.isPresent() ? Optional.empty() : store.get(zgroupKey);
+            if (zarray.isEmpty() && zgroup.isEmpty()) {
+                if (store.exists(metadataKey(childPath))) {
+                    throw new UnsupportedOperationException("'" + childPath + "' is a Zarr v3 node below the Zarr"
+                            + " v2 group '" + display() + "'; consolidated metadata holds one format's nodes");
+                }
+                continue; // no node here, as childNames() leaves such a directory out
+            }
+            String docKey = zarray.isPresent() ? zarrayKey : zgroupKey;
+            JsonObject doc = parseObject(zarray.orElseGet(zgroup::get), docKey);
+            String zattrsKey = key(childPath, V2Metadata.ZATTRS);
+            JsonObject zattrs = store.get(zattrsKey).map(b -> parseObject(b, zattrsKey))
+                    .orElse(JsonObject.builder().build());
+            try {
+                if (zarray.isPresent()) {
+                    V2Metadata.parseArray(doc, zattrs, docKey);
+                } else {
+                    V2Metadata.parseGroup(doc, zattrs, docKey);
+                }
+            } catch (ZarrUnsupportedException e) {
+                // valid Zarr that Falcon cannot read: embedded as stored, for readers that can
+            }
+            out.put(childRelative + "/" + V2Metadata.ZATTRS, zattrs);
+            out.put(childRelative + "/" + (zarray.isPresent() ? V2Metadata.ZARRAY : V2Metadata.ZGROUP), doc);
+            if (zgroup.isPresent()) {
+                collectV2(childPath, childRelative, out);
             }
         }
     }

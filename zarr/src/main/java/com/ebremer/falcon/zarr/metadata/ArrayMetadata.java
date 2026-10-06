@@ -52,6 +52,7 @@ public final class ArrayMetadata implements NodeMetadata {
     private final List<JsonObject> codecs; // raw codec specs, in pipeline order
     private final JsonObject attributes;
     private final String[] dimensionNames; // null if absent; individual entries may be null (unnamed)
+    private final int zarrFormat;          // 3, or 2 for a v2 array translated by V2Metadata
 
     private ChunkPipeline pipeline; // built lazily from the codec specs
     // A rectilinear grid's chunks differ in shape, and a pipeline is built for one shape: one per shape met.
@@ -59,7 +60,7 @@ public final class ArrayMetadata implements NodeMetadata {
 
     ArrayMetadata(ChunkGrid grid, DataType dataType, ChunkKeyEncoding chunkKeyEncoding,
                   JsonValue fillValue, List<JsonObject> codecs, JsonObject attributes,
-                  String[] dimensionNames) {
+                  String[] dimensionNames, int zarrFormat) {
         this.grid = grid;
         this.dataType = dataType;
         this.chunkKeyEncoding = chunkKeyEncoding;
@@ -67,10 +68,19 @@ public final class ArrayMetadata implements NodeMetadata {
         this.codecs = codecs;
         this.attributes = attributes;
         this.dimensionNames = dimensionNames;
+        this.zarrFormat = zarrFormat;
     }
 
     /** Parses a validated array document. {@code ctx} names the source key for diagnostics. */
     static ArrayMetadata parse(JsonObject o, String ctx) {
+        return parse(o, ctx, 3);
+    }
+
+    /**
+     * Parses a validated array document, recording {@code zarrFormat} as the format it was stored in: 2 for
+     * the v3 document {@link V2Metadata} translates a {@code .zarray} into.
+     */
+    static ArrayMetadata parse(JsonObject o, String ctx, int zarrFormat) {
         Fields.requireZarrFormat3(o, ctx);
 
         long[] shape = Fields.intArray(Fields.require(o, "shape", ctx), ctx + ".shape", false);
@@ -116,7 +126,7 @@ public final class ArrayMetadata implements NodeMetadata {
         Fields.checkUnknownFields(o, KNOWN, ctx);
 
         return new ArrayMetadata(grid, dataType, chunkKeyEncoding, fillValue, List.copyOf(codecs),
-                attributes, dimensionNames);
+                attributes, dimensionNames, zarrFormat);
     }
 
     /**
@@ -237,6 +247,11 @@ public final class ArrayMetadata implements NodeMetadata {
     @Override
     public NodeType nodeType() {
         return NodeType.ARRAY;
+    }
+
+    @Override
+    public int zarrFormat() {
+        return zarrFormat;
     }
 
     /** The array shape (a defensive copy). */

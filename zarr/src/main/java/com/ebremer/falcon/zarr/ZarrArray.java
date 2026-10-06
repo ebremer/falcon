@@ -64,6 +64,11 @@ public final class ZarrArray extends ZarrNode {
     }
 
     @Override
+    public int zarrFormat() {
+        return metadata.zarrFormat();
+    }
+
+    @Override
     public JsonObject attributes() {
         return metadata.attributes();
     }

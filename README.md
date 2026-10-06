@@ -99,7 +99,7 @@ the **[HDF5 User Guide](hdf5/USER_GUIDE.md)**.
 
 ## Zarr
 
-Read Zarr v2 and v3; write v3. Reading touches only the chunks a selection overlaps:
+Read and write Zarr v2 and v3. Reading touches only the chunks a selection overlaps:
 
 ```java
 import com.ebremer.falcon.zarr.*;
@@ -122,7 +122,8 @@ numcodecs' `zlib`, `lz4`, `bz2`, `zfpy` (read), filters, and checksums, the zarr
 `reshape` — with `zstd`/`blosc` read *and* written by Falcon's own
 pure-Java encoders (libzstd / c-blosc / zarr-python read the output; Blosc with every internal compressor,
 byte for byte as c-blosc writes it, zstd aside). Zarr v2 arrays open with their numcodecs filters,
-Fortran order, and NumPy string, byte, time, structured, and object dtypes. Consolidated metadata is read
+Fortran order, and NumPy string, byte, time, structured, and object dtypes, and Falcon creates them too
+(`ArraySpec.Builder.zarrFormat(2)`), with the `.zarray` zarr-python writes. Consolidated metadata is read
 and written, so a remote hierarchy opens in one request; rectilinear chunk grids and the extension data
 types zarr-python writes (datetimes, fixed-size strings and bytes, structs) are read and written too.
 Stores: in-memory, filesystem, ZIP (read

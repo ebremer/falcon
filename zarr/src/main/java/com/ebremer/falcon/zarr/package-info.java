@@ -1,5 +1,5 @@
 /**
- * Public API for Falcon's Zarr reader/writer: Zarr v3 read and write, Zarr v2 read.
+ * Public API for Falcon's Zarr reader/writer: Zarr v3 and v2, read and written.
  *
  * <p>{@link com.ebremer.falcon.zarr.Zarr#open} reads a hierarchy from a
  * {@link com.ebremer.falcon.zarr.store.Store} and returns its root

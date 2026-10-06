@@ -61,5 +61,5 @@ Locked at review and applied uniformly across the reactor:
   zstd and Blosc, so on 2026-10-05 they moved there rather than being copied, and on 2026-10-06 the
   Fletcher-32 and lookup3 checksums, the byte shuffle, and zlib, which each module had written, joined
   them. Details in [`zarr/PLAN.md`](zarr/PLAN.md) §10.
-- Module-specific non-goals (SWMR / MPI / HL APIs for HDF5; creating Zarr v2 arrays; …) are
-  listed in each module's PLAN and TODO.
+- Module-specific non-goals (SWMR / MPI / HL APIs for HDF5; writing zfpy or the registry data types
+  zarr-python does not write for Zarr; …) are listed in each module's PLAN and TODO.

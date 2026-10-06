@@ -125,11 +125,14 @@ class ConsolidatedTest {
         assertArrayEquals(new int[] {9, 9, 9, 9}, Zarr.openGroup(store).array("late").readInts());
     }
 
+    /** Consolidated metadata holds one format's nodes: a v3 group's v2 child, or a v2 group's v3 one, stops it. */
     @Test
-    void consolidateRefusesV2NodesAndReadOnlyStores() {
+    void consolidateRefusesMixedFormatsAndReadOnlyStores() {
         MemoryStore v2 = new MemoryStore();
         put(v2, ".zgroup", "{\"zarr_format\":2}");
+        put(v2, "new/zarr.json", "{\"zarr_format\":3,\"node_type\":\"group\"}");
         assertThrows(UnsupportedOperationException.class, () -> Zarr.openGroup(v2).consolidate());
+        assertFalse(v2.exists(".zmetadata"));
 
         MemoryStore mixed = tree();
         put(mixed, "g/old/.zgroup", "{\"zarr_format\":2}");

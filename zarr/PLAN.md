@@ -7,15 +7,16 @@ It is **Falcon Phase 2**; the HDF5 module (Phase 1) is the sibling and the templ
 [`PLAN.md`](../PLAN.md) for the umbrella roadmap.
 
 > **Status (2026-10-06): Z0–Z9 complete, and the 2026-10-04 review's P0–P3 all done.** The module reads
-> Zarr v2 and v3, writes v3, and writes into existing v2 arrays, checked against **zarr-python** both ways.
+> and writes Zarr v2 and v3, checked against **zarr-python** both ways.
 > Falcon reads 144 fixture stores and 2 ZIP archives zarr-python wrote (3.2.1 for the first, 3.4.0 since),
-> each against an expected-value sidecar. zarr-python 3.4 reads the 273 arrays, 42 written-into v2 arrays,
-> 6 hierarchies, and 4 ZIP archives Falcon writes (`check_zarr_writer.py`, `check_zarr_v2_writes.py`,
+> each against an expected-value sidecar. zarr-python 3.4 reads the 273 arrays, 58 written-into and 58 created
+> v2 nodes, 6 hierarchies, and 4 ZIP archives Falcon writes (`check_zarr_writer.py`, `check_zarr_v2_writes.py`,
 > `check_zarr_hierarchies.py`, `check_zip_store.py`).
 > - **Data:** every core data type, variable-length strings and bytes, the extension types zarr-python
 >   writes (datetimes, fixed-size strings and bytes, structs), the regular and rectilinear chunk grids,
 >   sharding (nested, with byte-range reads and partial writes), resizing, and consolidated metadata;
->   Zarr v2's NumPy dtypes, Fortran order, and numcodecs filters and compressors; the zarr-extensions
+>   Zarr v2's NumPy dtypes, Fortran order, and numcodecs filters and compressors, read and written, v2
+>   arrays and groups created as zarr-python creates them, and v2 consolidated metadata; the zarr-extensions
 >   `cast_value` (cast-value-rs's results bit for bit) and `reshape` codecs, and numcodecs' bz2 and zfpy
 >   (read).
 > - **Compression,** hand-written in pure Java in `core`:
@@ -29,7 +30,7 @@ It is **Falcon Phase 2**; the HDF5 module (Phase 1) is the sibling and the templ
 > - **Stores:** memory, filesystem, ZIP (read and written), read-only HTTP (byte ranges; listing from
 >   directory index pages when asked), and S3-compatible object storage (SigV4).
 > - **Robustness:** corrupt input fails with typed exceptions, fuzzed under a small heap and stack;
->   handles are safe across threads; an opt-in decoded-chunk cache. 854 tests, and 19 more under a small
+>   handles are safe across threads; an opt-in decoded-chunk cache. 921 tests, and 19 more under a small
 >   heap, pass; the public API's Javadoc is complete and checked by the compile.
 >
 > **Remaining** (tracked in [`TODO.md`](TODO.md)): nothing from the review; the non-goals below.
@@ -109,7 +110,7 @@ The data model is Zarr's own; only the compression codecs are shared with HDF5, 
   (`javax.crypto`, in `java.base`) and covers S3, GCS through HMAC keys, MinIO, and R2; `HttpStore` takes
   auth headers. Azure Shared Key and GCS OAuth remain out of scope (SAS URLs and bearer tokens work).
 - ~~**Consolidated metadata**~~ — done in P2 (F2, 2026-10-06): read (v3 inline, v2 `.zmetadata`) and
-  written (v3).
+  written (v3; v2 since F17).
 - ~~**Other registered extensions**~~ — done in P2 (F14, 2026-10-06): the `rectilinear` chunk grid (the
   only other one registered) is read and written, and so are the extension data types zarr-python writes;
   storage transformers with `must_understand: false` are read past (none is registered), as are other
@@ -117,9 +118,11 @@ The data model is Zarr's own; only the compression codecs are shared with HDF5, 
 - ~~**Blosc / Zstandard** codecs until they are hand-written in pure Java~~ — done (Z8, and P2's F12 for
   the zstd encoder's levels): decoded and encoded from scratch, now in `core`, the same "implement
   compression from scratch, no native/deps" decision made for HDF5's szip.
-- **Zarr v2** — read (Z8; P2's F4 closed the gaps: NumPy's string, byte, time, structured, and object
-  dtypes, Fortran order, numcodecs' filters, and the zlib and lz4 compressors), and written into once it
-  exists; *creating* v2 arrays is out of scope.
+- ~~**Creating Zarr v2 arrays**~~ — done (F17, 2026-10-06). Zarr v2 is read (Z8; P2's F4 closed the
+  gaps: NumPy's string, byte, time, structured, and object dtypes, Fortran order, numcodecs' filters, and
+  the zlib and lz4 compressors), written into, and created: arrays (`ArraySpec.Builder.zarrFormat(2)`,
+  with `order`, `filters`, and `compressor`), groups, and consolidated `.zmetadata`, as zarr-python 3.4
+  writes them.
 
 ## 4. Design decisions
 
@@ -262,7 +265,7 @@ store written by zarr-python (§8). Stages are dependency-ordered.
 - **Acceptance:** for each fixture, `Falcon-write → zarr-python-read` and `zarr-python-write →
   Falcon-read` agree on structure + data; property-based random round-trips pass.
 
-### Z8 — Compression breadth & compatibility ✅ *done (v2's Fortran order and filters since P2's F4; creating v2 arrays is a non-goal)*
+### Z8 — Compression breadth & compatibility ✅ *done (v2's Fortran order and filters since P2's F4; creating v2 arrays since F17)*
 - **Pure-Java `zstd`** (RFC 8878 decode first, then encode) and/or **`blosc`** (blosclz/lz4 + shuffle) —
   from scratch, validated against numcodecs/zstd reference vectors (a dev-time tool, like libaec for szip).
 - **Zarr v2 read compatibility**: `.zgroup`/`.zarray`/`.zattrs`, v2 dtype strings (`<i4`, `|u1`, …),

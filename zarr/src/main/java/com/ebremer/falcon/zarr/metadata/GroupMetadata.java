@@ -21,25 +21,40 @@ public final class GroupMetadata implements NodeMetadata {
 
     private final JsonObject attributes;
     private final JsonValue consolidated; // the raw consolidated_metadata member, or null if absent
+    private final int zarrFormat;         // 3, or 2 for a v2 group translated by V2Metadata
 
-    GroupMetadata(JsonObject attributes, JsonValue consolidated) {
+    GroupMetadata(JsonObject attributes, JsonValue consolidated, int zarrFormat) {
         this.attributes = attributes;
         this.consolidated = consolidated;
+        this.zarrFormat = zarrFormat;
     }
 
     /** Parses a validated group document. {@code ctx} names the source key for diagnostics. */
     static GroupMetadata parse(JsonObject o, String ctx) {
+        return parse(o, ctx, 3);
+    }
+
+    /**
+     * Parses a validated group document, recording {@code zarrFormat} as the format it was stored in: 2 for
+     * the v3 document {@link V2Metadata} translates a {@code .zgroup} into.
+     */
+    static GroupMetadata parse(JsonObject o, String ctx, int zarrFormat) {
         Fields.requireZarrFormat3(o, ctx);
         JsonObject attributes = o.find("attributes")
                 .map(v -> Fields.object(v, ctx + ".attributes"))
                 .orElse(Fields.EMPTY_OBJECT);
         Fields.checkUnknownFields(o, KNOWN, ctx);
-        return new GroupMetadata(attributes, o.find("consolidated_metadata").orElse(null));
+        return new GroupMetadata(attributes, o.find("consolidated_metadata").orElse(null), zarrFormat);
     }
 
     @Override
     public NodeType nodeType() {
         return NodeType.GROUP;
+    }
+
+    @Override
+    public int zarrFormat() {
+        return zarrFormat;
     }
 
     @Override

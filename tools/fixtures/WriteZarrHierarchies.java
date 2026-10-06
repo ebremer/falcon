@@ -105,7 +105,7 @@ public class WriteZarrHierarchies {
         return store;
     }
 
-    /** A v2 hierarchy written key by key (Falcon writes v3 metadata only), with zarr-python 2's .zmetadata. */
+    /** A v2 hierarchy written key by key, as zarr-python 2 wrote one, with its .zmetadata. */
     static Store v2Tree(Path out, String name) throws Exception {
         Path dir = out.resolve(name);
         if (Files.exists(dir)) {

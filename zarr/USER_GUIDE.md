@@ -293,14 +293,16 @@ nothing more; arrays still read their chunks from the store. `group.isConsolidat
 answers from a snapshot, and `Zarr.open(store, false)` reads every node's own metadata.
 
 ```java
-ZarrGroup root = Zarr.openGroup(store).consolidate();   // write the snapshot (v3 only)
+ZarrGroup root = Zarr.openGroup(store).consolidate();   // write the snapshot
 ZarrGroup remote = Zarr.openGroup(s3Store);             // one GET, then the whole tree from the snapshot
 ```
 
 `consolidate()` walks every node below the group by its own metadata and writes the snapshot into the
-group's `zarr.json` in zarr-python 3.4's layout, which zarr-python reads with `use_consolidated=True`. It
-refuses a v2 hierarchy (Falcon writes v3 only) and fails, before writing anything, if a node's metadata is
-malformed. A malformed snapshot fails to open; use `Zarr.open(store, false)` to read around it.
+group's `zarr.json` in zarr-python 3.4's layout, which zarr-python reads with `use_consolidated=True`. A v2
+group's snapshot goes into its `.zmetadata`, as zarr-python writes it. It fails, before writing anything,
+if a node's metadata is malformed, or if a node below is of the other Zarr format (zarr-python lists only a
+group's own format's children). A malformed snapshot fails to open; use `Zarr.open(store, false)` to read
+around it.
 
 The snapshot is what the hierarchy was when it was consolidated: nodes created, resized, or given new
 attributes later look as they were until `consolidate()` runs again. Deleting a child (below) is the one
@@ -549,8 +551,8 @@ with `"must_understand": false`, since skipping it would decode the wrong bytes.
 
 A v2 array (`.zarray`, with its attributes in `.zattrs`) is translated to the v3 model when it opens.
 Everything in this guide then applies to it, including writing into it (chunks, resizing, attributes),
-which stores what zarr-python stores for that metadata. Falcon does not create v2 arrays; it creates v3.
-The translation follows how zarr-python 3.4 reads and writes v2:
+which stores what zarr-python stores for that metadata. Falcon creates v2 arrays and groups too
+([below](#creating-v2-arrays-and-groups)). The translation follows how zarr-python 3.4 reads and writes v2:
 
 | v2 | Read as |
 |---|---|
@@ -615,6 +617,48 @@ Falcon is more lenient than zarr-python in three places:
 - it reads nested structured dtypes, which zarr-python writes but cannot read;
 - it reads a struct's `null` fill as all zeros, which zarr-python refuses when a field is a time or text;
 - it reads a `vlen-bytes` fill of `0` as no bytes.
+
+### Creating v2 arrays and groups
+
+`ArraySpec.Builder.zarrFormat(2)` describes a v2 array, and
+`Zarr.createGroup(store, attributes, overwrite, 2)` creates a v2 root group. A group creates its children
+in its own format, as zarr-python does, so a spec that names no format becomes a v2 array in a v2 group:
+
+```java
+ZarrGroup root = Zarr.createGroup(store, JsonObject.builder().put("title", "scan").build(), false, 2);
+ZarrGroup raw = root.createGroup("raw");                       // a v2 group: .zgroup and .zattrs
+ZarrArray a = raw.createArray("counts", ArraySpec.builder(new long[] {1000, 1000}, DataType.UINT16)
+        .zarrFormat(2)                                         // needed for order, filters, and compressor
+        .chunkShape(100, 100)
+        .order('F')
+        .filters(JsonObject.builder().put("id", "delta").put("dtype", "<u2").build())
+        .compressor(JsonObject.builder().put("id", "zlib").put("level", 1).build())
+        .build());
+root.consolidate();                                            // writes .zmetadata
+```
+
+Falcon writes the `.zarray` zarr-python 3.4 writes for the same array, its members in the same order, and
+a `.zattrs` (`{}` when there are no attributes) before it:
+- **The data type** is its NumPy dtype in the `endian` byte order: `|b1`, `<i4`, `>f8`, `<c16`, `<U3`, `|S4`,
+  `|V2`, `<M8[10s]` (a bare `<M8` for NumPy's generic unit), a struct's list of `[name, dtype]` fields, and
+  `|O` for strings and variable-length bytes, whose object codec (`vlen-utf8` or `vlen-bytes`) is then the
+  first filter.
+- **The fill value** takes v2's form: a number, `"NaN"` (for any NaN, whose other bits v2 cannot hold),
+  `"Infinity"`, a time's count (NaT is int64's minimum), text, or base64 of the bytes (a struct's whole
+  element, in the array's byte order). `fillValue(JsonNull.INSTANCE)` writes v2's `null`, "no fill value",
+  which zarr-python reads as the type's default.
+- **`order('F')`** stores each chunk in Fortran order. **`filters(...)`** and **`compressor(...)`** take
+  numcodecs configurations as `.zarray` lists them. Falcon writes the codecs of the table above, but
+  `categorize` and `zfpy`. `gzip`, `zstd`, `blosc`, and `bz2` set the compressor too, configured as
+  numcodecs configures them; a v2 array has one compressor.
+- **`separator("/")`** sets the `dimension_separator`; the default is `"."`.
+
+A v2 array cannot have sharding, `cast_value`, `reshape`, `crc32c` (numcodecs' checksum filters stand in),
+a rectilinear grid, dimension names, the `default` chunk key encoding, an `r<N>` data type, or `zfpy`, and
+`build()` refuses them. A v3 array cannot have `order('F')`, `filters`, or `compressor`, so they need
+`zarrFormat(2)`. Creating an array whose spec names the format other than its group's is refused before
+anything is written, and so is a spec that names none but cannot be a v2 array, in a v2 group.
+`ZarrNode.zarrFormat()` says which format a node is stored in.
 
 ## Stores
 
@@ -734,8 +778,9 @@ nothing else writes to that part of the hierarchy.
 
 ## What is and isn't supported
 
-**Supported:** Zarr v3 read *and* write; Zarr v2 read (NumPy's dtypes, Fortran order, and numcodecs'
-filters and compressors), and writing into existing v2 arrays; all core data types plus variable-length `string`
+**Supported:** Zarr v3 read *and* write; Zarr v2 read *and* write (NumPy's dtypes, Fortran order, and
+numcodecs' filters and compressors): writing into existing v2 arrays, and creating v2 arrays, groups, and
+consolidated metadata; all core data types plus variable-length `string`
 and `variable_length_bytes`, with exact uint64 and complex accessors; the extension data types
 zarr-python writes (`numpy.datetime64`, `numpy.timedelta64`, `fixed_length_utf32`,
 `null_terminated_bytes`, `raw_bytes`, `struct`); the regular chunk grid and the rectilinear one
@@ -749,12 +794,12 @@ that need not be understood (`must_understand: false`, read past); consolidated 
 written; changing attributes and deleting nodes; the memory, filesystem, ZIP (read and written), HTTP
 (listing from directory index pages, when asked), and S3-compatible stores.
 
-**Not supported** (see [`TODO.md`](TODO.md)): creating Zarr v2 arrays; the v2 `categorize` filter,
+**Not supported** (see [`TODO.md`](TODO.md)): the v2 `categorize` filter,
 object codecs other than `vlen-utf8`/`vlen-bytes`, and the `lzma`/`pcodec` compressors; writing `zfpy`;
 numcodecs' element filters as Zarr v3 array→array codecs; extension metadata that must be understood,
 other extension data types (`bfloat16`, the `float8`/`int4` families, and other registry types
 zarr-python does not write), and storage transformers that must be understood (none is registered);
-consolidating a v2 hierarchy; Azure Shared Key and GCS OAuth (implement the `Store` SPI yourself, or use
+Azure Shared Key and GCS OAuth (implement the `Store` SPI yourself, or use
 SAS URLs and bearer tokens on `HttpStore`); zstd dictionaries and optimal parsing (so Falcon's highest
 zstd levels trail libzstd's slightly); c-blosc2 chunks with
 variable-length blocks, dictionaries, or plugin codecs and filters; and compression in a ZIP Falcon

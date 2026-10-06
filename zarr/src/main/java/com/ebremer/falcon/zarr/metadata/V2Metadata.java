@@ -53,8 +53,9 @@ import java.util.regex.Pattern;
  * </ul>
  *
  * <p>Writing into a translated v2 array goes through the same pipeline, so the chunks written are those
- * zarr-python writes for that metadata (but for {@code zfpy}, which Falcon only reads). Creating v2 arrays is
- * out of scope.
+ * zarr-python writes for that metadata (but for {@code zfpy}, which Falcon only reads). Creating a v2 array
+ * goes the other way: {@link #dtype} and {@link #fillValue} give the {@code .zarray} members zarr-python 3.4
+ * writes for a v3 data type and fill value, and the document is then read back through this translation.
  */
 public final class V2Metadata {
 
@@ -107,7 +108,7 @@ public final class V2Metadata {
             JsonObject attributes = zattrs == null ? Fields.EMPTY_OBJECT : Fields.object(zattrs, key + " (.zattrs)");
             return GroupMetadata.parse(JsonObject.builder()
                     .put("zarr_format", 3).put("node_type", "group").put("attributes", attributes)
-                    .build(), key);
+                    .build(), key, 2);
         });
     }
 
@@ -138,7 +139,7 @@ public final class V2Metadata {
      */
     public static ArrayMetadata parseArray(JsonValue zarray, JsonValue zattrs, String key) {
         return Metadata.wrapJson(key, () -> ArrayMetadata.parse(translate(Fields.object(zarray, key),
-                zattrs == null ? null : Fields.object(zattrs, key + " (.zattrs)"), key), key));
+                zattrs == null ? null : Fields.object(zattrs, key + " (.zattrs)"), key), key, 2));
     }
 
     /**
@@ -582,6 +583,102 @@ public final class V2Metadata {
             }
             default -> fill;
         };
+    }
+
+    // ---- writing ---------------------------------------------------------------------------------------
+
+    /**
+     * The NumPy dtype that stands for {@code type} in a {@code .zarray}, as zarr-python 3.4 writes it, its
+     * multi-byte numbers (and UTF-32 text) in {@code order}: {@code "<f8"}, {@code "|b1"}, {@code ">U3"},
+     * {@code "|S4"}, {@code "|V2"}, {@code "<M8[10s]"} (a bare {@code "<M8"} for NumPy's generic unit),
+     * {@code "|O"} for the variable-length types (whose object codec is the first filter), and for a struct
+     * a list of {@code [name, dtype]} fields. It reads back as {@code type}, but that {@code μs} is written
+     * {@code us}, as NumPy writes it.
+     *
+     * @param type  the data type
+     * @param order the byte order of its multi-byte numbers
+     * @return the dtype: a JSON string, or a list for a struct
+     * @throws IllegalArgumentException if Zarr v2 has no dtype for {@code type} (an {@code r<N>} type), or for
+     *                                  a field of it
+     */
+    public static JsonValue dtype(DataType type, ByteOrder order) {
+        if (type.kind() == DataTypeKind.STRUCT) {
+            List<JsonValue> fields = new ArrayList<>(type.fields().size());
+            for (DataType.Field f : type.fields()) {
+                fields.add(JsonArray.of(new JsonString(f.name()), dtype(f.type(), order)));
+            }
+            return new JsonArray(fields);
+        }
+        int n = type.byteCount();
+        String body = switch (type.kind()) {
+            case BOOL -> "b1";
+            case INT -> "i" + n;
+            case UINT -> "u" + n;
+            case FLOAT -> "f" + n;
+            case COMPLEX -> "c" + n;
+            case FIXED_STRING -> "U" + n / 4;
+            case FIXED_BYTES -> "S" + n;
+            case RAW_BYTES -> "V" + n;
+            case DATETIME -> "M8" + timeUnit(type);
+            case TIMEDELTA -> "m8" + timeUnit(type);
+            case STRING, BYTES -> "O";
+            case RAW -> throw new IllegalArgumentException("Zarr v2 has no dtype for the '" + type.name()
+                    + "' data type; NumPy's V<n> is DataType.rawBytes(n)");
+            case STRUCT -> throw new AssertionError(); // handled above
+        };
+        char prefix = !type.hasByteOrder() ? '|' : order == ByteOrder.BIG_ENDIAN ? '>' : '<';
+        return new JsonString(prefix + body);
+    }
+
+    /** A time dtype's unit: {@code [10s]}, {@code [ns]}, or nothing for NumPy's generic unit. */
+    private static String timeUnit(DataType type) {
+        if (type.unit().equals("generic")) {
+            if (type.scaleFactor() != 1) {
+                throw new IllegalArgumentException("NumPy's generic time unit takes no scale factor, was "
+                        + type.scaleFactor());
+            }
+            return "";
+        }
+        String unit = type.unit().equals("μs") ? "us" : type.unit();
+        return "[" + (type.scaleFactor() == 1 ? "" : type.scaleFactor()) + unit + "]";
+    }
+
+    /**
+     * The {@code .zarray} fill value standing for the Zarr v3 fill value {@code fill} of an array of
+     * {@code type}, as zarr-python 3.4 writes it: a number, {@code true}/{@code false}, or {@code "NaN"},
+     * {@code "Infinity"}, or {@code "-Infinity"} (any NaN is written {@code "NaN"}, for v2 has no form for
+     * its bits); a complex value's two parts; a time's count, NaT being int64's minimum; the text of a
+     * {@code U} dtype or a {@code vlen-utf8} array; base64 of the bytes of an {@code S} or {@code V} dtype or a
+     * {@code vlen-bytes} array; and base64 of a struct's whole element, its numbers in {@code order}. A JSON
+     * {@code null}, v2's "no fill value", is kept: it reads as the type's default.
+     *
+     * @param type  the data type
+     * @param fill  the fill value in its Zarr v3 form, or {@code null} JSON
+     * @param order the byte order of the array's multi-byte numbers
+     * @return the fill value's {@code .zarray} JSON
+     * @throws ZarrFormatException if {@code fill} is not a fill value of {@code type}
+     */
+    public static JsonValue fillValue(DataType type, JsonValue fill, ByteOrder order) {
+        if (fill instanceof JsonNull || type.isVariableLength()) {
+            return fill; // the text, or base64 of the bytes, as in Zarr v3
+        }
+        byte[] element = type.decodeFillValue(fill, ByteOrder.LITTLE_ENDIAN);
+        return switch (type.kind()) {
+            case STRUCT -> new JsonString(Base64.getEncoder().encodeToString(type.decodeFillValue(fill, order)));
+            case DATETIME, TIMEDELTA -> JsonNumber.of(java.nio.ByteBuffer.wrap(element)
+                    .order(ByteOrder.LITTLE_ENDIAN).getLong());
+            case FLOAT -> anyNan(type.encodeFillValue(element, ByteOrder.LITTLE_ENDIAN));
+            case COMPLEX -> {
+                JsonArray parts = (JsonArray) type.encodeFillValue(element, ByteOrder.LITTLE_ENDIAN);
+                yield JsonArray.of(anyNan(parts.get(0)), anyNan(parts.get(1)));
+            }
+            default -> type.encodeFillValue(element, ByteOrder.LITTLE_ENDIAN);
+        };
+    }
+
+    /** A float's v3 fill value with a NaN's bits ({@code "0x7fc00001"}) written as v2 writes any NaN. */
+    private static JsonValue anyNan(JsonValue v3) {
+        return v3 instanceof JsonString s && s.value().startsWith("0x") ? new JsonString("NaN") : v3;
     }
 
     private static void checkFormat(JsonObject meta, String key) {

@@ -1,12 +1,12 @@
 package com.ebremer.falcon.zarr;
 
-import com.ebremer.falcon.zarr.json.Json;
 import com.ebremer.falcon.zarr.json.JsonObject;
 import com.ebremer.falcon.zarr.store.FileSystemStore;
 import com.ebremer.falcon.zarr.store.Store;
 import java.nio.file.Path;
 import java.util.Map;
 import java.util.NoSuchElementException;
+import java.util.Objects;
 
 /**
  * Entry point for reading a Zarr v3 hierarchy.
@@ -222,13 +222,37 @@ public final class Zarr {
      * @throws UnsupportedOperationException if the store is read-only
      */
     public static ZarrGroup createGroup(Store store, JsonObject attributes, boolean overwrite) {
+        return createGroup(store, attributes, overwrite, ZARR_FORMAT);
+    }
+
+    /**
+     * Creates the root group of {@code store} in the given Zarr format, as zarr-python's {@code zarr_format}:
+     * 3, a {@code zarr.json}; or 2, a {@code .zgroup} with the attributes in {@code .zattrs}, as zarr-python
+     * 3.4 writes them. The groups and arrays then created in it take its format. Otherwise as
+     * {@link #createGroup(Store, JsonObject, boolean)}.
+     *
+     * @param store      the store to create the group in
+     * @param attributes the group's attributes
+     * @param overwrite  whether to delete every key in the store first
+     * @param zarrFormat 2 or 3
+     * @return the new group
+     * @throws IllegalArgumentException      if {@code zarrFormat} is neither, or the store has a root node and
+     *                                       {@code overwrite} is false
+     * @throws UnsupportedOperationException if the store is read-only
+     */
+    public static ZarrGroup createGroup(Store store, JsonObject attributes, boolean overwrite, int zarrFormat) {
+        if (zarrFormat != 2 && zarrFormat != 3) {
+            throw new IllegalArgumentException("the Zarr format must be 2 or 3, not " + zarrFormat);
+        }
+        Objects.requireNonNull(attributes, "attributes");
         ZarrNode.prepareCreate(store, "", false, overwrite);
-        store.set("zarr.json", Json.writeBytes(ZarrGroup.groupJson(attributes)));
+        ZarrNode.writeGroup(store, "", attributes, zarrFormat);
         return ZarrNode.open(store, "").asGroup();
     }
 
     /**
-     * Creates an array at the root of {@code store} and returns it.
+     * Creates an array at the root of {@code store} and returns it: a Zarr v3 array, or a v2 one if the spec
+     * says so ({@link ArraySpec.Builder#zarrFormat(int)}).
      *
      * @param store the store to create the array in
      * @param spec  the array's description
@@ -254,8 +278,10 @@ public final class Zarr {
      * @throws UnsupportedOperationException if the store is read-only
      */
     public static ZarrArray createArray(Store store, ArraySpec spec, boolean overwrite) {
+        int format = spec.rootFormat();
+        JsonObject metadata = spec.metadata(format);
         ZarrNode.prepareCreate(store, "", true, overwrite);
-        store.set("zarr.json", Json.writeBytes(spec.toJson()));
+        ZarrNode.writeArray(store, "", spec, metadata, format);
         return ZarrNode.open(store, "").asArray();
     }
 }

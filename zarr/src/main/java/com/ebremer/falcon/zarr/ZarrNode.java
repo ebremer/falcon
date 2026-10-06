@@ -49,6 +49,13 @@ public abstract sealed class ZarrNode permits ZarrGroup, ZarrArray {
     /** {@return whether this node is a group} */
     public abstract boolean isGroup();
 
+    /**
+     * {@return the Zarr format this node's metadata is stored in: 3, a {@code zarr.json}; or 2, a
+     * {@code .zarray} or {@code .zgroup} with its attributes in {@code .zattrs}} The groups and arrays
+     * created in a group take its format.
+     */
+    public abstract int zarrFormat();
+
     /** {@return whether this node is an array} */
     public boolean isArray() {
         return !isGroup();
@@ -285,6 +292,35 @@ public abstract sealed class ZarrNode permits ZarrGroup, ZarrArray {
         }
         for (String key : ordered) {
             store.delete(key);
+        }
+    }
+
+    /**
+     * Writes the metadata of a new group at {@code path}: its {@code zarr.json}, or for Zarr v2 its
+     * {@code .zattrs} and then its {@code .zgroup}, as zarr-python writes them, so the group appears only once
+     * its attributes are stored.
+     */
+    static void writeGroup(Store store, String path, JsonObject attributes, int zarrFormat) {
+        if (zarrFormat == 2) {
+            store.set(key(path, V2Metadata.ZATTRS), Json.writeBytes(attributes));
+            store.set(key(path, V2Metadata.ZGROUP),
+                    Json.writeBytes(JsonObject.builder().put("zarr_format", 2).build()));
+        } else {
+            store.set(metadataKey(path), Json.writeBytes(ZarrGroup.groupJson(attributes)));
+        }
+    }
+
+    /**
+     * Writes the metadata of a new array at {@code path}, {@code metadata} being the spec's document in
+     * {@code zarrFormat}: its {@code zarr.json}, or for Zarr v2 its {@code .zattrs} and then its
+     * {@code .zarray}, as zarr-python writes them, so the array appears only once its attributes are stored.
+     */
+    static void writeArray(Store store, String path, ArraySpec spec, JsonObject metadata, int zarrFormat) {
+        if (zarrFormat == 2) {
+            store.set(key(path, V2Metadata.ZATTRS), Json.writeBytes(spec.attributes()));
+            store.set(key(path, V2Metadata.ZARRAY), Json.writeBytes(metadata));
+        } else {
+            store.set(metadataKey(path), Json.writeBytes(metadata));
         }
     }
 

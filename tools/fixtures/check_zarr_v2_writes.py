@@ -5,8 +5,12 @@ checks the other direction: Falcon writes through the pipeline it translates a .
 Fortran order, the numcodecs filters and compressors, blosc and zstd configurations), and zarr-python must
 read every element as written. Where a chunk is blosc-compressed, its header must also carry the type size
 and shuffle numcodecs would have given c-blosc for that array, and the compressor its cname names; a chunk
-compressed with bz2 must be the bytes numcodecs' BZ2 writes. Dev-time tool; zarr-python is not a Falcon
-dependency:
+compressed with bz2 must be the bytes numcodecs' BZ2 writes.
+
+The arrays Falcon created from scratch (created_NAME, "like" NAME in the manifest) must also hold the .zarray
+and .zattrs zarr-python wrote for NAME, and the v2 hierarchy Falcon created and consolidated (hierarchy_v2)
+must open through its .zmetadata with every group's attributes and every array's elements. Dev-time tool;
+zarr-python is not a Falcon dependency:
 
     mvn -pl zarr -am compile
     java -cp "zarr/target/classes;core/target/classes" tools/fixtures/WriteZarrV2Cases.java OUT_DIR
@@ -24,6 +28,9 @@ import zarr
 import zarr.storage
 
 warnings.simplefilter("ignore")
+
+FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "zarr", "src", "test", "resources",
+                        "fixtures")
 
 BLOSC_CODES = {"blosclz": 0, "lz4": 1, "lz4hc": 1, "snappy": 2, "zlib": 3, "zstd": 4}
 
@@ -125,12 +132,61 @@ def itemsize(zarray):
     return size
 
 
+def metadata_problems(path, like):
+    """The created array's .zarray and .zattrs against those zarr-python wrote for the fixture it recreates."""
+    problems = []
+    for key in (".zarray", ".zattrs"):
+        want_path = os.path.join(FIXTURES, like, key)
+        want = json.load(open(want_path, encoding="utf-8")) if os.path.exists(want_path) else {}
+        got = json.load(open(os.path.join(path, key), encoding="utf-8"))
+        if got != want:
+            problems.append(f"{key} is {json.dumps(got)}, zarr-python wrote {json.dumps(want)}")
+    if list(json.load(open(os.path.join(path, ".zarray"), encoding="utf-8"))) != list(
+            json.load(open(os.path.join(FIXTURES, like, ".zarray"), encoding="utf-8"))):
+        problems.append(".zarray members not in zarr-python's order")
+    return problems
+
+
+def group_problems(path, entry):
+    """A created v2 hierarchy, opened through its consolidated metadata as zarr-python opens it."""
+    root = zarr.open_group(zarr.storage.LocalStore(path), mode="r", zarr_format=2, use_consolidated=True)
+    problems = []
+    if root.metadata.consolidated_metadata is None:
+        problems.append("not opened through .zmetadata")
+    members = dict(root.members(max_depth=None))
+    want_groups = {k for k in entry["attributes"] if k}
+    got_groups = {k for k, v in members.items() if isinstance(v, zarr.Group)}
+    got_arrays = {k for k, v in members.items() if isinstance(v, zarr.Array)}
+    if got_groups != want_groups or got_arrays != set(entry["arrays"]):
+        problems.append(f"members {sorted(members)}, wrote groups {sorted(want_groups)}"
+                        f" and arrays {sorted(entry['arrays'])}")
+    for name, want in entry["attributes"].items():
+        node = root if not name else members.get(name)
+        if node is not None and dict(node.attrs) != want:
+            problems.append(f"{name or '/'} attributes {dict(node.attrs)}, wrote {want}")
+    for name, want in entry["arrays"].items():
+        a = members.get(name)
+        if a is None:
+            continue
+        got = falcon_values(a[...], a.dtype)
+        if len(got) != len(want) or any(not same(g, w) for g, w in zip(got, want)):
+            problems.append(f"{name} reads {got}, wrote {want}")
+    return problems
+
+
 def main(directory):
     manifest = json.load(open(os.path.join(directory, "manifest.json"), encoding="utf-8"))
     failures = 0
     for entry in manifest:
         name = entry["name"]
         path = os.path.join(directory, name)
+        if entry.get("kind") == "group":
+            try:
+                problems = group_problems(path, entry)
+            except Exception as e:  # noqa: BLE001 - report and go on
+                problems = [f"{type(e).__name__}: {e}"]
+            failures += report(name, problems)
+            continue
         zarray = json.load(open(os.path.join(path, ".zarray"), encoding="utf-8"))
         try:
             a = zarr.open_array(zarr.storage.LocalStore(path), mode="r")
@@ -145,15 +201,23 @@ def main(directory):
                 problems.append(f"{len(bad)} elements differ, first [{i}]: read {got[i]!r}, wrote {want[i]!r}")
             problems += blosc_problems(path, zarray)
             problems += bz2_problems(path, zarray)
+            if "like" in entry:
+                problems += metadata_problems(path, entry["like"])
         except Exception as e:  # noqa: BLE001 - report and go on
             problems = [f"{type(e).__name__}: {e}"]
-        if problems:
-            failures += 1
-            print(f"FAIL {name}: " + "; ".join(problems))
-        else:
-            print(f"ok   {name}")
-    print(f"{len(manifest) - failures} of {len(manifest)} Falcon-written v2 arrays read back by zarr-python {zarr.__version__}")
+        failures += report(name, problems)
+    created = sum(1 for e in manifest if "like" in e or e.get("kind") == "group")
+    print(f"{len(manifest) - failures} of {len(manifest)} Falcon-written v2 nodes read back by zarr-python"
+          f" {zarr.__version__} ({created} of them created by Falcon)")
     return 1 if failures else 0
+
+
+def report(name, problems):
+    if problems:
+        print(f"FAIL {name}: " + "; ".join(problems))
+        return 1
+    print(f"ok   {name}")
+    return 0
 
 
 if __name__ == "__main__":
