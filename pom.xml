@@ -90,6 +90,13 @@
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-surefire-plugin</artifactId>
                     <version>${surefire.plugin.version}</version>
+                    <configuration>
+                        <!-- Tests run on the class path. Surefire 3.5.2 reads module-info.class with ASM 9.7,
+                             which cannot parse release-25 class files, so it would fall back to the class path
+                             anyway, silently; saying so keeps a Surefire upgrade from moving the tests onto the
+                             module path unannounced (zarr's tests would then need jdk.httpserver read). -->
+                        <useModulePath>false</useModulePath>
+                    </configuration>
                 </plugin>
                 <plugin>
                     <groupId>org.apache.maven.plugins</groupId>

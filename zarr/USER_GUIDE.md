@@ -7,6 +7,7 @@ reader for Zarr v2 stores. Everything below is the public API in `com.ebremer.fa
 - [Opening a store](#opening-a-store)
 - [Reading arrays](#reading-arrays)
 - [Selections and streaming](#selections-and-streaming)
+- [Rectilinear chunk grids](#rectilinear-chunk-grids)
 - [Writing](#writing)
 - [Groups and hierarchy](#groups-and-hierarchy)
 - [Data types and fill values](#data-types-and-fill-values)
@@ -40,17 +41,19 @@ the Java type you ask for:
 
 ```java
 long[] shape      = array.shape();        // e.g. [1000, 1000]
-long[] chunkShape = array.chunkShape();
+long[] chunkShape = array.chunkShape();   // regular grids; chunkSizes() describes any grid
 DataType type     = array.dataType();     // e.g. DataType.FLOAT64
 long   elements   = array.size();
 
-double[] all = array.readDoubles();       // any numeric type -> double[]
+double[] all = array.readDoubles();       // bool, integer, and float types -> double[]
 int[]    ints = array.readInts();         // integer types that fit an int
-long[]   longs = array.readLongs();
+long[]   longs = array.readLongs();       // bool, integers but uint64, and the time types
 float[]  floats = array.readFloats();     // float types
 long[]   bits  = array.readUnsignedLongs(); // unsigned types exactly, uint64 included
 double[] cplx  = array.readComplex();     // complex types: real, imaginary, real, imaginary, ...
 byte[]   raw   = array.readRawBytes();    // C-order element bytes, for raw types or manual decoding
+String[] text  = array.readStrings();     // string and fixed_length_utf32
+byte[][] blobs = array.readByteArrays();  // variable_length_bytes, null_terminated_bytes, raw_bytes, struct, r*
 ```
 
 Values are returned in **C (row-major) order**. A whole-array read must fit in one Java array (about
@@ -113,6 +116,46 @@ A cached handle sees its own writes, but not writes made through other handles o
 while a chunk stays cached; `cached.clearChunkCache()` empties it. It also keeps shards' indexes, so many
 small reads of one shard fetch its index once. It may be shared between threads.
 
+## Rectilinear chunk grids
+
+Most arrays use the core `regular` chunk grid: every chunk has `chunkShape()`. The `rectilinear` grid
+(zarr-extensions `chunk-grids/rectilinear`) lets each dimension list its own chunk lengths instead, so
+chunks differ in shape: rows chunked 3, 3, 4 and columns 2, 5, say. Falcon reads and writes it.
+zarr-python 3.4 does too, but only with `zarr.config.set({"array.rectilinear_chunks": True})`.
+
+```java
+ZarrArray a = Zarr.createArray(store, ArraySpec.builder(new long[] {10, 7}, DataType.INT32)
+        .chunkLengths(0, 3, 3, 4)      // rows
+        .chunkLengths(1, 2, 5)         // columns
+        .build());
+
+a.isRectilinear();                     // true
+long[][] sizes = a.chunkSizes();       // [[3, 3, 4], [2, 5]]: each chunk's extent inside the array
+a.blocks().forEach(block -> ...);      // one selection per chunk, of that chunk's shape
+```
+
+- **Dimensions without lengths.** A dimension without listed lengths repeats its `chunkShape` entry, or
+  is one chunk covering it, so `.chunkShape(1, 4).chunkLengths(0, 2, 8)` lists the rows and chunks the
+  columns by 4.
+- **Lengths past the array.** The lengths must reach the array's extent and may run past it. A chunk that
+  runs past the array is stored at its full listed length, its tail holding the fill value, as
+  zarr-python stores it. zarr-python creates only lengths that sum to the extent exactly, but reads
+  either.
+- **`chunkShape()`.** A rectilinear array has no single chunk shape, so `chunkShape()` throws
+  `UnsupportedOperationException`, as zarr-python's `chunks` and `shards` raise there. `chunkSizes()`
+  (zarr-python's `write_chunk_sizes`, dask's `chunks`) describes regular and rectilinear grids alike.
+- **Sharding.** A rectilinear grid is sharded as zarr-python shards it: the shards follow the grid, and
+  the sub-chunks inside them share one shape, `sharding(...)`'s. Every listed length must then be a
+  multiple of the sub-chunk's extent along its dimension, which `build()` checks. `innerChunkShape()` is
+  the sub-chunk shape, so `blocks(a.innerChunkShape())` reads sub-chunk by sub-chunk across shards of
+  different shapes. On an unsharded rectilinear array, `innerChunkShape()` throws, as `chunkShape()`
+  does.
+- **Resizing** keeps the lengths, as zarr-python does: a dimension that grows past the lengths it lists
+  gains one chunk covering the rest, and one that shrinks keeps them all. Otherwise resizing works as on
+  a regular grid ([below](#writing)).
+- **Large run counts.** Falcon keeps the metadata's `[length, count]` runs as runs, so a run of a million
+  chunks costs nothing to open.
+
 ## Writing
 
 Create an array from an `ArraySpec`, then write into it. `ArraySpec.builder` defaults to one chunk
@@ -149,7 +192,9 @@ it belongs to the handle, which passes it on to the handles it makes (`withChunk
 
 **Resizing.** `a.resize(newShape...)` changes the shape and returns a handle on the resized array; the
 chunk shape, data, and every other field of the stored metadata stay as they were (a v2 array's `.zarray`
-is rewritten in place).
+is rewritten in place). On a [rectilinear grid](#rectilinear-chunk-grids) the chunk lengths stay too: a
+dimension growing past the lengths it lists gains one chunk covering the rest, and only then is
+`chunk_grid` rewritten.
 
 ```java
 ZarrArray longer = a.resize(2000);   // grow: the new elements read as the fill value
@@ -187,7 +232,8 @@ Zarr.createGroup(store, attributes, true);                    // root: delete ev
   beyond its range (`1e40` into `float32`); NaN and the infinities are stored as they are;
 - `bool` stores any nonzero value, NaN included, as true, as numpy does.
 
-`ArraySpec.builder` also offers `endian`, `gzip(level)`, `zstd()` / `zstd(level)`, `blosc()`,
+`ArraySpec.builder` also offers `endian`, `chunkLengths(dimension, lengths...)` (a
+[rectilinear grid](#rectilinear-chunk-grids)), `gzip(level)`, `zstd()` / `zstd(level)`, `blosc()`,
 `crc32c()`, `sharding(subChunkShape)`, `dimensionNames(...)`, and `chunkKeyEncoding("default"|"v2")`. The `zstd` and
 `blosc` compressors are written by Falcon's own pure-Java encoders (libzstd / c-blosc read the output).
 
@@ -269,10 +315,12 @@ the last write wins.
 
 ## Data types and fill values
 
-Core data types are modeled by `DataType`: `bool`, `int8/16/32/64`, `uint8/16/32/64`, `float16/32/64`,
-`complex64/128`, the raw `r<N>` family, and the variable-length `string` and `variable_length_bytes`
-types. Byte order is **not** part of the data type — it lives in the `bytes` codec (`ArraySpec.endian`, or
-the v2 dtype string when reading v2).
+Data types are modeled by `DataType`. The core types are constants: `bool`, `int8/16/32/64`,
+`uint8/16/32/64`, `float16/32/64`, `complex64/128`, the raw `r<N>` family, and the variable-length
+`string` and `variable_length_bytes` types. The [extension types](#extension-data-types) zarr-python
+writes (`numpy.datetime64`, `numpy.timedelta64`, `fixed_length_utf32`, `null_terminated_bytes`,
+`raw_bytes`, `struct`) are made by factories. Byte order is **not** part of the data type — it lives in
+the `bytes` codec (`ArraySpec.endian`, or the v2 dtype string when reading v2).
 
 A fill value is stored as JSON; `array.fillValue()` returns it, and `array.fillValueBytes(order)` decodes
 it to element bytes. Non-finite floats use the strings `"NaN"`, `"Infinity"`, `"-Infinity"`; a NaN other
@@ -323,6 +371,63 @@ Each `byte[]` returned is the caller's own. Everything said of strings above hol
 sharding, `transpose` before the codec, and the other accessors refusing the type. zarr-python marks the
 type as not yet in the v3 specification, and so may other implementations.
 
+### Extension data types
+
+Falcon reads and writes the extension data types zarr-python 3.4 writes, as zarr-python writes them:
+
+| `DataType` | zarr.json name | numpy | Read and write as | Fill value JSON (default) |
+|---|---|---|---|---|
+| `datetime64(unit, scale)` | `numpy.datetime64` | `datetime64[10s]` = `("s", 10)` | `long[]`: counts of the unit since 1970, `Long.MIN_VALUE` for NaT | an integer or `"NaT"` (NaT) |
+| `timedelta64(unit, scale)` | `numpy.timedelta64` | `timedelta64[ns]` | `long[]`: counts of the unit, `Long.MIN_VALUE` for NaT | an integer or `"NaT"` (NaT) |
+| `fixedLengthUtf32(n)` | `fixed_length_utf32` | `U<n>` | `String[]` (`readStrings`/`writeStrings`) | a string (`""`) |
+| `nullTerminatedBytes(n)` | `null_terminated_bytes` | `S<n>` | `byte[][]` (`readByteArrays`/`writeByteArrays`) | base64 (`""`) |
+| `rawBytes(n)` | `raw_bytes` | `V<n>` | `byte[][]` | base64 (zero bytes) |
+| `struct(fields...)` | `struct` (legacy `structured` read too) | structured dtype | `byte[][]`: whole elements, numbers little-endian | an object of field values (each field's default) |
+
+The units are numpy's: `Y`, `M`, `W`, `D`, `h`, `m`, `s`, `ms`, `us` (or `μs`), `ns`, `ps`, `fs`, `as`,
+and `generic`. A time is its exact int64 count; `dataType().unit()` and `scaleFactor()` give its meaning,
+so `java.time` conversion is yours (`Instant.ofEpochMilli(v)` for `("ms", 1)`).
+
+```java
+ZarrArray when = Zarr.createArray(store, ArraySpec.builder(new long[] {3}, DataType.datetime64("ms", 1)).build());
+when.writeLongs(new long[] {1577836800000L, Long.MIN_VALUE, 0});   // 2020-01-01, NaT, 1970-01-01
+
+DataType point = DataType.struct(new DataType.Field("x", DataType.INT16), new DataType.Field("y", DataType.FLOAT32));
+ZarrArray pts = Zarr.createArray(store2, ArraySpec.builder(new long[] {100}, point)
+        .fillValue(Json.parse("{\"x\": -1, \"y\": \"NaN\"}")).build());
+byte[] first = pts.readByteArrays()[0];                             // 6 bytes, little-endian
+short x = ByteBuffer.wrap(first).order(ByteOrder.LITTLE_ENDIAN).getShort(point.fieldOffset("x"));
+```
+
+- **Text and byte strings, as numpy has them.**
+  - A `fixed_length_utf32` element holds up to `n` code points, as UTF-32 code units in the `bytes`
+    codec's order. Writing a longer string is refused (`IllegalArgumentException`, nothing written).
+  - `null_terminated_bytes` writes up to `n` bytes; `raw_bytes`, `struct`, and `r<N>` write exactly
+    their size.
+  - Trailing NULs are padding: `readStrings` and a `null_terminated_bytes` `readByteArrays` return values
+    without them, so `"ab\0"` reads as `"ab"`. NULs inside a value are kept.
+  - A `null` element is written as empty, or zero bytes.
+- **Structs.** A struct is packed without padding: `fields()` lists the fields in order, and
+  `fieldOffset(name)` says where each starts. Fields may be any fixed-size type, structs included.
+  - Every number inside a struct follows the `bytes` codec's `endian` when stored. That covers integers,
+    floats, times, UTF-32 units, and nested structs; bytes, bools, and `S`/`V` fields have no byte order.
+  - `readByteArrays` and `writeByteArrays` always use little-endian elements, so a struct reads the same
+    from any array of its type.
+  - A struct fill value is an object of field values in each field's own JSON form; a field left out takes
+    its type's default. zarr-python's base64 form is read too.
+- **Defaults.** Without a fill value, `ArraySpec` writes `DataType.defaultFillValue()`: NaT for times, and
+  for a struct each field's default. zarr-python's own struct default instead casts 0, so its `S`/`U`
+  fields default to `"0"` and its time fields to the epoch. Both read back as written.
+- **Endian.** `ArraySpec` writes the `bytes` codec's `endian` only for a type with a byte order
+  (`DataType.hasByteOrder()`). Byte-string types, and a struct of single-byte fields, get
+  `{"name": "bytes"}`, as zarr-python writes them.
+
+All of them go through sharding, `transpose`, every compressor, the chunk cache, resizing,
+`write_empty_chunks`, and consolidated metadata. zarr-python marks most of them as not yet stable in the
+v3 specification (only `struct` is), so other implementations may not read them. Registry types
+zarr-python does not write (`bfloat16`, `float8_*`, `int4`, …) and v2's dtype strings for these types
+(`<M8[ns]`, `<U8`, `|S5`, structured lists) are not supported.
+
 ## Codecs and compression
 
 Falcon implements the Zarr v3 codec pipeline `(array→array)* (array→bytes) (bytes→bytes)*`:
@@ -337,12 +442,17 @@ Falcon implements the Zarr v3 codec pipeline `(array→array)* (array→bytes) (
 | `crc32c` (checksum) | ✅ | ✅ |
 | `sharding_indexed` | ✅ (byte-range; nested to any depth) | ✅ (nested too) |
 | `zstd` | ✅ | ✅ (pure Java, levels 1–22, the content checksum when configured; libzstd reads it) |
-| `blosc` (blosclz/lz4/lz4hc/zlib/zstd/snappy + byte/bit shuffle) | ✅ | ✅ (no, byte, or bit shuffle, the configured block size, type size, and clevel, c-blosc-sized blocks; zstd internally; c-blosc reads it) |
+| `blosc` (blosclz/lz4/lz4hc/zlib/zstd/snappy + byte/bit shuffle; c-blosc2 chunks too) | ✅ | ✅ (no, byte, or bit shuffle, the configured block size, type size, and clevel, c-blosc-sized blocks; zstd internally; c-blosc reads it) |
 
 `zstd` and `blosc` are read *and* written by pure-Java implementations (zarr-python compresses with zstd
 by default; libzstd reads Falcon's zstd frames). All compression codecs are hand-written in pure Java.
 All of blosc's internal codecs (blosclz/lz4/lz4hc/zlib/zstd/snappy) and both shuffle filters are
-supported on the read side.
+supported on the read side, and so are chunks written by c-blosc2 (Blosc format versions 3 to 6), which
+c-blosc 1.x and so zarr-python cannot read: the extended header, the filter pipeline (byte and bit
+shuffle, delta, truncated precision), split and unsplit blocks, zero and run streams, and the
+header-only chunks of zeros, NaN, or one repeated value. Falcon refuses (`ZarrUnsupportedException`)
+c-blosc2's variable-length blocks, dictionaries, lazy chunks, and plugin codecs and filters (bytedelta,
+zfp, …). Falcon writes c-blosc's format, which every Blosc reader reads.
 
 Writing into an array follows its codecs' configuration, whoever created it: a zstd `level` (libzstd's
 scale, 1 to 22; 0 or none means the default, 3) and `checksum`, and a blosc `shuffle`, `typesize`,
@@ -359,6 +469,13 @@ float32 0.883, as libzstd; Java source text 0.215 against 0.228). At 16 and up i
 no optimal parsing. It is slower than libzstd: about 30–90 MB/s at levels 1–3 depending on the data,
 15–40 MB/s at 9, and 3–11 MB/s at 19.
 
+**Storage transformers.** No storage transformer is registered with Zarr, and Falcon implements none. An
+array whose `storage_transformers` lists one that says `"must_understand": false` opens, as the v3
+specification allows, and the transformer is ignored; any other fails to open with
+`ZarrUnsupportedException`, naming it. Falcon's metadata rewrites (attributes, resizing, consolidation)
+keep the list as stored. zarr-python 3.4 refuses every non-empty list. An unknown codec is refused even
+with `"must_understand": false`, since skipping it would decode the wrong bytes.
+
 ## Stores
 
 A `Store` is a key→value map with byte-range reads; the module ships five:
@@ -370,16 +487,23 @@ new MemoryStore();                                  // in-memory, read/write
 FileSystemStore.open(root);                         // directory, read/write
 FileSystemStore.openReadOnly(root);
 ZipStore.openReadOnly(archive);                     // a .zip archive, read-only
-ZipStore.pack(sourceStore, archivePath);            // build a .zip from any store
+ZipStore.create(archive);                           // a new .zip archive, written in place
+ZipStore.open(archive);                             // add to a .zip archive (or start one)
+ZipStore.pack(sourceStore, archivePath);            // copy any store into a new .zip
 HttpStore.openReadOnly("https://host/data/store");  // read-only over HTTP(S)
 S3Store.fromUrl("s3://bucket/data.zarr").build();   // S3-compatible object storage
 ```
 
-`HttpStore` uses HTTP `Range` requests, so a remote sharded array reads only the bytes it needs. Plain
-HTTP has no directory listing, so a group's children cannot be *enumerated* over HTTP (a named child still
-opens fine, and a consolidated group lists its children from its snapshot). Implement `Store` yourself
-for other backends (databases, other object stores); `getSuffix`, which reads the last bytes of a value,
-has a default you can override with a single request.
+`HttpStore` uses HTTP `Range` requests, so a remote sharded array reads only the bytes it needs. HTTP has
+no way to list keys, so by default a group's children cannot be *enumerated* over HTTP (a named child still
+opens fine, and a consolidated group lists its children from its snapshot). A static file server's
+directory listings can stand in, as fsspec reads them: `HttpStore.builder(url).directoryListing(true)`
+reads the HTML index page a server makes for a directory (Python's `http.server`, nginx's `autoindex`,
+Apache's `mod_autoindex`) and takes its links to names directly below as keys and child prefixes. It is off
+by default because any other page a server answers with (a 200 error page, an application's start page)
+would list links that are not keys. Listing a whole tree costs a request per directory. Implement `Store`
+yourself for other backends (databases, other object stores); `getSuffix`, which reads the last bytes of a
+value, has a default you can override with a single request.
 
 `HttpStore` percent-encodes keys, keeps a base URL's query (presigned or SAS URLs) on every request, and
 follows redirects (http to https, never back). Only 404 means a key is absent. For an S3 or GCS bucket
@@ -422,7 +546,20 @@ ZarrGroup root = Zarr.openGroup(store);
   URL on `HttpStore`); GCS OAuth (use HMAC keys, or a bearer token on `HttpStore` for reads).
 
 `ZipStore` reads a range of an uncompressed (STORED) entry directly, so sharded arrays in a ZIP read only
-what they need; `ZipStore.pack` writes STORED entries, as zarr-python does.
+what they need. It also writes, as zarr-python's `ZipStore` does in modes `"w"` and `"a"`: `create` starts
+a new archive and `open` adds to one, appending each value as a STORED entry, and `close()` writes the
+archive's central directory (with Zip64 records past 65,535 entries or 4 GiB). Close the store: until then
+the file has no directory and nothing can read it, and adding to an archive writes over its old one. A
+value written again, or deleted, leaves its old bytes in the file (the directory names only the newest
+entry); `ZipStore.pack(zip, newPath)` copies the live entries into a compact archive. Where zarr-python
+wrote a key twice, its archive holds the name twice; Falcon reads the last, as Python does.
+
+```java
+try (ZipStore zip = ZipStore.create(Path.of("image.zarr.zip"))) {
+    ZarrGroup root = Zarr.createGroup(zip);
+    root.createArray("data", spec).writeDoubles(values);
+}   // close() writes the central directory
+```
 
 `FileSystemStore` writes each value to a temporary file beside it and renames it into place, so a reader
 never sees part of a write, and a process that dies mid-write leaves the old value. It does not force the
@@ -458,20 +595,27 @@ nothing else writes to that part of the hierarchy.
 ## What is and isn't supported
 
 **Supported:** Zarr v3 read *and* write; Zarr v2 read; all core data types plus variable-length `string`
-and `variable_length_bytes`, with exact uint64 and complex accessors; the regular chunk grid; both chunk
-key encodings; every codec in the table above (including `zstd` and `blosc` written by Falcon's own
-encoders, and all of blosc's internal codecs + both shuffle filters on read); sharding, nested too, with
-efficient byte-range reads and writes, for strings too; selections, navigation by path, and block
-streaming (by chunk, sub-chunk, or any block shape); resizing, and zarr-python's `write_empty_chunks`;
-consolidated metadata, read and written; changing attributes and deleting nodes; the memory, filesystem,
-ZIP, HTTP, and S3-compatible stores.
+and `variable_length_bytes`, with exact uint64 and complex accessors; the extension data types
+zarr-python writes (`numpy.datetime64`, `numpy.timedelta64`, `fixed_length_utf32`,
+`null_terminated_bytes`, `raw_bytes`, `struct`); the regular chunk grid and the rectilinear one
+(zarr-python's `array.rectilinear_chunks`); both chunk key encodings; every codec in the table above
+(including `zstd` and `blosc` written by Falcon's own encoders, and all of blosc's internal codecs + both
+shuffle filters on read, c-blosc2's chunk format too); sharding, nested too, with efficient byte-range
+reads and writes, for strings too; selections, navigation by path, and block streaming (by chunk,
+sub-chunk, or any block shape); resizing, and zarr-python's `write_empty_chunks`; storage transformers
+that need not be understood (`must_understand: false`, read past); consolidated metadata, read and
+written; changing attributes and deleting nodes; the memory, filesystem, ZIP (read and written), HTTP
+(listing from directory index pages, when asked), and S3-compatible stores.
 
 **Not supported** (see [`TODO.md`](TODO.md)): Zarr v2 *writing*, Fortran
-(`"F"`) order, and v2 filters; extension metadata that must be understood, non-`regular` chunk grids,
-extension data types, and storage transformers; consolidating a v2 hierarchy; Azure Shared Key and GCS
-OAuth (implement the `Store` SPI yourself, or use SAS URLs and bearer tokens on `HttpStore`); zstd
-dictionaries and optimal parsing (so Falcon's highest zstd levels trail libzstd's slightly); and a blosc
-`cname` other than `zstd` on write.
+(`"F"`) order, and v2 filters; extension metadata that must be understood, other extension data types
+(`bfloat16`, the `float8`/`int4` families, and other registry types zarr-python does not write), v2 dtype
+strings for the extension types, and storage transformers that must be understood (none is registered);
+consolidating a v2 hierarchy; Azure Shared Key and GCS OAuth (implement the `Store` SPI yourself, or use
+SAS URLs and bearer tokens on `HttpStore`); zstd dictionaries and optimal parsing (so Falcon's highest
+zstd levels trail libzstd's slightly); a blosc `cname` other than `zstd` on write; c-blosc2 chunks with
+variable-length blocks, dictionaries, or plugin codecs and filters; and compression in a ZIP Falcon
+writes (entries are STORED, as zarr-python writes them).
 
 Corrupt input (bad metadata, truncated or damaged chunks, malformed compressed streams) fails with a typed
 exception — `ZarrFormatException`, `ZarrUnsupportedException`, or `ZarrException`. Decompression is bounded

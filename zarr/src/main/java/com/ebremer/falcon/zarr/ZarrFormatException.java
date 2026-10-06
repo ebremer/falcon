@@ -10,10 +10,21 @@ package com.ebremer.falcon.zarr;
  */
 public class ZarrFormatException extends ZarrException {
 
+    /**
+     * Creates the exception with a detail message.
+     *
+     * @param message the detail message
+     */
     public ZarrFormatException(String message) {
         super(message);
     }
 
+    /**
+     * Creates the exception with a detail message and the failure that caused it.
+     *
+     * @param message the detail message
+     * @param cause   the underlying failure (an {@link java.io.IOException}, for example)
+     */
     public ZarrFormatException(String message, Throwable cause) {
         super(message, cause);
     }

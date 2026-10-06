@@ -1,0 +1,22 @@
+{
+ "name": "ext_timedelta64_ns",
+ "shape": [
+  6
+ ],
+ "data_type": {
+  "name": "numpy.timedelta64",
+  "configuration": {
+   "unit": "ns",
+   "scale_factor": 1
+  }
+ },
+ "fill_value": 5,
+ "values": [
+  -4611686018427387904,
+  -1,
+  0,
+  4611686018427387904,
+  5,
+  5
+ ]
+}

@@ -1,0 +1,21 @@
+{
+ "name": "rect_string",
+ "shape": [
+  5
+ ],
+ "dtype": "string",
+ "attributes": {},
+ "values": [
+  "alpha0",
+  "1",
+  "gamma-δ2",
+  "中文3",
+  "emoji-😀4"
+ ],
+ "chunk_sizes": [
+  [
+   2,
+   3
+  ]
+ ]
+}

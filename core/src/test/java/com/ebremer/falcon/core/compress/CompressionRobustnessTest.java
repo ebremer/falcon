@@ -90,6 +90,12 @@ class CompressionRobustnessTest {
     }
 
     @Test
+    void blosc2SurvivesCorruption() {
+        // A 32-byte special-value chunk may rightly claim 2 GB, so a flipped size is bounded as callers bound it.
+        fuzz("blosc2", vectors("blosc2_vectors.txt", 6), stream -> BloscDecoder.decompress(stream, 16 << 20));
+    }
+
+    @Test
     void lzfSurvivesCorruption() {
         fuzz("lzf", vectors("lzf_vectors.txt", 3), stream -> Lzf.decompress(stream, 0, stream.length, 0));
     }

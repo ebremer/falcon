@@ -62,7 +62,7 @@ com.ebremer.falcon.zarr             Public API: Zarr, ZarrGroup, ZarrArray, Zarr
         …zarr.store                 Store SPI; FileSystemStore, MemoryStore, ZipStore; byte-range reads
         …zarr.metadata              zarr.json parse/serialize: ArrayMetadata, GroupMetadata, extension fields
         …zarr.datatype              Zarr data types; element byte layout; fill-value JSON codec
-        …zarr.chunk                 Regular chunk grid; chunk key encoding (default / v2); chunk coordinates
+        …zarr.chunk                 Regular and rectilinear chunk grids; chunk key encoding (default / v2); chunk coordinates
         …zarr.codec                 Codec pipeline SPI + bytes / transpose / gzip / crc32c / sharding_indexed
         …zarr.util                  Shared small utilities
 ```
@@ -87,8 +87,11 @@ abstraction — Zarr keeps its own model and HDF5 is untouched.
   (`javax.crypto`, in `java.base`) and covers S3, GCS through HMAC keys, MinIO, and R2; `HttpStore` takes
   auth headers. Azure Shared Key and GCS OAuth remain out of scope (SAS URLs and bearer tokens work).
 - ~~**Consolidated metadata**~~ — done in P2 (F2, 2026-10-06): read (v3 inline, v2 `.zmetadata`) and
-  written (v3). Other registered **extensions** (custom chunk grids, storage transformers) beyond what the
-  core spec mandates remain out of scope: `must_understand: false` fields are read past.
+  written (v3).
+- ~~**Other registered extensions**~~ — done in P2 (F14, 2026-10-06): the `rectilinear` chunk grid (the
+  only other one registered) is read and written, and so are the extension data types zarr-python writes;
+  storage transformers with `must_understand: false` are read past (none is registered), as are other
+  `must_understand: false` fields. Registry data types zarr-python does not write remain out of scope.
 - **Blosc / Zstandard** codecs until they are hand-written in pure Java (staged in Z8) — the same
   "implement compression from scratch, no native/deps" decision made for HDF5's szip.
 - **Zarr v2** — read-compatibility is an optional Z8 add; v2 writing is out of scope.
@@ -137,8 +140,8 @@ abstraction — Zarr keeps its own model and HDF5 is untouched.
 |---|---|---|---|---|
 | `MemoryStore` | ✓ | ✓ | ✓ | Z0 |
 | `FileSystemStore` | ✓ | ✓ | ✓ | Z0 / Z7 |
-| `ZipStore` | ✓ | ✓ | (whole entry) | Z8 |
-| `HttpStore` (read-only) | ✓ | — | ✓ (Range) | Z8 (optional) |
+| `ZipStore` | ✓ | ✓ (written in place, F13) | ✓ (STORED entries) | Z8 / F13 |
+| `HttpStore` (read-only) | ✓ (lists from HTML index pages, opt-in, F13) | — | ✓ (Range) | Z8 (optional) |
 
 ## 6. Roadmap — stages Z0–Z9
 

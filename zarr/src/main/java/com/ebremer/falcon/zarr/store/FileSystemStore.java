@@ -53,7 +53,13 @@ public final class FileSystemStore implements Store {
         this.writable = writable;
     }
 
-    /** Opens a writable store rooted at {@code root}, creating the directory if necessary. */
+    /**
+     * Opens a writable store rooted at {@code root}, creating the directory if necessary.
+     *
+     * @param root the store's root directory
+     * @return the store
+     * @throws ZarrException if the directory cannot be created
+     */
     public static FileSystemStore open(Path root) {
         FileSystemStore store = new FileSystemStore(root, true);
         try {
@@ -64,12 +70,18 @@ public final class FileSystemStore implements Store {
         return store;
     }
 
-    /** Opens a read-only store rooted at {@code root}. {@link #set}/{@link #delete} will be rejected. */
+    /**
+     * Opens a read-only store rooted at {@code root}. {@link #set}/{@link #delete} will be rejected. The
+     * directory need not exist: a missing root reads as an empty store.
+     *
+     * @param root the store's root directory
+     * @return the store
+     */
     public static FileSystemStore openReadOnly(Path root) {
         return new FileSystemStore(root, false);
     }
 
-    /** The store's root directory. */
+    /** {@return the store's root directory, absolute and normalized} */
     public Path root() {
         return root;
     }

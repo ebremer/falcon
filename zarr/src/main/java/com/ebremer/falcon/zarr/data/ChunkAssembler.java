@@ -1,8 +1,8 @@
 package com.ebremer.falcon.zarr.data;
 
 import com.ebremer.falcon.zarr.ZarrException;
+import com.ebremer.falcon.zarr.chunk.ChunkGrid;
 import com.ebremer.falcon.zarr.chunk.ChunkKeyEncoding;
-import com.ebremer.falcon.zarr.chunk.RegularChunkGrid;
 import com.ebremer.falcon.zarr.codec.ChunkPipeline;
 import com.ebremer.falcon.zarr.datatype.DataType;
 import com.ebremer.falcon.zarr.metadata.ArrayMetadata;
@@ -62,6 +62,44 @@ public final class ChunkAssembler {
         return chunkOrigin + Math.min(chunkExtent, selEnd - chunkOrigin);
     }
 
+    /**
+     * The chunks a selection {@code [offset, end)} overlaps: {@code first[i]} to {@code last[i]} inclusive
+     * along each dimension. The selection must be non-empty.
+     */
+    static long[][] chunkRange(ChunkGrid grid, long[] offset, long[] end) {
+        int rank = offset.length;
+        long[] first = new long[rank];
+        long[] last = new long[rank];
+        for (int i = 0; i < rank; i++) {
+            first[i] = grid.chunkAt(i, offset[i]);
+            last[i] = grid.chunkAt(i, end[i] - 1);
+        }
+        return new long[][] {first, last};
+    }
+
+    /** The declared shape of the chunk at {@code coord}. */
+    static long[] chunkShape(ChunkGrid grid, long[] coord) {
+        long[] shape = new long[coord.length];
+        for (int i = 0; i < shape.length; i++) {
+            shape[i] = grid.chunkLength(i, coord[i]);
+        }
+        return shape;
+    }
+
+    /**
+     * Advances {@code coord} to the next chunk of {@code [first, last]} in C order; false when it was the
+     * last.
+     */
+    static boolean next(long[] coord, long[] first, long[] last) {
+        for (int d = coord.length - 1; d >= 0; d--) {
+            if (++coord[d] <= last[d]) {
+                return true;
+            }
+            coord[d] = first[d];
+        }
+        return false;
+    }
+
     /** The store key of the chunk at {@code coord}. */
     static String chunkKey(String arrayPath, ChunkKeyEncoding encoding, long[] coord) {
         String relative = encoding.encode(coord);
@@ -73,63 +111,45 @@ public final class ChunkAssembler {
                                   long[] offset, long[] selShape) {
         checkSelection(meta, offset, selShape);
 
-        RegularChunkGrid grid = meta.grid();
+        ChunkGrid grid = meta.grid();
         int rank = grid.rank();
-        long[] chunkShapeL = grid.chunkShape();
         DataType dataType = meta.dataType();
         int elementSize = dataType.byteCount();
 
-        long total = RegularChunkGrid.elementCount(selShape); // within the array, so it fits a long
+        long total = ChunkGrid.elementCount(selShape); // within the array, so it fits a long
         byte[] out = new byte[bufferSize(total, elementSize, "selection")];
         if (total == 0) {
             return out;
         }
 
-        ChunkPipeline pipeline = meta.pipeline();
-        ByteOrder order = pipeline.elementOrder();
+        ByteOrder order = meta.pipeline().elementOrder();
         ChunkKeyEncoding encoding = meta.chunkKeyEncoding();
         byte[] fillElement = meta.fillValueBytes(order);
-        int[] chunkShape = toInt(chunkShapeL);
         long[] selEnd = new long[rank];
         for (int i = 0; i < rank; i++) {
             selEnd[i] = offset[i] + selShape[i];
         }
 
         // The inclusive range of chunk coordinates the selection overlaps in each dimension.
-        long[] firstChunk = new long[rank];
-        long[] lastChunk = new long[rank];
-        for (int i = 0; i < rank; i++) {
-            firstChunk[i] = offset[i] / chunkShapeL[i];
-            lastChunk[i] = (selEnd[i] - 1) / chunkShapeL[i];
-        }
-
-        long[] coord = firstChunk.clone();
+        long[][] range = chunkRange(grid, offset, selEnd);
+        long[] coord = range[0].clone();
         int[] regionOrigin = new int[rank];
         int[] regionShape = new int[rank];
-        while (true) {
+        do {
             // The part of this chunk the selection needs, in chunk-local coordinates.
+            long[] chunkOrigin = new long[rank];
+            long[] chunkShapeL = chunkShape(grid, coord);
             for (int i = 0; i < rank; i++) {
-                long chunkOrigin = coord[i] * chunkShapeL[i];
-                long lo = Math.max(offset[i], chunkOrigin);
-                long hi = overlapEnd(chunkOrigin, chunkShapeL[i], selEnd[i]);
-                regionOrigin[i] = (int) (lo - chunkOrigin);
+                chunkOrigin[i] = grid.chunkStart(i, coord[i]);
+                long lo = Math.max(offset[i], chunkOrigin[i]);
+                long hi = overlapEnd(chunkOrigin[i], chunkShapeL[i], selEnd[i]);
+                regionOrigin[i] = (int) (lo - chunkOrigin[i]);
                 regionShape[i] = (int) (hi - lo);
             }
-            Block block = readChunk(store, chunkKey(arrayPath, encoding, coord), pipeline, cache,
-                    fillElement, chunkShape, elementSize, regionOrigin, regionShape);
-            copyIntersection(out, selShape, offset, selEnd, coord, chunkShapeL, block, elementSize);
-
-            int d = rank - 1;
-            for (; d >= 0; d--) {
-                if (++coord[d] <= lastChunk[d]) {
-                    break;
-                }
-                coord[d] = firstChunk[d];
-            }
-            if (d < 0) {
-                break;
-            }
-        }
+            Block block = readChunk(store, chunkKey(arrayPath, encoding, coord), meta.chunkPipeline(coord), cache,
+                    fillElement, toInt(chunkShapeL), elementSize, regionOrigin, regionShape);
+            copyIntersection(out, selShape, offset, selEnd, chunkOrigin, chunkShapeL, block, elementSize);
+        } while (next(coord, range[0], range[1]));
         return out;
     }
 
@@ -187,20 +207,22 @@ public final class ChunkAssembler {
                 extent);
     }
 
-    /** Copies chunk {@code coord}'s overlap with the selection from {@code block} into {@code out}. */
+    /**
+     * Copies the overlap of the chunk at {@code chunkOrigin} with the selection from {@code block} into
+     * {@code out}.
+     */
     private static void copyIntersection(byte[] out, long[] selShape, long[] selOffset, long[] selEnd,
-                                         long[] coord, long[] chunkShape, Block block, int elementSize) {
+                                         long[] chunkOrigin, long[] chunkShape, Block block, int elementSize) {
         int rank = selShape.length;
         long[] blockShape = new long[rank];
         long[] srcOrigin = new long[rank];
         long[] dstOrigin = new long[rank];
         long[] extent = new long[rank];
         for (int i = 0; i < rank; i++) {
-            long chunkOrigin = coord[i] * chunkShape[i];
-            long lo = Math.max(selOffset[i], chunkOrigin);
-            long hi = overlapEnd(chunkOrigin, chunkShape[i], selEnd[i]);
+            long lo = Math.max(selOffset[i], chunkOrigin[i]);
+            long hi = overlapEnd(chunkOrigin[i], chunkShape[i], selEnd[i]);
             blockShape[i] = block.shape[i];
-            srcOrigin[i] = lo - chunkOrigin - block.origin[i];
+            srcOrigin[i] = lo - chunkOrigin[i] - block.origin[i];
             dstOrigin[i] = lo - selOffset[i];
             extent[i] = hi - lo;
         }

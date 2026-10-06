@@ -23,10 +23,15 @@ import java.util.TreeSet;
  *
  * <p>Partial reads use the HTTP {@code Range} header (byte-range requests), which is what makes a
  * remote sharded array efficient; {@link #getSuffix} reads the end of a value in one request
- * ({@code Range: bytes=-N}), and {@link #size} uses a {@code HEAD}. Plain HTTP offers no directory
- * listing, so {@link #list}, {@link #listPrefix}, and {@link #listDir} are unsupported &mdash; a remote
- * array reads fine (its chunk keys are computed, not listed) and a group navigates to a <em>named</em>
- * child fine, but enumerating a group's children ({@code childNames}) does not work over HTTP.
+ * ({@code Range: bytes=-N}), and {@link #size} uses a {@code HEAD}.
+ *
+ * <p>HTTP has no way to list keys. A remote array reads without listing (its chunk keys are computed), and a
+ * group opens a <em>named</em> child, or answers from consolidated metadata; but listing a group's children
+ * ({@code childNames}) needs {@link #list}, {@link #listPrefix}, or {@link #listDir}, which by default throw
+ * {@link UnsupportedOperationException}. {@link Builder#directoryListing} turns listing on: keys are then read
+ * from the directory listings a static file server makes (Python's {@code http.server}, nginx's
+ * {@code autoindex}, Apache's {@code mod_autoindex}), as fsspec's HTTP filesystem reads them. See there for
+ * what counts as a key.
  *
  * <p>Requests:
  * <ul>
@@ -61,6 +66,8 @@ public final class HttpStore implements Store {
     private static final int HTTP_TEMPORARY_REDIRECT = 307;
     private static final int HTTP_PERMANENT_REDIRECT = 308;
     private static final int HTTP_RANGE_NOT_SATISFIABLE = HttpIo.HTTP_RANGE_NOT_SATISFIABLE;
+    static final int MAX_LISTING_DEPTH = 128;
+    static final int MAX_LISTING_PAGES = 1_000_000;
 
     private final String base;  // scheme://authority/path, without a trailing '/'
     private final String query; // the base URL's query (no '?'), sent with every key, or null
@@ -70,6 +77,7 @@ public final class HttpStore implements Store {
     private final long maxBodyBytes;
     private final Map<String, String> headers;  // fixed headers, checked
     private final RequestHeaders requestHeaders; // per-request headers, or null
+    private final boolean directoryListing;       // whether to list keys from directory listing pages
 
     private HttpStore(Builder b) {
         String url = b.baseUrl;
@@ -96,6 +104,7 @@ public final class HttpStore implements Store {
         this.maxBodyBytes = b.maxBodyBytes;
         this.headers = Map.copyOf(b.givenHeaders());
         this.requestHeaders = b.requestHeaders;
+        this.directoryListing = b.directoryListing;
     }
 
     /**
@@ -121,12 +130,28 @@ public final class HttpStore implements Store {
         Map<String, String> headers(String method, URI uri);
     }
 
-    /** Opens a read-only store rooted at {@code baseUrl} (for example {@code https://host/data/store}). */
+    /**
+     * Opens a read-only store rooted at {@code baseUrl} (for example {@code https://host/data/store}), with
+     * the {@link #builder} defaults.
+     *
+     * @param baseUrl the store's root URL
+     * @return the store; nothing is requested until it is read
+     * @throws IllegalArgumentException if {@code baseUrl} is not an absolute {@code http} or {@code https}
+     *                                  URL
+     */
     public static HttpStore openReadOnly(String baseUrl) {
         return builder(baseUrl).build();
     }
 
-    /** Opens a read-only store rooted at {@code baseUrl} with the given connect/read timeout. */
+    /**
+     * Opens a read-only store rooted at {@code baseUrl} with the given connect/read timeout.
+     *
+     * @param baseUrl       the store's root URL
+     * @param timeoutMillis the connect and read timeout in milliseconds; 0 waits forever
+     * @return the store; nothing is requested until it is read
+     * @throws IllegalArgumentException if {@code baseUrl} is not an absolute {@code http} or {@code https}
+     *                                  URL, or {@code timeoutMillis} is negative
+     */
     public static HttpStore openReadOnly(String baseUrl, int timeoutMillis) {
         return builder(baseUrl).timeoutMillis(timeoutMillis).build();
     }
@@ -152,6 +177,7 @@ public final class HttpStore implements Store {
         private final Map<String, String> headers = new LinkedHashMap<>(); // lower-case name -> value
         private final Map<String, String> headerNames = new LinkedHashMap<>(); // lower-case name -> as given
         private RequestHeaders requestHeaders;
+        private boolean directoryListing;
 
         private Builder(String baseUrl) {
             this.baseUrl = Objects.requireNonNull(baseUrl, "baseUrl");
@@ -225,6 +251,32 @@ public final class HttpStore implements Store {
          */
         public Builder requestHeaders(RequestHeaders hook) {
             this.requestHeaders = hook;
+            return this;
+        }
+
+        /**
+         * Lets the store list keys from the server's directory listings: the HTML page a static file server
+         * makes for a directory's URL (Python's {@code http.server}, nginx's {@code autoindex}, Apache's
+         * {@code mod_autoindex}), as fsspec's HTTP filesystem reads them. Off by default, since a server's
+         * other pages (an error page answered with {@code 200}, an application's start page) would list
+         * links that are not keys.
+         *
+         * <p>With it on, {@link HttpStore#listDir listDir(prefix)} reads the page at the prefix's URL, ending
+         * in {@code '/'}, and takes each link to a name directly below it: one ending in {@code '/'} is a
+         * child prefix, any other a key. Links are resolved against the page, after any redirect; a link with
+         * a query or a fragment (a column's sort order), to another origin, to the parent, or further down is
+         * not a name, nor is one that no store key can be. A prefix the server does not have (a status of
+         * {@link #missingStatuses}) lists nothing; a page that is not HTML fails with {@link ZarrException}.
+         * {@link HttpStore#list} and {@link HttpStore#listPrefix} read the pages below too, a request per
+         * directory, and fail more than 128 levels down (a server can link a directory into itself) or past
+         * a million pages. A child prefix is listed whether or not it holds keys: an empty directory lists as
+         * one.
+         *
+         * @param enabled whether to list keys from directory listings
+         * @return this builder
+         */
+        public Builder directoryListing(boolean enabled) {
+            this.directoryListing = enabled;
             return this;
         }
 
@@ -442,19 +494,118 @@ public final class HttpStore implements Store {
         return code == HttpURLConnection.HTTP_BAD_METHOD || code == HttpURLConnection.HTTP_NOT_IMPLEMENTED;
     }
 
+    /**
+     * Every key, read from the server's directory listings (see {@link Builder#directoryListing}).
+     *
+     * @throws UnsupportedOperationException if directory listing is off, the default
+     * @throws ZarrException                 if a listing cannot be read, or the walk goes too deep or too far
+     */
     @Override
     public List<String> list() {
-        throw new UnsupportedOperationException("HTTP stores cannot list keys");
+        return listPrefix("");
     }
 
+    /**
+     * Every key beginning with {@code prefix}, read from the server's directory listings (see
+     * {@link Builder#directoryListing}): that of the directory the prefix names up to its last {@code '/'},
+     * and those of the directories below it that can hold such keys.
+     *
+     * @throws UnsupportedOperationException if directory listing is off, the default
+     * @throws IllegalArgumentException      if the prefix's part up to its last {@code '/'} is not a valid key
+     * @throws ZarrException                 if a listing cannot be read, or the walk goes too deep or too far
+     */
     @Override
     public List<String> listPrefix(String prefix) {
-        throw new UnsupportedOperationException("HTTP stores cannot list keys");
+        requireListing();
+        int slash = prefix.lastIndexOf('/');
+        String start = directory(slash < 0 ? "" : prefix.substring(0, slash + 1));
+        TreeSet<String> keys = new TreeSet<>();
+        walk(start, prefix, keys, 0, new int[] {0});
+        return List.copyOf(keys);
     }
 
+    /**
+     * The names directly below {@code prefix}, read from the server's directory listing of it (see
+     * {@link Builder#directoryListing}): keys, and child prefixes ending in {@code '/'}.
+     *
+     * @throws UnsupportedOperationException if directory listing is off, the default
+     * @throws IllegalArgumentException      if the prefix is neither empty nor a valid key, with or without a
+     *                                       trailing {@code '/'}
+     * @throws ZarrException                 if the listing cannot be read
+     */
     @Override
     public List<String> listDir(String prefix) {
-        throw new UnsupportedOperationException("HTTP stores cannot list keys");
+        requireListing();
+        return List.copyOf(readListing(directory(prefix)));
+    }
+
+    private void requireListing() {
+        if (!directoryListing) {
+            throw new UnsupportedOperationException("HTTP stores cannot list keys unless directory listing is on "
+                    + "(HttpStore.Builder.directoryListing) and the server makes listings");
+        }
+    }
+
+    /** {@code prefix} as a directory: empty, or a valid key followed by {@code '/'}. */
+    private static String directory(String prefix) {
+        String dir = StoreKeys.asDirPrefix(prefix);
+        if (!dir.isEmpty()) {
+            StoreKeys.validate(dir.substring(0, dir.length() - 1));
+        }
+        return dir;
+    }
+
+    /** Adds the keys under {@code dir} that begin with {@code prefix}, going down where there can be some. */
+    private void walk(String dir, String prefix, Set<String> keys, int depth, int[] pages) {
+        if (depth > MAX_LISTING_DEPTH) {
+            throw new ZarrException("listing '" + prefix + "' goes more than " + MAX_LISTING_DEPTH
+                    + " directories down, to '" + dir + "': does the server link a directory into itself?");
+        }
+        if (++pages[0] > MAX_LISTING_PAGES) {
+            throw new ZarrException("listing '" + prefix + "' takes more than " + MAX_LISTING_PAGES + " pages");
+        }
+        for (String name : readListing(dir)) {
+            if (name.endsWith("/")) {
+                if (name.startsWith(prefix) || prefix.startsWith(name)) {
+                    walk(name, prefix, keys, depth + 1, pages);
+                }
+            } else if (name.startsWith(prefix)) {
+                keys.add(name);
+            }
+        }
+    }
+
+    /** The names {@code dir}'s listing page holds, or none if the server has no such directory. */
+    private Set<String> readListing(String dir) {
+        String label = dir.isEmpty() ? "/" : dir;
+        URI uri;
+        try {
+            uri = new URI(base + "/" + (dir.isEmpty() ? "" : encodePath(dir.substring(0, dir.length() - 1)) + "/")
+                    + (query == null ? "" : "?" + query));
+        } catch (URISyntaxException e) {
+            throw new ZarrException("bad HTTP request for the listing of '" + label + "'", e);
+        }
+        HttpURLConnection connection = request(uri, label, "GET", null);
+        try {
+            int code = connection.getResponseCode();
+            if (missingStatuses.contains(code)) {
+                return Set.of();
+            }
+            if (code != HttpURLConnection.HTTP_OK) {
+                throw new ZarrException("HTTP " + code + " reading the listing of '" + label + "'");
+            }
+            String type = connection.getContentType();
+            if (type != null && !DirectoryListing.isHtml(type)) {
+                throw new ZarrException("the listing of '" + label + "' is " + type + ", not an HTML directory listing");
+            }
+            byte[] page = readBody(connection, label);
+            return DirectoryListing.names(new String(page, DirectoryListing.charset(type)),
+                    connection.getURL().toURI(), dir, query);
+        } catch (IOException | URISyntaxException e) {
+            throw new ZarrException("failed to read the listing of '" + label + "' over HTTP", e);
+        } finally {
+            connection.disconnect();
+        }
     }
 
     @Override
@@ -498,6 +649,12 @@ public final class HttpStore implements Store {
         } catch (URISyntaxException e) {
             throw new ZarrException("bad HTTP request for key '" + key + "'", e);
         }
+        return request(uri, key, method, range);
+    }
+
+    /** As {@link #request(String, String, String)}, for any URL; {@code key} names it in messages. */
+    private HttpURLConnection request(URI start, String key, String method, String range) {
+        URI uri = start;
         for (int redirects = 0; ; redirects++) {
             HttpURLConnection connection;
             int code;

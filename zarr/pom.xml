@@ -36,12 +36,27 @@
     <build>
         <plugins>
             <!-- HttpStoreTest uses the JDK's com.sun.net.httpserver as an in-process test server.
-                 That module is needed only to compile and run the tests; the shipped module-info
-                 still requires nothing beyond java.base. -->
+                 The test compile patches the tests into the module, which must then read jdk.httpserver;
+                 the tests run on the class path (see the parent POM), where jdk.httpserver is resolved by
+                 default. The shipped module-info still requires nothing beyond java.base. -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
                 <executions>
+                    <!-- The public API's Javadoc stays complete: javac's doclint checks every public and
+                         protected member of the exported packages, and a missing or malformed comment fails
+                         the build. -->
+                    <execution>
+                        <id>default-compile</id>
+                        <configuration>
+                            <showWarnings>true</showWarnings>
+                            <compilerArgs>
+                                <arg>-Xdoclint:all/protected</arg>
+                                <arg>-Xdoclint/package:com.ebremer.falcon.zarr,com.ebremer.falcon.zarr.datatype,com.ebremer.falcon.zarr.json,com.ebremer.falcon.zarr.store</arg>
+                                <arg>-Werror</arg>
+                            </compilerArgs>
+                        </configuration>
+                    </execution>
                     <execution>
                         <id>default-testCompile</id>
                         <configuration>
@@ -57,10 +72,6 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
-                <configuration>
-                    <argLine>@{argLine} --add-modules jdk.httpserver
-                        --add-reads com.ebremer.falcon.zarr=jdk.httpserver</argLine>
-                </configuration>
                 <executions>
                     <!-- The corrupt-input tests run on their own, under a small stack and heap: unbounded
                          recursion or allocation on hostile input then fails them instead of passing on a

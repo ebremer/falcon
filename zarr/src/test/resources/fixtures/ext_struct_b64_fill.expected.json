@@ -1,0 +1,33 @@
+{
+ "name": "ext_struct_b64_fill",
+ "shape": [
+  4
+ ],
+ "data_type": {
+  "name": "struct",
+  "configuration": {
+   "fields": [
+    {
+     "name": "a",
+     "data_type": "int16"
+    },
+    {
+     "name": "s",
+     "data_type": {
+      "name": "null_terminated_bytes",
+      "configuration": {
+       "length_bytes": 2
+      }
+     }
+    }
+   ]
+  }
+ },
+ "fill_value": "/f96eg==",
+ "values": [
+  "01006100",
+  "ffff0000",
+  "fdff7a7a",
+  "fdff7a7a"
+ ]
+}

@@ -92,6 +92,26 @@ New API: `readUnsignedLongs`/`writeUnsignedLongs`, `readComplex`/`writeComplex` 
 `ZstdEncoder.compress(data, level, checksum)` (F12). What remains is P2's F3, F4, F13, and F14, and P3's
 D3, D4, and B1.
 
+**Update (2026-10-06): P2's F13 and F14, and P3's D4 and B1, are done too.** 567 Zarr tests, 18 more under
+a small heap, and 72 core tests pass; zarr-python 3.4 reads all 250 arrays `check_zarr_writer.py` checks
+and 4 of 4 ZIP archives `check_zip_store.py` checks, and Falcon's core reads 122 of 122 c-blosc2 chunks.
+Behaviour changes worth knowing:
+- arrays with the extension data types zarr-python writes, rectilinear chunk grids, or storage
+  transformers marked `must_understand: false` now open (F14), among them the datetime64 arrays P1's
+  fixtures left out; `DataType.equals` compares configurations;
+- `ZarrArray.chunkShape()` throws on a rectilinear array (F14);
+- `ZipStore` reads its archive itself rather than through `java.util.zip.ZipFile`, and checks each
+  entry's CRC-32 on `get` (F13);
+- Blosc chunks written by c-blosc2 decode, in Zarr and in HDF5's Blosc filter (F14);
+- the zarr compile fails on a missing or malformed Javadoc in the exported packages (D4), and tests run on
+  the class path explicitly in every module (B1).
+
+New API: `ZipStore.create`/`open`, `HttpStore.Builder.directoryListing` (F13);
+`ArraySpec.Builder.chunkLengths`, `ZarrArray.chunkSizes()`/`isRectilinear()`, the `DataType` factories
+`datetime64`, `timedelta64`, `fixedLengthUtf32`, `nullTerminatedBytes`, `rawBytes`, `struct` with
+`DataType.Field`, and `DataType.fromJson`/`toJson`/`hasByteOrder`/`unit`/`scaleFactor`/`fields`/
+`fieldOffset`/`defaultFillValue` (F14). What remains is P2's F3 and F4, and P3's D3.
+
 ## Do these first — top 10
 
 1. ~~**Z1/Z2 — node replacement destroys or corrupts data.**~~ Done 2026-10-05 (below).
@@ -854,7 +874,7 @@ Zarr's main use case is sharded data in object storage, so these matter more tha
 
 ## P2 — features & API
 
-Items 1–5 of the previous TODO's top-5 are F1–F5 below. F1, F2, and F5–F12 are done (2026-10-06); each
+Items 1–5 of the previous TODO's top-5 are F1–F5 below. F1, F2, and F5–F14 are done (2026-10-06); each
 says what was done, then gives the original finding.
 
 - [x] **F1 — cloud object stores (S3 / GCS / Azure).** The primary Zarr use case. First add `HttpStore`
@@ -1094,10 +1114,134 @@ says what was done, then gives the original finding.
   - **Gap:** there are no Huffman-coded literals, no repeat offsets, and no cross-block matching. Noisy
     float32 stays at ratio 1.000 (libzstd level 3: 0.896), and text compresses to 0.648 (libzstd: 0.365).
   - **Also:** no clevel or window tuning. (carried over)
-- [ ] **F13 — `ZipStore` writing and `HttpStore` key listing.** Both are inherent limits; keep them
-  documented. (carried over)
-- [ ] **F14 — extensions:** non-`regular` chunk grids, storage transformers, extension data types, and
-  blosc2 (format ≥ 3). All are refused cleanly today. (carried over)
+- [x] **F13 — `ZipStore` writing and `HttpStore` key listing.**
+  **Done 2026-10-06.** Both built.
+    - **ZipStore writes**, as zarr-python's does in modes "w" and "a": `ZipStore.create(path)` starts an
+      archive, `ZipStore.open(path)` adds to one (or starts it). `set` appends a STORED entry to the file at
+      once; `close()` writes the central directory, with Zip64 records past 65,535 entries or 4 GiB
+      (APPNOTE 6.3.10 §4.3.14–4.3.16, §4.5.3). Everything written reads back before then. A key written
+      again appends an entry and the directory names only the newest; `delete` drops it from the directory
+      (zarr-python's cannot delete); `pack` compacts, and refuses to pack a store into its own file.
+      Appending keeps existing entries (deflated ones, directories, comments), an unchanged session leaves
+      the file as it was, and an archive with bytes before it reads. `get` checks each entry's CRC-32.
+    - One reader for every mode: the central directory is read by Falcon, not `java.util.zip.ZipFile`. An
+      interrupted thread no longer closes the store for everyone (the JDK closes a `FileChannel` on
+      interrupt; the store reopens the file).
+    - Duplicate names, checked: zarr-python writes a key again as a second entry of the same name. The JDK's
+      `ZipFile`, behind the old reader, already returned the last, as Python does (all 8 duplicated names in
+      the fixtures), so no data was read wrong; the new reader keeps the last explicitly.
+    - **HttpStore listing**, opt-in: `HttpStore.builder(url).directoryListing(true)` lists keys from the
+      HTML index pages static file servers make (Python's `http.server`, nginx `autoindex`, Apache
+      `mod_autoindex`), as fsspec does; only links to names directly below a directory count (no sort,
+      parent, or other-host links). `list`/`listPrefix` walk a page per directory, at most 128 levels down.
+      `childNames()` then works over HTTP without consolidated metadata. Off, listing still throws
+      `UnsupportedOperationException`, now naming the option.
+    - Oracles: Falcon reads zarr-python's archives written in modes "w" and "a" with duplicate names
+      (`gen_zarr_zip_fixtures.py`); zarr-python and Python's zipfile read 4 of 4 Falcon-written archives
+      (`WriteZipCases.java` + `check_zip_store.py`: a consolidated hierarchy with keys written over and
+      deleted, an appended session, 70,002 entries, Zip64 offsets); Falcon lists a zarr-python hierarchy
+      served by `python -m http.server` exactly (15 keys; dev-time check).
+    - **Not done:** ZIP compression on write (STORED only, as zarr-python), in-place compaction; HTTP
+      listings other than HTML pages (WebDAV, JSON), and parallel or cached listing.
+    - Tests: `ZipStoreTest` (15 new), `ZipFixtureTest`, `HttpListingTest`, and the ZIP store in
+      `StoreTest`'s shared contracts.
+
+  The original finding follows.
+  - Both are inherent limits; keep them documented. (carried over)
+- [x] **F14 — extensions.**
+  **Done 2026-10-06.** All four parts, each checked against its reference implementation both ways where
+  one writes it.
+    - **The `rectilinear` chunk grid** (zarr-extensions `chunk-grids/rectilinear`, the only other grid
+      registered; zarr-python 3.4 behind `array.rectilinear_chunks`) reads and writes.
+      - A dimension lists its chunk lengths (bare lengths and `[length, count]` runs) or repeats one; the
+        lengths may run past the extent, and a chunk running past it is encoded at its full listed length,
+        as zarr-python encodes it. Runs are kept as runs (indexing is a binary search), so a run of 10^18
+        chunks opens at once (zarr-python would expand it).
+      - `chunk/ChunkGrid` generalises the grid arithmetic; every chunk walk (reads, shard-region reads,
+        writes and PF2's shard update, strings and bytes, the chunk cache, `writeEmptyChunks`, F6's resize)
+        follows it, and a codec pipeline is built per chunk shape (lazily; a shape the codecs refuse fails
+        only where it is touched, and `ArraySpec.build()` checks every listed length).
+      - API: `ArraySpec.Builder.chunkLengths(dimension, lengths...)`, `ZarrArray.chunkSizes()`
+        (zarr-python's `write_chunk_sizes`), `isRectilinear()`. `chunkShape()` throws
+        `UnsupportedOperationException` on a rectilinear array, as zarr-python's `chunks`/`shards` raise;
+        `innerChunkShape()` is a sharded one's regular sub-chunk shape; `blocks()` streams the grid's chunks.
+      - Shards follow zarr-python: the shard grid is rectilinear, the sub-chunks regular, every length a
+        multiple of the sub-chunk's. Resizing follows its `update_shape` (a dimension growing past its
+        lengths gains one chunk; shrinking keeps them), with F6's semantics; `chunk_grid` is rewritten only
+        then, in zarr-python's compressed form.
+      - zarr-python 3.4 reads the 15 rectilinear arrays Falcon writes, and Falcon reads its 14
+        (`gen_zarr_rectilinear_fixtures.py`: 1- to 5-D, runs, lengths past the array, a grown-and-shrunk
+        array, shards, strings, bytes, a transpose, v2 keys, the extension's own example, a consolidated
+        group).
+      - Tests: `RectilinearChunkGridTest`, `RectilinearGridTest` (a random model of 120 grids through plain,
+        cached, and write-empty handles), `RectilinearFixtureTest`,
+        `RobustnessTest.corruptRectilinearArraysAreRejected` (bit flips, and 400 hostile `chunk_shapes` in
+        the fuzz JVM).
+    - **Extension data types:** the six zarr-python 3.4 writes are read and written —
+      `numpy.datetime64` and `numpy.timedelta64` (`readLongs`/`writeLongs`: int64 counts of the unit,
+      `Long.MIN_VALUE` for NaT), `fixed_length_utf32` (`readStrings`/`writeStrings`), and
+      `null_terminated_bytes`, `raw_bytes`, and `struct` (`readByteArrays`/`writeByteArrays`; a struct as
+      whole elements, every number little-endian whatever the stored order; legacy `structured` read too).
+      - `DataType`: `datetime64`, `timedelta64`, `fixedLengthUtf32`, `nullTerminatedBytes`, `rawBytes`,
+        `struct(Field...)`, `fromJson`/`toJson`, `hasByteOrder`, `unit`/`scaleFactor`,
+        `fields`/`fieldOffset`, `defaultFillValue`; six new `DataTypeKind`s; `equals` now compares the
+        configuration. Fill values parse and serialise as zarr-python's do (`"NaT"`, base64, struct objects
+        or base64); byte order follows the `bytes` codec, recursively through nested structs, as numpy's
+        `newbyteorder`; `ArraySpec` writes `endian` only for a type with one. `r*` takes
+        `readByteArrays`/`writeByteArrays` too.
+      - Through sharding, transpose, every compressor, the chunk cache, resize, `write_empty_chunks`,
+        consolidated metadata, and rectilinear grids. The datetime64 arrays P1 left out (`p1_mixed/when`,
+        `consolidated_*/when`) now open. An element type over 1 MiB has its fill checked on first decode, so
+        a document claiming 2 GB elements allocates nothing on open.
+      - zarr-python quirks: its struct default fill casts 0 (`S`/`U` fields "0", time fields the epoch; a
+        `V` field cannot be defaulted at all), where Falcon uses each field's default; it compares struct
+        chunks to the fill field by field without NaN equality, where Falcon compares bytes (stored chunks
+        may differ, values do not).
+      - Oracles: zarr-python reads the 38 extension-type arrays `check_zarr_writer.py` gained (each type
+        plain, sharded, blosc, partly written with a non-default fill, transposed, big-endian,
+        write_empty_chunks, resized); Falcon reads zarr-python's 11 `gen_zarr_extension_fixtures.py` arrays
+        element for element. A one-off check: zarr-python reads 12 of 12 Falcon arrays of each type on
+        rectilinear grids, sharded and not.
+      - Tests: `ExtensionDataTypesTest`, the extension fixtures in `RobustnessTest`'s bit-flip fuzz,
+        `RobustnessTest.aHugeDeclaredElementIsNotAllocatedOnOpen`, and updates to `MetadataTest`,
+        `HierarchyFixtureTest`, and `ConsolidatedFixtureTest` (datetime arrays now open).
+    - **Storage transformers:** none is registered (zarr-extensions' `storage-transformers` holds only a
+      README), so Falcon implements none, and now reads past one that says `"must_understand": false`, as
+      the v3 specification allows for an extension object; any other is refused by name
+      (`ZarrUnsupportedException`). Falcon's rewrites (attributes, resize, consolidate) keep the list.
+      zarr-python 3.4 refuses every non-empty list. Unknown codecs stay refused even with
+      `must_understand: false`: skipping one would decode the wrong bytes. Tests: `StorageTransformersTest`.
+    - **c-blosc2 chunks** (Blosc format versions 3 to 6) read, in core, so Zarr's `blosc` codec and HDF5's
+      Blosc filter (32001) both take them; c-blosc 1.x, and so zarr-python, refuses them. Writing stays
+      c-blosc's format 2.
+      - Read: the 32-byte extended header and headers without it (filters from the flags); the filter
+        pipeline, last slot first: byte shuffle (`filters_meta` as the group size), bit shuffle (whole groups
+        of 8, the rest copied, as from format 3), XOR delta against the first block, and truncated precision
+        (nothing to undo); split and unsplit blocks; zero, run, raw, and compressed streams; memcpy'ed
+        chunks; and the header-only chunks of zeros, NaN, one repeated value (of any size), or uninitialised
+        values (zeros here). blosclz, lz4/lz4hc, zlib, and zstd, as for Blosc 1.
+      - Refused (`UnsupportedCompressionException`, Zarr's `ZarrUnsupportedException`): variable-length
+        blocks (format 6), dictionaries, lazy chunks, instrumented chunks, user-defined and plugin codecs and
+        filters (bytedelta, int_trunc, ndcell, ndmean, zfp, …), and versions above 6; malformed what c-blosc2
+        refuses, plus a split block that is not a whole number of streams (c-blosc2 decodes it wrongly).
+        Sizes are checked before allocating.
+      - Oracle: c-blosc2 3.3.2, through imagecodecs (`gen_blosc2_vectors.py`): 122 chunks, 95 that c-blosc2
+        compressed (every codec × filter, type sizes 1–255, split modes, odd and clamped block sizes, empty
+        to multi-block and ragged sizes, memcpy and special-zero chunks) and 27 assembled byte by byte and
+        decoded by c-blosc2 (NaN and repeated-value chunks, several filters, `filters_meta`, truncated
+        precision, short headers, versions 3, 4, and 6, blocks out of order). All decode exactly.
+      - Tests: `Blosc2DecoderTest`, `CompressionRobustnessTest.blosc2SurvivesCorruption`, Zarr's
+        `Blosc2ChunkTest`; `BloscHeaderTest` now reads versions 3–6 and refuses 7.
+    - **Not done:** registry data types zarr-python does not write (`bfloat16`, `float8_*`, `float6_*`,
+      `float4_e2m1fn`, `int2`/`int4`/`uint2`/`uint4`, `complex_*`); v2 dtype strings for the extension types
+      (F4); per-field struct accessors; storage transformers that must be understood (none exists);
+      c-blosc2 variable-length blocks and dictionaries (imagecodecs cannot write them, so there is no
+      oracle), bytedelta and the other plugins, lazy chunks and super-chunk frames, and HDF5's Blosc2 filter
+      (32026; see hdf5 S9).
+
+  The original finding follows.
+  - Non-`regular` chunk grids, storage transformers, extension data types, and blosc2 (format ≥ 3). All
+    are refused cleanly today. (carried over)
 
 **Out of scope / deferred (unchanged):**
 - **Zarr v2 *writing*** — Falcon writes v3 only.
@@ -1128,13 +1272,38 @@ says what was done, then gives the original finding.
   - §2 says only the first package is exported (four are), lists a non-existent `util` package, and
     omits `data`.
   - The §2 "shared model note" contradicts the §10 deferral.
-- [ ] **D4 — Javadoc lint:** 245 `-Xdoclint:all` warnings (134 missing `@return`); 0 errors.
+- [x] **D4 — Javadoc lint.** Done 2026-10-06. `-Xdoclint:all` over the four exported packages
+  (`com.ebremer.falcon.zarr`, `.datatype`, `.json`, `.store`): **0 warnings**, from 308 (245 at the
+  review; the API grew). `-Xdoclint:all,-missing` over every package: 0 too.
+  - Every public and protected member has a comment, with `@param`, `@return` (or `{@return}` for a
+    one-line description), and `@throws` for what it throws: an illegal store key, a store that cannot list,
+    a value a type cannot hold. Record components are documented. `JsonObject.Builder` and `MemoryStore`
+    have explicit, documented constructors (the implicit ones were public too).
+  - Corrected on the way: `DataType.decodeFillValue` and `encodeFillValue` had their descriptions'
+    verbs swapped ("Encodes" for the JSON-to-bytes decode, and back); `readDoubles` said "any numeric
+    type" (complex is refused); `readLongs`/`readInts` now name what they refuse (uint64; int64, uint32,
+    uint64) and that bool reads.
+  - **Kept so:** the zarr POM's `default-compile` runs javac with `-Xdoclint:all/protected` limited to the
+    four exported packages and `-Werror`, with `showWarnings` on, so a missing tag fails the build and names
+    the file and line (checked: removing one `@return` fails the compile). Tests and internal packages are
+    not checked. The API F13 and F14 added came in documented.
 - [x] **D5 — Python tooling.** `tools/fixtures/requirements.txt` now exists (added with the HDF5 fixes).
   It lists `zarr>=3.2,<4`, numcodecs, zstandard, h5py and imagecodecs, with venv instructions.
   - Remaining: pin zarr to the exact fixture version (3.2.1) if byte-identical regeneration matters.
-- [ ] **B1 — the surefire `argLine` `--add-reads com.ebremer.falcon.zarr=jdk.httpserver` prints
-  `WARNING: Unknown module` on every test run** (`zarr/pom.xml`). It is dead; remove it, or fix it so it
-  takes effect.
+- [x] **B1 — the surefire `argLine` `--add-reads com.ebremer.falcon.zarr=jdk.httpserver` prints
+  `WARNING: Unknown module` on every test run** (`zarr/pom.xml`). Done 2026-10-06: removed.
+  - **Why it was dead:** Surefire 3.5.2 ran every module's tests on the class path, not the module path.
+    It reads `module-info.class` with plexus-java 1.3.0's ASM 9.7, which cannot parse a release-25 class
+    file ("Unsupported class file major version 69", reproduced), and silently falls back. On the class
+    path `com.ebremer.falcon.zarr` is no module (hence the warning), and `jdk.httpserver`, which exports an
+    API, is resolved by default, so `--add-modules` was redundant too.
+  - zarr's surefire `argLine` is gone (the fuzz execution keeps `@{argLine} -Xss256k -Xmx128m`; JaCoCo's
+    agent still attaches under `-Pcoverage`, checked). The test compile keeps `--add-modules` and
+    `--add-reads`: it patches the tests into the module.
+  - The parent POM now sets `useModulePath` false for every module, with the reason, so a Surefire upgrade
+    that can read the descriptor does not move the tests onto the module path unannounced (zarr's tests
+    would then need `jdk.httpserver` read). Running the tests inside the module would need a newer Surefire,
+    a build-plugin change for Erich to approve, and the runtime flags back.
 - [x] **B2 — repo-wide** (done 2026-10-05; details in `../hdf5/TODO.md`, *Done — 2026-10-05 (P3: D2,
   D6, B1–B3)*):
   - a `windows-latest` CI leg;

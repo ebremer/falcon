@@ -1,0 +1,142 @@
+{
+  "shape": [
+    4,
+    5
+  ],
+  "data_type": {
+    "name": "struct",
+    "configuration": {
+      "fields": [
+        {
+          "name": "a",
+          "data_type": "int32"
+        },
+        {
+          "name": "b",
+          "data_type": "float64"
+        },
+        {
+          "name": "c",
+          "data_type": {
+            "name": "null_terminated_bytes",
+            "configuration": {
+              "length_bytes": 2
+            }
+          }
+        },
+        {
+          "name": "d",
+          "data_type": {
+            "name": "fixed_length_utf32",
+            "configuration": {
+              "length_bytes": 8
+            }
+          }
+        },
+        {
+          "name": "t",
+          "data_type": {
+            "name": "numpy.datetime64",
+            "configuration": {
+              "unit": "s",
+              "scale_factor": 1
+            }
+          }
+        },
+        {
+          "name": "f",
+          "data_type": "bool"
+        },
+        {
+          "name": "p",
+          "data_type": {
+            "name": "struct",
+            "configuration": {
+              "fields": [
+                {
+                  "name": "x",
+                  "data_type": "int16"
+                },
+                {
+                  "name": "y",
+                  "data_type": "uint8"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  },
+  "chunk_grid": {
+    "name": "regular",
+    "configuration": {
+      "chunk_shape": [
+        4,
+        5
+      ]
+    }
+  },
+  "chunk_key_encoding": {
+    "name": "default",
+    "configuration": {
+      "separator": "/"
+    }
+  },
+  "fill_value": {
+    "a": 7,
+    "b": 1.5,
+    "c": "cQ==",
+    "d": "z",
+    "t": -9223372036854775808,
+    "f": true,
+    "p": {
+      "x": -1,
+      "y": 255
+    }
+  },
+  "codecs": [
+    {
+      "name": "sharding_indexed",
+      "configuration": {
+        "chunk_shape": [
+          2,
+          5
+        ],
+        "codecs": [
+          {
+            "name": "transpose",
+            "configuration": {
+              "order": [
+                1,
+                0
+              ]
+            }
+          },
+          {
+            "name": "bytes",
+            "configuration": {
+              "endian": "big"
+            }
+          }
+        ],
+        "index_codecs": [
+          {
+            "name": "bytes",
+            "configuration": {
+              "endian": "little"
+            }
+          },
+          {
+            "name": "crc32c"
+          }
+        ],
+        "index_location": "end"
+      }
+    }
+  ],
+  "attributes": {},
+  "zarr_format": 3,
+  "node_type": "array",
+  "storage_transformers": []
+}

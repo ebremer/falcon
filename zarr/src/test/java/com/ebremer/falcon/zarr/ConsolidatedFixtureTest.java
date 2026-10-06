@@ -6,6 +6,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.ebremer.falcon.zarr.datatype.DataType;
+import com.ebremer.falcon.zarr.datatype.DataTypeKind;
 import com.ebremer.falcon.zarr.json.Json;
 import com.ebremer.falcon.zarr.json.JsonArray;
 import com.ebremer.falcon.zarr.json.JsonNumber;
@@ -122,8 +124,8 @@ class ConsolidatedFixtureTest {
 
     /**
      * Every node below {@code group}, depth first in name order, in the sidecar's form. A node Falcon cannot
-     * open (here, an extension data type) is entered as its path alone, after checking that
-     * {@link ZarrGroup#child} says why and {@link ZarrGroup#children()} leaves it out.
+     * open is entered as its path alone, after checking that {@link ZarrGroup#child} says why and
+     * {@link ZarrGroup#children()} leaves it out.
      */
     private static List<JsonObject> walk(ZarrGroup group, String prefix) {
         List<JsonObject> out = new ArrayList<>();
@@ -144,7 +146,7 @@ class ConsolidatedFixtureTest {
                 for (long d : a.shape()) {
                     shape.add(JsonNumber.of(d));
                 }
-                b.put("shape", new JsonArray(shape)).put("dtype", a.dataType().name());
+                b.put("shape", new JsonArray(shape)).put("dtype", numpyName(a.dataType()));
             }
             out.add(b.build());
             if (node instanceof ZarrGroup child) {
@@ -154,10 +156,20 @@ class ConsolidatedFixtureTest {
         return out;
     }
 
+    /** The numpy name zarr-python's sidecar gives a data type: datetime64[s] for numpy.datetime64 in seconds. */
+    private static String numpyName(DataType type) {
+        if (type.kind() != DataTypeKind.DATETIME && type.kind() != DataTypeKind.TIMEDELTA) {
+            return type.name();
+        }
+        String base = type.kind() == DataTypeKind.DATETIME ? "datetime64" : "timedelta64";
+        return type.unit().equals("generic") ? base
+                : base + "[" + (type.scaleFactor() == 1 ? "" : type.scaleFactor()) + type.unit() + "]";
+    }
+
     /**
-     * Falcon's view matches zarr-python's: the same paths in the same (sorted) order, and for each node it
-     * can open the same kind, attributes, shape, and data type. zarr-python's entry for a node Falcon
-     * cannot open must name a data type Falcon does not implement.
+     * Falcon's view matches zarr-python's: the same paths in the same (sorted) order, and for each node
+     * the same kind, attributes, shape, and data type. Falcon opens every node in these trees: the
+     * datetime64 array it could not open before opens since P2 F14.
      */
     private static void assertSameView(JsonValue expected, List<JsonObject> actual, String what) {
         JsonArray want = expected.asArray();
@@ -170,10 +182,7 @@ class ConsolidatedFixtureTest {
         assertEquals(wantPaths, gotPaths, what + ": paths");
         for (JsonObject got : actual) {
             JsonObject w = want.values().get(wantPaths.indexOf(got.get("path").asString())).asObject();
-            if (!got.has("kind")) {
-                assertTrue(w.get("dtype").asString().startsWith("datetime64"), what + ": " + w);
-                continue;
-            }
+            assertTrue(got.has("kind"), what + ": Falcon cannot open " + w);
             assertEquals(w.get("kind"), got.get("kind"), what + ": " + w);
             assertEquals(w.get("attributes"), got.get("attributes"), what + ": " + w);
             if (w.has("shape")) {

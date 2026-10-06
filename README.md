@@ -116,10 +116,12 @@ out.writeDoubles(myData);
 ```
 
 Every codec the ecosystem commonly uses is supported — `bytes`, `transpose`, `gzip`, `crc32c`,
-`sharding_indexed`, `vlen-utf8` strings and `vlen-bytes` byte strings, and the `zstd` and `blosc`
-families — with `zstd`/`blosc` read *and* written by Falcon's own pure-Java encoders (libzstd / c-blosc /
+`sharding_indexed`, `vlen-utf8` strings and `vlen-bytes` byte strings, and the `zstd` and `blosc` families
+— with `zstd`/`blosc` read *and* written by Falcon's own pure-Java encoders (libzstd / c-blosc /
 zarr-python read the output). Consolidated metadata is read and written, so a remote hierarchy opens in
-one request. Stores: in-memory, filesystem, ZIP, read-only HTTP (byte-range), and S3-compatible object
+one request; rectilinear chunk grids and the extension data types zarr-python writes (datetimes,
+fixed-size strings and bytes, structs) are read and written too. Stores: in-memory, filesystem, ZIP (read
+and written), read-only HTTP (byte-range; listing from directory index pages), and S3-compatible object
 storage (Amazon S3, Google Cloud Storage, MinIO, R2; requests signed with SigV4). Full walkthrough in the
 **[Zarr User Guide](zarr/USER_GUIDE.md)**.
 
@@ -130,7 +132,7 @@ storage (Amazon S3, Google Cloud Storage, MinIO, R2; requests signed with SigV4)
   hand-written in pure Java: HDF5 `szip` (CCSDS 121.0 extended-Rice), the `zstd` (RFC 8878), `blosc`,
   LZ4, LZF, and bitshuffle codecs in `core` (Zarr codecs and HDF5 filters alike), the Jenkins lookup3 /
   crc32c / fletcher32 checksums, and the shuffle/nbit/scale-offset filters. Every codec is validated
-  against its reference implementation (h5py/libaec/hdf5plugin, libzstd, c-blosc).
+  against its reference implementation (h5py/libaec/hdf5plugin, libzstd, c-blosc, c-blosc2).
 - **JPMS modules** exporting only their public API.
 - **Foreign Function & Memory API** (`MemorySegment`) for memory-mapped access to files beyond 2 GB; HDF5
   files elsewhere are read on demand through a `RangeReader`.

@@ -8,7 +8,8 @@
 # gen_core_vectors.py, check_hdf5_writer.py):
 h5py==3.16.0          # bundles HDF5 2.0.0 -- the reference oracle
 numpy>=2.0
-imagecodecs>=2026.1   # libaec: AEC / szip reference vectors and real-format szip chunks
+imagecodecs>=2026.1   # libaec: AEC / szip reference vectors and real-format szip chunks; c-blosc2 3.x:
+                      # Falcon Core's Blosc2 chunk vectors (gen_blosc2_vectors.py)
 hdf5plugin>=7.1       # Blosc, LZ4, bitshuffle and Zstandard HDF5 filters (plugin_filters.h5, gen_core_vectors.py)
 #
 # check_hdf5_writer.py can additionally read Falcon's output with an HDF5 1.14 build. Put that in a
@@ -16,8 +17,9 @@ hdf5plugin>=7.1       # Blosc, LZ4, bitshuffle and Zstandard HDF5 filters (plugi
 #   h5py==3.14.0       # bundles HDF5 1.14.6
 #
 # Zarr fixtures, and Falcon Core's zstd / Blosc / Snappy vectors (gen_zarr_fixtures.py,
-# gen_zarr_v2_fixtures.py, gen_zstd_vectors.py, gen_blosc_vectors.py, gen_snappy_vectors.py,
-# check_zstd_encoder.py, check_blosc_encoder.py):
+# gen_zarr_v2_fixtures.py, gen_zarr_extension_fixtures.py, gen_zarr_rectilinear_fixtures.py,
+# gen_zarr_zip_fixtures.py, gen_zstd_vectors.py, gen_blosc_vectors.py, gen_snappy_vectors.py,
+# check_zstd_encoder.py, check_blosc_encoder.py, check_zarr_writer.py, check_zip_store.py):
 zarr>=3.2,<4
 numcodecs>=0.15
 zstandard>=0.23

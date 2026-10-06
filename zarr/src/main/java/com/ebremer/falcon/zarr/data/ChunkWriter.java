@@ -1,7 +1,7 @@
 package com.ebremer.falcon.zarr.data;
 
+import com.ebremer.falcon.zarr.chunk.ChunkGrid;
 import com.ebremer.falcon.zarr.chunk.ChunkKeyEncoding;
-import com.ebremer.falcon.zarr.chunk.RegularChunkGrid;
 import com.ebremer.falcon.zarr.codec.ChunkPipeline;
 import com.ebremer.falcon.zarr.datatype.DataType;
 import com.ebremer.falcon.zarr.metadata.ArrayMetadata;
@@ -39,14 +39,13 @@ public final class ChunkWriter {
             throw new UnsupportedOperationException("store is read-only");
         }
 
-        RegularChunkGrid grid = meta.grid();
+        ChunkGrid grid = meta.grid();
         int rank = grid.rank();
-        long[] chunkShape = grid.chunkShape();
         long[] arrayShape = grid.arrayShape();
         DataType dataType = meta.dataType();
         int elementSize = dataType.byteCount();
 
-        long total = RegularChunkGrid.elementCount(selShape); // within the array, so it fits a long
+        long total = ChunkGrid.elementCount(selShape); // within the array, so it fits a long
         if (total > Integer.MAX_VALUE / elementSize || elements.length != total * elementSize) {
             throw new IllegalArgumentException(
                     "selection holds " + total + " elements of " + elementSize + " bytes but got " + elements.length
@@ -56,43 +55,38 @@ public final class ChunkWriter {
             return;
         }
 
-        ChunkPipeline pipeline = meta.pipeline(); // checks that a chunk fits one buffer
-        ByteOrder order = pipeline.elementOrder();
+        ByteOrder order = meta.pipeline().elementOrder(); // checks that the first chunk fits one buffer
         ChunkKeyEncoding encoding = meta.chunkKeyEncoding();
         byte[] fillElement = meta.fillValueBytes(order);
 
-        int chunkBytes = (int) grid.elementsPerChunk() * elementSize;
-        byte[] emptyChunk = new byte[chunkBytes];
-        ChunkAssembler.tile(emptyChunk, fillElement);
-
         long[] selEnd = new long[rank];
-        long[] firstChunk = new long[rank];
-        long[] lastChunk = new long[rank];
         for (int i = 0; i < rank; i++) {
             selEnd[i] = offset[i] + selShape[i];
-            firstChunk[i] = offset[i] / chunkShape[i];
-            lastChunk[i] = (selEnd[i] - 1) / chunkShape[i];
         }
 
-        long[] coord = firstChunk.clone();
-        while (true) {
-            writeChunk(store, arrayPath, pipeline, encoding, cache, coord, offset, selShape, selEnd,
+        long[][] range = ChunkAssembler.chunkRange(grid, offset, selEnd);
+        long[] coord = range[0].clone();
+        long[] emptyShape = null; // the shape emptyChunk was made for; a regular grid makes it once
+        byte[] emptyChunk = null;
+        do {
+            ChunkPipeline pipeline = meta.chunkPipeline(coord); // checks that the chunk fits one buffer
+            long[] chunkShape = ChunkAssembler.chunkShape(grid, coord);
+            if (!Arrays.equals(chunkShape, emptyShape)) {
+                emptyShape = chunkShape;
+                emptyChunk = new byte[(int) ChunkGrid.elementCount(chunkShape) * elementSize];
+                ChunkAssembler.tile(emptyChunk, fillElement);
+            }
+            long[] chunkOrigin = new long[rank];
+            for (int i = 0; i < rank; i++) {
+                chunkOrigin[i] = grid.chunkStart(i, coord[i]);
+            }
+            writeChunk(store, arrayPath, pipeline, encoding, cache, coord, chunkOrigin, offset, selShape, selEnd,
                     chunkShape, arrayShape, elements, elementSize, fillElement, emptyChunk, writeEmptyChunks);
-            int d = rank - 1;
-            for (; d >= 0; d--) {
-                if (++coord[d] <= lastChunk[d]) {
-                    break;
-                }
-                coord[d] = firstChunk[d];
-            }
-            if (d < 0) {
-                return;
-            }
-        }
+        } while (ChunkAssembler.next(coord, range[0], range[1]));
     }
 
     private static void writeChunk(Store store, String arrayPath, ChunkPipeline pipeline,
-                                   ChunkKeyEncoding encoding, ChunkCache cache, long[] coord,
+                                   ChunkKeyEncoding encoding, ChunkCache cache, long[] coord, long[] chunkOrigins,
                                    long[] selOffset, long[] selShape, long[] selEnd, long[] chunkShape,
                                    long[] arrayShape, byte[] elements, int elementSize, byte[] fillElement,
                                    byte[] emptyChunk, boolean writeEmptyChunks) {
@@ -103,7 +97,7 @@ public final class ChunkWriter {
         boolean coversChunk = true; // every element of the chunk inside the array is written
         boolean edge = false;       // the chunk reaches past the array
         for (int i = 0; i < rank; i++) {
-            long chunkOrigin = coord[i] * chunkShape[i];
+            long chunkOrigin = chunkOrigins[i];
             long lo = Math.max(selOffset[i], chunkOrigin);
             long hi = ChunkAssembler.overlapEnd(chunkOrigin, chunkShape[i], selEnd[i]);
             srcOrigin[i] = lo - selOffset[i];

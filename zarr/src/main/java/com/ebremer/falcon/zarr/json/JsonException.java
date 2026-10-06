@@ -9,6 +9,11 @@ package com.ebremer.falcon.zarr.json;
  */
 public final class JsonException extends RuntimeException {
 
+    /**
+     * Creates the exception with a detail message.
+     *
+     * @param message the detail message
+     */
     public JsonException(String message) {
         super(message);
     }

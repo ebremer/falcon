@@ -345,7 +345,9 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
   - [ ] **S8 — writing the third-party filters.** Falcon reads LZF, Blosc, LZ4, bitshuffle, and zstd. The
     writer cannot apply them yet, though core has zstd and Blosc encoders.
   - [ ] **S9 — more registered filters:** Blosc2 (32026), bzip2 (307), ZFP (32013), and SZ (32017).
-    Each needs a pure-Java codec.
+    Each needs a pure-Java codec. For Blosc2, core now decodes c-blosc2 *chunks* (Zarr's F14, 2026-10-06;
+    the Blosc filter 32001 reads them too), but filter 32026 may store b2nd frames, a container around
+    them, which is not read.
 
 ### Read API
 

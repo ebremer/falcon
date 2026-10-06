@@ -9,10 +9,21 @@ package com.ebremer.falcon.zarr;
  */
 public class ZarrException extends RuntimeException {
 
+    /**
+     * Creates the exception with a detail message.
+     *
+     * @param message the detail message
+     */
     public ZarrException(String message) {
         super(message);
     }
 
+    /**
+     * Creates the exception with a detail message and the failure that caused it.
+     *
+     * @param message the detail message
+     * @param cause   the underlying failure (an {@link java.io.IOException}, for example)
+     */
     public ZarrException(String message, Throwable cause) {
         super(message, cause);
     }

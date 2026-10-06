@@ -1,0 +1,45 @@
+{
+  "shape": [
+    10,
+    7
+  ],
+  "data_type": "int32",
+  "chunk_grid": {
+    "name": "rectilinear",
+    "configuration": {
+      "kind": "inline",
+      "chunk_shapes": [
+        [
+          [
+            3,
+            2
+          ],
+          4
+        ],
+        [
+          2,
+          5
+        ]
+      ]
+    }
+  },
+  "chunk_key_encoding": {
+    "name": "default",
+    "configuration": {
+      "separator": "/"
+    }
+  },
+  "fill_value": -1,
+  "codecs": [
+    {
+      "name": "bytes",
+      "configuration": {
+        "endian": "little"
+      }
+    }
+  ],
+  "attributes": {},
+  "zarr_format": 3,
+  "node_type": "array",
+  "storage_transformers": []
+}

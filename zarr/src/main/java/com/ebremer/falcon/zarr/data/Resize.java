@@ -1,7 +1,7 @@
 package com.ebremer.falcon.zarr.data;
 
+import com.ebremer.falcon.zarr.chunk.ChunkGrid;
 import com.ebremer.falcon.zarr.chunk.ChunkKeyEncoding;
-import com.ebremer.falcon.zarr.chunk.RegularChunkGrid;
 import com.ebremer.falcon.zarr.codec.ChunkPipeline;
 import com.ebremer.falcon.zarr.codec.VlenCodec;
 import com.ebremer.falcon.zarr.metadata.ArrayMetadata;
@@ -12,8 +12,9 @@ import java.util.List;
 import java.util.function.Consumer;
 
 /**
- * The chunk work of resizing an array (F6): the array's chunk grid keeps its chunk shape, so a resize only
- * changes which chunks, and which parts of edge chunks, lie inside the array.
+ * The chunk work of resizing an array (F6): the array's chunk grid keeps its chunks (a rectilinear grid
+ * only gains one past its last where the array grows beyond it), so a resize only changes which chunks, and
+ * which parts of edge chunks, lie inside the array.
  *
  * <ul>
  *   <li><b>Growing</b> brings part of an old edge chunk inside the array: the part past the old shape.
@@ -41,21 +42,24 @@ public final class Resize {
                                     ChunkCache cache, boolean writeEmptyChunks) {
         long[] oldShape = current.shape();
         long[] newShape = next.shape();
-        long[] chunkShape = current.chunkShape();
+        ChunkGrid grid = current.grid();
         int rank = oldShape.length;
         long[] kept = new long[rank];    // inside both shapes
         long[] covered = new long[rank]; // inside the new shape and the old grid's chunks
         for (int i = 0; i < rank; i++) {
             kept[i] = Math.min(oldShape[i], newShape[i]);
-            covered[i] = Math.min(newShape[i], Math.ceilDiv(oldShape[i], chunkShape[i]) * chunkShape[i]);
+            long chunks = grid.chunksAlong(i);
+            long gridEnd = chunks == 0 ? 0 : ChunkAssembler.overlapEnd(grid.chunkStart(i, chunks - 1),
+                    grid.chunkLength(i, chunks - 1), Long.MAX_VALUE);
+            covered[i] = Math.min(newShape[i], gridEnd);
         }
         ChunkKeyEncoding encoding = next.chunkKeyEncoding();
         for (long[][] slab : boxMinus(covered, kept)) {
             long[] first = new long[rank];
             long[] last = new long[rank];
             for (int i = 0; i < rank; i++) {
-                first[i] = slab[0][i] / chunkShape[i];
-                last[i] = (slab[1][i] - 1) / chunkShape[i];
+                first[i] = grid.chunkAt(i, slab[0][i]);
+                last[i] = grid.chunkAt(i, slab[1][i] - 1);
             }
             forEach(first, last, coord -> {
                 if (!store.exists(ChunkAssembler.chunkKey(arrayPath, encoding, coord))) {
@@ -64,8 +68,9 @@ public final class Resize {
                 long[] origin = new long[rank];
                 long[] extent = new long[rank];
                 for (int i = 0; i < rank; i++) {
-                    long lo = Math.max(slab[0][i], coord[i] * chunkShape[i]);
-                    long hi = Math.min(slab[1][i], (coord[i] + 1) * chunkShape[i]);
+                    long start = grid.chunkStart(i, coord[i]);
+                    long lo = Math.max(slab[0][i], start);
+                    long hi = ChunkAssembler.overlapEnd(start, grid.chunkLength(i, coord[i]), slab[1][i]);
                     origin[i] = lo;
                     extent[i] = hi - lo;
                 }
@@ -77,7 +82,7 @@ public final class Resize {
     /** Writes the fill value over {@code [origin, origin + extent)}, a region within one chunk. */
     private static void writeFill(Store store, String arrayPath, ArrayMetadata meta, ChunkCache cache,
                                   long[] origin, long[] extent, boolean writeEmptyChunks) {
-        int count = Math.toIntExact(RegularChunkGrid.elementCount(extent));
+        int count = Math.toIntExact(ChunkGrid.elementCount(extent));
         ChunkPipeline pipeline = meta.pipeline();
         VlenCodec vlen = pipeline.vlenCodec();
         if (vlen != null) {

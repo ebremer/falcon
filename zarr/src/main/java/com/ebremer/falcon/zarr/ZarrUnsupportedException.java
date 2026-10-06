@@ -8,6 +8,11 @@ package com.ebremer.falcon.zarr;
  */
 public class ZarrUnsupportedException extends ZarrException {
 
+    /**
+     * Creates the exception with a detail message.
+     *
+     * @param message the detail message
+     */
     public ZarrUnsupportedException(String message) {
         super(message);
     }

@@ -16,6 +16,7 @@ public final class StoreKeys {
     /**
      * Checks that {@code key} is a legal store key.
      *
+     * @param key the key to check
      * @throws IllegalArgumentException if the key is null, empty, begins or ends with {@code '/'}, or has
      *                                  an empty, {@code "."}, or {@code ".."} segment
      */
@@ -45,14 +46,27 @@ public final class StoreKeys {
         return prefix + "/";
     }
 
-    /** All of {@code keys} beginning with the raw string {@code prefix}, sorted and de-duplicated. */
+    /**
+     * All of {@code keys} beginning with the raw string {@code prefix}, sorted and de-duplicated, as
+     * {@link Store#listPrefix} gives them.
+     *
+     * @param keys   the store's keys
+     * @param prefix the start every listed key has
+     * @return the matching keys
+     */
     public static List<String> listPrefix(Collection<String> keys, String prefix) {
         return keys.stream().filter(k -> k.startsWith(prefix)).distinct().sorted().toList();
     }
 
     /**
      * The immediate children of {@code prefix}: leaf keys directly under it (returned as full keys) and
-     * child directories (returned as the full prefix with a trailing {@code '/'}). Sorted, de-duplicated.
+     * child directories (returned as the full prefix with a trailing {@code '/'}). Sorted, de-duplicated, as
+     * {@link Store#listDir} gives them.
+     *
+     * @param keys   the store's keys
+     * @param prefix the directory to list; a trailing {@code '/'} is added if missing, and empty lists the
+     *               top level
+     * @return the keys and child prefixes
      */
     public static List<String> listDir(Collection<String> keys, String prefix) {
         String dir = asDirPrefix(prefix);

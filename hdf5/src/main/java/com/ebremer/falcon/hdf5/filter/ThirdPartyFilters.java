@@ -17,8 +17,8 @@ import com.ebremer.falcon.hdf5.HdfUnsupportedException;
  * <ul>
  *   <li><b>LZF</b> (32000, h5py's {@code lzf_filter.c}): a bare LZF stream; client data 2, when set, is the
  *       chunk size.</li>
- *   <li><b>Blosc</b> (32001, {@code hdf5-blosc}): a Blosc (version 1) buffer, which records everything
- *       needed to decode it.</li>
+ *   <li><b>Blosc</b> (32001, {@code hdf5-blosc}): a Blosc buffer, in c-blosc's format (version 2) or
+ *       c-blosc2's (versions 3 to 6), which records everything needed to decode it.</li>
  *   <li><b>LZ4</b> (32004, the HDF Group's {@code H5Zlz4.c}): {@code decoded size (8, big-endian) · block
  *       size (4, big-endian)}, then per block {@code compressed size (4, big-endian) · LZ4 block}; a block
  *       whose compressed size equals its size is stored raw.</li>

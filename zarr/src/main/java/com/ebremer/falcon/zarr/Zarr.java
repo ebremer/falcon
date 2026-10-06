@@ -31,6 +31,8 @@ public final class Zarr {
      * <p>Both Zarr v3 (a {@code zarr.json} at each node) and Zarr v2 ({@code .zarray}/{@code .zgroup}
      * with a sidecar {@code .zattrs}) are read; v2 metadata is translated into the v3 model on open.
      *
+     * @param store the store holding the hierarchy
+     * @return the root group or array
      * @throws ZarrFormatException      if there is no root node metadata, or it or the consolidated metadata
      *                                  is malformed
      * @throws ZarrUnsupportedException if the store uses an unimplemented feature
@@ -50,6 +52,9 @@ public final class Zarr {
      * snapshot shows the hierarchy as it was consolidated (see {@link ZarrGroup}). Without
      * {@code useConsolidated}, every node's own metadata is read, here and below.
      *
+     * @param store           the store holding the hierarchy
+     * @param useConsolidated whether a root group answers child queries from its consolidated metadata
+     * @return the root group or array
      * @throws ZarrFormatException      if there is no root node metadata or it is malformed, or, with
      *                                  {@code useConsolidated}, if the consolidated metadata is malformed
      * @throws ZarrUnsupportedException if the store uses an unimplemented feature
@@ -67,6 +72,9 @@ public final class Zarr {
      * is not consulted. A group opened here uses its own consolidated metadata, if it has any:
      * {@code open(store, path, true)}.
      *
+     * @param store the store holding the hierarchy
+     * @param path  the node's path from the root
+     * @return the group or array at {@code path}
      * @throws NoSuchElementException   if there is no node at a non-root {@code path}
      * @throws IllegalArgumentException if the path has an empty name, or a {@code "."} or {@code ".."}
      * @throws ZarrFormatException      if there is no root node (for the root path), or the node's metadata is
@@ -81,6 +89,11 @@ public final class Zarr {
      * Opens the node at {@code path} in {@code store}, as {@link #open(Store, String)} does, with a group
      * using its consolidated metadata only if {@code useConsolidated} (see {@link #open(Store, boolean)}).
      *
+     * @param store           the store holding the hierarchy
+     * @param path            the node's path from the root
+     * @param useConsolidated whether a group opened here answers child queries from its consolidated
+     *                        metadata
+     * @return the group or array at {@code path}
      * @throws NoSuchElementException   if there is no node at a non-root {@code path}
      * @throws IllegalArgumentException if the path has an empty name, or a {@code "."} or {@code ".."}
      * @throws ZarrFormatException      if there is no root node (for the root path), or the node's metadata or
@@ -100,7 +113,11 @@ public final class Zarr {
     /**
      * Opens the group at {@code path} in {@code store}; see {@link #open(Store, String)}.
      *
-     * @throws IllegalStateException if the node there is an array
+     * @param store the store holding the hierarchy
+     * @param path  the group's path from the root
+     * @return the group
+     * @throws NoSuchElementException if there is no node at a non-root {@code path}
+     * @throws IllegalStateException  if the node there is an array
      */
     public static ZarrGroup openGroup(Store store, String path) {
         return open(store, path).asGroup();
@@ -109,13 +126,26 @@ public final class Zarr {
     /**
      * Opens the array at {@code path} in {@code store}; see {@link #open(Store, String)}.
      *
-     * @throws IllegalStateException if the node there is a group
+     * @param store the store holding the hierarchy
+     * @param path  the array's path from the root
+     * @return the array
+     * @throws NoSuchElementException if there is no node at a non-root {@code path}
+     * @throws IllegalStateException  if the node there is a group
      */
     public static ZarrArray openArray(Store store, String path) {
         return open(store, path).asArray();
     }
 
-    /** Opens the root node of the hierarchy in the store directory at {@code directory} (read-only). */
+    /**
+     * Opens the root node of the hierarchy in the store directory at {@code directory} (read-only), as
+     * {@link #open(Store)} does over a {@link FileSystemStore}.
+     *
+     * @param directory the store's root directory
+     * @return the root group or array
+     * @throws ZarrFormatException      if there is no root node metadata, or it or the consolidated metadata
+     *                                  is malformed
+     * @throws ZarrUnsupportedException if the store uses an unimplemented feature
+     */
     public static ZarrNode open(Path directory) {
         return open(FileSystemStore.openReadOnly(directory));
     }
@@ -123,6 +153,8 @@ public final class Zarr {
     /**
      * Opens the hierarchy root as a group, using its consolidated metadata if it has any.
      *
+     * @param store the store holding the hierarchy
+     * @return the root group
      * @throws IllegalStateException if the root is an array
      */
     public static ZarrGroup openGroup(Store store) {
@@ -132,6 +164,9 @@ public final class Zarr {
     /**
      * Opens the hierarchy root as a group; see {@link #open(Store, boolean)}.
      *
+     * @param store           the store holding the hierarchy
+     * @param useConsolidated whether the group answers child queries from its consolidated metadata
+     * @return the root group
      * @throws IllegalStateException if the root is an array
      */
     public static ZarrGroup openGroup(Store store, boolean useConsolidated) {
@@ -141,6 +176,8 @@ public final class Zarr {
     /**
      * Opens the hierarchy root as an array.
      *
+     * @param store the store holding the hierarchy
+     * @return the root array
      * @throws IllegalStateException if the root is a group
      */
     public static ZarrArray openArray(Store store) {
@@ -148,8 +185,10 @@ public final class Zarr {
     }
 
     /**
-     * Creates the root group of {@code store} and returns it.
+     * Creates the root group of {@code store}, with no attributes, and returns it.
      *
+     * @param store the store to create the group in
+     * @return the new group
      * @throws IllegalArgumentException      if the store already has a root node
      * @throws UnsupportedOperationException if the store is read-only
      */
@@ -160,6 +199,9 @@ public final class Zarr {
     /**
      * Creates the root group of {@code store} with the given attributes.
      *
+     * @param store      the store to create the group in
+     * @param attributes the group's attributes
+     * @return the new group
      * @throws IllegalArgumentException      if the store already has a root node
      * @throws UnsupportedOperationException if the store is read-only
      */
@@ -172,6 +214,10 @@ public final class Zarr {
      * in the store is deleted first, the old hierarchy and anything else stored there alike; without it, a
      * store that already has a root node is refused.
      *
+     * @param store      the store to create the group in
+     * @param attributes the group's attributes
+     * @param overwrite  whether to delete every key in the store first
+     * @return the new group
      * @throws IllegalArgumentException      if the store has a root node and {@code overwrite} is false
      * @throws UnsupportedOperationException if the store is read-only
      */
@@ -184,6 +230,9 @@ public final class Zarr {
     /**
      * Creates an array at the root of {@code store} and returns it.
      *
+     * @param store the store to create the array in
+     * @param spec  the array's description
+     * @return the new array
      * @throws IllegalArgumentException      if the store holds any key (a root array would read stray
      *                                       keys as its chunks)
      * @throws UnsupportedOperationException if the store is read-only
@@ -197,6 +246,10 @@ public final class Zarr {
      * deleted first; without it, a store that holds any key is refused, since a root array would read stray
      * keys as its chunks.
      *
+     * @param store     the store to create the array in
+     * @param spec      the array's description
+     * @param overwrite whether to delete every key in the store first
+     * @return the new array
      * @throws IllegalArgumentException      if the store holds any key and {@code overwrite} is false
      * @throws UnsupportedOperationException if the store is read-only
      */

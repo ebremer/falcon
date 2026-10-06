@@ -1,0 +1,22 @@
+{
+ "name": "ext_utf32_be",
+ "shape": [
+  2,
+  3
+ ],
+ "data_type": {
+  "name": "fixed_length_utf32",
+  "configuration": {
+   "length_bytes": 12
+  }
+ },
+ "fill_value": "",
+ "values": [
+  "abc",
+  "😀",
+  "",
+  "ü",
+  "x",
+  "ok!"
+ ]
+}

@@ -226,7 +226,8 @@ Chunked data is decoded through any of HDF5's built-in filters:
 
 It is also decoded through the third-party filters most common in the wild:
 - LZF (32000, h5py's built-in filter);
-- Blosc (32001), with every internal codec (BloscLZ, LZ4, LZ4HC, Snappy, zlib, zstd) and both shuffles;
+- Blosc (32001), with every internal codec (BloscLZ, LZ4, LZ4HC, Snappy, zlib, zstd) and both shuffles,
+  and chunks in c-blosc2's format (versions 3 to 6) as well as c-blosc's;
 - LZ4 (32004);
 - bitshuffle (32008), alone or with LZ4 or zstd;
 - Zstandard (32015), verifying each frame's content checksum when it has one.

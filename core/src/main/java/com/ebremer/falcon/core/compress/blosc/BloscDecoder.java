@@ -9,8 +9,9 @@ import java.util.zip.DataFormatException;
 import java.util.zip.Inflater;
 
 /**
- * A pure-Java decompressor for the Blosc container (c-blosc format version 2, what numcodecs and
- * zarr-python write).
+ * A pure-Java decompressor for the Blosc container: c-blosc's format version 2, what numcodecs and
+ * zarr-python write, and c-blosc2's chunk format, versions 3 to 6 (see {@link Blosc2Decoder}, to which a
+ * buffer whose version byte is 3 or more is handed).
  *
  * <p>Blosc is a meta-compressor: a 16-byte header, an offset table, and then per-block payloads
  * compressed by an <em>internal</em> codec, optionally preceded by a shuffle filter that regroups bytes
@@ -32,7 +33,7 @@ import java.util.zip.Inflater;
  * {@code snappy}; and both the byte- and bit-shuffle filters. A buffer using an undefined internal codec
  * or an unsupported format version is reported as a format/unsupported error rather than decoded wrongly.
  *
- * <p>The header is checked as c-blosc 1.x checks it before decoding: format version 2, the reserved flag
+ * <p>A version-2 header is checked as c-blosc 1.x checks it before decoding: format version 2, the reserved flag
  * bit clear, a type size of at least 1, a block size from 1 to the buffer's size (and c-blosc's
  * {@code BLOSC_MAX_BLOCKSIZE}), a memcpy'ed buffer exactly 16 bytes longer than its data, and an offset
  * table that fits. With both shuffle flags set, a block is byte-unshuffled when its type size exceeds 1
@@ -48,7 +49,7 @@ public final class BloscDecoder {
     private static final int FLAG_BITSHUFFLE = 0x04;
     private static final int FLAG_RESERVED = 0x08;
 
-    /** The only format version c-blosc 1.x reads ({@code BLOSC_VERSION_FORMAT}). */
+    /** The format version c-blosc 1.x writes and reads ({@code BLOSC_VERSION_FORMAT}). */
     private static final int VERSION_FORMAT = 2;
     /** c-blosc's {@code BLOSC_MAX_BLOCKSIZE}: {@code (INT_MAX - BLOSC_MAX_TYPESIZE * 4) / 3}. */
     static final int MAX_BLOCKSIZE = (Integer.MAX_VALUE - 255 * 4) / 3;
@@ -62,7 +63,7 @@ public final class BloscDecoder {
     private BloscDecoder() {
     }
 
-    /** The decompressed size recorded in a Blosc buffer's header. */
+    /** The decompressed size recorded in a Blosc buffer's header (Blosc 1 or 2). */
     public static int decompressedSize(byte[] src) {
         requireHeader(src);
         return le32(src, 4);
@@ -89,6 +90,9 @@ public final class BloscDecoder {
     public static byte[] decompress(byte[] src, int maxSize) {
         requireHeader(src);
         int version = src[0] & 0xff;
+        if (version >= Blosc2Decoder.VERSION_ALPHA) {
+            return Blosc2Decoder.decompress(src, maxSize);
+        }
         int flags = src[2] & 0xff;
         int typeSize = src[3] & 0xff;
         int nbytes = le32(src, 4);
@@ -116,9 +120,6 @@ public final class BloscDecoder {
         }
         if (typeSize == 0) {
             throw new CompressionFormatException("Blosc type size of zero");
-        }
-        if (version > VERSION_FORMAT) {
-            throw new UnsupportedCompressionException("Blosc format version " + version + " is not supported");
         }
         if (version != VERSION_FORMAT) {
             throw new CompressionFormatException("Blosc format version " + version + " (c-blosc writes 2)");
@@ -192,7 +193,7 @@ public final class BloscDecoder {
     }
 
     /** What one decode reuses from block to block: zlib's Inflater and the bit-unshuffle's scratch buffer. */
-    private static final class Scratch {
+    static final class Scratch {
         private Inflater inflater;
         private byte[] bitTmp;
 
@@ -273,7 +274,8 @@ public final class BloscDecoder {
         }
     }
 
-    private static void inflate(int compressor, byte[] src, int srcOff, int srcLen,
+    /** Decompresses one stream with internal codec {@code compressor} (the code in flags bits 5&ndash;7). */
+    static void inflate(int compressor, byte[] src, int srcOff, int srcLen,
                                 byte[] dst, int dstOff, int dstLen, Scratch scratch) {
         switch (compressor) {
             case COMPRESSOR_LZ4 -> Lz4.decompress(src, srcOff, srcLen, dst, dstOff, dstLen);
@@ -341,7 +343,7 @@ public final class BloscDecoder {
         }
     }
 
-    private static int le32(byte[] src, int off) {
+    static int le32(byte[] src, int off) {
         return (src[off] & 0xff) | ((src[off + 1] & 0xff) << 8)
                 | ((src[off + 2] & 0xff) << 16) | ((src[off + 3] & 0xff) << 24);
     }

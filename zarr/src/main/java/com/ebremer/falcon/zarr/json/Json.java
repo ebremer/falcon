@@ -17,7 +17,13 @@ public final class Json {
     private Json() {
     }
 
-    /** Parses one JSON value from {@code text}; rejects trailing content. */
+    /**
+     * Parses one JSON value from {@code text}; rejects trailing content.
+     *
+     * @param text the JSON text
+     * @return the value
+     * @throws JsonException if {@code text} is not one valid JSON value
+     */
     public static JsonValue parse(String text) {
         return JsonReader.parse(text);
     }
@@ -25,6 +31,8 @@ public final class Json {
     /**
      * Parses one JSON value from UTF-8 {@code bytes}.
      *
+     * @param bytes the JSON text, UTF-8 encoded
+     * @return the value
      * @throws JsonException if the bytes are not valid UTF-8 (malformed bytes are not replaced, which
      *                       would change the text silently), or not valid JSON
      */
@@ -42,17 +50,32 @@ public final class Json {
         return JsonReader.parse(text);
     }
 
-    /** Serializes {@code value} to canonical compact JSON (no insignificant whitespace). */
+    /**
+     * Serializes {@code value} to canonical compact JSON (no insignificant whitespace).
+     *
+     * @param value the value to write
+     * @return the JSON text
+     */
     public static String write(JsonValue value) {
         return JsonWriter.write(value);
     }
 
-    /** Serializes {@code value} to indented, human-readable JSON. */
+    /**
+     * Serializes {@code value} to indented, human-readable JSON.
+     *
+     * @param value the value to write
+     * @return the JSON text
+     */
     public static String writePretty(JsonValue value) {
         return JsonWriter.writePretty(value);
     }
 
-    /** Serializes {@code value} to canonical compact JSON encoded as UTF-8 bytes. */
+    /**
+     * Serializes {@code value} to canonical compact JSON encoded as UTF-8 bytes.
+     *
+     * @param value the value to write
+     * @return the JSON text, UTF-8 encoded
+     */
     public static byte[] writeBytes(JsonValue value) {
         return write(value).getBytes(StandardCharsets.UTF_8);
     }

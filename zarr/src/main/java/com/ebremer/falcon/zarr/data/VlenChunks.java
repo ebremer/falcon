@@ -1,7 +1,7 @@
 package com.ebremer.falcon.zarr.data;
 
+import com.ebremer.falcon.zarr.chunk.ChunkGrid;
 import com.ebremer.falcon.zarr.chunk.ChunkKeyEncoding;
-import com.ebremer.falcon.zarr.chunk.RegularChunkGrid;
 import com.ebremer.falcon.zarr.codec.ChunkPipeline;
 import com.ebremer.falcon.zarr.codec.VlenCodec;
 import com.ebremer.falcon.zarr.metadata.ArrayMetadata;
@@ -33,13 +33,11 @@ public final class VlenChunks {
                                 long[] offset, long[] selShape) {
         ChunkAssembler.checkSelection(meta, offset, selShape);
 
-        RegularChunkGrid grid = meta.grid();
+        ChunkGrid grid = meta.grid();
         int rank = grid.rank();
-        long[] chunkShape = grid.chunkShape();
-        ChunkPipeline pipeline = meta.pipeline();
-        VlenCodec vlen = pipeline.vlenCodec();
+        VlenCodec vlen = meta.pipeline().vlenCodec();
 
-        long total = RegularChunkGrid.elementCount(selShape); // within the array, so it fits a long
+        long total = ChunkGrid.elementCount(selShape); // within the array, so it fits a long
         if (total > Integer.MAX_VALUE) {
             throw new IllegalArgumentException(
                     "selection of " + total + " elements is too large to read into a single array");
@@ -51,47 +49,34 @@ public final class VlenChunks {
 
         ChunkKeyEncoding encoding = meta.chunkKeyEncoding();
         Object fill = vlen.fill(meta.fillValue());
-        int[] chunkShapeInt = ChunkAssembler.toInt(chunkShape);
 
         long[] selEnd = new long[rank];
-        long[] firstChunk = new long[rank];
-        long[] lastChunk = new long[rank];
         for (int i = 0; i < rank; i++) {
             selEnd[i] = offset[i] + selShape[i];
-            firstChunk[i] = offset[i] / chunkShape[i];
-            lastChunk[i] = (selEnd[i] - 1) / chunkShape[i];
         }
 
-        long[] coord = firstChunk.clone();
+        long[][] range = ChunkAssembler.chunkRange(grid, offset, selEnd);
+        long[] coord = range[0].clone();
         int[] regionOrigin = new int[rank];
         int[] regionShape = new int[rank];
-        while (true) {
+        do {
+            long[] chunkShape = ChunkAssembler.chunkShape(grid, coord);
+            long[] chunkOrigin = new long[rank];
             for (int i = 0; i < rank; i++) {
-                long chunkOrigin = coord[i] * chunkShape[i];
-                long lo = Math.max(offset[i], chunkOrigin);
-                long hi = ChunkAssembler.overlapEnd(chunkOrigin, chunkShape[i], selEnd[i]);
-                regionOrigin[i] = (int) (lo - chunkOrigin);
+                chunkOrigin[i] = grid.chunkStart(i, coord[i]);
+                long lo = Math.max(offset[i], chunkOrigin[i]);
+                long hi = ChunkAssembler.overlapEnd(chunkOrigin[i], chunkShape[i], selEnd[i]);
+                regionOrigin[i] = (int) (lo - chunkOrigin[i]);
                 regionShape[i] = (int) (hi - lo);
             }
             String key = ChunkAssembler.chunkKey(arrayPath, encoding, coord);
-            Object[] chunk = pipeline.decodeVlenChunk(new StoreChunkBytes(store, key, null), fill,
+            Object[] chunk = meta.chunkPipeline(coord).decodeVlenChunk(new StoreChunkBytes(store, key, null), fill,
                     regionOrigin, regionShape);
             if (chunk == null) {
-                chunk = fillChunk(vlen, chunkShapeInt, fill);
+                chunk = fillChunk(vlen, ChunkAssembler.toInt(chunkShape), fill);
             }
-            copyIntersection(out, selShape, offset, selEnd, coord, chunkShape, chunk);
-
-            int d = rank - 1;
-            for (; d >= 0; d--) {
-                if (++coord[d] <= lastChunk[d]) {
-                    break;
-                }
-                coord[d] = firstChunk[d];
-            }
-            if (d < 0) {
-                break;
-            }
-        }
+            copyIntersection(out, selShape, offset, selEnd, chunkOrigin, chunkShape, chunk);
+        } while (ChunkAssembler.next(coord, range[0], range[1]));
         return vlen.detach(out, fill);
     }
 
@@ -107,12 +92,11 @@ public final class VlenChunks {
             throw new UnsupportedOperationException("store is read-only");
         }
 
-        RegularChunkGrid grid = meta.grid();
+        ChunkGrid grid = meta.grid();
         int rank = grid.rank();
-        long[] chunkShape = grid.chunkShape();
         long[] arrayShape = grid.arrayShape();
 
-        long total = RegularChunkGrid.elementCount(selShape);
+        long total = ChunkGrid.elementCount(selShape);
         if (elements.length != total) {
             throw new IllegalArgumentException(
                     "selection holds " + total + " elements but got " + elements.length);
@@ -121,49 +105,40 @@ public final class VlenChunks {
             return;
         }
 
-        ChunkPipeline pipeline = meta.pipeline();
-        VlenCodec vlen = pipeline.vlenCodec();
+        VlenCodec vlen = meta.pipeline().vlenCodec();
         ChunkKeyEncoding encoding = meta.chunkKeyEncoding();
         Object fill = vlen.fill(meta.fillValue());
-        int[] chunkShapeInt = ChunkAssembler.toInt(chunkShape);
 
         long[] selEnd = new long[rank];
-        long[] firstChunk = new long[rank];
-        long[] lastChunk = new long[rank];
         for (int i = 0; i < rank; i++) {
             selEnd[i] = offset[i] + selShape[i];
-            firstChunk[i] = offset[i] / chunkShape[i];
-            lastChunk[i] = (selEnd[i] - 1) / chunkShape[i];
         }
 
-        long[] coord = firstChunk.clone();
-        while (true) {
-            writeChunk(store, arrayPath, pipeline, vlen, encoding, coord, offset, selShape, selEnd, chunkShape,
-                    arrayShape, chunkShapeInt, elements, fill, writeEmptyChunks);
-            int d = rank - 1;
-            for (; d >= 0; d--) {
-                if (++coord[d] <= lastChunk[d]) {
-                    break;
-                }
-                coord[d] = firstChunk[d];
+        long[][] range = ChunkAssembler.chunkRange(grid, offset, selEnd);
+        long[] coord = range[0].clone();
+        do {
+            long[] chunkShape = ChunkAssembler.chunkShape(grid, coord);
+            long[] chunkOrigin = new long[rank];
+            for (int i = 0; i < rank; i++) {
+                chunkOrigin[i] = grid.chunkStart(i, coord[i]);
             }
-            if (d < 0) {
-                return;
-            }
-        }
+            writeChunk(store, arrayPath, meta.chunkPipeline(coord), vlen, encoding, coord, chunkOrigin, offset,
+                    selShape, selEnd, chunkShape, arrayShape, ChunkAssembler.toInt(chunkShape), elements, fill,
+                    writeEmptyChunks);
+        } while (ChunkAssembler.next(coord, range[0], range[1]));
     }
 
     private static void writeChunk(Store store, String arrayPath, ChunkPipeline pipeline, VlenCodec vlen,
-                                   ChunkKeyEncoding encoding, long[] coord, long[] selOffset, long[] selShape,
-                                   long[] selEnd, long[] chunkShape, long[] arrayShape, int[] chunkShapeInt,
-                                   Object[] elements, Object fill, boolean writeEmptyChunks) {
+                                   ChunkKeyEncoding encoding, long[] coord, long[] chunkOrigins, long[] selOffset,
+                                   long[] selShape, long[] selEnd, long[] chunkShape, long[] arrayShape,
+                                   int[] chunkShapeInt, Object[] elements, Object fill, boolean writeEmptyChunks) {
         int rank = chunkShape.length;
         long[] srcOrigin = new long[rank];
         long[] dstOrigin = new long[rank];
         long[] block = new long[rank];
         boolean coversChunk = true; // every element of the chunk inside the array is written
         for (int i = 0; i < rank; i++) {
-            long chunkOrigin = coord[i] * chunkShape[i];
+            long chunkOrigin = chunkOrigins[i];
             long lo = Math.max(selOffset[i], chunkOrigin);
             long hi = ChunkAssembler.overlapEnd(chunkOrigin, chunkShape[i], selEnd[i]);
             srcOrigin[i] = lo - selOffset[i];
@@ -193,16 +168,15 @@ public final class VlenChunks {
     }
 
     private static void copyIntersection(Object[] out, long[] selShape, long[] selOffset, long[] selEnd,
-                                         long[] coord, long[] chunkShape, Object[] chunk) {
+                                         long[] chunkOrigin, long[] chunkShape, Object[] chunk) {
         int rank = selShape.length;
         long[] srcOrigin = new long[rank];
         long[] dstOrigin = new long[rank];
         long[] block = new long[rank];
         for (int i = 0; i < rank; i++) {
-            long chunkOrigin = coord[i] * chunkShape[i];
-            long lo = Math.max(selOffset[i], chunkOrigin);
-            long hi = ChunkAssembler.overlapEnd(chunkOrigin, chunkShape[i], selEnd[i]);
-            srcOrigin[i] = lo - chunkOrigin;
+            long lo = Math.max(selOffset[i], chunkOrigin[i]);
+            long hi = ChunkAssembler.overlapEnd(chunkOrigin[i], chunkShape[i], selEnd[i]);
+            srcOrigin[i] = lo - chunkOrigin[i];
             dstOrigin[i] = lo - selOffset[i];
             block[i] = hi - lo;
         }

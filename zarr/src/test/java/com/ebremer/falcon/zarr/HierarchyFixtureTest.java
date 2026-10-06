@@ -101,21 +101,21 @@ class HierarchyFixtureTest {
     }
 
     /**
-     * P1 I3: one child Falcon cannot open (a numpy.datetime64 array, an extension data type; a v2 "&lt;U8"
-     * array) aborted children(), arrays(), and groups(). They now leave it out; childNames() lists it, and
-     * array(name) says why it fails.
+     * P1 I3: one child Falcon cannot open (a v2 "&lt;U8" array) aborted children(), arrays(), and groups().
+     * They now leave it out; childNames() lists it, and child(name) says why it fails. The numpy.datetime64
+     * array beside it, once refused as well, opens since P2 F14.
      */
     @Test
     void childrenThatCannotBeOpenedAreLeftOut() {
         ZarrGroup root = Zarr.open(fixture("p1_mixed")).asGroup();
         assertEquals(List.of("good", "text", "when", "zz_group"), root.childNames());
-        assertEquals(List.of("good", "zz_group"), names(root.children()));
-        assertEquals(List.of("good"), names(root.arrays()));
+        assertEquals(List.of("good", "when", "zz_group"), names(root.children()));
+        assertEquals(List.of("good", "when"), names(root.arrays()));
         assertEquals(List.of("zz_group"), names(root.groups()));
         assertArrayEquals(new double[] {1.25, 2.5}, root.array("good").readDoubles());
+        // 2026-01-01 and 2026-01-02, in seconds since 1970
+        assertArrayEquals(new long[] {1767225600L, 1767312000L}, root.array("when").readLongs());
 
-        ZarrUnsupportedException when = assertThrows(ZarrUnsupportedException.class, () -> root.array("when"));
-        assertTrue(when.getMessage().contains("numpy.datetime64"), when.getMessage());
         ZarrUnsupportedException text = assertThrows(ZarrUnsupportedException.class, () -> root.child("text"));
         assertTrue(text.getMessage().contains("<U8"), text.getMessage());
     }

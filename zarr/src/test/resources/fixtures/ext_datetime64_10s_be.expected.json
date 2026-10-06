@@ -1,0 +1,29 @@
+{
+ "name": "ext_datetime64_10s_be",
+ "shape": [
+  3,
+  4
+ ],
+ "data_type": {
+  "name": "numpy.datetime64",
+  "configuration": {
+   "unit": "s",
+   "scale_factor": 10
+  }
+ },
+ "fill_value": -9223372036854775808,
+ "values": [
+  -20,
+  -13,
+  -6,
+  1,
+  8,
+  15,
+  -9223372036854775808,
+  29,
+  36,
+  43,
+  50,
+  57
+ ]
+}

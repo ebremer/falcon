@@ -1,0 +1,25 @@
+{
+ "name": "ext_utf32",
+ "shape": [
+  10
+ ],
+ "data_type": {
+  "name": "fixed_length_utf32",
+  "configuration": {
+   "length_bytes": 16
+  }
+ },
+ "fill_value": "zz",
+ "values": [
+  "",
+  "a",
+  "abcd",
+  "😀😁",
+  "x\u0000y",
+  "中文字",
+  "δ",
+  "zz",
+  "zz",
+  "zz"
+ ]
+}

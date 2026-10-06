@@ -1,0 +1,22 @@
+{
+ "name": "ext_null_bytes",
+ "shape": [
+  7
+ ],
+ "data_type": {
+  "name": "null_terminated_bytes",
+  "configuration": {
+   "length_bytes": 5
+  }
+ },
+ "fill_value": "YWI=",
+ "values": [
+  "",
+  "610062",
+  "6162636465",
+  "fffe",
+  "71",
+  "6162",
+  "6162"
+ ]
+}

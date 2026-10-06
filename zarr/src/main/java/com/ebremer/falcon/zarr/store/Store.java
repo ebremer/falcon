@@ -28,7 +28,13 @@ import java.util.OptionalLong;
  */
 public interface Store {
 
-    /** The full value stored under {@code key}, or empty if the key is absent. */
+    /**
+     * The full value stored under {@code key}, or empty if the key is absent.
+     *
+     * @param key the key
+     * @return the value, the caller's own, or empty
+     * @throws IllegalArgumentException if {@code key} is not a legal key
+     */
     Optional<byte[]> get(String key);
 
     /**
@@ -36,8 +42,12 @@ public interface Store {
      * The result is clamped to the value's size (a range past the end yields the available tail, possibly
      * empty). Returns empty only when the key itself is absent.
      *
-     * @throws IllegalArgumentException if {@code offset} or {@code length} is negative, or {@code length}
-     *                                  exceeds {@link Integer#MAX_VALUE}
+     * @param key    the key
+     * @param offset the range's first byte
+     * @param length the most bytes to return
+     * @return the bytes in range, or empty if the key is absent
+     * @throws IllegalArgumentException if {@code key} is not a legal key, {@code offset} or {@code length} is
+     *                                  negative, or {@code length} exceeds {@link Integer#MAX_VALUE}
      */
     Optional<byte[]> getRange(String key, long offset, long length);
 
@@ -50,7 +60,11 @@ public interface Store {
      * a store that can read a suffix in one step overrides it ({@link HttpStore} sends one request with
      * {@code Range: bytes=-length}).
      *
-     * @throws IllegalArgumentException if {@code length} is negative or exceeds {@link Integer#MAX_VALUE}
+     * @param key    the key
+     * @param length the most bytes to return, from the end
+     * @return the value's tail, or empty if the key is absent
+     * @throws IllegalArgumentException if {@code key} is not a legal key, or {@code length} is negative or
+     *                                  exceeds {@link Integer#MAX_VALUE}
      */
     default Optional<byte[]> getSuffix(String key, long length) {
         MemoryStore.checkedLength(0, length);
@@ -61,19 +75,40 @@ public interface Store {
         return getRange(key, Math.max(0, size.getAsLong() - length), length);
     }
 
-    /** True if {@code key} is present. */
+    /**
+     * True if {@code key} is present.
+     *
+     * @param key the key
+     * @return whether a value is stored under it
+     * @throws IllegalArgumentException if {@code key} is not a legal key
+     */
     boolean exists(String key);
 
     /**
      * The size in bytes of the value under {@code key}, or empty if the key is absent. Needed to address
      * a value's tail (a shard index stored at the end) without fetching the whole value.
+     *
+     * @param key the key
+     * @return the value's size, or empty if the key is absent
+     * @throws IllegalArgumentException if {@code key} is not a legal key
      */
     OptionalLong size(String key);
 
-    /** All keys in the store, sorted. */
+    /**
+     * All keys in the store, sorted.
+     *
+     * @return the keys
+     * @throws UnsupportedOperationException if the store cannot list its keys
+     */
     List<String> list();
 
-    /** All keys that begin with {@code prefix}, sorted. An empty prefix lists everything. */
+    /**
+     * All keys that begin with {@code prefix}, sorted. An empty prefix lists everything.
+     *
+     * @param prefix the start every listed key has, compared as a plain string
+     * @return the keys
+     * @throws UnsupportedOperationException if the store cannot list its keys
+     */
     List<String> listPrefix(String prefix);
 
     /**
@@ -84,15 +119,22 @@ public interface Store {
      * {@code listDir("")} yields {@code [a/, zarr.json]} and {@code listDir("a/")} yields
      * {@code [a/c/, a/zarr.json]}. {@code prefix} is treated as a directory boundary; a non-empty prefix
      * that does not end in {@code '/'} has one appended.
+     *
+     * @param prefix the directory to list; empty for the store's top level
+     * @return the keys and child prefixes
+     * @throws UnsupportedOperationException if the store cannot list its keys
      */
     List<String> listDir(String prefix);
 
-    /** True if this store supports {@link #set} and {@link #delete}. */
+    /** {@return true if this store supports {@link #set} and {@link #delete}} */
     boolean isWritable();
 
     /**
      * Stores {@code value} under {@code key}, replacing any existing value.
      *
+     * @param key   the key
+     * @param value the bytes to store; the store keeps its own copy, or writes them out during the call
+     * @throws IllegalArgumentException      if {@code key} is not a legal key
      * @throws UnsupportedOperationException if {@link #isWritable()} is false
      */
     void set(String key, byte[] value);
@@ -100,6 +142,8 @@ public interface Store {
     /**
      * Removes {@code key} if present; a no-op otherwise.
      *
+     * @param key the key
+     * @throws IllegalArgumentException      if {@code key} is not a legal key
      * @throws UnsupportedOperationException if {@link #isWritable()} is false
      */
     void delete(String key);

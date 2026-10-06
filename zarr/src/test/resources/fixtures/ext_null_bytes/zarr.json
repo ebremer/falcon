@@ -1,0 +1,41 @@
+{
+  "shape": [
+    7
+  ],
+  "data_type": {
+    "name": "null_terminated_bytes",
+    "configuration": {
+      "length_bytes": 5
+    }
+  },
+  "chunk_grid": {
+    "name": "regular",
+    "configuration": {
+      "chunk_shape": [
+        3
+      ]
+    }
+  },
+  "chunk_key_encoding": {
+    "name": "default",
+    "configuration": {
+      "separator": "/"
+    }
+  },
+  "fill_value": "YWI=",
+  "codecs": [
+    {
+      "name": "bytes"
+    },
+    {
+      "name": "gzip",
+      "configuration": {
+        "level": 5
+      }
+    }
+  ],
+  "attributes": {},
+  "zarr_format": 3,
+  "node_type": "array",
+  "storage_transformers": []
+}

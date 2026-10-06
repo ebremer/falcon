@@ -66,6 +66,13 @@ class StoreTest {
         runContract(FileSystemStore.open(tmp.resolve("store")));
     }
 
+    @Test
+    void zipStoreContract(@TempDir Path tmp) {
+        try (ZipStore zip = ZipStore.create(tmp.resolve("store.zip"))) {
+            runContract(zip);
+        }
+    }
+
     // ---- byte-range reads -------------------------------------------------------------------------
 
     private static void runRangeContract(Store store) {
@@ -93,6 +100,13 @@ class StoreTest {
         runRangeContract(FileSystemStore.open(tmp.resolve("store")));
     }
 
+    @Test
+    void zipStoreByteRanges(@TempDir Path tmp) {
+        try (ZipStore zip = ZipStore.create(tmp.resolve("store.zip"))) {
+            runRangeContract(zip);
+        }
+    }
+
     // ---- suffix reads -----------------------------------------------------------------------------
 
     private static void runSuffixContract(Store store) {
@@ -116,6 +130,13 @@ class StoreTest {
     @Test
     void fileSystemStoreSuffixes(@TempDir Path tmp) {
         runSuffixContract(FileSystemStore.open(tmp.resolve("store")));
+    }
+
+    @Test
+    void zipStoreSuffixes(@TempDir Path tmp) {
+        try (ZipStore zip = ZipStore.create(tmp.resolve("store.zip"))) {
+            runSuffixContract(zip);
+        }
     }
 
     /** {@code Store.getSuffix}'s default, through size() and getRange(), for a store that does not override it. */

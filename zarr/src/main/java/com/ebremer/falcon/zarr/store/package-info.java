@@ -6,8 +6,9 @@
  * metadata, and chunk layers are built on. {@link com.ebremer.falcon.zarr.store.MemoryStore} keeps
  * everything in memory; {@link com.ebremer.falcon.zarr.store.FileSystemStore} maps keys to files under
  * a root directory (the canonical on-disk Zarr layout); {@link com.ebremer.falcon.zarr.store.ZipStore}
- * reads a ZIP archive; {@link com.ebremer.falcon.zarr.store.HttpStore} reads over HTTP(S), with headers
- * of the caller's for authorization; {@link com.ebremer.falcon.zarr.store.S3Store} reads, lists, and
+ * reads and writes a ZIP archive; {@link com.ebremer.falcon.zarr.store.HttpStore} reads over HTTP(S), with
+ * headers of the caller's for authorization, and lists keys from a server's directory listing pages when
+ * asked to; {@link com.ebremer.falcon.zarr.store.S3Store} reads, lists, and
  * writes S3-compatible object storage (Amazon S3, Google Cloud Storage, MinIO, R2), signing its requests.
  * {@link com.ebremer.falcon.zarr.store.StoreKeys} holds the shared key rules and listing logic.
  *

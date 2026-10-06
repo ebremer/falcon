@@ -69,9 +69,15 @@ class BloscHeaderTest {
         byte[] version1 = memcpy(data, 4);
         version1[0] = 1;
         assertRefused(version1, "version 1");
-        byte[] version3 = memcpy(data, 4);
-        version3[0] = 3;
-        assertThrows(UnsupportedCompressionException.class, () -> BloscDecoder.decompress(version3));
+        // Versions 3 to 6 are c-blosc2 chunks (Blosc2DecoderTest); a short header reads as c-blosc2 reads it.
+        for (int version = 3; version <= 6; version++) {
+            byte[] blosc2 = memcpy(data, 4);
+            blosc2[0] = (byte) version;
+            assertArrayEquals(data, BloscDecoder.decompress(blosc2), "version " + version);
+        }
+        byte[] version7 = memcpy(data, 4);
+        version7[0] = 7;
+        assertThrows(UnsupportedCompressionException.class, () -> BloscDecoder.decompress(version7));
 
         byte[] reserved = memcpy(data, 4);
         reserved[2] |= 0x08;

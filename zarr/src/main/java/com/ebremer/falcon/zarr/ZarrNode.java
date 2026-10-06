@@ -36,25 +36,28 @@ public abstract sealed class ZarrNode permits ZarrGroup, ZarrArray {
         this.name = slash < 0 ? path : path.substring(slash + 1);
     }
 
-    /** This node's store path: {@code ""} for the root, otherwise a {@code '/'}-separated path. */
+    /** {@return this node's store path: {@code ""} for the root, otherwise a {@code '/'}-separated path} */
     public String path() {
         return path;
     }
 
-    /** This node's name: its last path segment, or {@code ""} for the root. */
+    /** {@return this node's name: its last path segment, or {@code ""} for the root} */
     public String name() {
         return name;
     }
 
-    /** Whether this node is a group. */
+    /** {@return whether this node is a group} */
     public abstract boolean isGroup();
 
-    /** Whether this node is an array. */
+    /** {@return whether this node is an array} */
     public boolean isArray() {
         return !isGroup();
     }
 
-    /** This node's user attributes; an empty object when none are stored. */
+    /**
+     * {@return this node's user attributes, as this handle was opened with them; an empty object when none
+     * are stored}
+     */
     public abstract JsonObject attributes();
 
     /**
@@ -64,6 +67,8 @@ public abstract sealed class ZarrNode permits ZarrGroup, ZarrArray {
      * {@code .zattrs} is rewritten). Consolidated metadata that lists the node is not updated: it is a
      * snapshot, stale until {@link ZarrGroup#consolidate()} runs again.
      *
+     * @param attributes the node's new attributes
+     * @return a handle on this node with the new attributes
      * @throws UnsupportedOperationException if the store is read-only
      * @throws ZarrFormatException           if the node's metadata is no longer stored, or is malformed
      * @throws IllegalStateException         if the node stored there is no longer of this node's kind
@@ -75,6 +80,8 @@ public abstract sealed class ZarrNode permits ZarrGroup, ZarrArray {
      * top-level member of {@code changes} is added or replaces the stored one, and the rest are kept, as
      * zarr-python's {@code attrs.update} does. Otherwise as {@link #setAttributes}.
      *
+     * @param changes the members to add or replace
+     * @return a handle on this node with the merged attributes
      * @throws UnsupportedOperationException if the store is read-only
      * @throws ZarrFormatException           if the node's metadata is no longer stored, or is malformed
      * @throws IllegalStateException         if the node stored there is no longer of this node's kind
@@ -161,6 +168,7 @@ public abstract sealed class ZarrNode permits ZarrGroup, ZarrArray {
     /**
      * This node as a {@link ZarrGroup}.
      *
+     * @return this node
      * @throws IllegalStateException if it is an array
      */
     public ZarrGroup asGroup() {
@@ -173,6 +181,7 @@ public abstract sealed class ZarrNode permits ZarrGroup, ZarrArray {
     /**
      * This node as a {@link ZarrArray}.
      *
+     * @return this node
      * @throws IllegalStateException if it is a group
      */
     public ZarrArray asArray() {

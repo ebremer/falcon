@@ -18,6 +18,10 @@ public final class MemoryStore implements Store {
 
     private final Map<String, byte[]> data = new ConcurrentHashMap<>();
 
+    /** Creates an empty store. */
+    public MemoryStore() {
+    }
+
     @Override
     public Optional<byte[]> get(String key) {
         StoreKeys.validate(key);

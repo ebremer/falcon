@@ -94,6 +94,8 @@ public final class ZarrGroup extends ZarrNode {
      * Whether this group answers {@link #childNames()}, {@link #child}, and the other child accessors from
      * consolidated metadata, a snapshot of the hierarchy below it, rather than from the store. See the
      * class description.
+     *
+     * @return true if this group answers from a snapshot
      */
     public boolean isConsolidated() {
         return snapshot != null;
@@ -103,6 +105,10 @@ public final class ZarrGroup extends ZarrNode {
      * The names of this group's direct children, sorted: every subdirectory that holds node metadata
      * (v3 or v2), including a child whose metadata is malformed or unsupported. A consolidated group lists
      * the children its snapshot does.
+     *
+     * @return the children's names (each a single path segment), sorted; empty if there are none
+     * @throws UnsupportedOperationException if the group is not consolidated and the store cannot list its
+     *                                       keys
      */
     public List<String> childNames() {
         if (snapshot != null) {
@@ -137,6 +143,8 @@ public final class ZarrGroup extends ZarrNode {
      * opens the node's metadata directly, one request whatever the depth, as zarr-python does: the groups
      * along the path are not opened, so a path through something that is not a group is not noticed.
      *
+     * @param relativePath a child's name, or names joined by {@code '/'}
+     * @return the group or array there, or empty if there is no node there
      * @throws IllegalArgumentException if the path is not one or more names joined by {@code '/'} (no empty
      *                                  name, and no {@code "."} or {@code ".."})
      * @throws ZarrFormatException      if the node's metadata is malformed
@@ -164,6 +172,10 @@ public final class ZarrGroup extends ZarrNode {
      * ({@link ZarrUnsupportedException}), is left out, so one such child does not hide the rest:
      * {@link #childNames()} still lists it, and {@link #child(String)} reports why it fails. Any other
      * failure, such as the store failing to read, is thrown.
+     *
+     * @return the children that open
+     * @throws UnsupportedOperationException if the group is not consolidated and the store cannot list its
+     *                                       keys
      */
     public List<ZarrNode> children() {
         List<ZarrNode> result = new ArrayList<>();
@@ -190,6 +202,10 @@ public final class ZarrGroup extends ZarrNode {
     /**
      * The direct child groups, ordered by name. Like {@link #children()}, it leaves out a child that cannot
      * be opened.
+     *
+     * @return the child groups that open
+     * @throws UnsupportedOperationException if the group is not consolidated and the store cannot list its
+     *                                       keys
      */
     public List<ZarrGroup> groups() {
         List<ZarrGroup> result = new ArrayList<>();
@@ -204,6 +220,10 @@ public final class ZarrGroup extends ZarrNode {
     /**
      * The direct child arrays, ordered by name. Like {@link #children()}, it leaves out a child that cannot
      * be opened.
+     *
+     * @return the child arrays that open
+     * @throws UnsupportedOperationException if the group is not consolidated and the store cannot list its
+     *                                       keys
      */
     public List<ZarrArray> arrays() {
         List<ZarrArray> result = new ArrayList<>();
@@ -219,6 +239,8 @@ public final class ZarrGroup extends ZarrNode {
      * The group at {@code relativePath} below this one: a direct child's name, or a path through child
      * groups, as {@link #child(String)} takes it.
      *
+     * @param relativePath a child's name, or names joined by {@code '/'}
+     * @return the group there
      * @throws NoSuchElementException   if there is no node there
      * @throws IllegalArgumentException if the node is an array, or the path is invalid
      * @throws ZarrFormatException      if the child's metadata is malformed
@@ -232,6 +254,8 @@ public final class ZarrGroup extends ZarrNode {
      * The array at {@code relativePath} below this group: a direct child's name, or a path through child
      * groups, as {@link #child(String)} takes it.
      *
+     * @param relativePath a child's name, or names joined by {@code '/'}
+     * @return the array there
      * @throws NoSuchElementException   if there is no node there
      * @throws IllegalArgumentException if the node is a group, or the path is invalid
      * @throws ZarrFormatException      if the child's metadata is malformed
@@ -252,8 +276,10 @@ public final class ZarrGroup extends ZarrNode {
     }
 
     /**
-     * Creates a child group.
+     * Creates a child group, with no attributes.
      *
+     * @param name the child's name, a single path segment
+     * @return the new group
      * @throws IllegalArgumentException      if the name is invalid or a node already has it
      * @throws UnsupportedOperationException if the store is read-only
      */
@@ -264,6 +290,9 @@ public final class ZarrGroup extends ZarrNode {
     /**
      * Creates a child group with the given attributes.
      *
+     * @param name       the child's name, a single path segment
+     * @param attributes the group's attributes
+     * @return the new group
      * @throws IllegalArgumentException      if the name is invalid or a node already has it
      * @throws UnsupportedOperationException if the store is read-only
      */
@@ -276,6 +305,10 @@ public final class ZarrGroup extends ZarrNode {
      * name is deleted first: an old array's chunks, or an old group and all its descendants. Without it, a
      * name that a node already has is refused.
      *
+     * @param name       the child's name, a single path segment
+     * @param attributes the group's attributes
+     * @param overwrite  whether to delete everything stored under the name first
+     * @return the new group
      * @throws IllegalArgumentException      if the name is invalid, or a node has it and {@code overwrite}
      *                                       is false
      * @throws UnsupportedOperationException if the store is read-only
@@ -290,6 +323,9 @@ public final class ZarrGroup extends ZarrNode {
     /**
      * Creates a child array described by {@code spec}.
      *
+     * @param name the child's name, a single path segment
+     * @param spec the array's description
+     * @return the new array
      * @throws IllegalArgumentException      if the name is invalid, or anything is stored under it (a node,
      *                                       or keys a new array would read as its chunks)
      * @throws UnsupportedOperationException if the store is read-only
@@ -304,6 +340,10 @@ public final class ZarrGroup extends ZarrNode {
      * the name is refused if anything is stored under it, a node or keys a new array would read as its
      * chunks.
      *
+     * @param name      the child's name, a single path segment
+     * @param spec      the array's description
+     * @param overwrite whether to delete everything stored under the name first
+     * @return the new array
      * @throws IllegalArgumentException      if the name is invalid, or anything is stored under it and
      *                                       {@code overwrite} is false
      * @throws UnsupportedOperationException if the store is read-only
@@ -324,6 +364,7 @@ public final class ZarrGroup extends ZarrNode {
      * child until it is consolidated again. Handles already open on the child or below it are not
      * invalidated: their reads see fill values and missing metadata.
      *
+     * @param name the child's name, a single path segment
      * @throws IllegalArgumentException      if the name cannot name a child
      * @throws UnsupportedOperationException if the store is read-only, or cannot list its keys
      * @throws NoSuchElementException        if there is no child of that name, in the store or the snapshot

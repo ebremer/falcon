@@ -1,0 +1,21 @@
+{
+ "name": "ext_raw_bytes",
+ "shape": [
+  6
+ ],
+ "data_type": {
+  "name": "raw_bytes",
+  "configuration": {
+   "length_bytes": 3
+  }
+ },
+ "fill_value": "AQID",
+ "values": [
+  "000000",
+  "616263",
+  "ff007f",
+  "010203",
+  "010203",
+  "010203"
+ ]
+}

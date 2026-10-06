@@ -2,12 +2,15 @@ package com.ebremer.falcon.zarr.metadata;
 
 import com.ebremer.falcon.zarr.ZarrFormatException;
 import com.ebremer.falcon.zarr.ZarrUnsupportedException;
+import com.ebremer.falcon.zarr.chunk.ChunkGrid;
 import com.ebremer.falcon.zarr.chunk.ChunkKeyEncoding;
+import com.ebremer.falcon.zarr.chunk.RectilinearChunkGrid;
 import com.ebremer.falcon.zarr.chunk.RegularChunkGrid;
 import com.ebremer.falcon.zarr.codec.ChunkPipeline;
 import com.ebremer.falcon.zarr.codec.VlenCodec;
 import com.ebremer.falcon.zarr.datatype.DataType;
 import com.ebremer.falcon.zarr.json.JsonArray;
+import com.ebremer.falcon.zarr.json.JsonBool;
 import com.ebremer.falcon.zarr.json.JsonObject;
 import com.ebremer.falcon.zarr.json.JsonString;
 import com.ebremer.falcon.zarr.json.JsonValue;
@@ -19,6 +22,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Parsed array metadata: shape, data type, chunk grid, chunk key encoding, fill value, and codecs, plus
@@ -27,8 +31,10 @@ import java.util.Set;
  * <p>The {@code data_type} is resolved to a {@link DataType} and the {@code fill_value} is validated
  * against it at parse time (though kept as raw JSON; {@link #fillValueBytes} decodes it on demand). The
  * {@code codecs} are kept as raw specs and assembled into a {@link ChunkPipeline} on first use (see
- * {@link #pipeline()}). Only the {@code regular} chunk grid and the {@code default}/{@code v2} chunk key
- * encodings are recognized; anything else is reported as {@link ZarrUnsupportedException}.
+ * {@link #pipeline()}). The {@code regular} chunk grid and the {@code rectilinear} extension, and the
+ * {@code default}/{@code v2} chunk key encodings, are recognized; anything else is reported as
+ * {@link ZarrUnsupportedException}. A storage transformer is read past only if it says
+ * {@code "must_understand": false}.
  */
 public final class ArrayMetadata implements NodeMetadata {
 
@@ -36,7 +42,10 @@ public final class ArrayMetadata implements NodeMetadata {
             "zarr_format", "node_type", "shape", "data_type", "chunk_grid", "chunk_key_encoding",
             "fill_value", "codecs", "attributes", "dimension_names", "storage_transformers");
 
-    private final RegularChunkGrid grid;
+    /** The largest element whose fill value is decoded when the document is parsed. */
+    private static final int MAX_EAGER_FILL = 1 << 20;
+
+    private final ChunkGrid grid;
     private final DataType dataType;
     private final ChunkKeyEncoding chunkKeyEncoding;
     private final JsonValue fillValue;
@@ -45,8 +54,10 @@ public final class ArrayMetadata implements NodeMetadata {
     private final String[] dimensionNames; // null if absent; individual entries may be null (unnamed)
 
     private ChunkPipeline pipeline; // built lazily from the codec specs
+    // A rectilinear grid's chunks differ in shape, and a pipeline is built for one shape: one per shape met.
+    private final Map<List<Long>, ChunkPipeline> pipelines = new ConcurrentHashMap<>();
 
-    ArrayMetadata(RegularChunkGrid grid, DataType dataType, ChunkKeyEncoding chunkKeyEncoding,
+    ArrayMetadata(ChunkGrid grid, DataType dataType, ChunkKeyEncoding chunkKeyEncoding,
                   JsonValue fillValue, List<JsonObject> codecs, JsonObject attributes,
                   String[] dimensionNames) {
         this.grid = grid;
@@ -67,25 +78,7 @@ public final class ArrayMetadata implements NodeMetadata {
 
         DataType dataType = parseDataType(Fields.require(o, "data_type", ctx), ctx + ".data_type");
 
-        NamedConfig chunkGrid = NamedConfig.parse(Fields.require(o, "chunk_grid", ctx), ctx + ".chunk_grid");
-        if (!chunkGrid.name().equals("regular")) {
-            throw new ZarrUnsupportedException(ctx + ".chunk_grid: only the 'regular' grid is supported, was '"
-                    + chunkGrid.name() + "'");
-        }
-        long[] chunkShape = Fields.intArray(
-                Fields.require(chunkGrid.configuration(), "chunk_shape", ctx + ".chunk_grid.configuration"),
-                ctx + ".chunk_grid.configuration.chunk_shape", true);
-        if (chunkShape.length != rank) {
-            throw new ZarrFormatException(ctx + ": chunk_shape rank " + chunkShape.length
-                    + " does not match array rank " + rank);
-        }
-        RegularChunkGrid grid;
-        try {
-            grid = new RegularChunkGrid(shape, chunkShape);
-        } catch (IllegalArgumentException e) {
-            // Ranks, signs, and positivity are checked above, so the array has more elements than a long counts.
-            throw new ZarrUnsupportedException(ctx + ".shape: " + e.getMessage());
-        }
+        ChunkGrid grid = ChunkGrids.parse(Fields.require(o, "chunk_grid", ctx), shape, ctx + ".chunk_grid");
 
         NamedConfig encodingConfig =
                 NamedConfig.parse(Fields.require(o, "chunk_key_encoding", ctx), ctx + ".chunk_key_encoding");
@@ -101,7 +94,9 @@ public final class ArrayMetadata implements NodeMetadata {
             } catch (ZarrFormatException e) {
                 throw new ZarrFormatException(ctx + ".fill_value: " + e.getMessage(), e);
             }
-        } else {
+        } else if (dataType.byteCount() <= MAX_EAGER_FILL) {
+            // An element larger than this (only an extension type's, claiming megabytes) has its fill value
+            // checked when it is first decoded, so opening a document allocates nothing in proportion to it.
             try {
                 dataType.decodeFillValue(fillValue, ByteOrder.LITTLE_ENDIAN);
             } catch (ZarrFormatException e) {
@@ -117,7 +112,7 @@ public final class ArrayMetadata implements NodeMetadata {
 
         String[] dimensionNames = parseDimensionNames(o, rank, ctx);
 
-        rejectStorageTransformers(o, ctx);
+        checkStorageTransformers(o, ctx);
         Fields.checkUnknownFields(o, KNOWN, ctx);
 
         return new ArrayMetadata(grid, dataType, chunkKeyEncoding, fillValue, List.copyOf(codecs),
@@ -125,20 +120,21 @@ public final class ArrayMetadata implements NodeMetadata {
     }
 
     /**
-     * The {@code data_type}: a core type's name, or the object form of one ({@code {"name": "int32"}},
-     * without a configuration). A data type with a configuration is an extension Falcon does not
-     * implement.
+     * The {@code data_type}: a core type's name, the object form of one ({@code {"name": "int32"}}), or an
+     * extension type zarr-python writes, with its configuration (F14; {@link DataType#fromJson}).
      */
     private static DataType parseDataType(JsonValue v, String ctx) {
         if (v instanceof JsonString s) {
             return DataType.of(s.value());
         }
-        NamedConfig named = NamedConfig.parse(v, ctx);
-        if (!named.configuration().members().isEmpty()) {
-            throw new ZarrUnsupportedException(ctx + ": data type '" + named.name()
-                    + "' with a configuration is an extension data type, which is not supported");
+        NamedConfig.parse(v, ctx); // an object with a string name and an object configuration, if any
+        try {
+            return DataType.fromJson(v);
+        } catch (ZarrUnsupportedException e) {
+            throw new ZarrUnsupportedException(ctx + ": " + e.getMessage());
+        } catch (ZarrFormatException e) {
+            throw new ZarrFormatException(ctx + ": " + e.getMessage(), e);
         }
-        return DataType.of(named.name());
     }
 
     /**
@@ -213,10 +209,28 @@ public final class ArrayMetadata implements NodeMetadata {
         return out;
     }
 
-    private static void rejectStorageTransformers(JsonObject o, String ctx) {
-        if (o.has("storage_transformers")
-                && Fields.array(o.get("storage_transformers"), ctx + ".storage_transformers").size() > 0) {
-            throw new ZarrUnsupportedException(ctx + ": storage_transformers are not supported");
+    /**
+     * Falcon implements no storage transformer (none is registered), so it reads past one only when the
+     * transformer says {@code "must_understand": false}, as the v3 specification allows for an extension
+     * object; any other is refused, by name. A transformer named by a bare string must be understood.
+     */
+    private static void checkStorageTransformers(JsonObject o, String ctx) {
+        if (!o.has("storage_transformers") || o.get("storage_transformers").isNull()) {
+            return;
+        }
+        String sctx = ctx + ".storage_transformers";
+        JsonArray transformers = Fields.array(o.get("storage_transformers"), sctx);
+        for (int i = 0; i < transformers.size(); i++) {
+            JsonValue t = transformers.get(i);
+            String tctx = sctx + "[" + i + "]";
+            String name = t instanceof JsonString s ? s.value()
+                    : Fields.string(Fields.require(Fields.object(t, tctx), "name", tctx), tctx + ".name");
+            if (t instanceof JsonObject ext && ext.members().get("must_understand") instanceof JsonBool flag
+                    && !flag.value()) {
+                continue;
+            }
+            throw new ZarrUnsupportedException(tctx + ": storage transformer '" + name + "' is not supported"
+                    + " (only one with \"must_understand\": false may be ignored)");
         }
     }
 
@@ -245,13 +259,22 @@ public final class ArrayMetadata implements NodeMetadata {
         return dataType.decodeFillValue(fillValue, order);
     }
 
-    /** The chunk shape (a defensive copy); same rank as {@link #shape()}, all entries positive. */
+    /**
+     * The chunk shape (a defensive copy) of a regular grid; same rank as {@link #shape()}, all entries
+     * positive.
+     *
+     * @throws UnsupportedOperationException if the grid is rectilinear, whose chunks differ in shape
+     */
     public long[] chunkShape() {
-        return grid.chunkShape();
+        if (grid instanceof RegularChunkGrid regular) {
+            return regular.chunkShape();
+        }
+        throw new UnsupportedOperationException("the array has a rectilinear chunk grid, whose chunks differ in"
+                + " shape: use chunkSizes()");
     }
 
-    /** The regular chunk grid (grid arithmetic and edge-chunk handling). */
-    public RegularChunkGrid grid() {
+    /** The chunk grid (grid arithmetic and edge-chunk handling). */
+    public ChunkGrid grid() {
         return grid;
     }
 
@@ -276,7 +299,9 @@ public final class ArrayMetadata implements NodeMetadata {
     }
 
     /**
-     * The chunk codec pipeline, built on first use from the codec specs and cached.
+     * The chunk codec pipeline, built on first use from the codec specs and cached. In a rectilinear grid it
+     * is the first chunk's, for what does not depend on a chunk's shape (the element order, the
+     * variable-length codec, the sub-chunk shape); {@link #chunkPipeline} gives each chunk's own.
      *
      * @throws ZarrFormatException      if the codec order or a configuration is invalid
      * @throws ZarrUnsupportedException if a codec is not yet implemented
@@ -284,10 +309,76 @@ public final class ArrayMetadata implements NodeMetadata {
     public ChunkPipeline pipeline() {
         ChunkPipeline p = pipeline;
         if (p == null) {
-            p = ChunkPipeline.of(dataType, grid.chunkShape(), codecs);
+            p = ChunkPipeline.of(dataType, firstChunkShape(), codecs);
             pipeline = p;
         }
         return p;
+    }
+
+    /**
+     * The pipeline for the chunk at {@code coords}, built for its declared shape: {@link #pipeline()} in a
+     * regular grid, and in a rectilinear one a pipeline per chunk shape, built on first use and cached.
+     *
+     * @throws ZarrFormatException      if the codec order or a configuration is invalid, or does not fit
+     *                                  this chunk's shape (a shard not divisible into sub-chunks, say)
+     * @throws ZarrUnsupportedException if a codec is not yet implemented
+     */
+    public ChunkPipeline chunkPipeline(long[] coords) {
+        if (grid.isRegular()) {
+            return pipeline();
+        }
+        long[] shape = new long[coords.length];
+        for (int i = 0; i < shape.length; i++) {
+            shape[i] = grid.chunkLength(i, coords[i]);
+        }
+        return pipelineFor(shape);
+    }
+
+    private ChunkPipeline pipelineFor(long[] shape) {
+        List<Long> key = Arrays.stream(shape).boxed().toList();
+        ChunkPipeline p = pipelines.get(key);
+        if (p == null) {
+            p = ChunkPipeline.of(dataType, shape, codecs); // may throw: then nothing is cached
+            pipelines.putIfAbsent(key, p);
+        }
+        return p;
+    }
+
+    /** The declared shape of chunk {@code (0, ..., 0)}, which every grid has, even over an empty array. */
+    private long[] firstChunkShape() {
+        long[] shape = new long[grid.rank()];
+        for (int i = 0; i < shape.length; i++) {
+            shape[i] = grid.chunkLength(i, 0);
+        }
+        return shape;
+    }
+
+    /**
+     * Builds the pipeline for every chunk shape the grid lists, as a writer checks before creating an array.
+     * In a rectilinear grid that is each dimension's distinct lengths in turn, the other dimensions at their
+     * first length, and the largest length of every dimension at once: a codec's checks of a chunk shape
+     * (a shard's division into sub-chunks, the size of one buffer) look at each dimension alone or at the
+     * total size.
+     *
+     * @throws ZarrFormatException      if a chunk shape does not suit the codecs
+     * @throws ZarrUnsupportedException if a codec is not yet implemented
+     */
+    public void checkPipelines() {
+        pipeline();
+        if (!(grid instanceof RectilinearChunkGrid rectilinear)) {
+            return;
+        }
+        long[] first = firstChunkShape();
+        long[] largest = first.clone();
+        for (int i = 0; i < first.length; i++) {
+            for (long length : rectilinear.distinctLengths(i)) {
+                long[] shape = first.clone();
+                shape[i] = length;
+                pipelineFor(shape);
+                largest[i] = Math.max(largest[i], length);
+            }
+        }
+        pipelineFor(largest);
     }
 
     @Override

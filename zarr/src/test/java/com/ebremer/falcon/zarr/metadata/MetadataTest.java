@@ -10,6 +10,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.ebremer.falcon.zarr.ZarrFormatException;
 import com.ebremer.falcon.zarr.ZarrUnsupportedException;
 import com.ebremer.falcon.zarr.codec.ChunkPipeline;
+import com.ebremer.falcon.zarr.datatype.DataType;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
@@ -200,10 +201,10 @@ class MetadataTest {
     }
 
     @Test
-    void nonRegularChunkGridIsUnsupported() {
+    void unknownChunkGridIsUnsupported() {
         assertThrows(ZarrUnsupportedException.class, () -> array(VALID_ARRAY.replace(
                 "\"chunk_grid\":{\"name\":\"regular\",\"configuration\":{\"chunk_shape\":[2,3]}}",
-                "\"chunk_grid\":{\"name\":\"rectilinear\",\"configuration\":{}}")));
+                "\"chunk_grid\":{\"name\":\"variable\",\"configuration\":{}}")));
     }
 
     @Test
@@ -321,13 +322,23 @@ class MetadataTest {
         assertArrayEquals(chunk, sharded.pipeline().decode(sharded.pipeline().encode(chunk, new byte[8])));
     }
 
-    /** P1 I5: an object data type with a configuration is an extension, still unsupported. */
+    /**
+     * P1 I5: an object data type with a configuration is an extension, unsupported unless it is one of the
+     * extension types zarr-python writes (P2 F14), such as numpy.datetime64.
+     */
     @Test
-    void anObjectDataTypeWithAConfigurationIsUnsupported() {
-        assertThrows(ZarrUnsupportedException.class, () -> array(VALID_ARRAY.replace("\"data_type\":\"float64\"",
-                "\"data_type\":{\"name\":\"numpy.datetime64\",\"configuration\":{\"unit\":\"s\",\"scale_factor\":1}}")));
+    void anObjectDataTypeWithAConfigurationIsUnsupportedUnlessFalconImplementsIt() {
+        assertEquals(DataType.datetime64("s", 1), array(VALID_ARRAY.replace("\"data_type\":\"float64\"",
+                "\"data_type\":{\"name\":\"numpy.datetime64\",\"configuration\":{\"unit\":\"s\",\"scale_factor\":1}}"))
+                .dataType());
         assertThrows(ZarrUnsupportedException.class, () -> array(VALID_ARRAY.replace("\"data_type\":\"float64\"",
                 "\"data_type\":{\"name\":\"float64\",\"configuration\":{\"x\":1}}")));
+        assertThrows(ZarrUnsupportedException.class, () -> array(VALID_ARRAY.replace("\"data_type\":\"float64\"",
+                "\"data_type\":{\"name\":\"bfloat16\",\"configuration\":{\"x\":1}}")));
+        ZarrFormatException bad = assertThrows(ZarrFormatException.class, () -> array(VALID_ARRAY.replace(
+                "\"data_type\":\"float64\"",
+                "\"data_type\":{\"name\":\"numpy.datetime64\",\"configuration\":{\"unit\":\"x\",\"scale_factor\":1}}")));
+        assertTrue(bad.getMessage().contains("data_type"), bad.getMessage());
         assertThrows(ZarrFormatException.class, () -> array(VALID_ARRAY.replace("\"data_type\":\"float64\"",
                 "\"data_type\":7")));
     }

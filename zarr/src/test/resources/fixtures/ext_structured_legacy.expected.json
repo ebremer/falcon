@@ -1,0 +1,30 @@
+{
+ "name": "ext_structured_legacy",
+ "shape": [
+  3
+ ],
+ "data_type": {
+  "name": "structured",
+  "configuration": {
+   "fields": [
+    [
+     "a",
+     "int32"
+    ],
+    [
+     "b",
+     "float64"
+    ]
+   ]
+  }
+ },
+ "fill_value": {
+  "a": 0,
+  "b": 0.0
+ },
+ "values": [
+  "01000000000000000000e03f",
+  "feffffff0000000000000440",
+  "030000009c7500883ce437fe"
+ ]
+}

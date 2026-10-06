@@ -1,0 +1,23 @@
+{
+ "name": "rect_group_sub_b",
+ "shape": [
+  5
+ ],
+ "dtype": "float64",
+ "attributes": {},
+ "values": [
+  0.0,
+  0.25,
+  0.5,
+  0.75,
+  1.0
+ ],
+ "chunk_sizes": [
+  [
+   2,
+   2,
+   1
+  ]
+ ],
+ "path": "sub/b"
+}

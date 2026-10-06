@@ -11,7 +11,8 @@ wherever there is some (use_consolidated=None: "consolidated"), and once reading
 (use_consolidated=False: "per_node"). ConsolidatedFixtureTest checks Falcon sees the same.
 
   consolidated_v3        a v3 tree after zarr.consolidate_metadata: nested groups, an empty group, arrays
-                         of three types, a non-ASCII name, and an array Falcon cannot open (datetime64)
+                         of three types, a non-ASCII name, and a datetime64 array (which Falcon could not
+                         open before P2 F14)
   consolidated_v2        a v2 tree after zarr.consolidate_metadata: the .zmetadata key
   consolidated_subgroup  a v3 tree consolidated at group "g" only, not at the root
   consolidated_stale     consolidated_v3's tree changed after consolidation without consolidating again:

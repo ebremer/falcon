@@ -1,0 +1,43 @@
+{
+  "shape": [
+    6
+  ],
+  "data_type": "variable_length_bytes",
+  "chunk_grid": {
+    "name": "rectilinear",
+    "configuration": {
+      "kind": "inline",
+      "chunk_shapes": [
+        [
+          1,
+          2,
+          3
+        ]
+      ]
+    }
+  },
+  "chunk_key_encoding": {
+    "name": "default",
+    "configuration": {
+      "separator": "/"
+    }
+  },
+  "fill_value": "",
+  "codecs": [
+    {
+      "name": "vlen-bytes",
+      "configuration": {}
+    },
+    {
+      "name": "zstd",
+      "configuration": {
+        "level": 0,
+        "checksum": false
+      }
+    }
+  ],
+  "attributes": {},
+  "zarr_format": 3,
+  "node_type": "array",
+  "storage_transformers": []
+}
