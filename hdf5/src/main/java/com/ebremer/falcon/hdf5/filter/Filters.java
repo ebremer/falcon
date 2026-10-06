@@ -1,16 +1,16 @@
 package com.ebremer.falcon.hdf5.filter;
 
+import com.ebremer.falcon.core.checksum.Fletcher32;
+import com.ebremer.falcon.core.compress.CompressionFormatException;
+import com.ebremer.falcon.core.compress.shuffle.ByteShuffle;
+import com.ebremer.falcon.core.compress.zlib.Zlib;
 import com.ebremer.falcon.hdf5.HdfFormatException;
 import com.ebremer.falcon.hdf5.HdfUnsupportedException;
-import com.ebremer.falcon.hdf5.checksum.Fletcher32;
-import java.io.ByteArrayOutputStream;
 import java.util.Arrays;
-import java.util.zip.DataFormatException;
-import java.util.zip.Inflater;
 
 /**
- * Decoders for HDF5's six built-in filters: {@code deflate} (via {@code java.util.zip}),
- * {@code shuffle}, {@code fletcher32} (verified), {@code szip} ({@link Szip}), {@code nbit} ({@link Nbit}),
+ * Decoders for HDF5's six built-in filters: {@code deflate} and {@code shuffle} (Falcon Core's zlib and
+ * byte shuffle), {@code fletcher32} (verified), {@code szip} ({@link Szip}), {@code nbit} ({@link Nbit}),
  * and {@code scaleoffset} ({@link ScaleOffset}); and for the common third-party filters LZF, Blosc, LZ4,
  * bitshuffle, Zstandard, bzip2, and Blosc2 ({@link ThirdPartyFilters}), ZFP ({@link ZfpFilter}), and SZ
  * ({@link SzFilter}).
@@ -36,7 +36,8 @@ public final class Filters {
         long maxBytes = (long) uncompressedSize + DECODE_SLACK;
         return switch (filter.id()) {
             case DEFLATE -> inflate(data, maxBytes);
-            case SHUFFLE -> unshuffle(data, filter.clientData().length > 0 ? filter.clientData()[0] : elementSize);
+            case SHUFFLE -> ByteShuffle.unshuffle(data, filter.clientData().length > 0 ? filter.clientData()[0]
+                    : elementSize);
             case FLETCHER32 -> verifyAndStripFletcher32(data);
             case SZIP -> Szip.decode(data, filter.clientData(), maxBytes);
             case SCALEOFFSET -> ScaleOffset.decode(data, filter.clientData(), maxBytes);
@@ -57,51 +58,17 @@ public final class Filters {
     /**
      * Inflates a zlib-wrapped deflate stream (HDF5 {@code deflate} / gzip filter), refusing to produce
      * more than {@code maxBytes} (a deflate stream can expand ~1000:1, so a corrupt chunk could
-     * otherwise exhaust the heap).
+     * otherwise exhaust the heap), and a stream that ends early or fails its check, as libhdf5's
+     * {@code H5Z__filter_deflate} does.
      */
     private static byte[] inflate(byte[] data, long maxBytes) {
-        Inflater inflater = new Inflater();
-        inflater.setInput(data);
-        ByteArrayOutputStream out = new ByteArrayOutputStream((int) Math.min(maxBytes, Math.max(64, data.length * 3L)));
-        byte[] buffer = new byte[8192];
         try {
-            while (!inflater.finished()) {
-                int n = inflater.inflate(buffer);
-                if (n == 0 && (inflater.finished() || inflater.needsDictionary() || inflater.needsInput())) {
-                    break;
-                }
-                if (out.size() + (long) n > maxBytes) {
-                    throw new HdfFormatException("deflate filter: chunk inflates past its " + maxBytes + "-byte bound");
-                }
-                out.write(buffer, 0, n);
-            }
-        } catch (DataFormatException e) {
+            return Zlib.decompress(data, 0, data.length, (int) Math.min(Integer.MAX_VALUE - 8, maxBytes));
+        } catch (CompressionFormatException e) {
             throw new HdfFormatException("deflate filter: " + e.getMessage(), e);
-        } finally {
-            inflater.end();
         }
-        return out.toByteArray();
     }
 
-    /** Reverses the byte-{@code shuffle} filter for elements of {@code elementSize} bytes. */
-    private static byte[] unshuffle(byte[] data, int elementSize) {
-        if (elementSize <= 1) {
-            return data;
-        }
-        int elements = data.length / elementSize;
-        byte[] out = new byte[data.length];
-        int p = 0;
-        for (int b = 0; b < elementSize; b++) {
-            for (int i = 0; i < elements; i++) {
-                out[i * elementSize + b] = data[p++];
-            }
-        }
-        int done = elements * elementSize; // any trailing bytes are stored unshuffled
-        if (done < data.length) {
-            System.arraycopy(data, done, out, done, data.length - done);
-        }
-        return out;
-    }
 
     /**
      * Verifies and strips the 4-byte little-endian {@code fletcher32} checksum trailer. Like libhdf5,

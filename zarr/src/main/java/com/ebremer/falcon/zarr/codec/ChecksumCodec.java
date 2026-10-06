@@ -1,5 +1,7 @@
 package com.ebremer.falcon.zarr.codec;
 
+import com.ebremer.falcon.core.checksum.Fletcher32;
+import com.ebremer.falcon.core.checksum.Lookup3;
 import com.ebremer.falcon.zarr.ZarrFormatException;
 import com.ebremer.falcon.zarr.ZarrUnsupportedException;
 import com.ebremer.falcon.zarr.json.JsonObject;
@@ -131,94 +133,13 @@ final class ChecksumCodec extends NumcodecsCodec {
             case CRC32 -> zip(new CRC32(), data, offset, length);
             case CRC32C -> zip(new CRC32C(), data, offset, length);
             case ADLER32 -> zip(new Adler32(), data, offset, length);
-            case FLETCHER32 -> fletcher32(data, offset, length);
-            case LOOKUP3 -> lookup3(data, offset, length, initval);
+            case FLETCHER32 -> Fletcher32.checksum(data, offset, length);
+            case LOOKUP3 -> Lookup3.hashLittle(data, offset, length, initval);
         };
     }
 
     private static int zip(Checksum checksum, byte[] data, int offset, int length) {
         checksum.update(data, offset, length);
         return (int) checksum.getValue();
-    }
-
-    /**
-     * HDF5's {@code H5_checksum_fletcher32}, as numcodecs computes it: big-endian 16-bit words summed in
-     * batches of 360, an odd last byte taken as the high byte of a word.
-     */
-    static int fletcher32(byte[] data, int offset, int length) {
-        long sum1 = 0;
-        long sum2 = 0;
-        int words = length / 2;
-        int i = offset;
-        while (words > 0) {
-            int batch = Math.min(words, 360);
-            words -= batch;
-            do {
-                sum1 += ((data[i] & 0xff) << 8) | (data[i + 1] & 0xff);
-                sum2 += sum1;
-                i += 2;
-            } while (--batch > 0);
-            sum1 = (sum1 & 0xffff) + (sum1 >>> 16);
-            sum2 = (sum2 & 0xffff) + (sum2 >>> 16);
-        }
-        if ((length & 1) != 0) {
-            sum1 += (data[i] & 0xff) << 8;
-            sum2 += sum1;
-            sum1 = (sum1 & 0xffff) + (sum1 >>> 16);
-            sum2 = (sum2 & 0xffff) + (sum2 >>> 16);
-        }
-        sum1 = (sum1 & 0xffff) + (sum1 >>> 16);
-        sum2 = (sum2 & 0xffff) + (sum2 >>> 16);
-        return (int) ((sum2 << 16) | sum1);
-    }
-
-    /** Bob Jenkins' lookup3 {@code hashlittle}, HDF5's {@code H5_checksum_lookup3}. */
-    static int lookup3(byte[] key, int offset, int length, int initval) {
-        int a = 0xdeadbeef + length + initval;
-        int b = a;
-        int c = a;
-        int i = offset;
-        int len = length;
-        while (len > 12) {
-            a += u32(key, i);
-            b += u32(key, i + 4);
-            c += u32(key, i + 8);
-            a -= c; a ^= Integer.rotateLeft(c, 4);  c += b;
-            b -= a; b ^= Integer.rotateLeft(a, 6);  a += c;
-            c -= b; c ^= Integer.rotateLeft(b, 8);  b += a;
-            a -= c; a ^= Integer.rotateLeft(c, 16); c += b;
-            b -= a; b ^= Integer.rotateLeft(a, 19); a += c;
-            c -= b; c ^= Integer.rotateLeft(b, 4);  b += a;
-            i += 12;
-            len -= 12;
-        }
-        if (len == 0) {
-            return c; // the final mixing is skipped when nothing is left
-        }
-        // The last 1 to 12 bytes, little-endian into a, b, c; bytes past the end count as 0.
-        a += tail(key, i, len, 0);
-        b += tail(key, i, len, 4);
-        c += tail(key, i, len, 8);
-        c ^= b; c -= Integer.rotateLeft(b, 14);
-        a ^= c; a -= Integer.rotateLeft(c, 11);
-        b ^= a; b -= Integer.rotateLeft(a, 25);
-        c ^= b; c -= Integer.rotateLeft(b, 16);
-        a ^= c; a -= Integer.rotateLeft(c, 4);
-        b ^= a; b -= Integer.rotateLeft(a, 14);
-        c ^= b; c -= Integer.rotateLeft(b, 24);
-        return c;
-    }
-
-    private static int u32(byte[] key, int i) {
-        return (key[i] & 0xff) | (key[i + 1] & 0xff) << 8 | (key[i + 2] & 0xff) << 16 | (key[i + 3] & 0xff) << 24;
-    }
-
-    /** Bytes {@code from} to {@code from + 3} of the {@code len}-byte tail at {@code i}, little-endian. */
-    private static int tail(byte[] key, int i, int len, int from) {
-        int value = 0;
-        for (int k = Math.min(len, from + 4) - 1; k >= from; k--) {
-            value = (value << 8) | (key[i + k] & 0xff);
-        }
-        return value;
     }
 }

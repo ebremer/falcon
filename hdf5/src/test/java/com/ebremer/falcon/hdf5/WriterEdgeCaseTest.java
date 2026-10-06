@@ -81,6 +81,28 @@ class WriterEdgeCaseTest {
         }
     }
 
+    /**
+     * Shuffle after a filter that changes the length (deflate, scale-offset) shuffles whole elements and copies
+     * the bytes past the last one, as libhdf5's {@code H5Z__filter_shuffle} does (it had dropped them).
+     */
+    @Test
+    void shuffleKeepsBytesPastTheLastElement() throws IOException {
+        Path file = dir.resolve("shuffle_tail.h5");
+        int[] values = new int[1000];
+        for (int i = 0; i < values.length; i++) {
+            values[i] = i * 7919 % 1013;
+        }
+        try (Hdf5Writer w = Hdf5Writer.create(file)) {
+            w.intChunkedDataset("deflate_shuffle", values, new long[] {1000}, new long[] {100}).deflate(1).shuffle();
+            w.intChunkedDataset("scaleoffset_shuffle", values, new long[] {1000}, new long[] {100}).scaleOffset()
+                    .shuffle();
+        }
+        try (Hdf5File h5 = Hdf5File.open(file)) {
+            assertArrayEquals(values, h5.root().dataset("deflate_shuffle").readInts());
+            assertArrayEquals(values, h5.root().dataset("scaleoffset_shuffle").readInts());
+        }
+    }
+
     @Test
     void emptyDatasetsHaveNoStorage() throws IOException {
         Path file = dir.resolve("empty.h5");

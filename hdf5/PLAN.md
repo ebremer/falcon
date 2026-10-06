@@ -5,7 +5,7 @@ writer for the [HDF5 File Format Specification v4.0](https://support.hdfgroup.or
 (HDF5 2.0). It is **Falcon Phase 1** and the template for the Zarr module (Phase 2, `../zarr/PLAN.md`).
 See the root [`../PLAN.md`](../PLAN.md) for the umbrella roadmap.
 
-> **Status (2026-10-06): stages H0–H9 are done, and the P2 features since; 1117 tests. Pre-1.0** (version
+> **Status (2026-10-06): stages H0–H9 are done, and the P2 features since; 1113 tests. Pre-1.0** (version
 > `0.1.0-SNAPSHOT`): the API may still change (`TODO.md` records each change), and no version has been
 > released.
 >
@@ -68,11 +68,11 @@ falcon/                              parent aggregator POM (packaging: pom) — 
 ```
 
 The `core` module holds the compression codecs both formats use (zstd, Blosc and Blosc2, LZ4, LZF,
-bitshuffle, bzip2, ZFP, SZ): the
-HDF5 module's third-party filters needed Zarr's zstd and Blosc, so they moved there rather than being
-copied. `core` exports them only to Falcon's own modules. A shared data model was considered when Zarr
-landed and not made: byte I/O, checksums, datatypes, and chunk indexing stay in each format's module (see
-[`../zarr/PLAN.md`](../zarr/PLAN.md) §10).
+bitshuffle, bzip2, ZFP, SZ, zlib, the byte shuffle) and the checksums both use (Fletcher-32, lookup3):
+the HDF5 module's third-party filters needed Zarr's zstd and Blosc, so they moved there rather than being
+copied, and what both modules had written twice followed. `core` exports them only to Falcon's own
+modules. A shared data model was considered when Zarr landed and not made: byte I/O, datatypes, and
+chunk indexing stay in each format's module (see [`../zarr/PLAN.md`](../zarr/PLAN.md) §10).
 
 ## 3. Goals & non-goals
 
@@ -162,7 +162,7 @@ com.ebremer.falcon.hdf5             Public API: Hdf5File, Group, Dataset, Attrib
                                     and DatatypeClass
         …hdf5.io                    HdfBuffer over a MemorySegment or a paged RangeReader, little-endian
                                     reads, address/length primitives; the file context; the chunk cache
-        …hdf5.checksum              Jenkins lookup3, fletcher32, metadata checksum verification
+        …hdf5.checksum              Metadata checksum verification (lookup3 and fletcher32 are core's)
         …hdf5.superblock            Superblock v0–v3; free-space managers
         …hdf5.header                Object header v1/v2, message framing, continuation; shared messages
                                     and the shared-message table

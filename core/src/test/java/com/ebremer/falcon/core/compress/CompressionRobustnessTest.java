@@ -11,6 +11,7 @@ import com.ebremer.falcon.core.compress.lzf.Lzf;
 import com.ebremer.falcon.core.compress.sz.SzDecoder;
 import com.ebremer.falcon.core.compress.zfp.ZfpDecoder;
 import com.ebremer.falcon.core.compress.zfp.ZfpHeader;
+import com.ebremer.falcon.core.compress.zlib.Zlib;
 import com.ebremer.falcon.core.compress.zstd.ZstdDecoder;
 import java.util.Arrays;
 import java.util.List;
@@ -67,6 +68,19 @@ class CompressionRobustnessTest {
             }
             assertHandled("bit-flipped " + codec + " stream", () -> decode.accept(stream));
         }
+    }
+
+    @Test
+    void zlibSurvivesCorruption() {
+        List<byte[]> streams = new java.util.ArrayList<>();
+        for (int level : new int[] {1, 6, 9}) {
+            byte[] data = new byte[4000];
+            for (int i = 0; i < data.length; i++) {
+                data[i] = (byte) (i % 61 < 30 ? i / 9 : i * 31);
+            }
+            streams.add(Zlib.compress(data, level));
+        }
+        fuzz("zlib", streams, stream -> Zlib.decompress(stream, 0, stream.length, 4000));
     }
 
     @Test

@@ -1,13 +1,10 @@
 package com.ebremer.falcon.zarr.codec;
 
+import com.ebremer.falcon.core.compress.CompressionFormatException;
+import com.ebremer.falcon.core.compress.zlib.Zlib;
 import com.ebremer.falcon.zarr.ZarrFormatException;
 import com.ebremer.falcon.zarr.ZarrUnsupportedException;
 import com.ebremer.falcon.zarr.json.JsonObject;
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
-import java.util.zip.Deflater;
-import java.util.zip.InflaterInputStream;
 
 /**
  * The {@code numcodecs.zlib} bytes&rarr;bytes codec: numcodecs' {@code Zlib}, under the name zarr-python 3
@@ -53,32 +50,15 @@ final class ZlibCodec implements BytesBytesCodec {
 
     @Override
     public byte[] decode(byte[] input, int maxSize) {
-        try (InflaterInputStream in = new InflaterInputStream(new ByteArrayInputStream(input))) {
-            byte[] out = in.readNBytes(maxSize); // allocates as it reads, not maxSize up front
-            if (in.read() >= 0) {
-                throw new ZarrFormatException(
-                        "numcodecs.zlib chunk decodes to more than the " + maxSize + " bytes it may hold");
-            }
-            return out;
-        } catch (IOException e) {
+        try {
+            return Zlib.decompress(input, 0, input.length, maxSize);
+        } catch (CompressionFormatException e) {
             throw new ZarrFormatException("numcodecs.zlib decode failed: " + e.getMessage(), e);
         }
     }
 
     @Override
     public byte[] encode(byte[] input) {
-        Deflater deflater = new Deflater(level);
-        try {
-            deflater.setInput(input);
-            deflater.finish();
-            ByteArrayOutputStream out = new ByteArrayOutputStream(input.length / 2 + 64);
-            byte[] buffer = new byte[64 * 1024];
-            while (!deflater.finished()) {
-                out.write(buffer, 0, deflater.deflate(buffer));
-            }
-            return out.toByteArray();
-        } finally {
-            deflater.end();
-        }
+        return Zlib.compress(input, level);
     }
 }

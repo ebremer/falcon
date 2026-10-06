@@ -3,6 +3,7 @@ package com.ebremer.falcon.core.compress.blosc;
 import com.ebremer.falcon.core.compress.CompressionFormatException;
 import com.ebremer.falcon.core.compress.UnsupportedCompressionException;
 import com.ebremer.falcon.core.compress.bitshuffle.Bitshuffle;
+import com.ebremer.falcon.core.compress.shuffle.ByteShuffle;
 import java.util.Arrays;
 
 /**
@@ -333,7 +334,7 @@ final class Blosc2Decoder {
             switch (filter) {
                 case SHUFFLE -> {
                     int group = filtersMeta[i] == 0 ? typeSize : filtersMeta[i] & 0xff;
-                    Shuffle.unshuffle(current, currentOffset, spare, 0, length, group);
+                    ByteShuffle.unshuffle(current, currentOffset, spare, 0, length, group);
                     current = spare;
                     currentOffset = 0;
                 }

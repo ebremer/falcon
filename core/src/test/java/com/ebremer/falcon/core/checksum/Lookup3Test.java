@@ -1,4 +1,4 @@
-package com.ebremer.falcon.hdf5.checksum;
+package com.ebremer.falcon.core.checksum;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 

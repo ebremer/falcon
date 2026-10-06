@@ -1391,8 +1391,11 @@ what was done, then gives the original finding.
 **Out of scope / deferred:**
 - **Creating Zarr v2 arrays** — Falcon creates v3 only. Writing into an existing v2 array works (F4).
 - **A shared data model in `com.ebremer.falcon.core`** — investigated and deferred (`PLAN.md` §10): data
-  types, byte I/O, checksums, and chunk indexing stay format-specific. The compression codecs did move to
-  `core` (2026-10-05), when HDF5's S4 (third-party HDF5 filters) needed Falcon's zstd, Blosc, and LZ4.
+  types, byte I/O, and chunk indexing stay format-specific. The compression codecs did move to `core`
+  (2026-10-05), when HDF5's S4 (third-party HDF5 filters) needed Falcon's zstd, Blosc, and LZ4. So, on
+  2026-10-06, did what both modules had written twice: the Fletcher-32 and lookup3 checksums of
+  numcodecs' `fletcher32` and `jenkins_lookup3`, the byte shuffle of `numcodecs.shuffle`, and the zlib of
+  `numcodecs.zlib` (now refusing a truncated stream or a failed check by name: "zlib stream ends early").
 
 ## P3 — docs, build, housekeeping
 

@@ -1,7 +1,7 @@
 package com.ebremer.falcon.hdf5;
 
 import com.ebremer.falcon.hdf5.btree.BTreeV2;
-import com.ebremer.falcon.hdf5.checksum.Lookup3;
+import com.ebremer.falcon.core.checksum.Lookup3;
 import com.ebremer.falcon.hdf5.data.DataspaceSelection;
 import com.ebremer.falcon.hdf5.data.SelectedElements;
 import com.ebremer.falcon.hdf5.datatype.Datatype;

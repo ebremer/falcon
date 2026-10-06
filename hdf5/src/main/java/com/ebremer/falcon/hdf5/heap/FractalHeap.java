@@ -3,7 +3,7 @@ package com.ebremer.falcon.hdf5.heap;
 import com.ebremer.falcon.hdf5.HdfFormatException;
 import com.ebremer.falcon.hdf5.HdfUnsupportedException;
 import com.ebremer.falcon.hdf5.btree.BTreeV2;
-import com.ebremer.falcon.hdf5.checksum.Lookup3;
+import com.ebremer.falcon.core.checksum.Lookup3;
 import com.ebremer.falcon.hdf5.checksum.MetadataChecksum;
 import com.ebremer.falcon.hdf5.io.FileContext;
 import com.ebremer.falcon.hdf5.io.HdfBuffer;

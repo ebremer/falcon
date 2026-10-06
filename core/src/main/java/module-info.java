@@ -1,9 +1,12 @@
 /**
  * Falcon Core &mdash; code shared by Falcon's format modules: pure-Java decoders (and, for zstd, Blosc
  * with each of its internal compressors, LZ4, LZF, bitshuffle, and bzip2, encoders) for the compression
- * formats both HDF5 filters and Zarr codecs use.
+ * formats both HDF5 filters and Zarr codecs use, and the checksums both use.
  *
  * <ul>
+ *   <li>{@code checksum} &mdash; Fletcher-32 and Jenkins' lookup3 (HDF5's, and numcodecs');</li>
+ *   <li>{@code compress.zlib} &mdash; zlib streams through {@code java.util.zip}, bounded and strict;</li>
+ *   <li>{@code compress.shuffle} &mdash; the byte shuffle (HDF5's filter, Blosc's, numcodecs');</li>
  *   <li>{@code compress.zstd} &mdash; Zstandard (RFC 8878);</li>
  *   <li>{@code compress.blosc} &mdash; the Blosc container, with BloscLZ, Snappy, and byte shuffle (it
  *       also uses LZ4, zlib, zstd, and bitshuffle), and c-blosc2's chunks, frames, and b2nd arrays;</li>
@@ -23,13 +26,16 @@
 // The modules exported to are built after this one, so javac cannot see them here ("module not found").
 @SuppressWarnings("module")
 module com.ebremer.falcon.core {
+    exports com.ebremer.falcon.core.checksum to com.ebremer.falcon.hdf5, com.ebremer.falcon.zarr;
     exports com.ebremer.falcon.core.compress to com.ebremer.falcon.hdf5, com.ebremer.falcon.zarr;
     exports com.ebremer.falcon.core.compress.bitshuffle to com.ebremer.falcon.hdf5, com.ebremer.falcon.zarr;
     exports com.ebremer.falcon.core.compress.blosc to com.ebremer.falcon.hdf5, com.ebremer.falcon.zarr;
     exports com.ebremer.falcon.core.compress.bzip2 to com.ebremer.falcon.hdf5, com.ebremer.falcon.zarr;
     exports com.ebremer.falcon.core.compress.lz4 to com.ebremer.falcon.hdf5, com.ebremer.falcon.zarr;
     exports com.ebremer.falcon.core.compress.lzf to com.ebremer.falcon.hdf5, com.ebremer.falcon.zarr;
+    exports com.ebremer.falcon.core.compress.shuffle to com.ebremer.falcon.hdf5, com.ebremer.falcon.zarr;
     exports com.ebremer.falcon.core.compress.sz to com.ebremer.falcon.hdf5, com.ebremer.falcon.zarr;
     exports com.ebremer.falcon.core.compress.zfp to com.ebremer.falcon.hdf5, com.ebremer.falcon.zarr;
+    exports com.ebremer.falcon.core.compress.zlib to com.ebremer.falcon.hdf5, com.ebremer.falcon.zarr;
     exports com.ebremer.falcon.core.compress.zstd to com.ebremer.falcon.hdf5, com.ebremer.falcon.zarr;
 }

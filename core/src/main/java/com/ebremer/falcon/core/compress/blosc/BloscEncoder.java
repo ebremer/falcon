@@ -2,6 +2,7 @@ package com.ebremer.falcon.core.compress.blosc;
 
 import com.ebremer.falcon.core.compress.bitshuffle.Bitshuffle;
 import com.ebremer.falcon.core.compress.lz4.Lz4;
+import com.ebremer.falcon.core.compress.shuffle.ByteShuffle;
 import com.ebremer.falcon.core.compress.zstd.ZstdEncoder;
 import java.util.Arrays;
 import java.util.zip.Deflater;
@@ -367,7 +368,7 @@ public final class BloscEncoder {
     private static void filterBlock(byte[] data, int start, int length, int ts, int filter, byte[] filtered,
                                     byte[] tmp) {
         if (filter == SHUFFLE && ts > 1) {
-            Shuffle.shuffle(data, start, filtered, 0, length, ts);
+            ByteShuffle.shuffle(data, start, filtered, 0, length, ts);
         } else if (filter == BITSHUFFLE && length >= ts && (length / ts) % 8 == 0) {
             Bitshuffle.transpose(data, start, filtered, 0, length / ts, ts, tmp);
         } else {

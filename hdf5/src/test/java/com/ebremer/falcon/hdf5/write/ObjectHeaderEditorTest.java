@@ -5,7 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import com.ebremer.falcon.hdf5.checksum.Lookup3;
+import com.ebremer.falcon.core.checksum.Lookup3;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;

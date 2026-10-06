@@ -73,7 +73,7 @@ public final class ThirdPartyFilters {
             return switch (id) {
                 case LZF -> Lzf.decompress(data, 0, data.length,
                         clientData.length > 2 && clientData[2] > 0 ? Math.min(clientData[2], max) : chunkSize, max);
-                case BLOSC -> blosc(data, max);
+                case BLOSC -> BloscDecoder.decompress(data, max); // refuses a larger size before allocating
                 case LZ4 -> lz4(data, max);
                 case BITSHUFFLE -> bitshuffle(data, clientData, elementSize, max);
                 case ZSTD -> ZstdDecoder.decompress(data, 0, data.length, max);
@@ -260,14 +260,6 @@ public final class ThirdPartyFilters {
         b[off + 1] = (byte) (v >>> 16);
         b[off + 2] = (byte) (v >>> 8);
         b[off + 3] = (byte) v;
-    }
-
-    private static byte[] blosc(byte[] data, int max) {
-        int size = BloscDecoder.decompressedSize(data);
-        if (size < 0 || size > max) {
-            throw new CompressionFormatException("chunk declares " + size + " decoded bytes, more than its " + max);
-        }
-        return BloscDecoder.decompress(data);
     }
 
     private static byte[] lz4(byte[] data, int max) {

@@ -1,11 +1,12 @@
-package com.ebremer.falcon.hdf5.checksum;
+package com.ebremer.falcon.core.checksum;
 
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 
 /**
- * Bob Jenkins' {@code lookup3} hash ({@code hashlittle}), the checksum HDF5 uses throughout the file
- * format (version-2+ superblocks, version-2 B-tree nodes, fractal-heap blocks, checksummed chunks).
+ * Bob Jenkins' {@code lookup3} hash ({@code hashlittle}): the checksum HDF5 uses throughout the file
+ * format (version-2+ superblocks, version-2 B-tree nodes, fractal-heap blocks, checksummed chunks), and
+ * numcodecs' {@code jenkins_lookup3} codec, seeded with its {@code initval}.
  *
  * <p>This is a faithful, endian-independent transcription of the public-domain {@code lookup3.c}
  * reference. HDF5 always calls it with an initial value of {@code 0}; use
@@ -20,17 +21,36 @@ public final class Lookup3 {
         // No instances.
     }
 
-    /** Hashes the whole array with initial value {@code 0} (the HDF5 metadata checksum). */
+    /**
+     * Hashes the whole array with initial value {@code 0} (the HDF5 metadata checksum).
+     *
+     * @param key the bytes
+     * @return the hash
+     */
     public static int hashLittle(byte[] key) {
         return hashLittle(MemorySegment.ofArray(key), 0, key.length, 0);
     }
 
-    /** Hashes the whole array with the given initial value. */
+    /**
+     * Hashes the whole array with the given initial value.
+     *
+     * @param key     the bytes
+     * @param initval the initial value
+     * @return the hash
+     */
     public static int hashLittle(byte[] key, int initval) {
         return hashLittle(MemorySegment.ofArray(key), 0, key.length, initval);
     }
 
-    /** Hashes {@code length} bytes of {@code key} starting at {@code offset}. */
+    /**
+     * Hashes {@code length} bytes of {@code key} starting at {@code offset}.
+     *
+     * @param key     the bytes
+     * @param offset  the first byte hashed
+     * @param length  how many bytes
+     * @param initval the initial value
+     * @return the hash
+     */
     public static int hashLittle(byte[] key, int offset, int length, int initval) {
         return hashLittle(MemorySegment.ofArray(key), offset, length, initval);
     }

@@ -343,7 +343,8 @@ that should stay separate:
 - **Byte I/O** — HDF5 uses `MemorySegment`/`Arena` (Foreign Function &amp; Memory, for &gt;2&nbsp;GB
   memory-mapped files); Zarr uses `byte[]`/`ByteBuffer` over a key-value `Store` SPI. Different substrates.
 - **Checksums** — HDF5 hand-writes lookup3 and fletcher32; Zarr calls the JDK's `java.util.zip.CRC32C`.
-  No shared code.
+  No shared code. (Since P2's F4, Zarr's numcodecs checksums use the same two; they moved to `core`,
+  2026-10-06: see the update below.)
 - **Chunk indexing** — HDF5's v1/v2 B-trees and fixed/extensible arrays vs Zarr's regular and
   rectilinear grids plus sharding. Different.
 
@@ -363,3 +364,17 @@ copied:
 - **Tests and vectors:** the codec unit tests, their vectors, and the codec fuzzing moved with the code.
 
 Data types, byte I/O, checksums, and chunk indexing stay format-specific, as above.
+
+**Update (2026-10-06): what both modules had written twice moved to `core` too,** by Erich's decision:
+- **`checksum`:** Fletcher-32 and Jenkins' lookup3, HDF5's metadata and `fletcher32` checksums and
+  numcodecs' `fletcher32` and `jenkins_lookup3` (Zarr had its own copies since F4). HDF5's
+  `MetadataChecksum`, which verifies a structure's stored hash, stays in the HDF5 module.
+- **`compress.shuffle`:** the byte shuffle of HDF5's `shuffle` filter, Blosc, and numcodecs' `shuffle`.
+  Bytes past the last whole element are copied through, as libhdf5 does; HDF5's writer had dropped
+  them, which corrupted a chunk shuffled after a filter that changes its length.
+- **`compress.zlib`:** zlib streams through `java.util.zip`, HDF5's `deflate` filter and numcodecs'
+  `zlib`, decoded bounded and strict (a truncated stream, a failed Adler-32 check, or a preset dictionary
+  is refused, as zlib's `inflate` refuses it).
+
+Data types, byte I/O, and chunk indexing stay format-specific. So do checksums the JDK provides (CRC-32,
+CRC-32C, Adler-32), gzip (Zarr's alone), and the codecs only one format has.

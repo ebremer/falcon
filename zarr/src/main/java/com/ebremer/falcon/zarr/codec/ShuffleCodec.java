@@ -1,5 +1,6 @@
 package com.ebremer.falcon.zarr.codec;
 
+import com.ebremer.falcon.core.compress.shuffle.ByteShuffle;
 import com.ebremer.falcon.zarr.ZarrFormatException;
 import com.ebremer.falcon.zarr.json.JsonObject;
 
@@ -53,25 +54,16 @@ final class ShuffleCodec extends NumcodecsCodec {
         return regroup(input, new byte[input.length], true);
     }
 
-    /** Shuffles {@code input} into {@code out}, or unshuffles it; a 1-byte element copies. */
+    /** Shuffles {@code input} into {@code out}, or unshuffles it (Falcon Core's byte shuffle, HDF5's). */
     private byte[] regroup(byte[] input, byte[] out, boolean shuffle) {
-        if (elementSize == 1) {
-            System.arraycopy(input, 0, out, 0, input.length);
-            return out;
-        }
         if (input.length % elementSize != 0) {
             throw new ZarrFormatException(name() + ": " + input.length
                     + " bytes are not a whole number of " + elementSize + "-byte elements");
         }
-        int count = input.length / elementSize;
-        for (int b = 0; b < elementSize; b++) {
-            for (int e = 0; e < count; e++) {
-                if (shuffle) {
-                    out[b * count + e] = input[e * elementSize + b];
-                } else {
-                    out[e * elementSize + b] = input[b * count + e];
-                }
-            }
+        if (shuffle) {
+            ByteShuffle.shuffle(input, 0, out, 0, input.length, elementSize);
+        } else {
+            ByteShuffle.unshuffle(input, 0, out, 0, input.length, elementSize);
         }
         return out;
     }

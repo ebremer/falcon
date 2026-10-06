@@ -7,7 +7,7 @@ formats — no native libraries, no third-party dependencies.
 |---|---|---|---|
 | [`hdf5`](hdf5) | `com.ebremer.falcon.hdf5` | HDF5 reader/writer implementing the [HDF5 File Format Specification v4.0](https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html) (HDF5 2.0) | Read-complete, write-broad; pre-1.0 |
 | [`zarr`](zarr) | `com.ebremer.falcon.zarr` | [Zarr](https://zarr.dev/) reader/writer (v3 core; v2 read) | Built |
-| [`core`](core) | `com.ebremer.falcon.core` | Pure-Java compression codecs both formats share (zstd, Blosc and Blosc2, LZ4, LZF, bitshuffle, bzip2, ZFP, SZ); exported only to Falcon's modules | Built |
+| [`core`](core) | `com.ebremer.falcon.core` | Pure-Java compression codecs both formats share (zstd, Blosc and Blosc2, LZ4, LZF, bitshuffle, bzip2, ZFP, SZ, zlib, byte shuffle) and their checksums (Fletcher-32, lookup3); exported only to Falcon's modules | Built |
 
 See **[PLAN.md](PLAN.md)** for the umbrella roadmap and **[CLAUDE.md](CLAUDE.md)** for conventions. Each
 module has its own plan, remaining-work list, and user guide:

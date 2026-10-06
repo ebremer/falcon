@@ -1,10 +1,10 @@
 # Falcon HDF5 — remaining work (prioritized)
 
-**Status (2026-10-06, after P2 S1–S9, A1–A12, PF1–PF8, WF1–WF11, and all of P3):** build green, **1117
+**Status (2026-10-06, after P2 S1–S9, A1–A12, PF1–PF8, WF1–WF11, and all of P3):** build green, **1113
 HDF5 tests** (144 at the review, 187 after the top 10, 206 after P0, 228 after P1, 243 after S1–S3, 256
 after S4–S7, 439 after A2–A6, 610 after PF1–PF4, 677 after A1–A10, 692 after A11–A12, 707 after WF1–WF4,
-743 after WF5–WF9, 782 after WF7 and WF10, 850 after WF11 and PF5–PF7, 855 after P3), plus 112 in the
-`core` module. The review's top 10, every P1 item, **P2 S1–S9**, **A1–A12**, **PF1–PF8**, **WF1–WF11**,
+743 after WF5–WF9, 782 after WF7 and WF10, 850 after WF11 and PF5–PF7, 855 after P3, 1117 after S8–S9; the
+checksum tests then moved to `core`), plus 129 in the `core` module. The review's top 10, every P1 item, **P2 S1–S9**, **A1–A12**, **PF1–PF8**, **WF1–WF11**,
 **every P3 item**, the P0 zstd fix (Z6/Z7, in `core`), and the P0 found with S8 (types libhdf5 refuses in
 version-1 object headers) are done (see *Done* at the end). Falcon now:
 
@@ -75,6 +75,11 @@ version-1 object headers) are done (see *Done* at the end). Falcon now:
 
 P0, P1, and P3 are empty. What remains in P2 is writing the three filters Falcon reads but has no
 encoder for: Blosc2, ZFP, and SZ (S10).
+
+**Shared with Zarr in `core` (2026-10-06)** changes no API. The checksums, byte shuffle, and zlib moved
+to `core`. A deflate chunk that ends early or fails its Adler-32 check is now an `HdfFormatException`
+("deflate filter: zlib stream ends early") where it was "decoded chunk is N bytes"; a shuffle after a
+filter that changes the chunk's length no longer corrupts the chunk (a P0, below).
 
 **P2 S8, S9** add API and change behaviour:
 - `Hdf5Writer.DatasetWriter` gains `lzf()`, `blosc()`, `blosc(cname, clevel, shuffle)`, `lz4()`,
@@ -349,8 +354,9 @@ review baseline. Abbreviations: `W` = `Hdf5Writer.java`; other paths are under
 ## P0 — silent wrong data / files libhdf5 rejects
 
 Empty: every item is done (see *Done — 2026-10-05*, *(P0: Z6/Z7)* for the zstd decoder, and *Done —
-2026-10-06 (P2: S8, S9)* for types libhdf5 refuses in version-1 object headers). A new P0 is any silent
-wrong value, or any written file that libhdf5 rejects or misreads.
+2026-10-06 (P2: S8, S9)* for types libhdf5 refuses in version-1 object headers, and *(core: what HDF5 and
+Zarr share)* for a shuffle after a length-changing filter). A new P0 is any silent wrong value, or any
+written file that libhdf5 rejects or misreads.
 
 ## P1 — valid files that fail; hardening; concurrency; test gaps
 
@@ -404,6 +410,29 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
 
 - D1, D2, D3, D4, D6, B1, B2, and B3 are done (see *Done — 2026-10-05 (P3: D2, D6, B1–B3)* and
   *(P3: D1, D3, D4)*). P3 is empty.
+
+## Done — 2026-10-06 (core: what HDF5 and Zarr share)
+
+By Erich's decision, what both modules had written twice moved to `core`. HDF5's `checksum` package keeps
+`MetadataChecksum`, which verifies a structure's stored hash.
+
+- [x] **`core.checksum`:** Fletcher-32 (`H5_checksum_fletcher32`, numcodecs' `fletcher32`) and Jenkins'
+  lookup3 (`H5_checksum_lookup3`, numcodecs' `jenkins_lookup3`), moved from HDF5 (its `Lookup3Test` with
+  them). Zarr's `ChecksumCodec` drops its own copies.
+- [x] **`core.compress.shuffle.ByteShuffle`:** the byte shuffle of HDF5's `shuffle` filter, Blosc, and
+  numcodecs' `shuffle`, moved from Blosc. Bytes past the last whole element are copied through.
+- [x] **`core.compress.zlib.Zlib`:** zlib streams for HDF5's `deflate` filter and numcodecs' `zlib`, through
+  `java.util.zip`, decoded within a bound and strictly: a stream that ends early, fails its Adler-32 check,
+  or needs a preset dictionary is refused, as zlib's `inflate` refuses it for libhdf5 and numcodecs; bytes
+  after the stream are ignored. HDF5's deflate had stopped quietly at the end of its input, so a truncated
+  chunk failed later, by its size.
+- [x] **P0, found on the way: a shuffle after a length-changing filter corrupted the chunk.** HDF5's
+  writer shuffled only whole elements and left the bytes past the last one zero, where libhdf5's
+  `H5Z__filter_shuffle` (and Falcon's reader) copy them. So `deflate(1).shuffle()` or
+  `scaleOffset().shuffle()` wrote chunks neither Falcon nor libhdf5 could read back ("incorrect data
+  check"). The shared shuffle keeps them (`WriterEdgeCaseTest.shuffleKeepsBytesPastTheLastElement`).
+- **Tests:** core 129 (`Fletcher32Test`, `ByteShuffleTest`, `ZlibTest`, `Lookup3Test` moved from HDF5,
+  and zlib in `CompressionRobustnessTest`); hdf5 1101 + 12; zarr 683 + 18.
 
 ## Done — 2026-10-06 (P2: S8, S9)
 

@@ -1,7 +1,7 @@
 package com.ebremer.falcon.hdf5.superblock;
 
 import com.ebremer.falcon.hdf5.HdfFormatException;
-import com.ebremer.falcon.hdf5.checksum.Lookup3;
+import com.ebremer.falcon.core.checksum.Lookup3;
 import com.ebremer.falcon.hdf5.io.HdfBuffer;
 
 /**

@@ -9,7 +9,8 @@ writers of scientific-data formats:
 - **`zarr`** module (`com.ebremer.falcon.zarr`) — a Zarr reader/writer: reads v2 and v3, writes v3.
   **Built** (Falcon Phase 2).
 - **`core`** module (`com.ebremer.falcon.core`) — the pure-Java compression codecs both formats use
-  (zstd, Blosc, LZ4, LZF, bitshuffle, bzip2, ZFP, SZ), exported only to Falcon's own modules.
+  (zstd, Blosc, LZ4, LZF, bitshuffle, bzip2, ZFP, SZ, zlib, byte shuffle) and their shared checksums
+  (Fletcher-32, lookup3), exported only to Falcon's own modules.
 
 The full roadmap is in [`PLAN.md`](PLAN.md); each module has its own `PLAN.md`, `TODO.md`, and
 `USER_GUIDE.md`.
@@ -68,9 +69,9 @@ mvn -pl hdf5 -am compile   # compile the hdf5 module
 ## Conventions
 
 - HDF5 code lives under `com.ebremer.falcon.hdf5.*`; sub-packages by format concern (see `hdf5/PLAN.md` §6).
-- Code both formats need goes in `core` (`com.ebremer.falcon.core`), which holds only the compression
-  codecs: a shared data model (byte I/O, checksums, datatypes, chunk indexing) was considered when Zarr
-  landed and deferred (see `zarr/PLAN.md` §10).
+- Code both formats need goes in `core` (`com.ebremer.falcon.core`), which holds the compression codecs
+  and the checksums both use: a shared data model (byte I/O, datatypes, chunk indexing) was considered
+  when Zarr landed and deferred (see `zarr/PLAN.md` §10).
 - Reference the spec section in a comment when implementing a non-obvious on-disk structure.
 - Every roadmap stage lands with tests: unit tests plus conformance tests against reference `.h5`
   files generated with **h5py** (3.16.0 / HDF5 2.0.0 is installed locally — the reference oracle).

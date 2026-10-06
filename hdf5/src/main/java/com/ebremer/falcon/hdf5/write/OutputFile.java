@@ -200,7 +200,7 @@ public final class OutputFile {
         }
         byte[] journal = body.toByteArray();
         GrowBuffer trailer = new GrowBuffer();
-        trailer.u32(com.ebremer.falcon.hdf5.checksum.Lookup3.hashLittle(journal, 0, journal.length, 0));
+        trailer.u32(com.ebremer.falcon.core.checksum.Lookup3.hashLittle(journal, 0, journal.length, 0));
         trailer.u64(journal.length);
         trailer.bytes(JOURNAL);
         write(end, journal);
@@ -229,7 +229,7 @@ public final class OutputFile {
             long start = size - TRAILER - length;
             ByteBuffer journal = readFully(channel, start, (int) length);
             byte[] bytes = journal.array();
-            if (com.ebremer.falcon.hdf5.checksum.Lookup3.hashLittle(bytes, 0, bytes.length, 0) != checksum
+            if (com.ebremer.falcon.core.checksum.Lookup3.hashLittle(bytes, 0, bytes.length, 0) != checksum
                     || !java.util.Arrays.equals(bytes, 0, 8, JOURNAL, 0, 8)) {
                 return false; // never complete: nothing was written over the file
             }

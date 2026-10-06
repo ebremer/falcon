@@ -4,6 +4,7 @@ import com.ebremer.falcon.core.compress.CompressionFormatException;
 import com.ebremer.falcon.core.compress.UnsupportedCompressionException;
 import com.ebremer.falcon.core.compress.bitshuffle.Bitshuffle;
 import com.ebremer.falcon.core.compress.lz4.Lz4;
+import com.ebremer.falcon.core.compress.shuffle.ByteShuffle;
 import com.ebremer.falcon.core.compress.zstd.ZstdDecoder;
 import java.util.zip.DataFormatException;
 import java.util.zip.Inflater;
@@ -181,7 +182,7 @@ public final class BloscDecoder {
                 if (bitShuffle && blockBytes >= typeSize) {
                     bitUnshuffle(block, out, destination, blockBytes, typeSize, scratch);
                 } else if (shuffle) {
-                    Shuffle.unshuffle(block, 0, out, destination, blockBytes, typeSize);
+                    ByteShuffle.unshuffle(block, 0, out, destination, blockBytes, typeSize);
                 } else {
                     System.arraycopy(block, 0, out, destination, blockBytes);
                 }

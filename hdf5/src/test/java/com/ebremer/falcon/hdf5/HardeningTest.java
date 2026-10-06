@@ -5,7 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.ebremer.falcon.hdf5.btree.GroupBTreeV1;
-import com.ebremer.falcon.hdf5.checksum.Fletcher32;
+import com.ebremer.falcon.core.checksum.Fletcher32;
 import com.ebremer.falcon.hdf5.filter.FilterPipeline;
 import com.ebremer.falcon.hdf5.filter.Filters;
 import com.ebremer.falcon.hdf5.header.ObjectHeader;

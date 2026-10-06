@@ -1,10 +1,9 @@
 /**
- * Checksums used by the HDF5 file format.
- *
- * <p>HDF5 protects version-2+ superblocks, version-2 B-tree nodes, fractal-heap blocks, and
- * checksummed chunks with the <strong>Jenkins lookup3</strong> hash (initial value 0); see
- * {@link com.ebremer.falcon.hdf5.checksum.Lookup3}. The Fletcher-32 checksum used by the
- * {@code fletcher32} filter is added alongside it when the filter pipeline lands (stage H4).
+ * HDF5's metadata checksum: version-2+ superblocks, version-2 object headers and B-tree nodes, fractal-heap
+ * blocks, and the other checksummed structures carry Jenkins' {@code lookup3} hash (initial value 0) of
+ * their bytes, verified by {@link com.ebremer.falcon.hdf5.checksum.MetadataChecksum}. The hash itself, and
+ * the Fletcher-32 of the {@code fletcher32} filter, are Falcon Core's ({@code com.ebremer.falcon.core.checksum}),
+ * shared with Zarr's numcodecs checksums.
  *
  * <p>Internal package &mdash; not exported.
  */

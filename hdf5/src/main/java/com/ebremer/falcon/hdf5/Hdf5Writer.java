@@ -1,7 +1,9 @@
 package com.ebremer.falcon.hdf5;
 
-import com.ebremer.falcon.hdf5.checksum.Fletcher32;
-import com.ebremer.falcon.hdf5.checksum.Lookup3;
+import com.ebremer.falcon.core.checksum.Fletcher32;
+import com.ebremer.falcon.core.checksum.Lookup3;
+import com.ebremer.falcon.core.compress.shuffle.ByteShuffle;
+import com.ebremer.falcon.core.compress.zlib.Zlib;
 import com.ebremer.falcon.hdf5.data.SelectedElements;
 import com.ebremer.falcon.hdf5.datatype.Datatype;
 import com.ebremer.falcon.hdf5.filter.FilterPipeline;
@@ -12,8 +14,8 @@ import com.ebremer.falcon.hdf5.filter.ScaleOffset;
 import com.ebremer.falcon.hdf5.filter.Szip;
 import com.ebremer.falcon.hdf5.filter.ThirdPartyFilters;
 import com.ebremer.falcon.hdf5.io.HdfBuffer;
-import com.ebremer.falcon.hdf5.write.ChunkIndexWriter;
 import com.ebremer.falcon.hdf5.write.BTreeV2Writer;
+import com.ebremer.falcon.hdf5.write.ChunkIndexWriter;
 import com.ebremer.falcon.hdf5.write.DatatypeEncoder;
 import com.ebremer.falcon.hdf5.write.FractalHeapWriter;
 import com.ebremer.falcon.hdf5.write.GrowBuffer;
@@ -4934,8 +4936,9 @@ public final class Hdf5Writer implements AutoCloseable {
         for (int i = 0; i < dataset.filters.size(); i++) {
             FilterSpec filter = dataset.filters.get(i);
             byte[] next = switch (filter.id()) {
-                case Filters.SHUFFLE -> shuffle(block, dataset.elementSize);
-                case Filters.DEFLATE -> deflate(block, filter.parameter());
+                // bytes past the last whole element (after a filter that changes the length) are kept
+                case Filters.SHUFFLE -> ByteShuffle.shuffle(block, dataset.elementSize);
+                case Filters.DEFLATE -> Zlib.compress(block, filter.parameter());
                 case Filters.FLETCHER32 -> appendFletcher32(block);
                 // at full precision, libhdf5 flags "no compression needed" and stores the chunk as it is
                 case Filters.NBIT -> Nbit.encode(block, nbitClientData(dataset, filter));
@@ -5135,21 +5138,6 @@ public final class Hdf5Writer implements AutoCloseable {
         }
     }
 
-    /** Groups the {@code j}-th byte of every element together (the shuffle filter's forward transform). */
-    private static byte[] shuffle(byte[] data, int elementSize) {
-        if (elementSize <= 1) {
-            return data;
-        }
-        int elements = data.length / elementSize;
-        byte[] out = new byte[data.length];
-        int p = 0;
-        for (int b = 0; b < elementSize; b++) {
-            for (int i = 0; i < elements; i++) {
-                out[p++] = data[i * elementSize + b];
-            }
-        }
-        return out;
-    }
 
     /** Appends the 4-byte (little-endian) Fletcher-32 checksum HDF5 uses. */
     private static byte[] appendFletcher32(byte[] data) {
@@ -5160,19 +5148,6 @@ public final class Hdf5Writer implements AutoCloseable {
         out[data.length + 2] = (byte) (checksum >>> 16);
         out[data.length + 3] = (byte) (checksum >>> 24);
         return out;
-    }
-
-    private static byte[] deflate(byte[] data, int level) {
-        Deflater deflater = new Deflater(level);
-        deflater.setInput(data);
-        deflater.finish();
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        byte[] scratch = new byte[1024];
-        while (!deflater.finished()) {
-            out.write(scratch, 0, deflater.deflate(scratch));
-        }
-        deflater.end();
-        return out.toByteArray();
     }
 
     /** Layout flag (version 4): partial edge chunks are stored unfiltered. */

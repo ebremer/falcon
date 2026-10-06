@@ -1,7 +1,7 @@
 package com.ebremer.falcon.hdf5.write;
 
 import com.ebremer.falcon.hdf5.HdfUnsupportedException;
-import com.ebremer.falcon.hdf5.checksum.Lookup3;
+import com.ebremer.falcon.core.checksum.Lookup3;
 import java.util.Arrays;
 
 /**

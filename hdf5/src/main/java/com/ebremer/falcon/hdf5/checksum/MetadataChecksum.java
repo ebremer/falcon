@@ -1,5 +1,6 @@
 package com.ebremer.falcon.hdf5.checksum;
 
+import com.ebremer.falcon.core.checksum.Lookup3;
 import com.ebremer.falcon.hdf5.HdfFormatException;
 import com.ebremer.falcon.hdf5.io.HdfBuffer;
 import java.lang.foreign.MemorySegment;

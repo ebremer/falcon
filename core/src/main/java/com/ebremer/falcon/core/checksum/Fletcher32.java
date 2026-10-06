@@ -1,22 +1,40 @@
-package com.ebremer.falcon.hdf5.checksum;
+package com.ebremer.falcon.core.checksum;
 
 /**
- * The Fletcher-32 checksum used by HDF5's {@code fletcher32} filter (filter id 3), a transcription of
- * {@code H5_checksum_fletcher32}: big-endian 16-bit words summed in batches of 360, with an odd final
- * byte treated as the high byte of a last word. The filter stores the result little-endian after the
- * chunk data.
+ * The Fletcher-32 checksum of HDF5's {@code fletcher32} filter (filter id 3) and numcodecs'
+ * {@code fletcher32} codec, which ports it: a transcription of {@code H5_checksum_fletcher32}, big-endian
+ * 16-bit words summed in batches of 360, with an odd final byte treated as the high byte of a last word.
+ * Both store the result little-endian after the data.
  */
 public final class Fletcher32 {
 
     private Fletcher32() {
     }
 
-    /** The checksum of the first {@code length} bytes of {@code data}. */
+    /**
+     * The checksum of the first {@code length} bytes of {@code data}.
+     *
+     * @param data   the bytes
+     * @param length how many of them, from the start
+     * @return the checksum
+     */
     public static int checksum(byte[] data, int length) {
+        return checksum(data, 0, length);
+    }
+
+    /**
+     * The checksum of {@code length} bytes of {@code data} from {@code offset}.
+     *
+     * @param data   the bytes
+     * @param offset the first byte
+     * @param length how many bytes
+     * @return the checksum
+     */
+    public static int checksum(byte[] data, int offset, int length) {
         long sum1 = 0;
         long sum2 = 0;
         int words = length / 2;
-        int i = 0;
+        int i = offset;
         while (words > 0) {
             int batch = Math.min(words, 360);
             words -= batch;
@@ -42,6 +60,9 @@ public final class Fletcher32 {
     /**
      * The checksum with the bytes of each 16-bit half swapped: the value libhdf5 releases before 1.6.3
      * stored on little-endian machines, which readers still accept alongside the correct one.
+     *
+     * @param checksum a checksum
+     * @return it with the bytes of each half swapped
      */
     public static int legacyByteSwapped(int checksum) {
         return ((checksum & 0x00ff00ff) << 8) | ((checksum >>> 8) & 0x00ff00ff);

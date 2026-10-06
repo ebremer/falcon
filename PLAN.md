@@ -11,7 +11,7 @@ work list:
 |---|---|---|---|---|---|---|
 | **1** | `hdf5` | `com.ebremer.falcon.hdf5` | Read + write HDF5 File Format Spec **v4.0** (HDF5 2.0) | **Pre-1.0** — read-complete (H0–H6), write-broad (H7–H8), hardened (H9); the API may still change | [`hdf5/PLAN.md`](hdf5/PLAN.md) | [`hdf5/TODO.md`](hdf5/TODO.md) |
 | **2** | `zarr` | `com.ebremer.falcon.zarr` | Read Zarr **v2 + v3**, write **v3** | **Built** — v3 core, every common codec, verified vs zarr-python / libzstd / c-blosc | [`zarr/PLAN.md`](zarr/PLAN.md) | [`zarr/TODO.md`](zarr/TODO.md) |
-| — | `core` | `com.ebremer.falcon.core` | Compression codecs both formats share: zstd, Blosc (BloscLZ, Snappy, shuffles) and Blosc2 frames, LZ4, LZF, bitshuffle, bzip2, ZFP, SZ | **Built** (2026-10-05) — exported only to `hdf5` and `zarr` | [`zarr/PLAN.md`](zarr/PLAN.md) §10 | the module TODOs |
+| — | `core` | `com.ebremer.falcon.core` | Compression codecs both formats share: zstd, Blosc (BloscLZ, Snappy, shuffles) and Blosc2 frames, LZ4, LZF, bitshuffle, bzip2, ZFP, SZ, zlib, byte shuffle; and the Fletcher-32 and lookup3 checksums | **Built** (2026-10-05) — exported only to `hdf5` and `zarr` | [`zarr/PLAN.md`](zarr/PLAN.md) §10 | the module TODOs |
 
 ## Repository & module structure
 
@@ -56,8 +56,10 @@ Locked at review and applied uniformly across the reactor:
 ## Program non-goals
 
 - **A shared data model in `core`** — a survey of the two modules found no shared *model* worth one
-  (data types, byte I/O, checksums, and chunk indexing are format-specific and correctly separate).
-  `core` holds the compression codecs only: HDF5's third-party filters needed Zarr's zstd and Blosc, so
-  on 2026-10-05 they moved there rather than being copied. Details in [`zarr/PLAN.md`](zarr/PLAN.md) §10.
+  (data types, byte I/O, and chunk indexing are format-specific and correctly separate). `core` holds
+  the compression codecs and the checksums both formats use: HDF5's third-party filters needed Zarr's
+  zstd and Blosc, so on 2026-10-05 they moved there rather than being copied, and on 2026-10-06 the
+  Fletcher-32 and lookup3 checksums, the byte shuffle, and zlib, which each module had written, joined
+  them. Details in [`zarr/PLAN.md`](zarr/PLAN.md) §10.
 - Module-specific non-goals (SWMR / MPI / HL APIs for HDF5; creating Zarr v2 arrays; …) are
   listed in each module's PLAN and TODO.
