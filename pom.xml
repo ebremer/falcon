@@ -13,7 +13,8 @@
     <description>Umbrella for pure-JDK 25, zero-runtime-dependency readers/writers of scientific-data
         formats. The hdf5 module implements the HDF5 File Format Specification, Version 4.0 (HDF5 2.0),
         the zarr module Zarr v3 (and v2); the core module holds the compression codecs both share. The s3
-        module, the one with dependencies (the AWS SDK), reads both formats from Amazon S3.</description>
+        module, the one with dependencies (the AWS SDK), reads both formats from Amazon S3; the cli module is
+        the falcon command.</description>
     <url>https://github.com/ebremer/falcon</url>
 
     <licenses>
@@ -36,6 +37,7 @@
         <module>hdf5</module>
         <module>zarr</module>  <!-- Falcon Phase 2 — Zarr v3 (see zarr/PLAN.md). -->
         <module>s3</module>    <!-- Amazon S3 for both formats, over the AWS SDK: optional, see s3/USER_GUIDE.md. -->
+        <module>cli</module>   <!-- The falcon command (JCommander), built as target/falcon.jar: see cli/USER_GUIDE.md. -->
     </modules>
 
     <properties>
@@ -51,8 +53,10 @@
 
         <!-- Test-scope only; core, hdf5, and zarr have zero runtime dependencies. -->
         <junit.version>5.11.4</junit.version>
-        <!-- The s3 module's only: the AWS SDK for Java 2.x, approved 2026-10-07 (CLAUDE.md). -->
+        <!-- The s3 and cli modules' only: the AWS SDK for Java 2.x, approved 2026-10-07 (CLAUDE.md). -->
         <aws.sdk.version>2.55.12</aws.sdk.version>
+        <!-- The cli module's only: JCommander, approved 2026-10-07 (CLAUDE.md). -->
+        <jcommander.version>3.0</jcommander.version>
 
         <!-- Build plugins. Every one is approved under the dependency gate (CLAUDE.md); the lifecycle's own
              (clean, resources, jar, install, deploy) are pinned to the versions Maven 3.9.16 binds, so
@@ -68,6 +72,7 @@
         <javadoc.plugin.version>3.12.0</javadoc.plugin.version>
         <enforcer.plugin.version>3.6.3</enforcer.plugin.version>
         <jacoco.plugin.version>0.8.15</jacoco.plugin.version>
+        <shade.plugin.version>3.6.2</shade.plugin.version>
     </properties>
 
     <dependencyManagement>
@@ -152,13 +157,19 @@
                     <artifactId>jacoco-maven-plugin</artifactId>
                     <version>${jacoco.plugin.version}</version>
                 </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-shade-plugin</artifactId>
+                    <version>${shade.plugin.version}</version>
+                </plugin>
             </plugins>
         </pluginManagement>
 
         <plugins>
             <!-- The build's own preconditions, and the zero-dependency rule: nothing but Falcon's own modules,
                  and JUnit 5 (with the jars it brings) for tests. A new dependency fails here until it is
-                 approved and added to the includes. The s3 module adds the AWS SDK to them, for itself. -->
+                 approved and added to the includes. The s3 module adds the AWS SDK to them, for itself, and the
+                 cli module JCommander and the SDK. -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-enforcer-plugin</artifactId>

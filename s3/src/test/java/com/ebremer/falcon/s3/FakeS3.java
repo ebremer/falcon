@@ -46,16 +46,16 @@ import javax.crypto.spec.SecretKeySpec;
  *       another region ({@code 301}), {@code 503 SlowDown}.</li>
  * </ul>
  */
-final class FakeS3 implements AutoCloseable {
+public final class FakeS3 implements AutoCloseable {
 
-    static final String ACCESS_KEY = "AKIDEXAMPLE";
-    static final String SECRET = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
+    public static final String ACCESS_KEY = "AKIDEXAMPLE";
+    public static final String SECRET = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
 
     private static final Comparator<String> S3_ORDER = (a, b) -> Arrays.compareUnsigned(
             a.getBytes(StandardCharsets.UTF_8), b.getBytes(StandardCharsets.UTF_8));
 
     final String bucket;
-    final ConcurrentSkipListMap<String, byte[]> objects = new ConcurrentSkipListMap<>(S3_ORDER);
+    public final ConcurrentSkipListMap<String, byte[]> objects = new ConcurrentSkipListMap<>(S3_ORDER);
     final List<String> requests = new CopyOnWriteArrayList<>();     // "METHOD rawPath?rawQuery [range]"
     final List<String> authorizations = new CopyOnWriteArrayList<>(); // the Authorization header, or "-"
     final List<String> refusals = new CopyOnWriteArrayList<>();     // why a signature was refused
@@ -64,7 +64,7 @@ final class FakeS3 implements AutoCloseable {
 
     volatile String region = "us-east-1";
     volatile String sessionToken;          // if set, a signed request must carry and sign it
-    volatile boolean allowAnonymous;       // reads without a signature are served
+    public volatile boolean allowAnonymous;       // reads without a signature are served
     volatile int absentStatus = 404;
     volatile int pageSize = 1000;
     volatile boolean encodeKeys = true;    // honour encoding-type=url
@@ -73,7 +73,7 @@ final class FakeS3 implements AutoCloseable {
 
     private final HttpServer server;
 
-    FakeS3(String bucket) throws IOException {
+    public FakeS3(String bucket) throws IOException {
         this.bucket = bucket;
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/", this::handle);
@@ -82,7 +82,7 @@ final class FakeS3 implements AutoCloseable {
     }
 
     /** The endpoint to build a client with ({@code S3ClientBuilder.endpointOverride}). */
-    String endpoint() {
+    public String endpoint() {
         return "http://127.0.0.1:" + server.getAddress().getPort();
     }
 

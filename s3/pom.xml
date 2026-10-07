@@ -94,6 +94,20 @@
                     </execution>
                 </executions>
             </plugin>
+            <!-- The tests' FakeS3, in a test jar beside the module's jar: the cli module's tests send the command
+                 to it. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>test-jar</id>
+                        <goals>
+                            <goal>test-jar</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
             <!-- The tests' FakeS3 uses the JDK's com.sun.net.httpserver, as zarr's HTTP tests do: the test compile
                  patches the tests into the module, which must then read jdk.httpserver; the tests run on the
                  class path (see the parent POM). -->

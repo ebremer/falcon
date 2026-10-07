@@ -1,0 +1,205 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.ebremer</groupId>
+        <artifactId>falcon</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>cli</artifactId>
+    <packaging>jar</packaging>
+
+    <name>Falcon CLI</name>
+    <description>The falcon command: lists, describes, and dumps HDF5 files and Zarr stores, converts between
+        the two formats, and copies and consolidates Zarr, from local files, HTTP, and Amazon S3. Built as one
+        runnable jar, target/falcon.jar.</description>
+
+    <dependencies>
+        <!-- The command line's parser: JCommander, approved by Erich on 2026-10-07 for this module (CLAUDE.md).
+             It brings no other library. -->
+        <dependency>
+            <groupId>org.jcommander</groupId>
+            <artifactId>jcommander</artifactId>
+            <version>${jcommander.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.ebremer</groupId>
+            <artifactId>hdf5</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.ebremer</groupId>
+            <artifactId>zarr</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <!-- s3:// sources and targets, through the s3 module and the AWS SDK it brings (approved for this
+             module too, 2026-10-07). -->
+        <dependency>
+            <groupId>com.ebremer</groupId>
+            <artifactId>s3</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <!-- The SDK logs through SLF4J 1.7, which the SDK brings; this module binds it to a logger that drops
+             everything (org.slf4j.impl.StaticLoggerBinder), so the command prints no SLF4J notice. -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+            <version>1.7.36</version>
+        </dependency>
+        <!-- Test only. -->
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- The s3 module's FakeS3, an in-process S3 the tests send the command to. -->
+        <dependency>
+            <groupId>com.ebremer</groupId>
+            <artifactId>s3</artifactId>
+            <version>${project.version}</version>
+            <type>test-jar</type>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <resources>
+            <!-- version.properties carries the project's version into the command's -version. -->
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>true</filtering>
+                <includes>
+                    <include>**/version.properties</include>
+                </includes>
+            </resource>
+            <!-- META-INF/THIRD-PARTY.txt: the libraries falcon.jar bundles, and their licenses. -->
+            <resource>
+                <directory>src/main/resources</directory>
+                <excludes>
+                    <exclude>**/version.properties</exclude>
+                </excludes>
+            </resource>
+            <!-- Falcon's own license, as META-INF/LICENSE: the Apache License the bundled libraries share. -->
+            <resource>
+                <directory>..</directory>
+                <targetPath>META-INF</targetPath>
+                <includes>
+                    <include>LICENSE</include>
+                </includes>
+            </resource>
+        </resources>
+        <plugins>
+            <!-- This module may depend on JCommander, and on the AWS SDK through the s3 module: the parent's ban
+                 admits them here, at their approved versions. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-enforcer-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>enforce</id>
+                        <configuration>
+                            <rules>
+                                <bannedDependencies>
+                                    <includes combine.children="append">
+                                        <include>org.jcommander:jcommander:${jcommander.version}</include>
+                                        <include>software.amazon.awssdk:*:${aws.sdk.version}</include>
+                                        <include>software.amazon.eventstream:eventstream:1.0.1</include>
+                                        <include>org.reactivestreams:reactive-streams:1.0.4</include>
+                                        <include>org.slf4j:slf4j-api:1.7.36</include>
+                                    </includes>
+                                </bannedDependencies>
+                            </rules>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>default-compile</id>
+                        <configuration>
+                            <showWarnings>true</showWarnings>
+                            <compilerArgs>
+                                <arg>-Xdoclint:all/protected</arg>
+                                <arg>-Xdoclint/package:com.ebremer.falcon.cli</arg>
+                                <arg>-Werror</arg>
+                            </compilerArgs>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <!-- The Javadoc jar documents the command's entry point, not the SLF4J binding. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-javadoc-plugin</artifactId>
+                <configuration>
+                    <excludePackageNames>org.slf4j.impl</excludePackageNames>
+                </configuration>
+            </plugin>
+            <!-- target/falcon.jar: the command and everything it needs in one jar, run with java -jar. Approved by
+                 Erich on 2026-10-07 (build scope). The jar runs on the class path, so the modules' descriptors
+                 are left out; the SDK's service files are merged, as are the bundled libraries' notices. Their
+                 license files (the Apache License, in each of 30 jars) give way to Falcon's META-INF/LICENSE and
+                 META-INF/THIRD-PARTY.txt, which names each library and its license. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>falcon-jar</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                        <configuration>
+                            <outputFile>${project.build.directory}/falcon.jar</outputFile>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <filters>
+                                <filter>
+                                    <artifact>*:*</artifact>
+                                    <excludes>
+                                        <exclude>module-info.class</exclude>
+                                        <exclude>META-INF/versions/*/module-info.class</exclude>
+                                        <exclude>META-INF/*.SF</exclude>
+                                        <exclude>META-INF/*.DSA</exclude>
+                                        <exclude>META-INF/*.RSA</exclude>
+                                        <exclude>META-INF/MANIFEST.MF</exclude>
+                                    </excludes>
+                                </filter>
+                                <filter>
+                                    <artifact>software.amazon.awssdk:*</artifact>
+                                    <excludes>
+                                        <exclude>META-INF/LICENSE</exclude>
+                                        <exclude>META-INF/LICENSE.txt</exclude>
+                                    </excludes>
+                                </filter>
+                                <filter>
+                                    <artifact>org.jcommander:jcommander</artifact>
+                                    <excludes>
+                                        <exclude>META-INF/license.txt</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
+                            <transformers>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                                    <mainClass>com.ebremer.falcon.cli.Falcon</mainClass>
+                                </transformer>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ApacheNoticeResourceTransformer">
+                                    <addHeader>false</addHeader>
+                                </transformer>
+                            </transformers>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

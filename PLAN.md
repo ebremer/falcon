@@ -3,7 +3,8 @@
 **Falcon** is a multi-module Maven umbrella for **pure-JDK 25, zero-runtime-dependency** readers and
 writers of scientific-data formats. Each format is a JPMS module under `com.ebremer.falcon.*`, exporting
 only its public API package, and depends on nothing beyond `java.base` (JUnit 5 is test-scope only). The
-optional `s3` module, which reads both formats from Amazon S3, is the one with dependencies: the AWS SDK.
+optional `s3` module, which reads both formats from Amazon S3, has one dependency, the AWS SDK; the `cli`
+module, the `falcon` command, adds JCommander.
 
 This document is the **program-level roadmap**. Each module carries its own detailed plan and remaining-
 work list:
@@ -14,6 +15,7 @@ work list:
 | **2** | `zarr` | `com.ebremer.falcon.zarr` | Read Zarr **v2 + v3**, write **v3** | **Built** — v3 core, every common codec, verified vs zarr-python / libzstd / c-blosc | [`zarr/PLAN.md`](zarr/PLAN.md) | [`zarr/TODO.md`](zarr/TODO.md) |
 | — | `core` | `com.ebremer.falcon.core` | Compression codecs both formats share: zstd, Blosc (BloscLZ, Snappy, shuffles) and Blosc2 frames, LZ4, LZF, bitshuffle, bzip2, ZFP, SZ, zlib, byte shuffle; and the Fletcher-32 and lookup3 checksums | **Built** (2026-10-05) — exported only to `hdf5` and `zarr` | [`zarr/PLAN.md`](zarr/PLAN.md) §10 | the module TODOs |
 | — | `s3` | `com.ebremer.falcon.s3` | Amazon S3 and S3-compatible storage for both formats, over the AWS SDK for Java 2.x: a Zarr `Store` (read, list, write) and an HDF5 `RangeReader` (read) | **Built** (2026-10-07) — replaced the `zarr` module's hand-written `S3Store` | [`s3/USER_GUIDE.md`](s3/USER_GUIDE.md) | — |
+| — | `cli` | `com.ebremer.falcon.cli` | The `falcon` command (JCommander), built as one runnable jar: `ls`, `info`, `dump`, `convert` (HDF5 to Zarr and back), `copy` and `consolidate` (Zarr); local files, ZIP, HTTP, and S3 | **Built** (2026-10-07) — checked against h5py 3.16 and zarr-python 3.4 (`tools/fixtures/check_cli.py`) | [`cli/USER_GUIDE.md`](cli/USER_GUIDE.md) | the guide's last section |
 
 ## Repository & module structure
 
@@ -32,14 +34,19 @@ falcon/                              parent aggregator POM (packaging: pom) — 
 │   ├── pom.xml                      parent = com.ebremer:falcon
 │   ├── PLAN.md  TODO.md  USER_GUIDE.md  BENCHMARKS.md
 │   └── src/{main,test}/java/…
-└── s3/                              Amazon S3 for both formats — com.ebremer.falcon.s3 (AWS SDK)
-    ├── pom.xml                      parent = com.ebremer:falcon; the formats are optional dependencies
+├── s3/                              Amazon S3 for both formats — com.ebremer.falcon.s3 (AWS SDK)
+│   ├── pom.xml                      parent = com.ebremer:falcon; the formats are optional dependencies
+│   ├── USER_GUIDE.md
+│   └── src/{main,test}/java/…
+└── cli/                             the falcon command — com.ebremer.falcon.cli (JCommander)
+    ├── pom.xml                      parent = com.ebremer:falcon; shades target/falcon.jar
     ├── USER_GUIDE.md
     └── src/{main,test}/java/…
 ```
 
-The root `pom.xml` is a `pom`-packaging aggregator holding only shared configuration; each module is a
-`jar` with its own `module-info.java`.
+The root `pom.xml` is a `pom`-packaging aggregator holding only shared configuration; each library module
+is a `jar` with its own `module-info.java`. The `cli` module is an application: it has no descriptor (its
+jar runs on the class path), and JCommander names no module.
 
 ## Shared principles (both modules)
 
@@ -47,7 +54,8 @@ Locked at review and applied uniformly across the reactor:
 
 1. **Pure JDK, zero runtime dependencies.** Every shipped artifact depends on nothing beyond `java.base`
    (and Falcon's own `core`, which depends on nothing else), but for the optional `s3` module, which uses
-   the AWS SDK (approved 2026-10-07) so that the format modules need not. Compression the JDK lacks is implemented
+   the AWS SDK (approved 2026-10-07) so that the format modules need not, and the `cli` module, which adds
+   JCommander (approved 2026-10-07). Compression the JDK lacks is implemented
    from scratch (HDF5 szip as CCSDS 121.0 extended-Rice; zstd per RFC 8878, the blosc container, LZ4,
    LZF, bitshuffle, bzip2, ZFP, and SZ in `core`), never by wrapping native code. JUnit 5 is test-scope only.
 2. **Approval gate for dependencies.** Adding any library outside `java.base` — any module, any scope —

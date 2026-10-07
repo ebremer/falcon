@@ -7,7 +7,8 @@ Falcon S3 reads Falcon's formats from **Amazon S3** and S3-compatible object sto
 - **`S3RangeReader`**, an HDF5 `RangeReader` that reads an object a byte range at a time, so opening a
   large file fetches only the metadata and the chunks a read needs.
 
-Everything below is the public API in `com.ebremer.falcon.s3`.
+Everything below is the public API in `com.ebremer.falcon.s3`. From the shell, the `falcon` command (the
+`cli` module, see [`../cli/USER_GUIDE.md`](../cli/USER_GUIDE.md)) reads and writes `s3://` URLs through them.
 
 - [Dependencies](#dependencies)
 - [The client](#the-client)
@@ -18,8 +19,8 @@ Everything below is the public API in `com.ebremer.falcon.s3`.
 
 ## Dependencies
 
-This is Falcon's one module with runtime dependencies beyond `java.base`; `core`, `hdf5`, and `zarr`
-have none, and S3 lives here so that they keep none. It brings:
+This is Falcon's one library module with runtime dependencies beyond `java.base` (the `cli` application
+bundles it); `core`, `hdf5`, and `zarr` have none, and S3 lives here so that they keep none. It brings:
 
 | Library | Version | License |
 |---|---|---|

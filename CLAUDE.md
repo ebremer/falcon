@@ -12,11 +12,14 @@ writers of scientific-data formats:
   (zstd, Blosc, LZ4, LZF, bitshuffle, bzip2, ZFP, SZ, zlib, byte shuffle) and their shared checksums
   (Fletcher-32, lookup3), exported only to Falcon's own modules.
 - **`s3`** module (`com.ebremer.falcon.s3`) — Amazon S3 for both formats over the AWS SDK for Java 2.x:
-  a Zarr `Store` and an HDF5 `RangeReader`. Optional, and the **only** module with runtime dependencies
-  (see the approval gate below); the format modules are optional dependencies of it.
+  a Zarr `Store` and an HDF5 `RangeReader`. Optional; with `cli`, the **only** modules with runtime
+  dependencies (see the approval gate below); the format modules are optional dependencies of it.
+- **`cli`** module (`com.ebremer.falcon.cli`) — the `falcon` command (JCommander): `ls`, `info`, `dump`,
+  `convert` (HDF5 to Zarr and back), `copy`, `consolidate`; built by the shade plugin into one runnable jar,
+  `cli/target/falcon.jar`. An application, so it has no `module-info.java`.
 
 The full roadmap is in [`PLAN.md`](PLAN.md); each format module has its own `PLAN.md`, `TODO.md`, and
-`USER_GUIDE.md`, and `s3` a `USER_GUIDE.md`.
+`USER_GUIDE.md`, and `s3` and `cli` a `USER_GUIDE.md` each.
 
 ## Commit policy (IMPORTANT)
 
@@ -42,11 +45,12 @@ mvn verify                 # build/test the whole reactor (parent + all modules)
 mvn -pl hdf5 -am test      # test the hdf5 module (-am also builds core, which it depends on)
 mvn -pl hdf5 -am compile   # compile the hdf5 module
 mvn -pl s3 -am test        # test the s3 module (-am builds core, hdf5, and zarr too)
+mvn -pl cli -am package    # build the falcon command, cli/target/falcon.jar (and run its tests)
 ```
 
 - **JDK 25 required.** The parent POM sets `<maven.compiler.release>25</maven.compiler.release>`.
 - Each format module is a **JPMS module** (e.g. `module com.ebremer.falcon.hdf5`), exporting only its
-  public API packages; format-level packages stay encapsulated.
+  public API packages; format-level packages stay encapsulated. The `cli` application is not a module.
 - The root `pom.xml` is a `pom`-packaging aggregator: shared versions live in its `<properties>`,
   `<dependencyManagement>` (JUnit BOM), and `<pluginManagement>`.
 
@@ -64,10 +68,14 @@ mvn -pl s3 -am test        # test the s3 module (-am builds core, hdf5, and zarr
   `org.reactivestreams:reactive-streams` 1.0.4, `org.slf4j:slf4j-api` 1.7.36, and
   `software.amazon.eventstream:eventstream` 1.0.1. The s3 module's enforcer rule admits exactly these; an
   SDK upgrade that brings another library needs approval again.
+  Approved since (2026-10-07), **in the `cli` module only**: `org.jcommander:jcommander` 3.0 (runtime scope;
+  it brings no other library), the AWS SDK and its three libraries above (through the `s3` module, at the
+  same versions), and `maven-shade-plugin` 3.6.2 (build scope), which builds `falcon.jar`. The cli module's
+  enforcer rule admits exactly these.
 - **Pure JDK, zero runtime dependencies.** Every shipped artifact must depend on nothing beyond
-  `java.base`, except the optional `s3` module (the approved AWS SDK above). JUnit 5 is allowed but
-  **test scope only**. Do not add runtime dependencies — including compression libraries — and keep the
-  SDK out of `core`, `hdf5`, and `zarr`.
+  `java.base`, except the optional `s3` and `cli` modules (the approved AWS SDK and JCommander above).
+  JUnit 5 is allowed but **test scope only**. Do not add runtime dependencies — including compression
+  libraries — and keep the SDK and JCommander out of `core`, `hdf5`, and `zarr`.
   - `deflate` uses `java.util.zip`.
   - **`szip` is IN scope** and must be implemented from scratch in pure Java as CCSDS 121.0
     extended-Rice / adaptive entropy coding (libaec-compatible), **not** by wrapping native code.
