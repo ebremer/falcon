@@ -1,0 +1,30 @@
+# The sidebar, in order. An entry with "section" is a heading; the others link to pages.
+- section: Start
+- title: Home
+  url: /
+- title: Getting started
+  url: /getting-started.html
+
+- section: How-to guides
+- title: HDF5
+  url: /hdf5.html
+- title: Zarr
+  url: /zarr.html
+- title: OME-Zarr
+  url: /ome-zarr.html
+- title: S3 and HTTP
+  url: /cloud.html
+- title: The falcon command
+  url: /cli.html
+
+- section: Reference
+- title: API at a glance
+  url: /reference.html
+- title: Troubleshooting
+  url: /troubleshooting.html
+
+- section: Project
+- title: Testing and conformance
+  url: /testing.html
+- title: Working on Falcon
+  url: /development.html

@@ -20,6 +20,9 @@ module has its own plan, remaining-work list, and user guide:
 [zarr](zarr/PLAN.md) ([TODO](zarr/TODO.md), [guide](zarr/USER_GUIDE.md)) ·
 [ome](ome/USER_GUIDE.md) (guide) · [s3](s3/USER_GUIDE.md) (guide) · [cli](cli/USER_GUIDE.md) (guide).
 
+**Documentation site:** how-to guides for every module, the command, and testing, in [`docs/`](docs/index.md),
+published by GitHub Pages at <https://ebremer.github.io/falcon/> (see [`docs/README.md`](docs/README.md)).
+
 ## Requirements
 
 - JDK 25+

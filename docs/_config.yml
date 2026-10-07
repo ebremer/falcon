@@ -1,0 +1,30 @@
+# The Falcon documentation site, built by GitHub Pages from this folder (see README.md).
+title: Falcon
+description: Pure-Java readers and writers for HDF5, Zarr, and OME-Zarr, with no dependencies beyond the JDK.
+repository: ebremer/falcon
+url: https://ebremer.github.io
+baseurl: /falcon
+
+markdown: kramdown
+kramdown:
+  input: GFM
+  hard_wrap: false
+  syntax_highlighter: rouge
+highlighter: rouge
+
+# GitHub Pages runs this plugin by default; naming it keeps a local build the same. It turns links to .md
+# files into links to their pages, so the same links work on github.com and on the site.
+plugins:
+  - jekyll-relative-links
+relative_links:
+  enabled: true
+  collections: false
+
+exclude:
+  - README.md
+
+defaults:
+  - scope:
+      path: ""
+    values:
+      layout: default
