@@ -50,3 +50,6 @@ Thumbs.db
 # Falcon: local scratch HDF5 files produced by ad-hoc runs (checked-in fixtures live in src/test/resources)
 /scratch/
 *.h5.tmp
+
+# Project conventions for Claude Code: kept locally, not in the repository
+/CLAUDE.md
