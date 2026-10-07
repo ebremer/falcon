@@ -1,0 +1,60 @@
+{
+  "attributes": {
+    "ome": {
+      "version": "0.6",
+      "scene": {
+        "coordinateSystems": [
+          {
+            "name": "world",
+            "axes": [
+              {
+                "name": "y",
+                "type": "space",
+                "unit": "micrometer"
+              },
+              {
+                "name": "x",
+                "type": "space",
+                "unit": "micrometer"
+              }
+            ]
+          }
+        ],
+        "coordinateTransformations": [
+          {
+            "type": "translation",
+            "translation": [
+              0,
+              0
+            ],
+            "name": "tile_0 to world",
+            "input": {
+              "path": "tile_0",
+              "name": "physical"
+            },
+            "output": {
+              "name": "world"
+            }
+          },
+          {
+            "type": "translation",
+            "translation": [
+              0,
+              10
+            ],
+            "name": "tile_1 to world",
+            "input": {
+              "path": "tile_1",
+              "name": "physical"
+            },
+            "output": {
+              "name": "world"
+            }
+          }
+        ]
+      }
+    }
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

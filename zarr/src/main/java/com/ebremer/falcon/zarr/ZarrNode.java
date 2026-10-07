@@ -46,6 +46,14 @@ public abstract sealed class ZarrNode permits ZarrGroup, ZarrArray {
         return name;
     }
 
+    /**
+     * {@return the store this node is in, from which {@link Zarr#open(Store, String)} opens the hierarchy's
+     * other nodes, such as one a relative path such as {@code ../../} names}
+     */
+    public Store store() {
+        return store;
+    }
+
     /** {@return whether this node is a group} */
     public abstract boolean isGroup();
 

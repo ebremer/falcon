@@ -37,6 +37,12 @@
             <artifactId>zarr</artifactId>
             <version>${project.version}</version>
         </dependency>
+        <!-- OME-Zarr: info's description of images, plates, and scenes, and the ome commands. -->
+        <dependency>
+            <groupId>com.ebremer</groupId>
+            <artifactId>ome</artifactId>
+            <version>${project.version}</version>
+        </dependency>
         <!-- s3:// sources and targets, through the s3 module and the AWS SDK it brings (approved for this
              module too, 2026-10-07). -->
         <dependency>

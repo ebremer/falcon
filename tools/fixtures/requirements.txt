@@ -36,3 +36,8 @@ cast-value-rs==0.4.2  # zarr-python's backend for the cast_value codec: gen_cast
                       # gen_zarr_cast_value_fixtures.py, and check_zarr_writer.py's cast_* arrays
 zfpy==1.0.1           # numcodecs.ZFPY (gen_zarr_bz2_zfpy_fixtures.py) and gen_zfp_encoder_vectors.py; 1.0.1 is the
                       # first for NumPy 2
+#
+# OME-Zarr fixtures and interop checks (gen_ome_fixtures.py, check_ome.py; check_ome.py also needs h5py, above).
+# tools/conformance/run_ome_conformance.py needs only Python 3.11+, git, and java.
+ome-zarr==0.21.0      # ome-zarr-py, the reference reader and writer: writes the 0.4 and 0.5 fixtures, reads Falcon's
+ome-zarr-models==1.8.1  # the community's validator (pydantic): validates what Falcon writes, in 0.4, 0.5, and 0.6

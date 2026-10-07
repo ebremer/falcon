@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<OME xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06"><Image ID="Image:0" Name="first"><Pixels ID="Pixels:0" DimensionOrder="XYZCT" Type="uint8" SizeX="20" SizeY="16" SizeZ="1" SizeC="1" SizeT="1"><MetadataOnly/></Pixels></Image><Image ID="Image:1" Name="second"><Pixels ID="Pixels:1" DimensionOrder="XYZCT" Type="uint8" SizeX="10" SizeY="8" SizeZ="1" SizeC="1" SizeT="1"><MetadataOnly/></Pixels></Image></OME>

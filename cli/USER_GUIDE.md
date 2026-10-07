@@ -12,6 +12,8 @@ falcon dump scan.h5 /images/frame --slice 0,:4,:4      # values, numpy's way
 falcon convert scan.h5 scan.zarr                       # HDF5 to Zarr v3 (and back the other way)
 falcon copy s3://bucket/scan.zarr scan.zarr.zip        # a Zarr store, byte for byte
 falcon consolidate scan.zarr                           # consolidated metadata
+falcon ome pyramid scan.h5 /images/frame slide.ome.zarr  # an OME-Zarr image pyramid
+falcon ome validate slide.ome.zarr                     # check OME-Zarr against its specification
 ```
 
 - [Building and running](#building-and-running)
@@ -21,6 +23,7 @@ falcon consolidate scan.zarr                           # consolidated metadata
 - [convert](#convert)
 - [copy and consolidate](#copy-and-consolidate)
 - [conformance](#conformance)
+- [OME-Zarr: ome validate and ome pyramid](#ome-zarr-ome-validate-and-ome-pyramid)
 - [S3 and HTTP options](#s3-and-http-options)
 - [Errors and exit status](#errors-and-exit-status)
 - [What is and isn't supported](#what-is-and-isnt-supported)
@@ -104,6 +107,29 @@ $ falcon info scan.zarr /run/temperature
 Types are numpy's names where numpy has one (`float32`, `uint16, big-endian`, `datetime64[D]`), else
 HDF5's or Zarr's (`string(5 bytes, ascii)`, `vlen string (utf-8)`, `compound {id: int32, v: float64}`,
 `null_terminated_bytes[2]`).
+
+A Zarr group with [OME-Zarr](#ome-zarr-ome-validate-and-ome-pyramid) metadata says what it is in `ls`
+(`OME-Zarr 0.5 image`, `label image`, `plate`, `well`, `scene`, ...), and `info` describes it: an image's axes,
+each level's shape, type, pixel size, and offset, its channels, and its label images; a plate's rows, columns,
+wells, and acquisitions; a scene's coordinate systems and transformations. Over HTTP, where a store cannot
+list its keys, `info` says the number of members is unknown and describes the rest.
+
+```
+$ falcon info https://uk1s3.embassy.ebi.ac.uk/idr/zarr/v0.4/idr0062A/6001240.zarr
+/
+  object        group (Zarr v2)
+  members       unknown (the store cannot list its keys)
+  consolidated  no
+  OME-Zarr      0.4 image
+  axes          c (channel), z (space, micrometer), y (space, micrometer), x (space, micrometer)
+  levels        0: (2, 236, 275, 271) uint16; scale 1, 0.5002025531914894, 0.3603981534640209, 0.3603981534640209
+                1: (2, 236, 137, 135) uint16; scale 1, 0.5002025531914894, 0.7207963069280418, 0.7207963069280418
+                2: (2, 236, 68, 67) uint16; scale 1, 0.5002025531914894, 1.4415926138560835, 1.4415926138560835
+  channels      LaminB1 #0000FF, window 0 to 1500
+                Dapi #FFFF00, window 0 to 1500
+  labels        0
+  ...
+```
 
 ## dump
 
@@ -262,6 +288,67 @@ python -I tools/conformance/check_values.py  # and compares every value with zar
 
 The suite checks only the exit status; `check_values.py` reads each of its arrays with zarr-python too.
 
+## OME-Zarr: ome validate and ome pyramid
+
+[OME-Zarr](https://ngff.openmicroscopy.org/) is Zarr with the bioimaging community's metadata: images as
+resolution pyramids, label images, plates, and (0.6) scenes. Falcon's `ome` module reads, checks, and writes
+versions 0.4, 0.5, and 0.6 ([`../ome/USER_GUIDE.md`](../ome/USER_GUIDE.md)).
+
+`ome validate <store> [<path>]` checks an OME-Zarr group, and the hierarchy below it, against its version's
+specification: everything its JSON schemas check, and the rules they cannot (axis order, a well's path naming
+its row and column, a rotation that is a rotation, the levels' arrays matching the axes, a label image with as
+many levels as its image, ...). It prints each error (a MUST broken) and warning (a SHOULD), with where it is,
+and exits with 0 if there are no errors, 1 if there are.
+
+```
+$ falcon ome validate https://uk1s3.embassy.ebi.ac.uk/idr/zarr/v0.4/idr0062A/6001240.zarr --errors-only
+error: labels/0: the label image has 4 levels but its image has 3: they must have the same number
+https://uk1s3.embassy.ebi.ac.uk/idr/zarr/v0.4/idr0062A/6001240.zarr: invalid, 1 error and 5 warnings
+```
+
+| Option | |
+|---|---|
+| `--strict` | also require the recommended fields the specification's strict schemas require (an image's name, type, and metadata; a label image's colors; a plate's name; ...) |
+| `--metadata-only` | check the group's attributes alone, not the arrays and groups they refer to: quick over HTTP |
+| `--attributes FILE` | check a JSON file of one group's attributes, instead of a store |
+| `--errors-only` | list no warnings |
+| `--json` | print `{"valid": ..., "message": ...}` and exit with 0 either way: the specification's conformance tool's interface |
+
+The specification's own conformance tests run against it in CI (`.github/workflows/ome-conformance.yml`) and
+locally with `python tools/conformance/run_ome_conformance.py`, which fetches them; the ome guide lists the
+results.
+
+`ome pyramid <input> [<path>] <output>` writes an OME-Zarr image from an array (an HDF5 dataset, or a Zarr array,
+of booleans, integers, or floats), building its smaller levels: each the mean of 2x2 blocks of the one before,
+in y and x, until they fit 256 pixels. The output is a directory, a `.zip`, or an `s3://` prefix.
+
+```
+$ falcon ome pyramid scan.h5 /images/frame slide.ome.zarr --pixel-size 0.25,0.25 --channel-names DAPI,GFP
+  level 0: (2, 20000, 30000)
+  ...
+  level 7: (2, 157, 235)
+Wrote OME-Zarr 0.5 image 'frame', 8 levels, to slide.ome.zarr
+```
+
+| Option | Default | |
+|---|---|---|
+| `--ome-version` | 0.5 | 0.4 (Zarr v2), 0.5, or 0.6 |
+| `--axes` | the Zarr array's dimension names, else `yx`, `cyx`, `czyx`, or `tczyx` by rank | the axes' names in the array's order, as letters or joined by commas; t is time, c channel, z, y, x space |
+| `--pixel-size`, `--unit`, `--time-unit` | 1; micrometer with a pixel size | the full-resolution pixel size, for each axis or each space axis |
+| `--origin` | 0 | the first pixel's center |
+| `--levels`, `--smallest` | until the downsampled axes fit 256 | how many levels |
+| `--method` | mean | mean, nearest (each block's first pixel), or mode (its most frequent value) |
+| `--downsample`, `--factor` | y and x, 2 | the axes that shrink, and by how much |
+| `--chunks`, `--shards` | 512 in y and x, 1 elsewhere; no shards | shards are 0.5 and 0.6 only |
+| `-c`, `--compression` | zstd | none, gzip[:level], zstd[:level], blosc[:cname[:clevel[:shuffle]]], or bz2[:level] |
+| `--name` | the array's name | the image's name |
+| `--channel-names`, `--channel-colors` | none | written as `omero` metadata, each channel's window the data type's range |
+| `--label NAME` | | write the input as label image NAME of the image at `<output>`, with its levels, version, and axes |
+| `--overwrite`, `-j`, `-q` | | replace the output (or the label image); threads; no level list |
+
+The image's axes must be in OME-Zarr's order (time, channel, then space): an array stored y, x, c (as RGB
+images often are) must be transposed first.
+
 ## S3 and HTTP options
 
 Every command takes these:
@@ -289,7 +376,9 @@ summary counts them; the command still succeeds.
 
 ## What is and isn't supported
 
-**Checked:** `tools/fixtures/check_cli.py` converts files h5py 3.16 and zarr-python 3.4 write, in both
+**Checked:** `tools/fixtures/check_ome.py` writes OME-Zarr images with `ome pyramid` in each version and reads
+them back with ome-zarr-models and ome-zarr-py (see the ome guide). `tools/fixtures/check_cli.py` converts files
+h5py 3.16 and zarr-python 3.4 write, in both
 directions and through Zarr v2, v3, and ZIP, and reads every result back with them: values, types,
 attributes, and fill values agree. The Zarr community's conformance tests pass (see
 [conformance](#conformance)), with the values zarr-python reads.

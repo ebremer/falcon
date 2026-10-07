@@ -1,0 +1,39 @@
+{
+  "plate": {
+    "columns": [
+      {
+        "name": "1"
+      },
+      {
+        "name": "2"
+      }
+    ],
+    "rows": [
+      {
+        "name": "A"
+      }
+    ],
+    "wells": [
+      {
+        "path": "A/1",
+        "rowIndex": 0,
+        "columnIndex": 0
+      },
+      {
+        "path": "A/2",
+        "rowIndex": 0,
+        "columnIndex": 1
+      }
+    ],
+    "name": "screen",
+    "field_count": 1,
+    "acquisitions": [
+      {
+        "id": 0,
+        "name": "run",
+        "maximumfieldcount": 1
+      }
+    ],
+    "version": "0.4"
+  }
+}

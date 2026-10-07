@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.ebremer</groupId>
+        <artifactId>falcon</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>ome</artifactId>
+    <packaging>jar</packaging>
+
+    <name>Falcon OME-Zarr</name>
+    <description>OME-Zarr (OME-NGFF) 0.4, 0.5, and 0.6 on Falcon's Zarr module: multiscale images, labels,
+        plates and wells, bioformats2raw collections, and scenes, read, validated, and written, with the
+        image pyramids built in pure Java.</description>
+
+    <dependencies>
+        <!-- OME-Zarr is Zarr with agreed attributes: the zarr module reads and writes it. Like it, this module
+             needs nothing beyond java.base. -->
+        <dependency>
+            <groupId>com.ebremer</groupId>
+            <artifactId>zarr</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <!-- Test only. -->
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!-- The public API's Javadoc stays complete: javac's doclint checks every public and protected
+                 member of the exported packages, and a missing or malformed comment fails the build. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>default-compile</id>
+                        <configuration>
+                            <showWarnings>true</showWarnings>
+                            <compilerArgs>
+                                <arg>-Xdoclint:all/protected</arg>
+                                <arg>-Xdoclint/package:com.ebremer.falcon.ome,com.ebremer.falcon.ome.metadata</arg>
+                                <arg>-Werror</arg>
+                            </compilerArgs>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

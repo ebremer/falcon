@@ -10,14 +10,15 @@ parses its command line with JCommander.
 | [`hdf5`](hdf5) | `com.ebremer.falcon.hdf5` | HDF5 reader/writer implementing the [HDF5 File Format Specification v4.0](https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html) (HDF5 2.0) | Read-complete, write-broad; pre-1.0 |
 | [`zarr`](zarr) | `com.ebremer.falcon.zarr` | [Zarr](https://zarr.dev/) reader/writer (v3 core; v2 read) | Built |
 | [`core`](core) | `com.ebremer.falcon.core` | Pure-Java compression codecs both formats share (zstd, Blosc and Blosc2, LZ4, LZF, bitshuffle, bzip2, ZFP, SZ, zlib, byte shuffle) and their checksums (Fletcher-32, lookup3); exported only to Falcon's modules | Built |
+| [`ome`](ome) | `com.ebremer.falcon.ome` | [OME-Zarr](https://ngff.openmicroscopy.org/) 0.4, 0.5, and 0.6 on the Zarr module: multiscale images, labels, plates, collections, and scenes, read, validated against the specification, and written with their pyramids | Built |
 | [`s3`](s3) | `com.ebremer.falcon.s3` | Amazon S3 (and S3-compatible storage) for both formats, over the AWS SDK for Java 2.x: a Zarr store and an HDF5 range reader. Optional, and with the `cli`, Falcon's only modules with dependencies | Built |
-| [`cli`](cli) | `com.ebremer.falcon.cli` | The `falcon` command, one runnable jar: `ls`, `info`, and `dump` of HDF5 files and Zarr stores, `convert` between them, `copy` and `consolidate` Zarr; local, HTTP, and S3 | Built |
+| [`cli`](cli) | `com.ebremer.falcon.cli` | The `falcon` command, one runnable jar: `ls`, `info`, and `dump` of HDF5 files and Zarr stores, `convert` between them, `copy` and `consolidate` Zarr, `ome validate` and `ome pyramid`; local, HTTP, and S3 | Built |
 
 See **[PLAN.md](PLAN.md)** for the umbrella roadmap and **[CLAUDE.md](CLAUDE.md)** for conventions. Each
 module has its own plan, remaining-work list, and user guide:
 [hdf5](hdf5/PLAN.md) ([TODO](hdf5/TODO.md), [guide](hdf5/USER_GUIDE.md)) ·
 [zarr](zarr/PLAN.md) ([TODO](zarr/TODO.md), [guide](zarr/USER_GUIDE.md)) ·
-[s3](s3/USER_GUIDE.md) (guide) · [cli](cli/USER_GUIDE.md) (guide).
+[ome](ome/USER_GUIDE.md) (guide) · [s3](s3/USER_GUIDE.md) (guide) · [cli](cli/USER_GUIDE.md) (guide).
 
 ## Requirements
 
@@ -31,6 +32,7 @@ mvn verify              # whole reactor (parent + all modules)
 mvn -pl hdf5 -am test   # the HDF5 module (and core, which it depends on)
 mvn -pl zarr -am test   # the Zarr module (and core)
 mvn -pl core test       # just the shared codecs
+mvn -pl ome -am test    # the OME-Zarr module (and zarr and core)
 mvn -pl s3 -am test     # the S3 module (and the formats and core)
 mvn -pl cli -am package # the falcon command: cli/target/falcon.jar
 mvn verify -Pcoverage   # ...with a coverage report per module, in target/site/jacoco/
@@ -144,6 +146,29 @@ S3-compatible storage (Google Cloud Storage, MinIO, R2) through the `s3` module'
 SDK. Full walkthrough in the **[Zarr User Guide](zarr/USER_GUIDE.md)**, and the
 **[S3 User Guide](s3/USER_GUIDE.md)**.
 
+## OME-Zarr
+
+The `ome` module reads, validates, and writes [OME-Zarr](https://ngff.openmicroscopy.org/) 0.4, 0.5, and
+0.6 — images as resolution pyramids, label images, plates, bioformats2raw collections, and scenes — from any
+Zarr store:
+
+```java
+import com.ebremer.falcon.ome.*;
+
+MultiscaleImage image = OmeZarr.open(store).asImage();
+ZarrArray full = image.level(0);                   // the levels are Zarr arrays
+double[] pixel = image.scale(0);                   // the pixel size along each axis
+ValidationReport report = new OmeValidator().validate(store);   // against the specification
+
+// a pyramid, from any array: each level the mean of 2x2 blocks of the one before
+MultiscaleImageWriter.builder(OmeVersion.V0_5, List.of(Axis.channel("c"), Axis.space("y", "micrometer"),
+        Axis.space("x", "micrometer"))).pixelSize(1, 0.25, 0.25).build().write(target, PixelSource.of(array));
+```
+
+The validator passes the specification's own conformance tests, but for test data that breaks rules of
+the specification's text (which ome-zarr-models rejects too); what Falcon writes, ome-zarr-models validates and
+ome-zarr-py reads. Full walkthrough in the **[OME-Zarr User Guide](ome/USER_GUIDE.md)**.
+
 ## The falcon command
 
 The `cli` module builds `falcon.jar`, one runnable jar for the shell:
@@ -153,6 +178,8 @@ java -jar cli/target/falcon.jar ls -r scan.h5                         # the tree
 java -jar cli/target/falcon.jar dump scan.h5 /frames --slice 0,:4,:4  # values, as text, CSV, or JSON
 java -jar cli/target/falcon.jar convert scan.h5 s3://bucket/scan.zarr # HDF5 to Zarr, and Zarr to HDF5
 java -jar cli/target/falcon.jar copy scan.zarr scan.zarr.zip          # Zarr, as it is or re-encoded
+java -jar cli/target/falcon.jar ome pyramid scan.h5 /frames out.ome.zarr # an OME-Zarr image pyramid
+java -jar cli/target/falcon.jar ome validate out.ome.zarr             # check OME-Zarr against its spec
 ```
 
 Sources are local files, directories, and ZIP archives, `http(s)://` URLs, and `s3://` URLs, of either

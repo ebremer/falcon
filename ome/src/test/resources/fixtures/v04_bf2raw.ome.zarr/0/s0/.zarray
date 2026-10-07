@@ -1,0 +1,20 @@
+{
+  "shape": [
+    16,
+    20
+  ],
+  "chunks": [
+    16,
+    20
+  ],
+  "dtype": "|u1",
+  "fill_value": 0,
+  "order": "C",
+  "filters": null,
+  "dimension_separator": "/",
+  "compressor": {
+    "id": "zstd",
+    "level": 0
+  },
+  "zarr_format": 2
+}

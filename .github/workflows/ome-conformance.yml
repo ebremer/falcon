@@ -1,0 +1,35 @@
+name: OME-Zarr conformance tests
+
+# The OME-Zarr specification's own conformance tests -- 0.6's (https://github.com/ome/ngff-spec, through its
+# conformance/ome_zarr_conformance.py) and the 0.4 and 0.5 JSON schema test suites (https://github.com/ome/ngff) --
+# against `java -jar falcon.jar ome validate --json`. tools/conformance/run_ome_conformance.py fetches them at
+# pinned tags, runs them, and fails on any result other than the known errata in the suites' own data.
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  ome-conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build falcon.jar
+        run: mvn -B --no-transfer-progress -pl cli -am package -DskipTests
+
+      - name: Run the conformance tests
+        run: python tools/conformance/run_ome_conformance.py

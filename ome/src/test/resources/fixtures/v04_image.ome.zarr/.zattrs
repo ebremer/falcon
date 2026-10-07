@@ -1,0 +1,97 @@
+{
+  "multiscales": [
+    {
+      "axes": [
+        {
+          "name": "c",
+          "type": "channel"
+        },
+        {
+          "name": "y",
+          "type": "space",
+          "unit": "micrometer"
+        },
+        {
+          "name": "x",
+          "type": "space",
+          "unit": "micrometer"
+        }
+      ],
+      "datasets": [
+        {
+          "path": "s0",
+          "coordinateTransformations": [
+            {
+              "type": "scale",
+              "scale": [
+                1.0,
+                0.5,
+                0.5
+              ]
+            },
+            {
+              "type": "translation",
+              "translation": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            }
+          ]
+        },
+        {
+          "path": "s1",
+          "coordinateTransformations": [
+            {
+              "type": "scale",
+              "scale": [
+                1.0,
+                1.0,
+                1.0
+              ]
+            },
+            {
+              "type": "translation",
+              "translation": [
+                0.0,
+                0.25,
+                0.25
+              ]
+            }
+          ]
+        }
+      ],
+      "name": "cells",
+      "version": "0.4"
+    }
+  ],
+  "omero": {
+    "channels": [
+      {
+        "label": "DAPI",
+        "color": "0000FF",
+        "active": true,
+        "window": {
+          "min": 0,
+          "max": 65535,
+          "start": 0,
+          "end": 4000
+        }
+      },
+      {
+        "label": "GFP",
+        "color": "00FF00",
+        "active": true,
+        "window": {
+          "min": 0,
+          "max": 65535,
+          "start": 0,
+          "end": 4000
+        }
+      }
+    ],
+    "rdefs": {
+      "model": "color"
+    }
+  }
+}

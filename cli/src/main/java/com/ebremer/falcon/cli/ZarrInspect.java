@@ -91,7 +91,8 @@ final class ZarrInspect {
             return new String[] {name, "array", Describe.shape(array.shape()), Describe.type(array.dataType(), null),
                     chunks(array), String.join(", ", array.codecNames())};
         }
-        return new String[] {name, "group", "v" + node.zarrFormat()};
+        return OmeInspect.kind(node).map(kind -> new String[] {name, "group", "v" + node.zarrFormat(), kind})
+                .orElse(new String[] {name, "group", "v" + node.zarrFormat()});
     }
 
     private static String chunks(ZarrArray array) {
@@ -147,8 +148,15 @@ final class ZarrInspect {
         } else {
             ZarrGroup group = node.asGroup();
             rows.add(Hdf5Inspect.field("object", "group (Zarr v" + group.zarrFormat() + ")"));
-            rows.add(Hdf5Inspect.field("members", Integer.toString(group.childNames().size())));
+            String members;
+            try {
+                members = Integer.toString(group.childNames().size());
+            } catch (UnsupportedOperationException e) { // a store that cannot list, such as HTTP without listing
+                members = "unknown (the store cannot list its keys)";
+            }
+            rows.add(Hdf5Inspect.field("members", members));
             rows.add(Hdf5Inspect.field("consolidated", group.isConsolidated() ? "yes" : "no"));
+            rows.addAll(OmeInspect.rows(group));
         }
         Map<String, JsonValue> attributes = node.attributes().members();
         rows.add(Hdf5Inspect.field("attributes", Integer.toString(attributes.size())));

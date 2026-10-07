@@ -14,6 +14,7 @@ work list:
 | **1** | `hdf5` | `com.ebremer.falcon.hdf5` | Read + write HDF5 File Format Spec **v4.0** (HDF5 2.0) | **Pre-1.0** — read-complete (H0–H6), write-broad (H7–H8), hardened (H9); the API may still change | [`hdf5/PLAN.md`](hdf5/PLAN.md) | [`hdf5/TODO.md`](hdf5/TODO.md) |
 | **2** | `zarr` | `com.ebremer.falcon.zarr` | Read Zarr **v2 + v3**, write **v3** | **Built** — v3 core, every common codec, verified vs zarr-python / libzstd / c-blosc | [`zarr/PLAN.md`](zarr/PLAN.md) | [`zarr/TODO.md`](zarr/TODO.md) |
 | — | `core` | `com.ebremer.falcon.core` | Compression codecs both formats share: zstd, Blosc (BloscLZ, Snappy, shuffles) and Blosc2 frames, LZ4, LZF, bitshuffle, bzip2, ZFP, SZ, zlib, byte shuffle; and the Fletcher-32 and lookup3 checksums | **Built** (2026-10-05) — exported only to `hdf5` and `zarr` | [`zarr/PLAN.md`](zarr/PLAN.md) §10 | the module TODOs |
+| — | `ome` | `com.ebremer.falcon.ome` | [OME-Zarr](https://ngff.openmicroscopy.org/) 0.4, 0.5, and 0.6 on `zarr`: multiscale images, labels, plates and wells, bioformats2raw collections, and scenes, read (every 0.6 transformation, applied to points), validated (the specification's MUST and SHOULD rules), and written (pyramids built in pure Java) | **Built** (2026-10-07) — the specification's conformance tests (`tools/conformance/run_ome_conformance.py`), ome-zarr-py's output, and ome-zarr-models and ome-zarr-py on Falcon's (`tools/fixtures/check_ome.py`) | [`ome/USER_GUIDE.md`](ome/USER_GUIDE.md) | the guide's last section |
 | — | `s3` | `com.ebremer.falcon.s3` | Amazon S3 and S3-compatible storage for both formats, over the AWS SDK for Java 2.x: a Zarr `Store` (read, list, write) and an HDF5 `RangeReader` (read) | **Built** (2026-10-07) — replaced the `zarr` module's hand-written `S3Store` | [`s3/USER_GUIDE.md`](s3/USER_GUIDE.md) | — |
 | — | `cli` | `com.ebremer.falcon.cli` | The `falcon` command (JCommander), built as one runnable jar: `ls`, `info`, `dump`, `convert` (HDF5 to Zarr and back), `copy` and `consolidate` (Zarr); local files, ZIP, HTTP, and S3 | **Built** (2026-10-07) — checked against h5py 3.16 and zarr-python 3.4 (`tools/fixtures/check_cli.py`); runs the Zarr community's conformance tests (`tools/conformance/`) | [`cli/USER_GUIDE.md`](cli/USER_GUIDE.md) | the guide's last section |
 
@@ -33,6 +34,10 @@ falcon/                              parent aggregator POM (packaging: pom) — 
 ├── zarr/                            Falcon Phase 2 — com.ebremer.falcon.zarr
 │   ├── pom.xml                      parent = com.ebremer:falcon
 │   ├── PLAN.md  TODO.md  USER_GUIDE.md  BENCHMARKS.md
+│   └── src/{main,test}/java/…
+├── ome/                             OME-Zarr on zarr — com.ebremer.falcon.ome
+│   ├── pom.xml                      parent = com.ebremer:falcon
+│   ├── USER_GUIDE.md
 │   └── src/{main,test}/java/…
 ├── s3/                              Amazon S3 for both formats — com.ebremer.falcon.s3 (AWS SDK)
 │   ├── pom.xml                      parent = com.ebremer:falcon; the formats are optional dependencies

@@ -12,7 +12,8 @@
     <name>Falcon</name>
     <description>Umbrella for pure-JDK 25, zero-runtime-dependency readers/writers of scientific-data
         formats. The hdf5 module implements the HDF5 File Format Specification, Version 4.0 (HDF5 2.0),
-        the zarr module Zarr v3 (and v2); the core module holds the compression codecs both share. The s3
+        the zarr module Zarr v3 (and v2), the ome module OME-Zarr on it; the core module holds the compression
+        codecs both formats share. The s3
         module, the one with dependencies (the AWS SDK), reads both formats from Amazon S3; the cli module is
         the falcon command.</description>
     <url>https://github.com/ebremer/falcon</url>
@@ -36,6 +37,7 @@
         <module>core</module>  <!-- Code both formats share: the pure-Java compression codecs. -->
         <module>hdf5</module>
         <module>zarr</module>  <!-- Falcon Phase 2 — Zarr v3 (see zarr/PLAN.md). -->
+        <module>ome</module>   <!-- OME-Zarr 0.4-0.6 on the zarr module: see ome/USER_GUIDE.md. -->
         <module>s3</module>    <!-- Amazon S3 for both formats, over the AWS SDK: optional, see s3/USER_GUIDE.md. -->
         <module>cli</module>   <!-- The falcon command (JCommander), built as target/falcon.jar: see cli/USER_GUIDE.md. -->
     </modules>
