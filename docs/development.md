@@ -40,12 +40,12 @@ sources build byte-identical jars. Each module also builds a sources jar and a J
 
 ## Rules the code follows
 
-- **No dependencies beyond the JDK.** `core`, `hdf5`, `zarr`, and `ome` depend on nothing but `java.base`
-  (and Falcon's own modules). Only the optional `s3` module (the AWS SDK) and the `cli` application
-  (JCommander, and the SDK through `s3`) have dependencies, at fixed versions. The Maven Enforcer plugin fails
-  the build on any other dependency, in any scope (JUnit 5, test scope only, is the exception). A new
-  dependency, a build plugin included, needs the maintainer's approval before it is added.
-- **Everything in pure Java.** Compression codecs are written from scratch (szip as CCSDS 121.0, zstd from
+- **Minimal dependencies.** `core`, `hdf5`, `zarr`, and `ome` depend on nothing but `java.base` (and
+  Falcon's own modules). Only the optional `s3` module (the AWS SDK) and the `cli` application (JCommander,
+  and the SDK through `s3`) have dependencies, at fixed versions. The Maven Enforcer plugin fails the build
+  on any other dependency, in any scope (JUnit 5, test scope only, is the exception). A new dependency, a
+  build plugin included, needs the maintainer's approval before it is added.
+- **No native code.** Compression codecs are written in Java from scratch (szip as CCSDS 121.0, zstd from
   RFC 8878, and so on), never by wrapping native code, and checked against their reference implementations.
 - **Java 25, as Java 25.** Records, sealed types, pattern matching, and the Foreign Function & Memory API
   (`MemorySegment`), which memory-maps files of any size.

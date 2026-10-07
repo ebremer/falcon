@@ -16,7 +16,7 @@
 
     <name>Falcon S3</name>
     <description>Amazon S3 for Falcon's formats, over the AWS SDK for Java 2.x: a Zarr store and an HDF5
-        range reader. Falcon's one module with runtime dependencies beyond java.base.</description>
+        range reader. Optional: Falcon's one library module with runtime dependencies beyond java.base.</description>
 
     <dependencies>
         <!-- The AWS SDK's S3 client, without the two HTTP clients it brings by default (Netty, and Apache

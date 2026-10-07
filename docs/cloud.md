@@ -101,8 +101,9 @@ two files' bytes.
 
 ### Add the s3 module
 
-The `s3` module is the one library module with dependencies: the AWS SDK for Java 2.x (its S3 client and its
-URL-connection HTTP client). Add it beside the format you use:
+The `s3` module is optional, and the one library module with dependencies: the AWS SDK for Java 2.x (its S3
+client and its URL-connection HTTP client). The format modules stay free of them; add `s3` beside the format
+you use only when you want S3:
 
 ```xml
 <dependency>

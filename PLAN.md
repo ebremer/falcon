@@ -1,10 +1,10 @@
 # Falcon — Implementation Plan (umbrella)
 
-**Falcon** is a multi-module Maven umbrella for **pure-JDK 25, zero-runtime-dependency** readers and
-writers of scientific-data formats. Each format is a JPMS module under `com.ebremer.falcon.*`, exporting
-only its public API package, and depends on nothing beyond `java.base` (JUnit 5 is test-scope only). The
-optional `s3` module, which reads both formats from Amazon S3, has one dependency, the AWS SDK; the `cli`
-module, the `falcon` command, adds JCommander.
+**Falcon** is a multi-module Maven umbrella for **JDK 25** readers and writers of scientific-data formats,
+with **minimal dependencies**. Each format is a JPMS module under `com.ebremer.falcon.*`, exporting only
+its public API package, and depends on nothing beyond `java.base` (JUnit 5 is test-scope only). Only the
+optional modules bring dependencies: the `s3` module, which reads both formats from Amazon S3, the AWS SDK;
+the `cli` module, the `falcon` command, JCommander (and the SDK, through `s3`).
 
 This document is the **program-level roadmap**. Each module carries its own detailed plan and remaining-
 work list:
@@ -57,12 +57,12 @@ jar runs on the class path), and JCommander names no module.
 
 Locked at review and applied uniformly across the reactor:
 
-1. **Pure JDK, zero runtime dependencies.** Every shipped artifact depends on nothing beyond `java.base`
-   (and Falcon's own `core`, which depends on nothing else), but for the optional `s3` module, which uses
-   the AWS SDK (approved 2026-10-07) so that the format modules need not, and the `cli` module, which adds
-   JCommander (approved 2026-10-07). Compression the JDK lacks is implemented
-   from scratch (HDF5 szip as CCSDS 121.0 extended-Rice; zstd per RFC 8878, the blosc container, LZ4,
-   LZF, bitshuffle, bzip2, ZFP, and SZ in `core`), never by wrapping native code. JUnit 5 is test-scope only.
+1. **Minimal dependencies; the formats on the JDK alone.** The format modules (`hdf5`, `zarr`, `ome`) depend
+   on nothing beyond `java.base` (and Falcon's own `core`, which depends on nothing else). Only the optional
+   modules have dependencies: `s3` the AWS SDK (approved 2026-10-07), so that the format modules need not,
+   and `cli` JCommander (approved 2026-10-07). Compression the JDK lacks is implemented from scratch
+   (HDF5 szip as CCSDS 121.0 extended-Rice; zstd per RFC 8878, the blosc container, LZ4, LZF, bitshuffle,
+   bzip2, ZFP, and SZ in `core`), never by wrapping native code. JUnit 5 is test-scope only.
 2. **Approval gate for dependencies.** Adding any library outside `java.base` — any module, any scope —
    requires explicit approval first (see `CLAUDE.md`).
 3. **JDK 25**, `--release 25`; **JPMS module per format**, exporting only the public API package.

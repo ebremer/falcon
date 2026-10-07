@@ -18,7 +18,8 @@ or a Gradle toolchain of 25).
 `mavenLocal()` to `repositories`.
 
 **The build fails with "Only Falcon's own modules, and JUnit 5 for tests".** A dependency was added that the
-dependency rules do not allow. Falcon's libraries depend on nothing beyond the JDK; see
+dependency rules do not allow. Falcon keeps its dependencies minimal: the format libraries depend on nothing
+beyond the JDK, and only `s3` and `cli` have dependencies, at approved versions; see
 [Working on Falcon](development.md#rules-the-code-follows).
 
 ## Reading

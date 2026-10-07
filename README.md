@@ -1,9 +1,10 @@
 # Falcon
 
-**Falcon** is a multi-module, **pure-JDK 25, zero-runtime-dependency** toolkit for scientific-data
-formats — no native libraries, no third-party dependencies. The exceptions are optional: the `s3`
-module reads both formats from Amazon S3 through the AWS SDK, and the `cli` module, the `falcon` command,
-parses its command line with JCommander.
+**Falcon** is a multi-module Java 25 toolkit for scientific-data formats with **minimal dependencies**
+and no native libraries. The format libraries — `hdf5`, `zarr`, `ome`, and the `core` codecs they share —
+depend on nothing beyond `java.base`. Two modules bring dependencies, and both are optional: the `s3`
+module reads both formats from Amazon S3 through the AWS SDK for Java, and the `cli` module, the `falcon`
+command, parses its command line with JCommander (and brings the SDK through `s3`).
 
 | Module | Package | What it is | Status |
 |---|---|---|---|
@@ -192,10 +193,10 @@ walkthrough in the **[CLI User Guide](cli/USER_GUIDE.md)**.
 
 ## Design highlights
 
-- **Zero runtime dependencies** — only `java.base` (the format modules depend on Falcon's own `core`,
-  which itself needs only `java.base`). The optional `s3` and `cli` modules are the exceptions: `s3` uses
-  the AWS SDK, so that the format modules need not, and `cli` JCommander. `deflate`/`gzip` use `java.util.zip`; everything else is
-  hand-written in pure Java: HDF5 `szip` (CCSDS 121.0 extended-Rice), the `zstd` (RFC 8878), `blosc`
+- **Minimal dependencies** — the format modules need only `java.base` (they depend on Falcon's own
+  `core`, which itself needs only `java.base`). Dependencies come only with the optional modules, at fixed,
+  approved versions: `s3` uses the AWS SDK, so that the format modules need not, and `cli` JCommander.
+- **No native code** — `deflate`/`gzip` use `java.util.zip`; everything else is hand-written in Java: HDF5 `szip` (CCSDS 121.0 extended-Rice), the `zstd` (RFC 8878), `blosc`
   and Blosc2, LZ4, LZF, bitshuffle, bzip2, ZFP, and SZ codecs in `core` (Zarr codecs and HDF5 filters
   alike), the Jenkins lookup3 /
   crc32c / fletcher32 checksums, and the shuffle/nbit/scale-offset filters. Every codec is validated

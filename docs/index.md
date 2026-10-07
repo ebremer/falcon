@@ -1,12 +1,12 @@
 ---
 title: Falcon
-description: Pure-Java readers and writers for HDF5, Zarr, and OME-Zarr, with no dependencies beyond the JDK.
+description: Java readers and writers for HDF5, Zarr, and OME-Zarr, with minimal dependencies and no native code.
 ---
 
 # Falcon
 
-<p class="lead">Read and write HDF5, Zarr, and OME-Zarr in pure Java: no native libraries, no JNI, and no
-dependencies beyond the JDK.</p>
+<p class="lead">Read and write HDF5, Zarr, and OME-Zarr in Java, with minimal dependencies: no native
+libraries, no JNI, and format libraries that need nothing beyond the JDK.</p>
 
 Falcon is a set of Java 25 libraries, and a command-line tool, for the scientific-data formats that hold
 images, volumes, and arrays:
@@ -62,12 +62,15 @@ $ falcon ome pyramid scan.h5 /images/frame slide.ome.zarr --pixel-size 0.25,0.25
 | `cli` | (an application) | The `falcon` command: one runnable jar |
 
 `hdf5`, `zarr`, `ome`, and `core` depend on nothing beyond `java.base`. Only the optional `s3` module (the AWS
-SDK) and the `cli` application (JCommander, and the SDK through `s3`) have dependencies.
+SDK) and the `cli` application (JCommander, and the SDK through `s3`) have dependencies, and only a project
+that uses them takes those dependencies on.
 
 ## Why Falcon
 
-- **One jar, any platform.** No HDF5 C library, no native codecs, nothing to install but a JDK: zstd, Blosc,
-  LZ4, bzip2, szip, ZFP, SZ, and the rest are written in Java and checked against their reference
+- **Minimal dependencies.** Reading and writing HDF5, Zarr, and OME-Zarr adds Falcon's own jars and nothing
+  else; S3 support adds the AWS SDK, and only when you ask for it.
+- **Any platform, no native code.** No HDF5 C library, no native codecs, nothing to install but a JDK: zstd,
+  Blosc, LZ4, bzip2, szip, ZFP, SZ, and the rest are written in Java and checked against their reference
   implementations.
 - **Large and remote data.** Files are memory-mapped through the Foreign Function & Memory API, so they may
   be far larger than 2 GB; remote files and stores are read a byte range at a time, fetching only the

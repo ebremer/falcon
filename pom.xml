@@ -10,12 +10,12 @@
     <packaging>pom</packaging>
 
     <name>Falcon</name>
-    <description>Umbrella for pure-JDK 25, zero-runtime-dependency readers/writers of scientific-data
-        formats. The hdf5 module implements the HDF5 File Format Specification, Version 4.0 (HDF5 2.0),
-        the zarr module Zarr v3 (and v2), the ome module OME-Zarr on it; the core module holds the compression
-        codecs both formats share. The s3
-        module, the one with dependencies (the AWS SDK), reads both formats from Amazon S3; the cli module is
-        the falcon command.</description>
+    <description>Umbrella for JDK 25 readers/writers of scientific-data formats, with minimal dependencies:
+        the format modules need nothing beyond java.base. The hdf5 module implements the HDF5 File Format
+        Specification, Version 4.0 (HDF5 2.0), the zarr module Zarr v3 (and v2), the ome module OME-Zarr on it;
+        the core module holds the compression codecs both formats share. Only the optional modules have
+        dependencies: the s3 module (the AWS SDK) reads both formats from Amazon S3, and the cli module
+        (JCommander) is the falcon command.</description>
     <url>https://github.com/ebremer/falcon</url>
 
     <licenses>
@@ -53,7 +53,7 @@
              that set their own argLine start with @{argLine} to keep it. -->
         <argLine/>
 
-        <!-- Test-scope only; core, hdf5, and zarr have zero runtime dependencies. -->
+        <!-- Test-scope only; core, hdf5, zarr, and ome have no runtime dependencies. -->
         <junit.version>5.11.4</junit.version>
         <!-- The s3 and cli modules' only: the AWS SDK for Java 2.x, approved 2026-10-07 (CLAUDE.md). -->
         <aws.sdk.version>2.55.12</aws.sdk.version>
@@ -168,7 +168,7 @@
         </pluginManagement>
 
         <plugins>
-            <!-- The build's own preconditions, and the zero-dependency rule: nothing but Falcon's own modules,
+            <!-- The build's own preconditions, and the dependency rule: nothing but Falcon's own modules,
                  and JUnit 5 (with the jars it brings) for tests. A new dependency fails here until it is
                  approved and added to the includes. The s3 module adds the AWS SDK to them, for itself, and the
                  cli module JCommander and the SDK. -->

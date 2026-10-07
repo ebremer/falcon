@@ -20,7 +20,8 @@ Everything below is the public API in `com.ebremer.falcon.s3`. From the shell, t
 ## Dependencies
 
 This is Falcon's one library module with runtime dependencies beyond `java.base` (the `cli` application
-bundles it); `core`, `hdf5`, and `zarr` have none, and S3 lives here so that they keep none. It brings:
+bundles it); `core`, `hdf5`, `zarr`, and `ome` have none, and S3 lives here so that they keep none: only
+an application that wants S3 takes on these dependencies. It brings:
 
 | Library | Version | License |
 |---|---|---|

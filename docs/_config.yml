@@ -1,6 +1,6 @@
 # The Falcon documentation site, built by GitHub Pages from this folder (see README.md).
 title: Falcon
-description: Pure-Java readers and writers for HDF5, Zarr, and OME-Zarr, with no dependencies beyond the JDK.
+description: Java readers and writers for HDF5, Zarr, and OME-Zarr, with minimal dependencies and no native code.
 repository: ebremer/falcon
 url: https://ebremer.github.io
 baseurl: /falcon
