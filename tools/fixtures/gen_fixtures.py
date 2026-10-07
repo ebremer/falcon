@@ -1548,6 +1548,187 @@ def build_zfp_write(f):
     d.attrs["zfp"] = "rate 6.0"
 
 
+def build_sz_write(f):
+    """The oracle for Falcon's SZ filter encoder (P2 S10): each dataset hdf5plugin's H5Z-SZ (SZ 2.1.12)
+    compressed, its input kept uncompressed under /input (SZ is lossy), its settings in its "sz" attribute
+    ("absolute 0.001", "relative 0.0001", "pointwise_relative 0.001", or "defaults", hdf5plugin.SZ()'s point-wise
+    relative 1e-5). Falcon, writing the input with those settings, must store the same client data and every
+    chunk as libSZ does beneath its zstd stage (Falcon's zstd frames are its own): floats and doubles in 1 to 4
+    used dimensions (the 2-D and 3-D regression coders, 4-D through 3-D), dimensions of size 1, chunks cut at the
+    edges, both point-wise relative forms (zeros and signs), constant data, data SZ stores as it is, chunks of
+    fewer than 20 values (and of exactly 20), the 1-D slip of H5Z-SZ's client data (a (1, n) chunk records one
+    value, so it is stored as it is), the integer coders of every width (the 4-D one's slips included), int64
+    data needing more than 32 bits (where hdf5plugin's MSVC libSZ loses data and Falcon does not), and a checksum
+    after the filter."""
+    import hdf5plugin
+    rng = np.random.default_rng(32017)
+
+    def smooth(shape, scale=3.0, offset=0.5):
+        grids = np.meshgrid(*[np.linspace(0, 4, n) for n in shape], indexing="ij")
+        values = sum(np.sin(g * (i + 1.3) + i) for i, g in enumerate(grids)) * scale + offset
+        return values + rng.normal(scale=scale / 200, size=shape)
+
+    wide = smooth((30, 40)) * 10.0 ** rng.integers(-3, 4, (30, 40))
+    wide[rng.random((30, 40)) < 0.1] = 0
+    sources = {
+        "f4_1d": (smooth((250,)).astype("<f4"), (64,)),
+        "f8_2d": (smooth((40, 30)).astype("<f8"), (16, 16)),
+        "f4_3d": (smooth((10, 9, 8)).astype("<f4"), (5, 9, 8)),
+        "f8_4d": (smooth((6, 5, 4, 7)).astype("<f8"), (3, 5, 4, 7)),
+        "f4_wide": (wide.astype("<f4"), (15, 40)),
+        "f8_wide": (wide.astype("<f8"), (30, 20)),
+        "f4_noise": (rng.normal(0, 1, 200).astype("<f4"), (100,)),
+        "f4_constant": (np.full(100, 3.5, "<f4"), (50,)),
+        "f8_unit_dims": (smooth((3, 1, 16, 1, 20)).astype("<f8"), (1, 1, 16, 1, 20)),
+        "f4_lead1": (smooth((4, 100)).astype("<f4"), (1, 100)),
+        "f4_short": (smooth((8, 8)).astype("<f4"), (4, 4)),
+        "f4_twenty": (smooth((40,)).astype("<f4"), (20,)),
+        "i4_2d": ((smooth((33, 20)) * 1000).astype("<i4"), (11, 20)),
+        "u2_3d": ((smooth((8, 8, 8)) * 1000 + 20000).astype("<u2"), (4, 8, 8)),
+        "i1_1d": ((smooth((90,)) * 20).astype("<i1"), (40,)),
+        "i2_noise": (rng.integers(-30000, 30000, 200).astype("<i2"), (100,)),
+        "u8_2d": ((smooth((20, 30)) * 1e6 + 1e7).astype("<u8"), (10, 30)),
+        "u4_4d": ((smooth((4, 5, 6, 7)) * 1e5 + 1e6).astype("<u4"), (2, 5, 6, 7)),
+        "i8_big": ((smooth((16, 20)) * 1e12).astype("<i8"), (8, 20)),
+    }
+    modes = {
+        "abs3": ("absolute 0.001", hdf5plugin.SZ(absolute=1e-3)),
+        "abs4": ("absolute 0.0001", hdf5plugin.SZ(absolute=1e-4)),
+        "abs7": ("absolute 1e-07", hdf5plugin.SZ(absolute=1e-7)),
+        "abs_int": ("absolute 3.0", hdf5plugin.SZ(absolute=3.0)),
+        "rel3": ("relative 0.001", hdf5plugin.SZ(relative=1e-3)),
+        "rel4": ("relative 0.0001", hdf5plugin.SZ(relative=1e-4)),
+        "pwr2": ("pointwise_relative 0.01", hdf5plugin.SZ(pointwise_relative=1e-2)),
+        "pwr3": ("pointwise_relative 0.001", hdf5plugin.SZ(pointwise_relative=1e-3)),
+        "pwr6": ("pointwise_relative 1e-06", hdf5plugin.SZ(pointwise_relative=1e-6)),
+        "defaults": ("defaults", hdf5plugin.SZ()),
+    }
+    plan = {
+        "f4_1d": ("abs3", "rel4", "pwr3", "pwr6", "defaults"),
+        "f8_2d": ("abs4", "rel3", "pwr2", "pwr6"),
+        "f4_3d": ("abs3", "rel3", "pwr3"),
+        "f8_4d": ("abs3", "pwr3"),
+        "f4_wide": ("pwr3", "pwr6"),
+        "f8_wide": ("pwr2", "pwr6"),
+        "f4_noise": ("abs7",),
+        "f4_constant": ("abs3",),
+        "f8_unit_dims": ("abs3", "pwr2"),
+        "f4_lead1": ("abs3",),
+        "f4_short": ("abs3",),
+        "f4_twenty": ("abs3",),
+        "i4_2d": ("abs_int", "rel3"),
+        "u2_3d": ("abs_int",),
+        "i1_1d": ("abs_int", "rel3"),
+        "i2_noise": ("abs_int",),
+        "u8_2d": ("abs_int",),
+        "u4_4d": ("abs_int",),
+        "i8_big": ("abs_int",),
+    }
+    for source, (data, chunks) in sources.items():
+        f.create_dataset("input/" + source, data=data)
+        for mode in plan[source]:
+            setting, filters = modes[mode]
+            d = f.create_dataset(f"{source}_{mode}", data=data, chunks=chunks, **filters)
+            d.attrs["source"] = source
+            d.attrs["sz"] = setting
+    data, chunks = sources["f8_2d"]
+    d = f.create_dataset("f8_2d_abs4_fletcher32", data=data, chunks=chunks, fletcher32=True,
+                         **hdf5plugin.SZ(absolute=1e-4))
+    d.attrs["source"] = "f8_2d"
+    d.attrs["sz"] = "absolute 0.0001"
+
+
+
+
+def build_blosc2_write(f):
+    """The oracle for Falcon's Blosc2 filter encoder (P2 S10): each dataset hdf5plugin's Blosc2 filter
+    (hdf5-blosc2, c-blosc2 3.3.2) wrote, its settings in its "blosc2" attribute ("cname clevel filter", and a
+    block size where client data value 1 asks for one, which hdf5plugin's API never does) and the
+    filters around it in "before" ("shuffle", "scaleoffset", or "") and "after" ("fletcher32" or ""). Falcon,
+    writing the same values with those settings, must store the same client data and, but for zstd, every chunk
+    byte for byte: plain frames for rank 1, b2nd frames for ranks 2 to 5 with blocks that do and do not divide
+    the chunk, partial chunks at the edges, every codec, clevel 0 to 9, every filter the plugin applies (and
+    truncated precision, which it cannot: those chunks are stored unfiltered), zeros, compound, array (a plain
+    frame at rank 2: the filter's input is not the base type's chunk) and 300-byte types, a shuffle or a
+    scale-offset filter before it (the latter shrinks the chunk, so a plain frame again), and a checksum after."""
+    import hdf5plugin
+    rng = np.random.default_rng(32026)
+
+    def smooth(shape, dtype, scale=1000.0):
+        grids = np.meshgrid(*[np.linspace(0, 4, n) for n in shape], indexing="ij")
+        values = sum(np.cos(g * (i + 1.5)) for i, g in enumerate(grids)) * scale
+        return np.round(values + rng.normal(scale=scale / 50, size=shape)).astype(dtype)
+
+    record = np.dtype([("a", "<i4"), ("b", "<f8")])
+    compound = np.zeros((30, 20), record)
+    compound["a"] = np.arange(600).reshape(30, 20) % 37
+    compound["b"] = smooth((30, 20), "<f8")
+    sources = {
+        "f4_1d": (smooth((1000,), "<f4"), (300,)),
+        "i2_2d": (smooth((100, 70), "<i2"), (32, 32)),
+        "f8_2d": (smooth((40, 50), "<f8"), (16, 50)),
+        "u1_3d": (smooth((20, 30, 40), "<f8", 100).astype("<u1"), (10, 30, 16)),
+        "f4_3d": (smooth((10, 9, 8), "<f4"), (5, 9, 8)),
+        "f8_4d": (smooth((6, 5, 4, 7), "<f8"), (3, 5, 4, 7)),
+        "i4_5d": (smooth((3, 4, 5, 6, 2), "<i4"), (2, 4, 5, 3, 2)),
+        "f4_big": (smooth((256, 512), "<f4"), (256, 512)),
+        "i8_1d": (smooth((5000,), "<i8"), (2048,)),
+        "zeros_2d": (np.zeros((64, 64), "<f4"), (32, 32)),
+        "compound_2d": (compound, (8, 16)),
+        "compound_1d": (compound.reshape(600), (250,)),
+        "array_2d": (smooth((50, 40, 3), "<i2"), (25, 20)),  # stored as a 3-element array type, below
+        "v300_1d": (rng.integers(0, 4, (40, 300), dtype=np.uint8).view("V300").reshape(40), (16,)),
+    }
+    plan = {
+        "f4_1d": ["blosclz 5 1", "lz4 5 1", "lz4hc 5 1", "zlib 5 1", "zstd 5 1", "blosclz 5 0", "lz4 9 2",
+                  "blosclz 1 3", "lz4 0 1", "zlib 9 2", "lz4 5 4"],
+        "i2_2d": ["blosclz 5 1", "lz4 5 2", "lz4hc 9 3", "zlib 1 0", "zstd 3 1", "blosclz 0 1"],
+        "f8_2d": ["blosclz 5 1", "lz4 3 2", "zstd 9 3", "lz4 5 4"],
+        "u1_3d": ["blosclz 5 1", "lz4hc 4 2", "lz4 7 3"],
+        "f4_3d": ["blosclz 5 1", "zlib 6 2"],
+        "f8_4d": ["lz4 5 1", "blosclz 9 3"],
+        "i4_5d": ["blosclz 5 1", "lz4 5 2"],
+        "f4_big": ["blosclz 5 1", "lz4 1 2", "lz4hc 5 1", "zlib 5 3", "zstd 1 1"],
+        "i8_1d": ["blosclz 5 1", "lz4 8 3"],
+        "zeros_2d": ["blosclz 5 1", "lz4 5 0"],
+        "compound_2d": ["blosclz 5 1", "lz4 5 3"],
+        "compound_1d": ["lz4hc 5 1"],
+        "array_2d": ["blosclz 5 1", "lz4 5 2"],
+        "v300_1d": ["lz4 5 1"],
+    }
+    wrapped = {  # filters around Blosc2: (source, setting, before, after)
+        "i2_2d_shuffle_lz4": ("i2_2d", "lz4 5 1", "shuffle", ""),
+        "i2_2d_scaleoffset_blosclz": ("i2_2d", "blosclz 5 1", "scaleoffset", ""),
+        "f4_1d_lz4_block4096": ("f4_1d", "lz4 5 1 4096", "", ""),
+        "i2_2d_blosclz_block1024": ("i2_2d", "blosclz 5 1 1024", "", ""),
+        "f8_4d_lz4_block512": ("f8_4d", "lz4 5 2 512", "", ""),
+        "u1_3d_zlib_block100000": ("u1_3d", "zlib 5 1 100000", "", ""),
+        "f8_2d_lz4_fletcher32": ("f8_2d", "lz4 5 2", "", "fletcher32"),
+        "f4_1d_shuffle_blosclz_fletcher32": ("f4_1d", "blosclz 5 1", "shuffle", "fletcher32"),
+    }
+    for source, (data, chunks) in sources.items():
+        for setting in plan[source]:
+            wrapped[f"{source}_{setting.replace(' ', '_')}"] = (source, setting, "", "")
+    for name, (source, setting, before, after) in wrapped.items():
+        data, chunks = sources[source]
+        cname, clevel, filters, *block = setting.split()
+        options = hdf5plugin.Blosc2(cname=cname, clevel=int(clevel), filters=int(filters))
+        if block:
+            opts = list(options["compression_opts"])
+            opts[1] = int(block[0])
+            options = dict(options, compression_opts=tuple(opts))
+        shape, dtype = data.shape, data.dtype
+        if source == "array_2d":
+            shape, dtype = data.shape[:2], np.dtype(("<i2", (3,)))
+        d = f.create_dataset(name, shape=shape, dtype=dtype, chunks=chunks, shuffle=before == "shuffle",
+                             scaleoffset=0 if before == "scaleoffset" else None, fletcher32=after == "fletcher32",
+                             **options)
+        d[...] = data
+        d.attrs["blosc2"] = setting
+        d.attrs["before"] = before
+        d.attrs["after"] = after
+
+
 def _lookup3(data, initval=0):
     """Bob Jenkins' lookup3 hashlittle, as libhdf5's H5_checksum_lookup3 computes metadata checksums."""
     m = 0xFFFFFFFF
@@ -2145,7 +2326,9 @@ FIXTURES = {
     "bzip2": lambda: _with_file("bzip2.h5", build_bzip2, libver="latest"),
     "zfp": lambda: _with_file("zfp.h5", build_zfp, libver="latest"),
     "zfp_write": lambda: _with_file("zfp_write.h5", build_zfp_write, libver="latest"),
+    "sz_write": lambda: _with_file("sz_write.h5", build_sz_write, libver="latest"),
     "blosc2": lambda: _with_file("blosc2.h5", build_blosc2, libver="latest"),
+    "blosc2_write": lambda: _with_file("blosc2_write.h5", build_blosc2_write, libver="latest"),
     "sz": lambda: build_sz(os.path.join(OUT, "sz.h5")),
     "vds_unlimited": lambda: build_vds_unlimited(OUT),
     "vds_views": lambda: build_vds_views(OUT),

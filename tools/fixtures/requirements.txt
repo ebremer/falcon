@@ -10,12 +10,15 @@ h5py==3.16.0          # bundles HDF5 2.0.0 -- the reference oracle
 numpy>=2.0
 imagecodecs>=2026.1   # libaec: AEC / szip reference vectors and real-format szip chunks; c-blosc2 3.x:
                       # Falcon Core's Blosc2 chunk vectors (gen_blosc2_vectors.py) and the chunks of its
-                      # crafted frames (gen_blosc2_frame_vectors.py); a c-blosc with snappy:
+                      # crafted frames (gen_blosc2_frame_vectors.py); zstd, to undo the last stage of libSZ's
+                      # streams (gen_sz_encoder_vectors.py); a c-blosc with snappy:
                       # check_blosc_encoder.py decodes Falcon's snappy Blosc buffers with it when installed
 hdf5plugin==7.1.0     # the third-party HDF5 filters, the oracle for reading and writing them: Blosc, LZ4,
                       # bitshuffle, Zstandard, bzip2, Blosc2, ZFP, SZ (plugin_filters*.h5, bzip2.h5, blosc2.h5,
-                      # zfp.h5, sz.h5; gen_core_vectors.py, gen_blosc2_frame_vectors.py, gen_zfp_vectors.py,
-                      # gen_sz_vectors.py; check_hdf5_writer.py). bzip2 vectors need only Python's bz2.
+                      # zfp.h5, sz.h5, and the writers' blosc2_write.h5, zfp_write.h5, sz_write.h5;
+                      # gen_core_vectors.py, gen_blosc2_frame_vectors.py, gen_blosc2_encoder_vectors.py,
+                      # gen_zfp_vectors.py, gen_zfp_encoder_vectors.py, gen_sz_vectors.py,
+                      # gen_sz_encoder_vectors.py; check_hdf5_writer.py). bzip2 vectors need only Python's bz2.
 #
 # check_hdf5_writer.py can additionally read Falcon's output with an HDF5 1.14 build. Put that in a
 # second environment (its own venv) and pass it with --python114:

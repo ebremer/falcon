@@ -16,8 +16,7 @@ import com.ebremer.falcon.hdf5.HdfUnsupportedException;
 import java.util.Arrays;
 
 /**
- * Decoders (and, for all but Blosc2, encoders) for the registered third-party HDF5 filters most common in the
- * wild, built on Falcon Core's pure-Java codecs. Each filter's chunk framing and client data come from its
+ * Decoders and encoders for the registered third-party HDF5 filters most common in the wild, built on Falcon Core's pure-Java codecs. Each filter's chunk framing and client data come from its
  * reference HDF5 plugin:
  *
  * <ul>
@@ -107,7 +106,13 @@ public final class ThirdPartyFilters {
      *   <li><b>bzip2</b> ({@code H5Zbzip2.c}): one stream, {@code BZ2_bzBuffToBuffCompress} in blocks of
      *       {@code cd[0]} (default 9) times 100,000 bytes, kept even where it is larger than the chunk;</li>
      *   <li><b>ZFP</b> ({@code H5Zzfp.c}): {@code zfp_compress} of the field and mode the zfp header in
-     *       {@code cd[1]} onward holds, in 8-bit words, libzfp 1.0.1's stream byte for byte.</li>
+     *       {@code cd[1]} onward holds, in 8-bit words, libzfp 1.0.1's stream byte for byte;</li>
+     *   <li><b>Blosc2</b> ({@code blosc2_filter.c}): a frame of c-blosc2 3.3.2's, a b2nd array for a chunk of
+     *       the rank {@code cd[7]} and shape {@code cd[8]} onward give, else a one-chunk super-chunk, at clevel
+     *       {@code cd[4]}, filter {@code cd[5]}, and compressor {@code cd[6]} (see {@link Blosc2Filter});</li>
+     *   <li><b>SZ</b> ({@code H5Z_SZ.c}): {@code SZ_compress_args} with the data type, dimensions, and error
+     *       bound the client data hold: libSZ 2.1.12's bytes beneath its zstd stage, which is Falcon's own; a
+     *       chunk of fewer than 20 values stays as it is.</li>
      * </ul>
      *
      * @param id         the filter
@@ -128,8 +133,55 @@ public final class ThirdPartyFilters {
                     : ZstdEncoder.DEFAULT_LEVEL, false);
             case BZIP2 -> encodeBzip2(clientData, data);
             case ZfpFilter.ID -> ZfpFilter.encode(clientData, data);
+            case BLOSC2 -> Blosc2Filter.encode(clientData, data);
+            case SzFilter.ID -> SzFilter.encode(clientData, data);
             default -> throw new IllegalArgumentException("not a third-party filter Falcon writes: " + id);
         };
+    }
+
+    /**
+     * The client data H5Z-SZ's {@code set_local} stores for a new dataset: the chunk's dimensions longer than 1
+     * (fastest-varying first, behind their count) and SZ's data type, then the nine error-bound values
+     * hdf5plugin passes ({@code mode, absolute, relative, point-wise relative, PSNR}, each double as two
+     * values, high first).
+     *
+     * @param dataType   SZ's data type: 0 float, 1 double, 2 to 9 the integers
+     * @param chunkShape the chunk's shape, at most 5 dimensions
+     * @param bound      the nine error-bound values
+     * @return the client data
+     * @throws IllegalArgumentException if the chunk has more than 5 dimensions
+     */
+    public static int[] szClientData(int dataType, long[] chunkShape, int[] bound) {
+        return SzFilter.clientData(dataType, chunkShape, bound);
+    }
+
+    /**
+     * Checks that Falcon can write chunks with an SZ dataset's client data (as the file holds them), before any
+     * is written: the data type its elements give, an error bound in a mode and range Falcon compresses (unless
+     * every chunk is too short to compress), and no more than 4 dimensions.
+     *
+     * @param clientData the client data
+     * @param dataType   the SZ data type of the dataset's elements
+     * @throws IllegalArgumentException if Falcon cannot, saying why
+     * @throws HdfFormatException       if the client data are malformed
+     */
+    public static void checkSzWritable(int[] clientData, int dataType) {
+        SzFilter.checkWritable(clientData, dataType);
+    }
+
+    /**
+     * The client data hdf5-blosc2's {@code set_local} stores for a new dataset from hdf5plugin's values
+     * ({@code clevel, filters, compcode}): its version, block size 0, the type size, the chunk's bytes, those
+     * three, and for a chunk of rank 2 to 16 its rank and dimensions.
+     *
+     * @param typeSize    the datatype's size, or for an array its base type's
+     * @param elementSize the datatype's size
+     * @param chunkShape  the chunk's shape
+     * @param options     clevel, filter, and compressor code
+     * @return the client data
+     */
+    public static int[] blosc2ClientData(int typeSize, int elementSize, long[] chunkShape, int[] options) {
+        return Blosc2Filter.clientData(typeSize, elementSize, chunkShape, options);
     }
 
     /**
@@ -165,6 +217,8 @@ public final class ThirdPartyFilters {
             case ZSTD -> "HDF5 zstd filter; see " + HDF_GROUP_PLUGINS;
             case BZIP2 -> "bzip2";
             case ZfpFilter.ID -> ZfpFilter.NAME;
+            case BLOSC2 -> Blosc2Filter.NAME;
+            case SzFilter.ID -> SzFilter.NAME;
             default -> throw new IllegalArgumentException("not a third-party filter Falcon writes: " + id);
         };
     }

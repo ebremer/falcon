@@ -594,7 +594,7 @@ Without arguments they take hdf5plugin's defaults: Blosc's LZ4 at clevel 5 after
 block per chunk for LZ4, LZ4 for bitshuffle, zstd's level 3, and bzip2's 900,000-byte blocks. Each chunk
 is the plugin's own, byte for byte (h5py's liblzf, c-blosc 1.21, liblz4, bitshuffle, libbzip2), except
 zstd, whose frames come from Falcon's own encoder, which libzstd reads. A chunk LZF or Blosc cannot
-shrink is stored unfiltered, as the plugins leave it. Blosc2 and SZ are read, not written.
+shrink is stored unfiltered, as the plugins leave it.
 
 ZFP (32013, LLNL's H5Z-ZFP) is written as `hdf5plugin.Zfp` sets it up, every chunk libzfp 1.0.1's byte for
 byte:
@@ -607,6 +607,31 @@ byte:
 zfp is lossy but for `zfpReversible()`. It must be the first filter, and H5Z-ZFP takes 4- and 8-byte
 little-endian integers and floats in chunks with 1 to 4 dimensions longer than 1 (the dimensions of size 1
 are left out of zfp's field). Falcon refuses anything else before writing.
+
+Blosc2 (32026, hdf5-blosc2 with c-blosc2 3.3.2) is written as `hdf5plugin.Blosc2` sets it up:
+- `blosc2(cname, clevel, filter)`: `blosclz`, `lz4`, `lz4hc`, `zlib`, or `zstd`, at clevel 0 to 9, after
+  `nofilter`, `shuffle`, `bitshuffle`, or `delta`;
+- `blosc2()`: BloscLZ at clevel 5 after a byte shuffle.
+
+Each chunk is a Blosc2 frame: for a chunk of rank 2 to 16 a b2nd array of the chunk's shape, in blocks of
+the shape the plugin derives from c-blosc2's block size, and otherwise (rank 1, an array type, a filter
+before it that changes the chunk's size) a super-chunk of one chunk. Every frame is the plugin's byte for
+byte, but for zstd's. The plugin cannot read back the b2nd chunks it writes of elements over 255 bytes, so
+Falcon refuses those (`IllegalStateException`); at rank 1 they are written.
+
+SZ (32017, SZ 2.1.12's H5Z-SZ) is written as `hdf5plugin.SZ` sets it up:
+- `szAbsolute(bound)`: each value within the bound;
+- `szRelative(ratio)`: within the ratio times the chunk's value range;
+- `szPointwiseRelative(ratio)`: each value within the ratio times itself;
+- `sz()`: point-wise relative 1e-5, `hdf5plugin.SZ()`'s default.
+
+SZ is lossy. Each chunk is libSZ's byte for byte beneath its last, zstd stage (whose frames are Falcon's own),
+but for int64 data needing more than 32 bits: hdf5plugin's Windows build of libSZ loses those values, and
+Falcon writes them as a 64-bit build does, within the bound (libSZ reads them correctly). SZ must be the
+first filter, over little-endian floats or integers of 1 to 8 bytes (integers take no point-wise relative
+bound), in chunks of at most 4 dimensions longer than 1. A chunk of fewer than 20 values, and one H5Z-SZ
+records as a single value (a `(1, n)` chunk: its client data keep only the first dimension), is stored as it
+is, as H5Z-SZ leaves it.
 
 ### Links and references
 
@@ -758,8 +783,11 @@ try (Hdf5Writer w = Hdf5Writer.open(Path.of("data.h5"))) {
 - **Refused** (`HdfUnsupportedException`):
   - files with 4-byte addresses, of a non-default driver (family, multi), that track their free space
     persistently or in pages, or that are marked as open by a writer (with no journal of Falcon's to redo);
-  - writing into datasets filtered by Blosc2, SZ, or a filter Falcon does not know (it writes into LZF,
-    Blosc, LZ4, bitshuffle, Zstandard, bzip2, and ZFP datasets, with their client data);
+  - writing into datasets filtered by a filter Falcon does not know (it writes into LZF, Blosc, LZ4,
+    bitshuffle, Zstandard, bzip2, ZFP, Blosc2, and SZ datasets, with their client data), or with client
+    data Falcon cannot write as the plugin does (c-blosc2's filter and codec plugins; SZ client data with
+    no error bound, which H5Z-SZ takes from a configuration file, or a bound mode other than absolute,
+    relative, their combinations, and point-wise relative);
   - writing through a virtual dataset of variable-length or reference data (as reading one is), into a
     source of another type (other than the other byte order), or into a source file read through a
     resolver;
@@ -846,5 +874,5 @@ The following are not supported:
 - **Multi-file drivers** (family, multi, split). `driverInfo()` reports them, and Falcon reads only the
   file it opened.
 
-On the write side, Blosc2 and SZ are not written (Falcon has no encoders for them), and changing a
-file refuses what *Changing an existing file* lists. See [`TODO.md`](TODO.md).
+On the write side, Falcon writes every filter it reads; changing a file refuses what *Changing an
+existing file* lists. See [`TODO.md`](TODO.md).

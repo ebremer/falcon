@@ -87,7 +87,8 @@ class ThirdPartyFiltersEncodeTest {
         byte[] lz4 = ThirdPartyFilters.encode(ThirdPartyFilters.LZ4, new int[] {300}, data);
         assertEquals(12 + 4 * 4 + 1000, lz4.length);
         assertNotNull(ThirdPartyFilters.encode(ThirdPartyFilters.ZSTD, new int[] {3}, data));
-        assertThrows(IllegalArgumentException.class, () -> ThirdPartyFilters.encode(32026, new int[0], data));
+        assertNull(ThirdPartyFilters.encode(32026, new int[0], data)); // Blosc2 without its client data
+        assertThrows(IllegalArgumentException.class, () -> ThirdPartyFilters.encode(32024, new int[0], data)); // SZ3
     }
 
     @Test
@@ -100,6 +101,48 @@ class ThirdPartyFiltersEncodeTest {
                 ThirdPartyFilters.pluginName(ThirdPartyFilters.LZ4));
         assertEquals("HDF5 zstd filter; see https://github.com/HDFGroup/hdf5_plugins/blob/master/docs/RegisteredFilterPlugins.md",
                 ThirdPartyFilters.pluginName(ThirdPartyFilters.ZSTD));
+        assertEquals("blosc2", ThirdPartyFilters.pluginName(ThirdPartyFilters.BLOSC2));
         assertThrows(IllegalArgumentException.class, () -> ThirdPartyFilters.pluginName(1));
+    }
+
+    /**
+     * Blosc2 (P2 S10) with the client data a file may hold: b2nd and plain frames that decode back, failures
+     * where hdf5-blosc2 fails (null), and refusals where Falcon would not write the plugin's chunk.
+     */
+    @Test
+    void blosc2WritesWhatItReadsAndFailsWhereThePluginFails() {
+        byte[] data = new byte[4000];
+        Random random = new Random(26);
+        for (int i = 0; i < data.length; i++) {
+            data[i] = (byte) (random.nextInt(16) == 0 ? random.nextInt() : i / 40);
+        }
+        int[][] written = {
+            {1, 0, 4, 4000, 5, 1, 0}, {1, 0, 4, 4000, 5, 1, 0, 2, 25, 40}, {1, 0, 4, 4000, 9, 2, 1, 2, 40, 25},
+            {1, 0, 2, 4000, 3, 3, 4, 3, 10, 10, 20}, {1, 4096, 4, 4000, 5, 1, 2}, {1, 64, 4, 4000, 5, 0, 1, 2, 25, 40},
+            {1, 0, 8, 4000, 5, 1, 5, 2, 25, 40}, {1, 0, 4, 4000, 5, 1}, {1, 0, 1, 4000, 0, 0, 0, 2, 40, 100},
+            {1, 0, 3, 4000, 5, 1, 0, 2, 25, 40},
+        };
+        for (int[] cd : written) {
+            byte[] encoded = ThirdPartyFilters.encode(ThirdPartyFilters.BLOSC2, cd, data);
+            assertNotNull(encoded, Arrays.toString(cd));
+            FilterPipeline.Filter filter = new FilterPipeline.Filter(ThirdPartyFilters.BLOSC2, 1, cd);
+            assertArrayEquals(data, Filters.decode(filter, encoded, 1, data.length), Arrays.toString(cd));
+        }
+        int[][] failed = {
+            {1, 0, 4, 4000}, {1, 0, 4, 4000, 5}, {1, 0, 4, 4000, 10, 1, 0}, {1, 0, 4, 4000, 5, 4, 0},
+            {1, 0, 4, 4000, 5, 7, 0}, {1, 0, 4, 4000, 5, 1, 3}, {1, 0, 4, 4000, 5, 1, 9}, {1, 0, 4, 4000, 5, 1, 0, 1, 1000},
+            {1, 0, 4, 4000, 5, 1, 0, 2, 25}, {1, 0, 4, 4002, 5, 1, 0, 2, 25, 40}, {1, 0, 0, 4000, 5, 1, 0},
+        };
+        for (int[] cd : failed) {
+            assertNull(ThirdPartyFilters.encode(ThirdPartyFilters.BLOSC2, cd, data), Arrays.toString(cd));
+        }
+        int[][] refused = {
+            {1, 0, 4, 4000, 5, 32, 0}, {1, 0, 4, 4000, 5, 1, 33}, {1, 0, 400, 4000, 5, 1, 0, 2, 2, 5},
+            {1, 1001, 4, 4000, 5, 1, 0},
+        };
+        for (int[] cd : refused) {
+            assertThrows(com.ebremer.falcon.hdf5.HdfUnsupportedException.class,
+                    () -> ThirdPartyFilters.encode(ThirdPartyFilters.BLOSC2, cd, data), Arrays.toString(cd));
+        }
     }
 }

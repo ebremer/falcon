@@ -88,8 +88,8 @@ try (Hdf5Writer w = Hdf5Writer.create(Path.of("out.h5"))) {
 The reader handles every superblock, object-header, and group form, every chunk index, the built-in and
 the common third-party filters, vlen data, references, virtual datasets, and external links (not files
 split across several by the family, multi, or split drivers). The writer covers every datatype, all six
-built-in filters (szip in both codings, byte for byte libaec's) and the third-party LZF, Blosc, LZ4,
-bitshuffle, Zstandard, and bzip2 (as hdf5plugin writes them), compact, contiguous and chunked storage
+built-in filters (szip in both codings, byte for byte libaec's) and every third-party filter it reads
+(LZF, Blosc, LZ4, bitshuffle, Zstandard, bzip2, ZFP, Blosc2, and SZ, as hdf5plugin writes them), compact, contiguous and chunked storage
 (growing ones included), dense groups and attributes of any size, hard, soft and external links, object and
 region references (in datasets and attributes), user blocks, files past 2 GB, and both the modern and
 earliest on-disk formats; it changes existing files in place, its own and libhdf5's (writing into their

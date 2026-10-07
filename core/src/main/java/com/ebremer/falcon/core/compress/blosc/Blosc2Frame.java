@@ -6,6 +6,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -58,6 +59,8 @@ public final class Blosc2Frame {
     private static final int FRAME_CONTIGUOUS_TYPE = 0;
     /** The newest frame format c-blosc2 3.3 reads ({@code BLOSC2_VERSION_FRAME_FORMAT}). */
     private static final int VERSION_FRAME_FORMAT = 3;
+    /** The frame format c-blosc2 writes for chunks of one size ({@code BLOSC2_VERSION_FRAME_FORMAT_RC1}). */
+    private static final int VERSION_FRAME_FORMAT_RC1 = 2;
     private static final int MAX_FILTERS = 6;
     private static final int MAX_METALAYERS = 16;
     private static final int MAX_VLMETALAYERS = 8 * 1024;
@@ -362,7 +365,7 @@ public final class Blosc2Frame {
     }
 
     /** The header's metalayers ({@code get_meta_from_header}): name to content, in the frame's order. */
-    private static Map<String, byte[]> metalayers(byte[] header, int headerLen) {
+    static Map<String, byte[]> metalayers(byte[] header, int headerLen) {
         int pos = FRAME_IDX_SIZE + 2; // the index's size (uint16) is not needed
         if (headerLen < pos + 1) {
             throw new CompressionFormatException("Blosc2 frame header is too short for its metalayers");
@@ -465,6 +468,185 @@ public final class Blosc2Frame {
                     + " bytes is truncated");
         }
         return new Entry(name, offset + 5, length, pos);
+    }
+
+    /**
+     * What a frame's header records of the super-chunk's compression context, as a copy to a contiguous frame
+     * takes it from the context that compressed the chunks: the (capped) type size and the context's block
+     * size, the chunks' size, the clevel and compressor, the split mode, and the filter pipeline.
+     */
+    record Params(int typeSize, int blockSize, int chunkSize, int clevel, int compressor, int splitMode,
+                  byte[] filters) {
+    }
+
+    /** A fixed-length metalayer, by name. */
+    record Metalayer(String name, byte[] content) {
+    }
+
+    /**
+     * A contiguous frame of {@code chunks} (Blosc2 chunks of {@code params.chunkSize()} bytes each, decoded), as
+     * {@code blosc2_schunk_to_buffer} writes a super-chunk to a buffer: a new frame ({@code frame_from_schunk}),
+     * its metalayers ({@code blosc2_meta_add}), then each chunk appended ({@code frame_append_chunk}), which
+     * leaves the header, the chunks back to back, the index chunk of their offsets, and the trailer. A chunk of
+     * zeros, NaNs, or uninitialised values is not stored: its offset says so.
+     */
+    static byte[] write(List<byte[]> chunks, Params params, List<Metalayer> metalayers) {
+        long nbytes = 0;
+        long cbytes = 0;
+        long[] offsets = new long[chunks.size()];
+        java.io.ByteArrayOutputStream section = new java.io.ByteArrayOutputStream();
+        for (int i = 0; i < chunks.size(); i++) {
+            byte[] chunk = chunks.get(i);
+            int chunkNbytes = BloscDecoder.le32(chunk, 4);
+            int chunkCbytes = BloscDecoder.le32(chunk, 12);
+            if (chunkNbytes != params.chunkSize()) {
+                throw new IllegalArgumentException("Blosc2 frame chunks must all hold " + params.chunkSize() + " bytes");
+            }
+            nbytes += chunkNbytes;
+            int special = (chunk[31] >>> 4) & 0x7;
+            if (special == 1 || special == 2 || special == 4) { // zeros, NaN, uninitialised
+                offsets[i] = Long.MIN_VALUE | ((long) special << 56);
+            } else {
+                offsets[i] = cbytes;
+                section.write(chunk, 0, chunkCbytes);
+                cbytes += chunkCbytes;
+            }
+        }
+        // The index: the offsets as int64s, compressed as frame_append_chunk does (BloscLZ, clevel 5, shuffled
+        // 8-byte items, 16 KiB blocks, never split).
+        byte[] index = new byte[0];
+        if (!chunks.isEmpty()) {
+            byte[] raw = new byte[8 * offsets.length];
+            for (int i = 0; i < offsets.length; i++) {
+                for (int k = 0; k < 8; k++) {
+                    raw[8 * i + k] = (byte) (offsets[i] >>> (8 * k));
+                }
+            }
+            index = Blosc2Encoder.compress(raw, 0, raw.length, new Blosc2Encoder.Params(8, 5, Blosc2Encoder.BLOSCLZ,
+                    Blosc2Encoder.filters(Blosc2Encoder.SHUFFLE), 16 * 1024, Blosc2Encoder.NEVER_SPLIT)).chunk();
+        }
+        byte[] header = header(params, nbytes, cbytes, metalayers);
+        byte[] trailer = trailer();
+        long frameLen = (long) header.length + cbytes + index.length + trailer.length;
+        if (frameLen > Integer.MAX_VALUE - 8) {
+            throw new IllegalArgumentException("a Blosc2 frame of " + frameLen + " bytes is too large");
+        }
+        byte[] frame = new byte[(int) frameLen];
+        System.arraycopy(header, 0, frame, 0, header.length);
+        putBe64(frame, FRAME_LEN, frameLen);
+        byte[] stored = section.toByteArray();
+        System.arraycopy(stored, 0, frame, header.length, stored.length);
+        System.arraycopy(index, 0, frame, header.length + stored.length, index.length);
+        System.arraycopy(trailer, 0, frame, header.length + stored.length + index.length, trailer.length);
+        return frame;
+    }
+
+    /** {@code new_header_frame}: the msgpack header and the metalayers, for a frame of uniform chunks. */
+    private static byte[] header(Params p, long nbytes, long cbytes, List<Metalayer> metalayers) {
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        byte[] h = new byte[FRAME_HEADER_MINLEN];
+        h[0] = (byte) (0x90 + 14); // fixarray
+        h[1] = (byte) (0xa0 + 8);  // str of 8
+        System.arraycopy(MAGIC, 0, h, 2, MAGIC.length);
+        h[FRAME_HEADER_LEN - 1] = (byte) 0xd2; // int32 header length, filled in below
+        h[FRAME_LEN - 1] = (byte) 0xcf;        // uint64 frame length, filled in by write
+        h[FRAME_FLAGS - 1] = (byte) (0xa0 + 4);
+        h[FRAME_FLAGS] = (byte) (VERSION_FRAME_FORMAT_RC1 | 0x10); // 64-bit offsets
+        h[FRAME_TYPE] = FRAME_CONTIGUOUS_TYPE;
+        h[FRAME_TYPE + 1] = (byte) (p.compressor() | p.clevel() << 4);
+        h[FRAME_TYPE + 2] = (byte) (p.splitMode() - 1);
+        h[FRAME_NBYTES - 1] = (byte) 0xd3;
+        putBe64(h, FRAME_NBYTES, nbytes);
+        h[FRAME_CBYTES - 1] = (byte) 0xd3;
+        putBe64(h, FRAME_CBYTES, cbytes);
+        h[FRAME_TYPESIZE - 1] = (byte) 0xd2;
+        putBe32(h, FRAME_TYPESIZE, p.typeSize());
+        h[FRAME_TYPESIZE + 4] = (byte) 0xd2;
+        putBe32(h, FRAME_TYPESIZE + 5, p.blockSize());
+        h[FRAME_CHUNKSIZE - 1] = (byte) 0xd2;
+        putBe32(h, FRAME_CHUNKSIZE, p.chunkSize());
+        // compression threads 0 (a copy's context sets none), decompression threads 1 (the default)
+        h[FRAME_CHUNKSIZE + 4] = (byte) 0xd1;
+        h[FRAME_CHUNKSIZE + 7] = (byte) 0xd1;
+        h[FRAME_CHUNKSIZE + 9] = 1;
+        h[FRAME_FILTER_PIPELINE - 2] = (byte) 0xc2; // no variable-length metalayers
+        h[FRAME_FILTER_PIPELINE - 1] = (byte) 0xd8; // fixext 16
+        h[FRAME_FILTER_PIPELINE] = MAX_FILTERS;
+        System.arraycopy(p.filters(), 0, h, FRAME_FILTER_PIPELINE + 1, MAX_FILTERS);
+        h[FRAME_FILTER_PIPELINE + 1 + 6] = (byte) p.compressor(); // udcodec; codec meta and filters' meta 0
+        out.writeBytes(h);
+
+        // The metalayers: [index size, map of name -> offset, array of bin32 contents].
+        int n = metalayers.size();
+        java.io.ByteArrayOutputStream index = new java.io.ByteArrayOutputStream();
+        index.write(0x90 + 3);
+        index.write(0xcd);
+        index.write(0); // the index's size, filled in below
+        index.write(0);
+        index.write(0xde);
+        index.write(n >>> 8);
+        index.write(n);
+        int[] slots = new int[n];
+        for (int i = 0; i < n; i++) {
+            byte[] name = metalayers.get(i).name().getBytes(StandardCharsets.US_ASCII);
+            if (name.length >= 32) {
+                throw new IllegalArgumentException("a Blosc2 metalayer name has at most 31 bytes");
+            }
+            index.write(0xa0 + name.length);
+            index.writeBytes(name);
+            index.write(0xd2);
+            slots[i] = FRAME_HEADER_MINLEN + index.size();
+            index.writeBytes(new byte[4]);
+        }
+        byte[] idx = index.toByteArray();
+        int mapSize = idx.length; // from the array marker through the map
+        idx[2] = (byte) (mapSize >>> 8);
+        idx[3] = (byte) mapSize;
+        out.writeBytes(idx);
+        out.write(0xdc);
+        out.write(n >>> 8);
+        out.write(n);
+        java.io.ByteArrayOutputStream values = new java.io.ByteArrayOutputStream();
+        int[] at = new int[n];
+        for (int i = 0; i < n; i++) {
+            at[i] = out.size() + values.size();
+            byte[] content = metalayers.get(i).content();
+            values.write(0xc6);
+            byte[] len = new byte[4];
+            putBe32(len, 0, content.length);
+            values.writeBytes(len);
+            values.writeBytes(content);
+        }
+        out.writeBytes(values.toByteArray());
+        byte[] header = out.toByteArray();
+        for (int i = 0; i < n; i++) {
+            putBe32(header, slots[i], at[i]);
+        }
+        putBe32(header, FRAME_HEADER_LEN, header.length);
+        return header;
+    }
+
+    /**
+     * {@code frame_update_trailer} without variable-length metalayers: version 1, an empty index and array,
+     * the trailer's length, and an empty fingerprint.
+     */
+    private static byte[] trailer() {
+        byte[] t = {(byte) (0x90 + 4), 1, (byte) (0x90 + 3), (byte) 0xcd, 0, 6, (byte) 0xde, 0, 0, (byte) 0xdc, 0, 0,
+            (byte) 0xce, 0, 0, 0, 0, (byte) 0xd8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+        putBe32(t, 13, t.length);
+        return t;
+    }
+
+    private static void putBe32(byte[] b, int off, int v) {
+        for (int k = 0; k < 4; k++) {
+            b[off + k] = (byte) (v >>> (24 - 8 * k));
+        }
+    }
+
+    private static void putBe64(byte[] b, int off, long v) {
+        for (int k = 0; k < 8; k++) {
+            b[off + k] = (byte) (v >>> (56 - 8 * k));
+        }
     }
 
     private static int be16(byte[] b, int off) {

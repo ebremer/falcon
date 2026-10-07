@@ -2,7 +2,9 @@ package com.ebremer.falcon.core.compress.blosc;
 
 import com.ebremer.falcon.core.compress.CompressionFormatException;
 import com.ebremer.falcon.core.compress.UnsupportedCompressionException;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 
 /**
  * A b2nd (formerly Caterva) array: an N-dimensional array stored in a {@link Blosc2Frame}, its shape in the
@@ -294,6 +296,157 @@ public final class B2ndArray {
                 return;
             }
         }
+    }
+
+    /** A b2nd array's geometry, checked for writing: its shapes, item counts, and grids. */
+    record Layout(long[] shape, int[] chunkShape, int[] blockShape, long items, long extChunkItems, long blockItems,
+                  long[] chunksInArray, long[] blocksInChunk) {
+    }
+
+    /**
+     * Checks an array's shapes as {@code b2nd_create_ctx} and {@code update_shape_struct} do, for a non-empty
+     * array of rank 1 to {@value #MAX_DIM}.
+     *
+     * @throws IllegalArgumentException if a shape is out of range, or a count overflows
+     */
+    static Layout layout(long[] shape, int[] chunkShape, int[] blockShape) {
+        int ndim = shape.length;
+        if (ndim < 1 || ndim > MAX_DIM || chunkShape.length != ndim || blockShape.length != ndim) {
+            throw new IllegalArgumentException("b2nd shapes must share a rank of 1 to " + MAX_DIM + ": "
+                    + Arrays.toString(shape) + ", " + Arrays.toString(chunkShape) + ", " + Arrays.toString(blockShape));
+        }
+        long items = 1;
+        long extChunkItems = 1;
+        long blockItems = 1;
+        long[] chunksInArray = new long[ndim];
+        long[] blocksInChunk = new long[ndim];
+        try {
+            for (int i = 0; i < ndim; i++) {
+                if (shape[i] < 1 || chunkShape[i] < 1 || blockShape[i] < 1 || blockShape[i] > chunkShape[i]) {
+                    throw new IllegalArgumentException("b2nd shape " + Arrays.toString(shape) + ", chunks "
+                            + Arrays.toString(chunkShape) + ", blocks " + Arrays.toString(blockShape)
+                            + ": each dimension at least 1, and blocks no larger than chunks");
+                }
+                long extChunk = chunkShape[i] % blockShape[i] == 0 ? chunkShape[i]
+                        : (long) chunkShape[i] + blockShape[i] - chunkShape[i] % blockShape[i];
+                chunksInArray[i] = (shape[i] + chunkShape[i] - 1) / chunkShape[i];
+                blocksInChunk[i] = extChunk / blockShape[i];
+                items = Math.multiplyExact(items, shape[i]);
+                extChunkItems = Math.multiplyExact(extChunkItems, extChunk);
+                blockItems = Math.multiplyExact(blockItems, blockShape[i]);
+            }
+        } catch (ArithmeticException e) {
+            throw new IllegalArgumentException("b2nd shape, chunkshape, or blockshape overflows");
+        }
+        return new Layout(shape.clone(), chunkShape.clone(), blockShape.clone(), items, extChunkItems, blockItems,
+                chunksInArray, blocksInChunk);
+    }
+
+    /**
+     * The array cut into its chunks, in C order over the chunk grid, as {@code get_set_slice} fills each before
+     * compressing it: padded to whole blocks, the blocks in C order, each block's items in C order over the
+     * block shape, and zeros where a block reaches past the chunk or the array.
+     */
+    static List<byte[]> cut(byte[] data, int typeSize, Layout layout) {
+        int ndim = layout.shape().length;
+        long chunks = 1;
+        long blocks = 1;
+        for (int i = 0; i < ndim; i++) {
+            chunks *= layout.chunksInArray()[i];
+            blocks *= layout.blocksInChunk()[i];
+        }
+        long[] arrayStrides = strides(layout.shape());
+        int blockBytes = (int) (layout.blockItems() * typeSize);
+        long[] chunkIndex = new long[ndim];
+        long[] blockIndex = new long[ndim];
+        long[] start = new long[ndim];
+        long[] extent = new long[ndim];
+        List<byte[]> out = new ArrayList<>();
+        for (long c = 0; c < chunks; c++) {
+            unravel(c, layout.chunksInArray(), chunkIndex);
+            byte[] chunk = new byte[(int) (layout.extChunkItems() * typeSize)];
+            for (long b = 0; b < blocks; b++) {
+                unravel(b, layout.blocksInChunk(), blockIndex);
+                boolean empty = false;
+                for (int i = 0; i < ndim; i++) {
+                    long chunkStart = chunkIndex[i] * layout.chunkShape()[i];
+                    long chunkStop = Math.min(chunkStart + layout.chunkShape()[i], layout.shape()[i]);
+                    long blockStart = Math.min(chunkStart + blockIndex[i] * layout.blockShape()[i], chunkStop);
+                    long blockStop = Math.min(blockStart + layout.blockShape()[i], chunkStop);
+                    start[i] = blockStart;
+                    extent[i] = blockStop - blockStart;
+                    empty |= extent[i] == 0;
+                }
+                if (!empty) {
+                    fillBlock(data, typeSize, arrayStrides, layout.blockShape(), start, extent, chunk, b * blockBytes);
+                }
+            }
+            out.add(chunk);
+        }
+        return out;
+    }
+
+    /** Copies the array's items at {@code start} over {@code extent} into a block's corner (C order). */
+    private static void fillBlock(byte[] data, int typeSize, long[] arrayStrides, int[] blockShape, long[] start,
+                                  long[] extent, byte[] block, long blockOffset) {
+        int ndim = start.length;
+        long[] position = new long[ndim];
+        int run = (int) (extent[ndim - 1] * typeSize);
+        while (true) {
+            long dst = 0;
+            long src = 0;
+            for (int i = 0; i < ndim; i++) {
+                dst = dst * blockShape[i] + position[i];
+                src += (start[i] + position[i]) * arrayStrides[i];
+            }
+            System.arraycopy(data, (int) (src * typeSize), block, (int) (blockOffset + dst * typeSize), run);
+            int i = ndim - 2;
+            while (i >= 0 && ++position[i] == extent[i]) {
+                position[i] = 0;
+                i--;
+            }
+            if (i < 0) {
+                return;
+            }
+        }
+    }
+
+    /**
+     * The {@code "b2nd"} metalayer, as {@code b2nd_serialize_meta} writes it: a msgpack array of version 0, the
+     * rank, the shape (int64s), the chunk and block shapes (int32s), the dtype format (0, NumPy's), and the
+     * dtype (a str32).
+     */
+    static byte[] metalayer(long[] shape, int[] chunkShape, int[] blockShape, String dtype) {
+        int ndim = shape.length;
+        byte[] name = dtype.getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+        byte[] meta = new byte[3 + (1 + 9 * ndim) + 2 * (1 + 5 * ndim) + 1 + 1 + 4 + name.length];
+        int p = 0;
+        meta[p++] = (byte) (0x90 + 7);
+        meta[p++] = 0; // B2ND_METALAYER_VERSION
+        meta[p++] = (byte) ndim;
+        meta[p++] = (byte) (0x90 + ndim);
+        for (long s : shape) {
+            meta[p++] = (byte) 0xd3;
+            for (int k = 7; k >= 0; k--) {
+                meta[p++] = (byte) (s >>> (8 * k));
+            }
+        }
+        for (int[] dims : new int[][] {chunkShape, blockShape}) {
+            meta[p++] = (byte) (0x90 + ndim);
+            for (int d : dims) {
+                meta[p++] = (byte) 0xd2;
+                for (int k = 3; k >= 0; k--) {
+                    meta[p++] = (byte) (d >>> (8 * k));
+                }
+            }
+        }
+        meta[p++] = 0; // DTYPE_NUMPY_FORMAT
+        meta[p++] = (byte) 0xdb;
+        for (int k = 3; k >= 0; k--) {
+            meta[p++] = (byte) (name.length >>> (8 * k));
+        }
+        System.arraycopy(name, 0, meta, p, name.length);
+        return meta;
     }
 
     /** Item strides of a C-order array of {@code dims}. */

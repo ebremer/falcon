@@ -1,7 +1,6 @@
 /**
- * Falcon Core &mdash; code shared by Falcon's format modules: pure-Java decoders (and, for zstd, Blosc
- * with each of its internal compressors, LZ4, LZF, bitshuffle, and bzip2, encoders) for the compression
- * formats both HDF5 filters and Zarr codecs use, and the checksums both use.
+ * Falcon Core &mdash; code shared by Falcon's format modules: pure-Java decoders and encoders for the
+ * compression formats both HDF5 filters and Zarr codecs use, and the checksums both use.
  *
  * <ul>
  *   <li>{@code checksum} &mdash; Fletcher-32 and Jenkins' lookup3 (HDF5's, and numcodecs');</li>
@@ -14,9 +13,8 @@
  *   <li>{@code compress.lz4} &mdash; the LZ4 block format;</li>
  *   <li>{@code compress.bzip2} &mdash; bzip2 (libbzip2);</li>
  *   <li>{@code compress.lzf} &mdash; LZF (liblzf);</li>
- *   <li>{@code compress.sz} &mdash; SZ 2, the error-bounded lossy compressor (decoding only);</li>
- *   <li>{@code compress.zfp} &mdash; zfp's lossy and lossless floating-point and integer compression (decoding
- *       only).</li>
+ *   <li>{@code compress.sz} &mdash; SZ 2, the error-bounded lossy compressor;</li>
+ *   <li>{@code compress.zfp} &mdash; zfp's lossy and lossless floating-point and integer compression.</li>
  * </ul>
  *
  * <p>Like the format modules, it has <strong>no dependencies beyond {@code java.base}</strong> (zlib

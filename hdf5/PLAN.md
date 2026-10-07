@@ -5,7 +5,7 @@ writer for the [HDF5 File Format Specification v4.0](https://support.hdfgroup.or
 (HDF5 2.0). It is **Falcon Phase 1** and the template for the Zarr module (Phase 2, `../zarr/PLAN.md`).
 See the root [`../PLAN.md`](../PLAN.md) for the umbrella roadmap.
 
-> **Status (2026-10-06): stages H0–H9 are done, and the P2 features since; 1113 tests. Pre-1.0** (version
+> **Status (2026-10-06): stages H0–H9 are done, and the P2 features since; 1128 tests. Pre-1.0** (version
 > `0.1.0-SNAPSHOT`): the API may still change (`TODO.md` records each change), and no version has been
 > released.
 >
@@ -21,7 +21,7 @@ See the root [`../PLAN.md`](../PLAN.md) for the umbrella roadmap.
 >
 > **Write:** new files in the modern or the earliest format, and existing files (Falcon's or libhdf5's)
 > changed in place: every datatype, the six built-in filters and the third-party LZF, Blosc, LZ4,
-> bitshuffle, Zstandard, and bzip2 (as hdf5plugin writes them), compact, contiguous, and chunked storage
+> bitshuffle, Zstandard, bzip2, ZFP, Blosc2, and SZ (as hdf5plugin writes them), compact, contiguous, and chunked storage
 > (growing ones included), dense storage of any size, hard, soft, and external links, references, user
 > blocks, and writes through virtual datasets, streamed to the file. Falcon's tests read back what it
 > writes; the dev-time `tools/fixtures/check_hdf5_writer.py` (not part of the build) has libhdf5 2.0 and
@@ -120,9 +120,9 @@ round-trip conformance** against h5py. Every non-goal falls out of that boundary
   test is semantic round-trip — h5py reads what Falcon writes and vice versa — which Falcon does across
   the whole fixture matrix.
 
-**Not a non-goal — open.** Distinct from the above (which are out of scope *by design*), a few in-scope
-features are not done yet: writing Blosc2, ZFP, and SZ, which Falcon reads but has no encoders for
-(S10). What was once deferred here is done: the bit-field, opaque, and time datatypes are
+**Not a non-goal — done.** Distinct from the above (which are out of scope *by design*), the in-scope
+features once open here are done: writing ZFP, Blosc2, and SZ, the filters Falcon read but had no encoders
+for, since S10 (2026-10-06); the bit-field, opaque, and time datatypes are
 written since P2 WF1–WF4; shared messages (SOHM), the revised `H5R_ref_t` reference encoding, and
 unlimited (printf-style) VDS mappings are read since P2. See the stage roadmap (§8) and
 [`TODO.md`](TODO.md). **Zarr** is Falcon Phase 2 (§12).
@@ -150,7 +150,7 @@ unlimited (printf-style) VDS mappings are read since P2. See the stage roadmap (
 | Metadata endianness | Little-endian readers/writers | HDF5 metadata is little-endian; datatype *data* order is per-datatype. |
 | Addresses/lengths | Widths from superblock ("size of offsets"/"size of lengths"); undefined = all-1s | Matches the format's parameterized addressing. |
 | Checksums | Hand-written Jenkins lookup3 (+ fletcher32) | Not in the JDK. |
-| Compression | `java.util.zip` for `deflate`; hand-written `shuffle`/`fletcher32`/`nbit`/`scaleoffset`; hand-written **szip** (§9); the third-party filters (LZF, Blosc, LZ4, bitshuffle, zstd, bzip2, Blosc2, ZFP, SZ) through `core`'s codecs, all but the last three written too | All pure-JDK; zero deps. |
+| Compression | `java.util.zip` for `deflate`; hand-written `shuffle`/`fletcher32`/`nbit`/`scaleoffset`; hand-written **szip** (§9); the third-party filters (LZF, Blosc, LZ4, bitshuffle, zstd, bzip2, Blosc2, ZFP, SZ) through `core`'s codecs, read and written | All pure-JDK; zero deps. |
 | Error model | Typed exceptions (`HdfFormatException`, `HdfUnsupportedException`) carrying byte offsets | Precise diagnostics against a binary format. |
 
 ## 6. HDF5 module — package layout (`com.ebremer.falcon.hdf5.*`)

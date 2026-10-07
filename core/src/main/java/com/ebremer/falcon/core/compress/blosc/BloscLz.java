@@ -5,7 +5,9 @@ import com.ebremer.falcon.core.compress.CompressionFormatException;
 /**
  * BloscLZ &mdash; c-blosc's built-in LZ codec (a FastLZ variant) and its default compressor. Translated
  * directly from {@code blosclz_decompress} and {@code blosclz_compress} in c-blosc 1.21.6's
- * {@code blosclz.c}, so a stream is the one c-blosc writes for the same block and clevel.
+ * {@code blosclz.c}, so a stream is the one c-blosc writes for the same block and clevel; and from c-blosc2
+ * 3.3.2's {@code blosclz_compress} ({@link #compress2}), which probes more of the block and always matches
+ * with a shift and minimum length of 4.
  *
  * <p>The stream is a sequence of opcodes. A control byte below 32 introduces a literal run of
  * {@code ctrl + 1} bytes; a control byte of 32 or more introduces a match: its top three bits carry the
@@ -42,7 +44,7 @@ final class BloscLz {
     static int compress(int clevel, byte[] src, int off, int length, byte[] dst, int dstOff, int maxOut,
                         boolean splitBlock) {
         int maxlen = length / 4; // checking the last quarter is enough to estimate the ratio
-        double cratio = estimateRatio(src, off + length - maxlen, maxlen);
+        double cratio = estimateRatio(src, off + length - maxlen, maxlen, 3, 3, HASH_LOG2);
         if (cratio < CRATIO[clevel]) {
             return 0;
         }
@@ -54,6 +56,37 @@ final class BloscLz {
             ipshift = 3;
             minlen = 3;
         }
+        return encode(clevel, src, off, length, dst, dstOff, maxOut, ipshift, minlen);
+    }
+
+    /**
+     * Compresses one block into {@code dst} as c-blosc2 3.3.2's {@code blosclz_compress} does: the entropy
+     * probe reads the block's last eighth at clevel 1, quarter at 2 and 3, half at 4 to 6, and all of it from
+     * 7, with the clevel's hash table and the shift and minimum length of 4 the compressor then always uses.
+     * It gives up (returns 0) as {@link #compress} does.
+     *
+     * @param clevel 1 to 9
+     * @return the stream's length, or 0
+     */
+    static int compress2(int clevel, byte[] src, int off, int length, byte[] dst, int dstOff, int maxOut) {
+        int maxlen = length;
+        if (clevel < 2) {
+            maxlen /= 8;
+        } else if (clevel < 4) {
+            maxlen /= 4;
+        } else if (clevel < 7) {
+            maxlen /= 2;
+        }
+        double cratio = estimateRatio(src, off + length - maxlen, maxlen, 4, 4, HASHLOG[clevel]);
+        if (cratio < CRATIO[clevel]) {
+            return 0;
+        }
+        return encode(clevel, src, off, length, dst, dstOff, maxOut, 4, 4);
+    }
+
+    /** The compressor proper, after the probe: {@code blosclz_compress}'s main loop. */
+    private static int encode(int clevel, byte[] src, int off, int length, byte[] dst, int dstOff, int maxOut,
+                              int ipshift, int minlen) {
         int hashlog = HASHLOG[clevel];
         if (length < 16 || maxOut < 66) {
             return 0;
@@ -175,21 +208,22 @@ final class BloscLz {
     }
 
     /**
-     * {@code get_cratio}: a quick estimate of the ratio the compressor will reach on up to 4 KiB from
-     * {@code base}, from a dry run with a 12-bit hash and the shift and minimum length both 3.
+     * {@code get_cratio}: a quick estimate of the ratio the compressor will reach on up to
+     * 2<sup>hashlog</sup> bytes from {@code base}, from a dry run with that hash (c-blosc's is 12 bits, its
+     * shift and minimum length 3).
      */
-    private static double estimateRatio(byte[] src, int base, int maxlen) {
+    private static double estimateRatio(byte[] src, int base, int maxlen, int minlen, int ipshift, int hashlog) {
         int ip = base;
         int oc = 0;
-        int[] htab = new int[1 << HASH_LOG2];
-        int limit = Math.min(maxlen, 1 << HASH_LOG2);
+        int[] htab = new int[1 << hashlog];
+        int limit = Math.min(maxlen, 1 << hashlog);
         int ipBound = base + limit - 1;
         int ipLimit = base + limit - 12;
         int copy = 4; // starts with a literal run
         oc += 5;
         while (ip < ipLimit) {
             int anchor = ip;
-            int hval = hash(read32(src, ip), HASH_LOG2);
+            int hval = hash(read32(src, ip), hashlog);
             int ref = base + htab[hval];
             int distance = anchor - ref;
             htab[hval] = anchor - base;
@@ -197,9 +231,9 @@ final class BloscLz {
             int len = 0;
             if (!literal) {
                 distance--;
-                ip = matchEnd(src, anchor + 4, ipBound, ref + 4) - 3;
+                ip = matchEnd(src, anchor + 4, ipBound, ref + 4) - ipshift;
                 len = ip - anchor;
-                literal = len < 3;
+                literal = len < minlen;
             }
             if (literal) {
                 oc++;
@@ -218,7 +252,7 @@ final class BloscLz {
                 oc += (len - 7) / 255 + 1;
             }
             oc += distance < MAX_DISTANCE ? 2 : 4;
-            htab[hash(read32(src, ip), HASH_LOG2)] = ip - base;
+            htab[hash(read32(src, ip), hashlog)] = ip - base;
             ip += 2;
             oc++; // assume a literal run follows
         }
