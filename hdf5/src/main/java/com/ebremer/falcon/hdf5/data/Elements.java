@@ -205,16 +205,16 @@ public final class Elements {
         byte[] element = new byte[size];
         for (int i = 0; i < count; i++) {
             MemorySegment.copy(data, ValueLayout.JAVA_BYTE, (long) i * size, element, 0, size);
-            int length;
+            // A string ends at its first NUL whatever its padding, as libhdf5's readers (h5dump, h5py) see it:
+            // a space-padded string never written is all NULs, and reads as "". Then a space-padded one also
+            // loses its trailing spaces.
+            int length = 0;
+            while (length < size && element[length] != 0) {
+                length++;
+            }
             if (spacePad) {
-                length = size;
                 while (length > 0 && element[length - 1] == ' ') {
                     length--;
-                }
-            } else {
-                length = 0;
-                while (length < size && element[length] != 0) {
-                    length++;
                 }
             }
             out[i] = new String(element, 0, length, charset);

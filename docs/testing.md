@@ -7,8 +7,9 @@ Falcon is tested at four levels, and each can be run on your own machine:
 
 1. **Unit and fixture tests** (`mvn verify`): JUnit tests of every module, against committed files that the
    reference tools wrote. They need nothing but the JDK and Maven.
-2. **Community conformance suites**: the Zarr community's tests and the OME-Zarr specification's own tests,
-   run against the `falcon` command. They need Git, and Bash or Python.
+2. **Conformance suites**: the Zarr community's tests and the OME-Zarr specification's own tests, run against
+   the `falcon` command; and the HDF5 library's own test files, which Falcon and h5py must read alike, and the
+   HDF Group's CVE files, which Falcon must refuse safely. They need Git, and Bash or Python.
 3. **Reference-tool checks**: scripts that have Falcon write files and the reference tools (h5py, zarr-python,
    ome-zarr-py, ome-zarr-models) read them back, value by value. They need a Python environment with those tools.
 4. **CI** on GitHub Actions runs levels 1 and 2 on every push.
@@ -39,7 +40,7 @@ What the tests cover, roughly:
 | `s3` | the stores and range reader against an in-process S3 |
 | `cli` | every command, locally, over HTTP, and against the in-process S3 |
 
-## Community conformance suites
+## Conformance suites
 
 ### Zarr: zarr-conformance-tests
 
@@ -75,6 +76,43 @@ marked valid that break a rule of the specification's text which its schemas can
 and columns are swapped, a scale with too few values, and 0.6 tests in a pre-release form). The script lists
 each with the rule it breaks; ome-zarr-models, the community's Python validator, rejects them too. It fails
 only on any *other* disagreement.
+
+### HDF5: the HDF5 library's own test files
+
+HDF5 has no conformance suite of the Zarr kind, but the HDF5 library's repository holds the files its own tests
+read: some 400 HDF5 files from many releases of the library, of every layout, datatype, and link, in both byte
+orders, with the corrupt and odd ones its tests refuse. `tools/conformance/run_hdf5_conformance.py` reads each
+with Falcon and with h5py, and compares what they read:
+
+```bash
+mvn -pl cli -am package -DskipTests
+python tools/conformance/run_hdf5_conformance.py     # needs Git, and h5py and hdf5plugin (requirements.txt)
+```
+
+It fetches the test directories of [HDFGroup/hdf5](https://github.com/HDFGroup/hdf5) at the tag of h5py's
+HDF5 (`hdf5_2.0.0`) into `cli/target/hdf5-conformance`. For each file, `falcon conformance --hdf5=<file>` prints
+a JSON manifest of everything in it (every link, object, attribute, and value), and the script builds h5py's
+manifest in a process of its own and compares the two. Each file then **agrees**; is **refused by both**
+(files of the multi-file drivers, and files broken on purpose); is one where **Falcon reads more** (region
+references, new-style references, szip data, VAX floats, and damaged files libhdf5 refuses); or **differs**.
+A failure of Falcon's that is not a typed exception is a bug, whatever h5py does. The last run: 310 files
+agree, 62 are refused by both, Falcon reads more of 60, and the 2 that differ are listed in the script with
+their reasons (a file whose metadata is in a metadata cache image, which Falcon does not read yet, and an
+h5py bug the HDF5 library's expected output confirms). `-v` lists every difference, and
+`cli/target/hdf5-conformance/report.json` holds them all.
+
+### HDF5: the CVE files
+
+[HDFGroup/cve_hdf5](https://github.com/HDFGroup/cve_hdf5) holds the malformed files behind each CVE filed
+against the HDF5 library, and fuzzer finds. Falcon must read each one, or fail with a typed exception, within a
+minute, under a small stack and heap:
+
+```bash
+bash tools/conformance/run_hdf5_cve.sh     # needs Git and Maven; no Python
+```
+
+It fetches the files at a pinned commit into `hdf5/target` and runs the hdf5 module's `CveCorpusTest` on them,
+memory-mapped and through a `RangeReader`, as the module's corrupt-input tests read their mutations.
 
 ## Reference-tool checks
 
@@ -118,5 +156,6 @@ that regenerated fixtures hold the same data and a change shows up as a real dif
 | `.github/workflows/ci.yml` | `mvn verify` on Linux and Windows, JDK 25 |
 | `.github/workflows/conformance.yml` | the Zarr community's conformance tests against `falcon.jar` |
 | `.github/workflows/ome-conformance.yml` | the OME-Zarr specification's conformance tests against `falcon.jar` |
+| `.github/workflows/hdf5-conformance.yml` | the HDF5 library's test files, Falcon against h5py; and the CVE files |
 
-All three run on every push to `main` and on every pull request.
+All four run on every push to `main` and on every pull request.

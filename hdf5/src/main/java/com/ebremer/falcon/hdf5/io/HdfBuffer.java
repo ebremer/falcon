@@ -161,8 +161,12 @@ public final class HdfBuffer {
         return (value & mask) == mask;
     }
 
-    /** Copies {@code len} bytes starting at {@code off} into a fresh array. */
+    /**
+     * Copies {@code len} bytes starting at {@code off} into a fresh array, checking the range first: a corrupt
+     * length (a link name's, up to 2 GB) fails as out of bounds instead of allocating it.
+     */
     public byte[] getBytes(long off, int len) {
+        checkRange(off, len);
         byte[] out = new byte[len];
         copyTo(off, out, 0, len);
         return out;

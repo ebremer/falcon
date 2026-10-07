@@ -185,7 +185,7 @@ public final class Falcon {
                   convert      Convert an HDF5 file to Zarr, or a Zarr store to HDF5
                   copy         Copy a Zarr store, or re-encode it (Zarr v2 or v3, compression, chunks)
                   consolidate  Write a Zarr group's consolidated metadata
-                  conformance  Read a Zarr array's values: the command the Zarr conformance tests call
+                  conformance  What conformance tests call: a Zarr array's values, or an HDF5 file's manifest
                   ome          OME-Zarr: 'ome validate' an image, plate, or scene; 'ome pyramid' write an image
 
                 A source is a local HDF5 file, a Zarr store (a directory, or a .zip of one), or an http(s):// or

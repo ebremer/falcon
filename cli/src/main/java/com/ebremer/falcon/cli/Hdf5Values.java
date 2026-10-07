@@ -155,7 +155,7 @@ final class Hdf5Values {
                 if (row == null) {
                     yield JsonNull.INSTANCE;
                 }
-                int length = Array.getLength(row);
+                int length = count(v.base(), row);
                 List<JsonValue> items = new ArrayList<>(length);
                 for (int j = 0; j < length; j++) {
                     items.add(element(v.base(), row, j));
@@ -172,6 +172,24 @@ final class Hdf5Values {
             case Datatype.FloatingPoint f when column instanceof double[] d ->
                     f.size() <= 4 ? Values.number((float) d[i]) : Values.number(d[i]);
             default -> scalar(column, i);
+        };
+    }
+
+    /**
+     * {@return how many elements of {@code type} a natural-value column holds: a compound's column is a map of
+     * its members' columns, an array type's holds each element's values one after another, and a complex
+     * number's holds each element's two parts}
+     *
+     * @param type   the elements' datatype
+     * @param column what {@code read()} gives for them
+     */
+    static int count(Datatype type, Object column) {
+        return switch (type) {
+            case Datatype.Compound c when column instanceof Map<?, ?> members -> c.members().isEmpty() ? 0
+                    : count(c.members().getFirst().type(), members.get(c.members().getFirst().name()));
+            case Datatype.Array array -> count(array.base(), column) / array.elementCount();
+            case Datatype.Complex c when column instanceof double[] pairs -> pairs.length / 2;
+            default -> Array.getLength(column);
         };
     }
 

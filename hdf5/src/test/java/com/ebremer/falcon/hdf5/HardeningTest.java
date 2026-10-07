@@ -45,6 +45,19 @@ class HardeningTest {
         assertThrows(HdfFormatException.class, () -> GlobalHeap.readObject(context(b.array()), 0, 1));
     }
 
+    /**
+     * A link message whose name claims 2 GB, in an 896-byte file (CVE-2018-13870's, of HDFGroup/cve_hdf5): the
+     * name's bytes were allocated before their range was checked, which exhausted the heap.
+     */
+    @Test
+    void linkNameLongerThanTheFileFailsWithoutAllocatingIt() {
+        ByteBuffer b = ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN);
+        b.put((byte) 1).put((byte) 0x03).putLong(Integer.MAX_VALUE); // version 1, an 8-byte name length
+        HdfFormatException e = assertThrows(HdfFormatException.class,
+                () -> com.ebremer.falcon.hdf5.message.LinkMessage.parse(HdfBuffer.of(b.array()), 0, 8));
+        assertTrue(e.getMessage().contains("out of bounds"), e.getMessage());
+    }
+
     /** A continuation message pointing back at its own chunk used to recurse until the stack overflowed. */
     @Test
     void objectHeaderContinuationCycleFails() {

@@ -373,7 +373,21 @@ written file that libhdf5 rejects or misreads.
 
 ## P1 — valid files that fail; hardening; concurrency; test gaps
 
-Empty: every item is done (see *Done — 2026-10-05 (P1)*).
+The items of 2026-10-05 are done (see *Done — 2026-10-05 (P1)*). Open, found by the HDF5 conformance harness
+(`tools/conformance/run_hdf5_conformance.py`, see *Done — 2026-10-07*), on the HDF5 library's own test files:
+
+- **C1 — files with a metadata cache image.** A file written with `H5Pset_mdc_image_config` keeps its metadata
+  in the metadata cache image block (format specification III.J, pointed to by the superblock extension's
+  Metadata Cache Image message, IV.A.3.y), not at each entry's own address, so Falcon finds zeros where the root
+  object header should be (`tools/test/testfiles/h5clear_mdc_image.h5`: "unrecognized object header at 48").
+  Fix: read the block (signature `MDCI`, version 0, its entries' addresses, types, and images, and its
+  checksum) and serve those addresses from it. Listed in the harness's `KNOWN` until then.
+- **C2 — a corrupt symbol table message, repaired as libhdf5 repairs it.** When an old-style group's Symbol
+  Table message points at no local heap or B-tree, libhdf5 (`H5G__stab_valid`) uses the addresses its parent's
+  symbol table entry caches in its scratch pad (cache type 1) instead; Falcon reads neither the cache nor the
+  repair, and cannot list the group (`test/testfiles/corrupt_stab_msg.h5`: "expected local heap signature
+  'HEAP' at 0"). h5py 3.16 cannot read that file either (`H5Oget_info` fails), so the harness does not fail
+  on it.
 
 ## P2 — features, API, performance
 
@@ -424,6 +438,34 @@ Empty: every item is done (see *Done — 2026-10-05 (P1)*).
 
 - D1, D2, D3, D4, D6, B1, B2, and B3 are done (see *Done — 2026-10-05 (P3: D2, D6, B1–B3)* and
   *(P3: D1, D3, D4)*). P3 is empty.
+
+## Done — 2026-10-07 (the HDF5 conformance harness and the CVE files)
+
+Two checks against the HDF Group's own files, fetched at pinned versions (dev-time data, not Falcon's), in CI
+(`.github/workflows/hdf5-conformance.yml`) and locally:
+
+- **`tools/conformance/run_hdf5_conformance.py`** reads the ~430 files in the HDF5 library's test directories
+  (HDFGroup/hdf5 at `hdf5_2.0.0`) with `falcon conformance --hdf5` (a JSON manifest of every link, object,
+  attribute, and value) and with h5py 3.16, and compares them: 310 agree, 62 are refused by both, Falcon reads
+  more of 60 (region and new-style references, szip data, VAX floats, damaged files libhdf5 refuses), and 2
+  differ for known reasons (C1 above, and an h5py bug with big-endian complex sequences that h5dump's expected
+  output confirms). A failure of Falcon's that is not typed fails the run.
+- **`tools/conformance/run_hdf5_cve.sh`** runs `CveCorpusTest` on HDFGroup/cve_hdf5's 147 files (the malformed
+  files behind the HDF5 library's CVEs, and fuzzer finds), in the `fuzz` execution: each must read, or fail
+  typed, within a minute, under a 256 KB stack and a 128 MB heap. All 147 do.
+
+What they found, fixed:
+- **A link name longer than the file exhausted the heap** (`cve-2018-13870.h5`, 896 bytes): `HdfBuffer.getBytes`
+  allocated a corrupt length (up to 2 GB) before checking its range. It now checks first, for every caller.
+  `HardeningTest.linkNameLongerThanTheFileFailsWithoutAllocatingIt`.
+- **A space-padded string of NULs read as NULs** (`tstring-at.h5`, a dataset never written): a fixed-length string
+  now ends at its first NUL whatever its padding, as h5dump and h5py read it, and a space-padded one then loses
+  its trailing spaces. `ElementsStringsTest`.
+- **`RobustnessTest`'s walk recursed forever on a hard-link cycle** (four CVE files link a group to its own
+  ancestor, as HDF5 allows): it now reads each group once. Falcon itself was not at fault.
+- In the `falcon` command (`dump`, and `convert`'s attributes), **sequences of records or of arrays failed**
+  ("Argument is not an array", an index out of bounds; `compounds_array_vlen1.h5`, `tarray7.h5`): a sequence's
+  elements are now counted by their type (`Hdf5Values.count`). `DumpTest`.
 
 ## Done — 2026-10-06 (P2: S10's Blosc2 and SZ)
 

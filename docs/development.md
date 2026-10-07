@@ -19,7 +19,7 @@ falcon/
 ├── cli/                 the falcon command, built into cli/target/falcon.jar
 ├── tools/
 │   ├── fixtures/        scripts that write test fixtures with the reference tools, and check Falcon against them
-│   └── conformance/     runners for the community conformance suites
+│   └── conformance/     runners for the conformance suites (Zarr, OME-Zarr, and the HDF5 library's files)
 ├── docs/                this site
 └── .github/workflows/   CI
 ```
@@ -98,5 +98,6 @@ code sample: Jekyll reads them as the start of a template tag. Write a Java arra
 ## Continuous integration
 
 `.github/workflows/ci.yml` builds and tests every module on Linux and Windows with JDK 25;
-`conformance.yml` and `ome-conformance.yml` run the community conformance suites against `falcon.jar`. See
+`conformance.yml` and `ome-conformance.yml` run the community conformance suites against `falcon.jar`, and
+`hdf5-conformance.yml` compares Falcon with h5py on the HDF5 library's test files and reads the CVE files. See
 [Testing and conformance](testing.md#continuous-integration).

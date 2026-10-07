@@ -9,6 +9,7 @@ import com.ebremer.falcon.hdf5.Hdf5Writer;
 import com.ebremer.falcon.hdf5.datatype.Datatype;
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -27,6 +28,29 @@ class DumpTest {
         h5 = Samples.hdf5(dir.resolve("sample.h5")).toString();
         zarr = dir.resolve("sample.zarr").toString();
         Cli.run("convert", "-q", h5, zarr).ok();
+    }
+
+    /**
+     * A sequence of records (h5py's, in the hdf5 module's typed.h5) once failed with "Argument is not an array":
+     * a record column is a map of its members' columns, not an array (the HDF5 conformance harness found it).
+     */
+    @Test
+    void dumpsASequenceOfRecords() {
+        String typed = Path.of("..", "hdf5", "src", "test", "resources", "fixtures", "typed.h5").toString();
+        assertEquals("[[{\"a\":1,\"b\":0.5}], [], [{\"a\":2,\"b\":1.5},{\"a\":3,\"b\":2.5}]]\n",
+                Cli.ok("dump", "-f", "json", typed, "vlen_rec"));
+    }
+
+    /** What a sequence's row holds, counted by its type: records, arrays (n values each), complex numbers (2). */
+    @Test
+    void countsAColumnsElementsByTheirType() {
+        assertEquals(4, Hdf5Values.count(Datatype.int32(), new int[4]));
+        assertEquals(2, Hdf5Values.count(Datatype.arrayOf(Datatype.int32(), 2, 2), new int[8]));
+        assertEquals(3, Hdf5Values.count(Datatype.complexOf(Datatype.float32()), new double[6]));
+        assertEquals(2, Hdf5Values.count(Datatype.compound(Map.of("a", Datatype.int32())),
+                Map.of("a", new int[2])));
+        assertEquals(1, Hdf5Values.count(Datatype.arrayOf(Datatype.compound(Map.of("a", Datatype.int32())), 3),
+                Map.of("a", new int[3])));
     }
 
     @Test

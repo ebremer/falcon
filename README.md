@@ -52,7 +52,11 @@ The build is hermetic: conformance fixtures are committed, so no HDF5, h5py, or 
 build time. (Those are the dev-time reference oracles that *generate* the fixtures — never Falcon
 dependencies.) The Zarr community's [conformance tests](https://github.com/Bisaloo/zarr-conformance-tests)
 run against the `falcon` command in CI as well, and `bash tools/conformance/run_conformance.sh` runs them
-locally ([how](cli/USER_GUIDE.md#conformance)).
+locally ([how](cli/USER_GUIDE.md#conformance)). So do two HDF5 checks on the HDF Group's own files:
+`python tools/conformance/run_hdf5_conformance.py` reads the HDF5 library's ~400 test files with Falcon and
+with h5py and compares them, and `bash tools/conformance/run_hdf5_cve.sh` has Falcon read the malformed files
+behind the HDF5 library's CVEs, each of which must fail with a typed exception or read
+([how](docs/testing.md#hdf5-the-hdf5-librarys-own-test-files)).
 
 ## HDF5
 

@@ -69,6 +69,7 @@
                             <excludes>
                                 <exclude>**/RobustnessTest.java</exclude>
                                 <exclude>**/HardeningTest.java</exclude>
+                                <exclude>**/CveCorpusTest.java</exclude>
                             </excludes>
                         </configuration>
                     </execution>
@@ -81,8 +82,10 @@
                             <includes>
                                 <include>**/RobustnessTest.java</include>
                                 <include>**/HardeningTest.java</include>
+                                <!-- skipped unless -Dfalcon.cve.dir names the corpus (tools/conformance/run_hdf5_cve.sh) -->
+                                <include>**/CveCorpusTest.java</include>
                             </includes>
-                            <argLine>@{argLine} -Xss256k -Xmx128m</argLine>
+                            <argLine>@{argLine} -Xss256k -Xmx128m -Dfalcon.limits=fuzz</argLine>
                         </configuration>
                     </execution>
                 </executions>

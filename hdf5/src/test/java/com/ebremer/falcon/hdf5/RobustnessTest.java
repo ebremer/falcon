@@ -5,7 +5,9 @@ import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -107,9 +109,9 @@ class RobustnessTest {
 
     /**
      * Opens and fully reads {@code bytes}, from a temporary file or through a {@link RangeReader}; any
-     * failure must be an {@link HdfException} or IOException.
+     * failure must be an {@link HdfException} or IOException. {@link CveCorpusTest} reads its files with it.
      */
-    private static void assertTypedFailure(byte[] bytes, boolean throughReader) {
+    static void assertTypedFailure(byte[] bytes, boolean throughReader) {
         Path file = null;
         try {
             if (!throughReader) {
@@ -120,7 +122,7 @@ class RobustnessTest {
                 h5.fileSpaceInfo();
                 h5.btreeKValues();
                 h5.driverInfo();
-                readEverything(h5.root());
+                readEverything(h5.root(), new HashSet<>());
             }
         } catch (HdfException | IOException typed) {
             // acceptable: a typed format/unsupported error or an I/O error
@@ -138,9 +140,10 @@ class RobustnessTest {
     /**
      * Forces reads of every attribute and dataset reachable from {@code object}: the raw bytes, and the
      * typed read (which also resolves variable-length data and references through the heaps). A datatype
-     * the typed read does not support is skipped for that object only.
+     * the typed read does not support is skipped for that object only. A group already read (hard links may
+     * form a cycle, a group linking to its own ancestor, as HDF5 allows) is not read again.
      */
-    private static void readEverything(Hdf5Object object) {
+    private static void readEverything(Hdf5Object object, Set<Long> groupsRead) {
         List<Attribute> attributes;
         try {
             attributes = object.attributes();
@@ -162,13 +165,16 @@ class RobustnessTest {
             // fine: keep reading the rest of the file
         }
         if (object instanceof Group group) {
+            if (!groupsRead.add(group.objectHeaderAddress())) {
+                return;
+            }
             List<Link> links = group.links();
             if (fresh instanceof Group freshGroup) {
                 freshGroup.link(links.isEmpty() ? "absent" : links.getLast().name());
                 freshGroup.link("absent");
             }
             for (Hdf5Object child : group.children()) {
-                readEverything(child);
+                readEverything(child, groupsRead);
             }
         } else if (object instanceof Dataset dataset) {
             try {

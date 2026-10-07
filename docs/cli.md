@@ -208,4 +208,6 @@ the command.
 
 `falcon conformance --array_path=<array>` reads every value of a Zarr array and exits with 0 if it can: it is
 the command line the Zarr community's [conformance tests](https://github.com/Bisaloo/zarr-conformance-tests)
-call. See [Testing and conformance](testing.md).
+call. `falcon conformance --hdf5=<file>` prints a JSON manifest of everything in an HDF5 file (every link,
+object, attribute, and value), which Falcon's HDF5 conformance harness compares with h5py's reading of the same
+file. See [Testing and conformance](testing.md).

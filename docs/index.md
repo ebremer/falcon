@@ -77,7 +77,8 @@ that uses them takes those dependencies on.
   metadata and chunks a read needs.
 - **Checked against the reference tools.** h5py and libhdf5, zarr-python and numcodecs, ome-zarr-py and
   ome-zarr-models write the test data Falcon reads, and read back what Falcon writes; the Zarr and OME-Zarr
-  communities' conformance tests run in CI. See [Testing and conformance](testing.md).
+  communities' conformance tests run in CI, and Falcon and h5py read the HDF5 library's own test files alike.
+  See [Testing and conformance](testing.md).
 - **Fails safely.** Corrupt input fails with a typed exception, never a crash or a hang, and every checksum
   a file stores is verified.
 

@@ -288,6 +288,21 @@ python -I tools/conformance/check_values.py  # and compares every value with zar
 
 The suite checks only the exit status; `check_values.py` reads each of its arrays with zarr-python too.
 
+`conformance --hdf5=<file>` prints a JSON manifest of everything in a local HDF5 file, on one line: every path
+reachable from the root group (in the byte order of the link names, depth first), with the link or object there
+(a second hard link to an object as `{"kind": "hard", "same_as": <first path>}`; soft, external, and
+user-defined links as such, not followed), each dataset's shape, type class and size, layout, chunks, filter
+ids, and values (as `dump -f json` prints them; of a dataset of more than 65,536 elements, the first 4,096
+indexes of its last dimension and the first 16 of the others), and every attribute. What cannot be read is an `error` (or `values_error`, `links_error`, ...): the exception's
+class and message. It exits with 0 if the file opened, and 1 (printing `{"error": ...}`) if not.
+`tools/conformance/run_hdf5_conformance.py` compares it with h5py's reading of the HDF5 library's own test
+files, in CI (`.github/workflows/hdf5-conformance.yml`) and locally:
+
+```bash
+mvn -pl cli -am package -DskipTests
+python tools/conformance/run_hdf5_conformance.py   # needs Git, h5py, and hdf5plugin
+```
+
 ## OME-Zarr: ome validate and ome pyramid
 
 [OME-Zarr](https://ngff.openmicroscopy.org/) is Zarr with the bioimaging community's metadata: images as

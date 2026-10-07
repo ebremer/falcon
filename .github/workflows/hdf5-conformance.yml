@@ -1,0 +1,65 @@
+name: HDF5 conformance tests
+
+# The HDF Group's own files, fetched at pinned versions (dev-time data, not Falcon's):
+# - h5py: tools/conformance/run_hdf5_conformance.py reads every HDF5 file in the HDF5 library's test directories
+#   (https://github.com/HDFGroup/hdf5 at hdf5_2.0.0) with `java -jar falcon.jar conformance --hdf5` and with
+#   h5py 3.16 (HDF5 2.0.0), compares what each reads, and fails on any difference but the known ones; its
+#   report.json is uploaded as the artifact hdf5-conformance-report.
+# - cve: tools/conformance/run_hdf5_cve.sh reads the malformed files of https://github.com/HDFGroup/cve_hdf5
+#   with the hdf5 module (CveCorpusTest), each of which must read or fail typed, within a minute, under a small
+#   stack and heap.
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  h5py:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install h5py and hdf5plugin
+        run: pip install h5py==3.16.0 hdf5plugin==7.1.0
+
+      - name: Build falcon.jar
+        run: mvn -B --no-transfer-progress -pl cli -am package -DskipTests
+
+      - name: Compare Falcon with h5py on the HDF5 library's test files
+        run: python tools/conformance/run_hdf5_conformance.py
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hdf5-conformance-report
+          path: cli/target/hdf5-conformance/report.json
+          if-no-files-found: ignore
+
+  cve:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+
+      - name: Read the HDF5 CVE files
+        run: bash tools/conformance/run_hdf5_cve.sh
