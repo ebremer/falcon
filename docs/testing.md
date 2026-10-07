@@ -42,6 +42,10 @@ What the tests cover, roughly:
 
 ## Conformance suites
 
+**[Results](conformance-results.md)**: the latest results of every check below, and their status in CI.
+`python tools/conformance/run_all.py` runs them all (those this machine has the tools for) and writes one
+report of their results, `cli/target/conformance-report.md`; `--only hdf5,cve` runs some of them.
+
 ### Zarr: zarr-conformance-tests
 
 The Zarr community's [conformance tests](https://github.com/Bisaloo/zarr-conformance-tests) (the suite

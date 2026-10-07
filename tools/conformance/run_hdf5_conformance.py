@@ -600,6 +600,11 @@ def main():
           + (f"; {sum(1 for r in results if r['untyped'])} with untyped Falcon failures" if any(
               r["untyped"] for r in results) else ""))
     print(f"report: {WORK / 'report.json'}")
+    summary = {"files": len(results), "subset": bool(args.files), "unexpected": len(failed),
+               "untyped": sum(1 for r in results if r["untyped"]), "tag": HDF5_TAG,
+               "h5py": h5py.version.version, "hdf5": h5py.version.hdf5_version,
+               **{k: counts[k] for k in ("agree", "both refuse", "Falcon reads more", "known", "differs")}}
+    (WORK / "summary.json").write_text(json.dumps(summary), encoding="utf-8")  # for run_all.py's report
     return 1 if failed else 0
 
 

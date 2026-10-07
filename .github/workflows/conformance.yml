@@ -31,3 +31,8 @@ jobs:
         uses: Bisaloo/zarr-conformance-tests@05220cfbf2c600efdf3a2546bab4e0e8e99bd97e # v0.0.2
         with:
           zarr-cli: java -jar ${{ github.workspace }}/cli/target/falcon.jar conformance
+
+      # The action leaves its JUnit report, report.xml, in the workspace; this puts its result in the job's summary.
+      - name: Summary
+        if: always()
+        run: python3 tools/conformance/run_all.py --report-only --only zarr

@@ -125,9 +125,11 @@ def main():
     ngff = fetch(*SPEC_05)
     unexpected = 0
     errata = 0
+    tests = agree = 0
     for mode in ("attributes", "zarr"):
         results = suite_06(spec, mode)
         passed = sum(1 for s in results.values() if s == "pass")
+        tests, agree = tests + len(results), agree + passed
         print(f"0.6 {mode}: {len(results)} tests, {passed} pass")
         for name, status in sorted(results.items()):
             if status == "pass":
@@ -141,6 +143,7 @@ def main():
                 print(f"  {status.upper():7}  {name}")
     results = suites_045(ngff)
     passed = sum(1 for valid, got in results.values() if valid == got)
+    tests, agree = tests + len(results), agree + passed
     print(f"0.4 and 0.5 suites: {len(results)} tests, {passed} pass")
     for name, (valid, got) in sorted(results.items()):
         if valid == got:
@@ -153,6 +156,9 @@ def main():
             unexpected += 1
             print(f"  {'ERROR' if got is None else 'FAIL':7}  {name} (expected {'valid' if valid else 'invalid'})")
     print(f"{errata} errata in the suites' data, {unexpected} unexpected results")
+    summary = {"tests": tests, "agree": agree, "errata": errata, "unexpected": unexpected,
+               "suites": f"{SPEC_06[0]} {SPEC_06[1]}, {SPEC_05[0]} {SPEC_05[1]}"}
+    (WORK / "ome-summary.json").write_text(json.dumps(summary), encoding="utf-8")  # for run_all.py's report
     sys.exit(1 if unexpected else 0)
 
 

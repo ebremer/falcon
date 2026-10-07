@@ -41,6 +41,10 @@ jobs:
       - name: Compare Falcon with h5py on the HDF5 library's test files
         run: python tools/conformance/run_hdf5_conformance.py
 
+      - name: Summary
+        if: always()
+        run: python tools/conformance/run_all.py --report-only --only hdf5
+
       - name: Upload the report
         if: always()
         uses: actions/upload-artifact@v4
@@ -63,3 +67,7 @@ jobs:
 
       - name: Read the HDF5 CVE files
         run: bash tools/conformance/run_hdf5_cve.sh
+
+      - name: Summary
+        if: always()
+        run: python3 tools/conformance/run_all.py --report-only --only cve

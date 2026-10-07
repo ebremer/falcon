@@ -45,6 +45,9 @@ def main():
             failures += 1
             print(f'FAIL {array.name}: values differ\n  zarr-python: {expected.tolist()}\n  falcon: {got.tolist()}')
     print(f'{len(arrays)} arrays, {failures} failures')
+    if len(sys.argv) == 1:  # the suite's data: for run_all.py's report
+        summary = {'arrays': len(arrays), 'failures': failures, 'suite': SUITE_TAG}
+        (data.parents[1] / 'values-summary.json').write_text(json.dumps(summary), encoding='utf-8')
     sys.exit(1 if failures else 0)
 
 

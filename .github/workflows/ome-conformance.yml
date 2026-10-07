@@ -33,3 +33,7 @@ jobs:
 
       - name: Run the conformance tests
         run: python tools/conformance/run_ome_conformance.py
+
+      - name: Summary
+        if: always()
+        run: python tools/conformance/run_all.py --report-only --only ome
