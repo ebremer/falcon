@@ -461,6 +461,11 @@ What they found, fixed:
 - **A space-padded string of NULs read as NULs** (`tstring-at.h5`, a dataset never written): a fixed-length string
   now ends at its first NUL whatever its padding, as h5dump and h5py read it, and a space-padded one then loses
   its trailing spaces. `ElementsStringsTest`.
+- **16-byte long doubles were refused** ("floating-point layout not supported: 15-bit exponent, 112-bit mantissa";
+  `tcomplex.h5`'s long double complex numbers, which h5py reads on Linux, found by the harness's first CI run):
+  a mantissa of more than 64 bits now keeps its top 64 bits and a sticky bit for the rest, and an implied
+  leading bit joins the significand before its one rounding to a double. `ElementsWideFloatsTest` (x87 values
+  in 16 bytes, as libhdf5 describes them, and IEEE binary128 with its ties and sticky bits).
 - **`RobustnessTest`'s walk recursed forever on a hard-link cycle** (four CVE files link a group to its own
   ancestor, as HDF5 allows): it now reads each group once. Falcon itself was not at fault.
 - In the `falcon` command (`dump`, and `convert`'s attributes), **sequences of records or of arrays failed**

@@ -31,12 +31,15 @@ writes this table:
 | `zarr` | Zarr community conformance suite | [Bisaloo/zarr-conformance-tests](https://github.com/Bisaloo/zarr-conformance-tests) v0.0.2 | 6 / 6 pass | pass | 2026-10-07 21:32 UTC |
 | `zarr` | The suite's arrays' values | zarr-python, on [Bisaloo/zarr-conformance-tests](https://github.com/Bisaloo/zarr-conformance-tests) v0.0.2 | 6 / 6 arrays' values match zarr-python's | pass | 2026-10-07 21:32 UTC |
 | `ome` | OME-Zarr specification conformance tests (0.4, 0.5, 0.6) | [ome/ngff-spec](https://github.com/ome/ngff-spec) 0.6, [ome/ngff](https://github.com/ome/ngff) 0.5.2 | 368 / 403 agree; the other 35 are errata in the suites' own data (listed in the runner); 0 unexpected | pass | 2026-10-07 21:32 UTC |
-| `hdf5` | The HDF5 library's own test files, against h5py | [HDFGroup/hdf5](https://github.com/HDFGroup/hdf5) hdf5_2.0.0, h5py 3.16.0 (HDF5 2.0.0) | 434 files: 310 agree, 62 refused by both, Falcon reads more of 60, 2 known differences (listed in the runner); 0 unexpected | pass | 2026-10-07 21:34 UTC |
-| `hdf5` | The HDF Group's CVE files | [HDFGroup/cve_hdf5](https://github.com/HDFGroup/cve_hdf5) 3fd1f5a | 147 / 147 files read or fail typed, within a minute, in a 128 MB heap | pass | 2026-10-07 21:34 UTC |
+| `hdf5` | The HDF5 library's own test files, against h5py | [HDFGroup/hdf5](https://github.com/HDFGroup/hdf5) hdf5_2.0.0, h5py 3.16.0 (HDF5 2.0.0) | 434 files: 310 agree, 60 refused by both, Falcon reads more of 62, 2 known differences (listed in the runner); 0 unexpected | pass | 2026-10-07 22:01 UTC |
+| `hdf5` | The HDF Group's CVE files | [HDFGroup/cve_hdf5](https://github.com/HDFGroup/cve_hdf5) 3fd1f5a | 147 / 147 files read or fail typed, within a minute, in a 128 MB heap | pass | 2026-10-07 22:02 UTC |
 
-Falcon at commit `d72d2c8` with local changes. What each check does, and how to run it: [Testing and conformance](https://ebremer.github.io/falcon/testing.html).
+Falcon at commit `7fb984d` with local changes. What each check does, and how to run it: [Testing and conformance](https://ebremer.github.io/falcon/testing.html).
 
 <!-- results:end -->
+
+The HDF5 counts depend on h5py's build: on Linux, as in CI, h5py also reads szip data and 16-byte long doubles,
+which h5py on Windows cannot, so more files agree there and fewer are ones where Falcon reads more.
 
 ## What the numbers mean
 

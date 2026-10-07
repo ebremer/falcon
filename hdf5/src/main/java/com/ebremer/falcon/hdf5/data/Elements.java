@@ -328,7 +328,8 @@ public final class Elements {
      * Decodes a floating-point element from its sign, exponent, and mantissa fields, as libhdf5's
      * float conversion ({@code H5T__conv_f_f}) does: field locations count from the element's least
      * significant bit (the bit offset and precision are not used), an all-ones exponent is infinity or
-     * NaN, and a mantissa without an implied leading bit (x87 extended precision) is read as written. A
+     * NaN, and a mantissa without an implied leading bit (x87 extended precision) is read as written; one of
+     * more than 64 bits (a 16-byte long double) is rounded to the nearest double once, as narrower ones are. A
      * VAX-order element is first put in little-endian order by reversing its 16-bit words, as libhdf5
      * does before converting it.
      */
@@ -352,13 +353,28 @@ public final class Elements {
                 || (long) fp.exponentLocation() + esize > totalBits || (long) fp.mantissaLocation() + msize > totalBits) {
             throw new HdfFormatException("floating-point fields do not fit a " + size + "-byte element");
         }
-        if (esize > 62 || msize > 64 || fp.normalization() == Datatype.MantissaNormalization.RESERVED) {
+        if (esize > 62 || fp.normalization() == Datatype.MantissaNormalization.RESERVED) {
             throw new HdfUnsupportedException("floating-point layout not supported: " + esize
                     + "-bit exponent, " + msize + "-bit mantissa, " + fp.normalization() + " normalization");
         }
         boolean negative = bits(data, off, size, le, fp.signLocation(), 1) != 0;
         long exponent = bits(data, off, size, le, fp.exponentLocation(), esize);
-        long mantissa = bits(data, off, size, le, fp.mantissaLocation(), msize);
+        long mantissa;
+        if (msize > 64) {
+            // A wider mantissa (a 16-byte long double's 112 bits): its top 64 bits, any lower bit set folded into
+            // the lowest, which leaves the one rounding to a double still to nearest; and it counts as 64 bits.
+            int below = msize - 64;
+            mantissa = bits(data, off, size, le, fp.mantissaLocation() + below, 64);
+            for (int at = 0; at < below; at += 64) {
+                if (bits(data, off, size, le, fp.mantissaLocation() + at, Math.min(64, below - at)) != 0) {
+                    mantissa |= 1;
+                    break;
+                }
+            }
+            msize = 64;
+        } else {
+            mantissa = bits(data, off, size, le, fp.mantissaLocation(), msize);
+        }
         long maxExponent = (1L << esize) - 1;
         boolean implied = fp.normalization() == Datatype.MantissaNormalization.IMPLIED;
         double magnitude;
@@ -372,8 +388,17 @@ public final class Elements {
             double m = unsignedToDouble(mantissa);
             long scale;
             if (implied && exponent != 0) {
-                m += Math.scalb(1.0, msize);                        // 1.mantissa x 2^(e - bias)
-                scale = exponent - fp.exponentBias() - msize;
+                // 1.mantissa x 2^(e - bias): the implied 1 at bit 63 of one significand, rounded to a double once
+                // (a mantissa of more than 63 bits keeps a sticky bit for those it drops)
+                int shift = msize - 63;
+                long fraction;
+                if (shift > 0) {
+                    fraction = (mantissa >>> shift) | ((mantissa & ((1L << shift) - 1)) != 0 ? 1 : 0);
+                } else {
+                    fraction = mantissa << -shift;
+                }
+                m = unsignedToDouble(Long.MIN_VALUE | fraction);
+                scale = exponent - fp.exponentBias() - 63;
             } else if (implied) {
                 scale = 1 - fp.exponentBias() - msize;              // subnormal: 0.mantissa x 2^(1 - bias)
             } else {
