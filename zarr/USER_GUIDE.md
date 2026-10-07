@@ -295,6 +295,7 @@ answers from a snapshot, and `Zarr.open(store, false)` reads every node's own me
 ```java
 ZarrGroup root = Zarr.openGroup(store).consolidate();   // write the snapshot
 ZarrGroup remote = Zarr.openGroup(s3Store);             // one GET, then the whole tree from the snapshot
+                                                        // (s3Store: the s3 module's S3Store)
 ```
 
 `consolidate()` walks every node below the group by its own metadata and writes the snapshot into the
@@ -682,8 +683,10 @@ ZipStore.create(archive);                           // a new .zip archive, writt
 ZipStore.open(archive);                             // add to a .zip archive (or start one)
 ZipStore.pack(sourceStore, archivePath);            // copy any store into a new .zip
 HttpStore.openReadOnly("https://host/data/store");  // read-only over HTTP(S)
-S3Store.fromUrl("s3://bucket/data.zarr").build();   // S3-compatible object storage
 ```
+
+Amazon S3 (and S3-compatible storage) is the `s3` module's `S3Store`: see
+[Amazon S3 and other object stores](#amazon-s3-and-other-object-stores).
 
 `HttpStore` uses HTTP `Range` requests, so a remote sharded array reads only the bytes it needs. HTTP has
 no way to list keys, so by default a group's children cannot be *enumerated* over HTTP (a named child still
@@ -709,32 +712,27 @@ expire. Both go only to the base URL's origin (scheme, host, and port); a redire
 them, as curl drops `Authorization`. Headers the store or the JDK owns (`Range`, `Host`, `Content-Length`,
 …) and values with control characters are refused.
 
-### Cloud object stores
+### Amazon S3 and other object stores
 
-`S3Store` reads, lists, and writes S3-compatible object storage: Amazon S3, Google Cloud Storage (its XML
-API with HMAC keys, region `auto`), MinIO, and Cloudflare R2.
+Amazon S3 is read, listed, and written by `S3Store` in Falcon's **`s3` module**
+(`com.ebremer.falcon.s3`), over the AWS SDK for Java 2.x. It is a module of its own so that this one keeps
+no dependencies; add it beside `zarr` (see [`../s3/USER_GUIDE.md`](../s3/USER_GUIDE.md)):
 
 ```java
-Store store = S3Store.fromUrl("s3://my-bucket/data/image.zarr")
-        .region("eu-west-1")
-        .fromEnvironment()   // AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN, AWS_REGION
-        .build();
-ZarrGroup root = Zarr.openGroup(store);
+try (S3Client s3 = S3Client.create()) {   // the SDK's default region and credential chains
+    Store store = S3Store.fromUrl(s3, "s3://my-bucket/data/image.zarr").build();
+    ZarrGroup root = Zarr.openGroup(store);
+}
 ```
 
-- Requests are signed with AWS Signature Version 4 (`credentials(id, secret[, token])`, or
-  `fromEnvironment()`). Without credentials, the default, they go unsigned, for public buckets, and the
-  store is read-only (`readOnly()` makes a signed one read-only too).
-- `endpoint("http://localhost:9000")` names another service and addresses the bucket in the path;
-  `pathStyle(false)` puts it in the host name. `prefix(...)`, or the path of an `s3://` URL, roots the store
-  inside the bucket.
-- Listings use ListObjectsV2 with the `/` delimiter, so `childNames()` works, a page of 1,000 keys per
-  request. Writes are single PUTs (a value is at most 2 GB).
-- A bucket that may be read but not listed answers 403 for an absent key: pass `missingStatuses(404, 403)`.
-- Server errors (500, 502, 503, 504) and failed connections are retried 3 times (`maxRetries`). A bucket
-  in another region is reported with its region; redirects are not followed.
-- Not supported: `~/.aws` profiles, instance roles, and SSO; Azure's Shared Key (read Azure through a SAS
-  URL on `HttpStore`); GCS OAuth (use HMAC keys, or a bearer token on `HttpStore` for reads).
+The SDK client brings the full AWS credential chain (profiles, SSO, instance and container roles), its
+retries, and endpoints for S3-compatible storage (Google Cloud Storage's XML API with HMAC keys, MinIO,
+Cloudflare R2). The store reads ranges of shards, lists groups with the `/` delimiter, and takes
+`missingStatuses(404, 403)` for a bucket that may be read but not listed.
+
+Without the `s3` module, a public bucket, or a presigned or SAS URL, reads through `HttpStore` (above).
+Azure's Shared Key and GCS OAuth are not supported: read Azure through a SAS URL, and GCS with a bearer
+token, on `HttpStore`.
 
 `ZipStore` reads a range of an uncompressed (STORED) entry directly, so sharded arrays in a ZIP read only
 what they need. It also writes, as zarr-python's `ZipStore` does in modes `"w"` and `"a"`: `create` starts
@@ -798,8 +796,9 @@ shuffle filter, and c-blosc2's chunk format on read), among them the zarr-extens
 reads and writes, for strings too; selections, navigation by path, and block streaming (by chunk,
 sub-chunk, or any block shape); resizing, and zarr-python's `write_empty_chunks`; storage transformers
 that need not be understood (`must_understand: false`, read past); consolidated metadata, read and
-written; changing attributes and deleting nodes; the memory, filesystem, ZIP (read and written), HTTP
-(listing from directory index pages, when asked), and S3-compatible stores.
+written; changing attributes and deleting nodes; the memory, filesystem, ZIP (read and written), and HTTP
+(listing from directory index pages, when asked) stores, and Amazon S3 and S3-compatible storage through
+the `s3` module.
 
 **Not supported** (see [`TODO.md`](TODO.md)): the v2 `categorize` filter,
 object codecs other than `vlen-utf8`/`vlen-bytes`, and the `lzma`/`pcodec` compressors;

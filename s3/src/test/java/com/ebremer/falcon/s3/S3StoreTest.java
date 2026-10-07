@@ -1,4 +1,4 @@
-package com.ebremer.falcon.zarr.store;
+package com.ebremer.falcon.s3;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -14,44 +14,47 @@ import com.ebremer.falcon.zarr.ZarrException;
 import com.ebremer.falcon.zarr.ZarrGroup;
 import com.ebremer.falcon.zarr.datatype.DataType;
 import java.io.IOException;
-import java.net.URI;
 import java.nio.charset.StandardCharsets;
-import java.time.Clock;
-import java.time.Instant;
-import java.time.ZoneOffset;
+import java.util.Arrays;
 import java.util.List;
-import java.util.Map;
 import java.util.OptionalLong;
+import java.util.Random;
 import java.util.TreeSet;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import software.amazon.awssdk.auth.credentials.AnonymousCredentialsProvider;
+import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
+import software.amazon.awssdk.auth.credentials.AwsSessionCredentials;
+import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
+import software.amazon.awssdk.core.checksums.RequestChecksumCalculation;
+import software.amazon.awssdk.core.checksums.ResponseChecksumValidation;
+import software.amazon.awssdk.services.s3.S3Client;
 
 /**
- * {@link S3Store} against {@link FakeS3}, an in-process S3 that checks every signature from the request it
- * received. That the signer agrees with AWS's is {@link SigV4Test}'s part; this checks that what the store
- * signs is what it sends, and everything else the store does.
+ * {@link S3Store} against {@link FakeS3}, an in-process S3 that checks every signature the AWS SDK sends
+ * from the request it received.
  */
 class S3StoreTest {
 
-    private static final Clock CLOCK = Clock.fixed(Instant.parse("2026-10-06T12:00:00Z"), ZoneOffset.UTC);
-
     private FakeS3 s3;
+    private Clients clients;
 
     @BeforeEach
     void start() throws IOException {
         s3 = new FakeS3("bucket");
+        clients = new Clients(s3);
     }
 
     @AfterEach
     void stop() {
+        clients.close();
         s3.close();
     }
 
     private S3Store.Builder builder() {
-        return S3Store.builder("bucket").endpoint(s3.endpoint()).credentials(FakeS3.ACCESS_KEY, FakeS3.SECRET)
-                .clock(CLOCK).retryDelayMillis(1);
+        return S3Store.builder(clients.signed(), "bucket");
     }
 
     private static byte[] bytes(String s) {
@@ -84,21 +87,22 @@ class S3StoreTest {
         Selection part = read.array("sharded").select(new long[] {10}, new long[] {4});
         assertArrayEquals(new int[] {10, 11, 12, 13}, part.readInts());
         // the shard index from the end of the shard, then one sub-chunk: no whole shard
-        assertTrue(s3.requests.stream().anyMatch(r -> r.endsWith("/sharded/c/0 bytes=-68")), s3.requests.toString());
-        assertTrue(s3.requests.stream().anyMatch(r -> r.contains("/sharded/c/0 bytes=") && !r.endsWith("=-68")),
-                s3.requests.toString());
-        assertTrue(s3.requests.stream().noneMatch(r -> r.endsWith("/sharded/c/0")), s3.requests.toString());
+        List<String> shard = clients.gets(s3, "/bucket/data/image.zarr/sharded/c/0");
+        assertTrue(shard.contains("bytes=-68"), s3.requests.toString());
+        assertTrue(shard.stream().anyMatch(r -> r.startsWith("bytes=") && !r.equals("bytes=-68")), s3.requests.toString());
+        assertFalse(shard.contains(""), s3.requests.toString());
         assertEquals(List.of(), s3.refusals);
     }
 
     @Test
     void readsWritesRangesAndDeletes() {
         S3Store store = builder().build();
-        String[] keys = {"a b", "50%", "x+y=z", "caf\u00E9/\u4E2D", "q?x#y", "t~i_l-d.e"};
+        String[] keys = {"a b", "50%", "x+y=z", "café/中", "q?x#y", "t~i_l-d.e"};
         for (String key : keys) {
             store.set(key, bytes("value of " + key));
         }
         for (String key : keys) {
+            assertArrayEquals(bytes("value of " + key), s3.objects.get(key), key);
             assertArrayEquals(bytes("value of " + key), store.get(key).orElseThrow(), key);
             assertEquals(OptionalLong.of(bytes("value of " + key).length), store.size(key));
             assertTrue(store.exists(key));
@@ -115,8 +119,17 @@ class S3StoreTest {
         assertArrayEquals(new byte[0], store.getRange("empty", 0, 5).orElseThrow());
         assertEquals(OptionalLong.of(0), store.size("empty"));
 
+        byte[] large = new byte[3 << 20];
+        new Random(7).nextBytes(large);
+        store.set("large", large);
+        assertArrayEquals(large, s3.objects.get("large"));
+        assertArrayEquals(large, store.get("large").orElseThrow());
+        assertArrayEquals(Arrays.copyOfRange(large, 1 << 20, (1 << 20) + 1000),
+                store.getRange("large", 1 << 20, 1000).orElseThrow());
+
         assertTrue(store.get("missing").isEmpty());
         assertTrue(store.getRange("missing", 0, 4).isEmpty());
+        assertTrue(store.getRange("missing", 0, 0).isEmpty());
         assertTrue(store.getSuffix("missing", 4).isEmpty());
         assertTrue(store.size("missing").isEmpty());
         assertFalse(store.exists("missing"));
@@ -126,18 +139,19 @@ class S3StoreTest {
         assertTrue(store.get("a b").isEmpty());
         assertThrows(IllegalArgumentException.class, () -> store.get("/bad"));
         assertThrows(IllegalArgumentException.class, () -> store.getRange("k", -1, 4));
+        assertThrows(IllegalArgumentException.class, () -> store.getSuffix("k", -1));
         assertEquals(List.of(), s3.refusals);
     }
 
     /**
      * Listings come a page at a time (here three entries a page), in S3's order (UTF-8 bytes), with keys
-     * URL-encoded; the store returns every valid key, in Java's order, relative to its prefix.
+     * URL-encoded or not; the store returns every valid key, in Java's order, relative to its prefix.
      */
     @Test
     void listingsPageDecodeAndSort() {
         // S3 sorts by UTF-8 bytes, so U+FF5E (EF BD 9E) comes before an emoji (F0 9F ...); Java sorts by
         // UTF-16 units, the emoji (D83D) first
-        List<String> keys = List.of("a b", "x+y", "50%", "caf\u00E9", "\uFF5E", "\uD83D\uDE00", "emoji\uD83D\uDE00",
+        List<String> keys = List.of("a b", "x+y", "50%", "café", "～", "😀", "emoji😀",
                 "q&r<s>\"'", "dir/x", "dir/y", "dir/sub/z", "folder/", "bad//key", "zarr.json");
         for (String key : keys) {
             s3.objects.put("root/" + key, bytes(key));
@@ -147,9 +161,9 @@ class S3StoreTest {
         s3.pageSize = 3;
         S3Store store = builder().prefix("root").build();
 
-        TreeSet<String> valid = new TreeSet<>(List.of("a b", "x+y", "50%", "caf\u00E9", "\uFF5E", "\uD83D\uDE00",
-                "emoji\uD83D\uDE00", "q&r<s>\"'", "dir/x", "dir/y", "dir/sub/z", "zarr.json"));
-        assertEquals("\uFF5E", valid.last());
+        TreeSet<String> valid = new TreeSet<>(List.of("a b", "x+y", "50%", "café", "～", "😀",
+                "emoji😀", "q&r<s>\"'", "dir/x", "dir/y", "dir/sub/z", "zarr.json"));
+        assertEquals("～", valid.last());
         for (boolean encode : new boolean[] {true, false}) {
             s3.encodeKeys = encode;
             s3.requests.clear();
@@ -157,8 +171,8 @@ class S3StoreTest {
             assertTrue(s3.requests.size() >= 4, "pages: " + s3.requests);
             assertEquals(List.of("dir/sub/z", "dir/x", "dir/y"), store.listPrefix("dir/"));
             assertEquals(List.of("dir/sub/z"), store.listPrefix("dir/s"));
-            assertEquals(List.of("50%", "a b", "bad/", "caf\u00E9", "dir/", "emoji\uD83D\uDE00", "folder/",
-                    "q&r<s>\"'", "x+y", "zarr.json", "\uD83D\uDE00", "\uFF5E"), store.listDir(""));
+            assertEquals(List.of("50%", "a b", "bad/", "café", "dir/", "emoji😀", "folder/",
+                    "q&r<s>\"'", "x+y", "zarr.json", "😀", "～"), store.listDir(""));
             assertEquals(List.of("dir/sub/", "dir/x", "dir/y"), store.listDir("dir"));
             assertEquals(List.of("dir/sub/z"), store.listDir("dir/sub/"));
             assertEquals(List.of(), store.listDir("nothing/"));
@@ -185,11 +199,13 @@ class S3StoreTest {
     void anAnonymousStoreSendsNoSignatureAndIsReadOnly() {
         s3.objects.put("zarr.json", bytes("{}"));
         s3.allowAnonymous = true;
-        S3Store store = S3Store.builder("bucket").endpoint(s3.endpoint()).build();
+        S3Store store = S3Store.builder(clients.client(AnonymousCredentialsProvider.create(), "us-east-1", 3), "bucket")
+                .build();
         assertFalse(store.isWritable());
         assertArrayEquals(bytes("{}"), store.get("zarr.json").orElseThrow());
         assertEquals(List.of("-"), s3.authorizations);
-        assertThrows(UnsupportedOperationException.class, () -> store.set("k", new byte[1]));
+        assertTrue(assertThrows(UnsupportedOperationException.class, () -> store.set("k", new byte[1]))
+                .getMessage().contains("anonymous"));
         assertThrows(UnsupportedOperationException.class, () -> store.delete("k"));
 
         s3.allowAnonymous = false;
@@ -199,16 +215,17 @@ class S3StoreTest {
         S3Store readOnly = builder().readOnly().build();
         assertFalse(readOnly.isWritable());
         assertThrows(UnsupportedOperationException.class, () -> readOnly.set("k", new byte[1]));
+        assertTrue(s3.objects.keySet().equals(java.util.Set.of("zarr.json")), s3.objects.keySet().toString());
     }
 
     @Test
     void aWrongSecretOrRegionIsRefused() {
-        S3Store wrongSecret = S3Store.builder("bucket").endpoint(s3.endpoint())
-                .credentials(FakeS3.ACCESS_KEY, "not the secret").clock(CLOCK).build();
+        S3Store wrongSecret = S3Store.builder(clients.client(StaticCredentialsProvider.create(
+                AwsBasicCredentials.create(FakeS3.ACCESS_KEY, "not the secret")), "us-east-1", 1), "bucket").build();
         ZarrException e = assertThrows(ZarrException.class, () -> wrongSecret.get("k"));
         assertTrue(e.getMessage().contains("SignatureDoesNotMatch"), e.getMessage());
 
-        S3Store wrongRegion = builder().region("eu-west-1").build();
+        S3Store wrongRegion = S3Store.builder(clients.client(Clients.CREDENTIALS, "eu-west-1", 1), "bucket").build();
         assertThrows(ZarrException.class, () -> wrongRegion.get("k"));
     }
 
@@ -216,7 +233,9 @@ class S3StoreTest {
     void aSessionTokenIsSentAndSigned() {
         s3.sessionToken = "FQoGZXIvYXdzEXAMPLETOKEN//+=";
         s3.objects.put("k", bytes("v"));
-        S3Store withToken = builder().credentials(FakeS3.ACCESS_KEY, FakeS3.SECRET, s3.sessionToken).build();
+        S3Store withToken = S3Store.builder(clients.client(StaticCredentialsProvider.create(
+                AwsSessionCredentials.create(FakeS3.ACCESS_KEY, FakeS3.SECRET, s3.sessionToken)), "us-east-1", 1),
+                "bucket").build();
         assertArrayEquals(bytes("v"), withToken.get("k").orElseThrow());
         assertTrue(s3.authorizations.get(0).contains("x-amz-security-token"), s3.authorizations.get(0));
         assertThrows(ZarrException.class, () -> builder().build().get("k"));
@@ -228,31 +247,31 @@ class S3StoreTest {
         S3Store store = builder().build();
         ZarrException e = assertThrows(ZarrException.class, () -> store.get("k"));
         assertTrue(e.getMessage().contains("PermanentRedirect"), e.getMessage());
-        assertTrue(e.getMessage().contains("region(\"eu-west-1\")"), e.getMessage());
-        assertEquals(1, s3.requests.size());
+        assertTrue(e.getMessage().contains("region 'eu-west-1'"), e.getMessage());
+        assertEquals(1, s3.requests.size(), s3.requests.toString());
         assertTrue(assertThrows(ZarrException.class, () -> store.size("k")).getMessage().contains("eu-west-1"));
         assertTrue(assertThrows(ZarrException.class, store::list).getMessage().contains("eu-west-1"));
     }
 
     @Test
-    void serverErrorsAreRetried() {
+    void serverErrorsAreRetriedByTheClient() {
         s3.objects.put("k", bytes("v"));
         s3.failNext.set(2);
         S3Store store = builder().build();
         assertArrayEquals(bytes("v"), store.get("k").orElseThrow());
-        assertEquals(3, s3.requests.size());
+        assertEquals(3, s3.requests.size(), s3.requests.toString());
 
         s3.failNext.set(2);
         store.set("w", bytes("written"));
         assertArrayEquals(bytes("written"), s3.objects.get("w"));
 
         s3.failNext.set(3);
-        S3Store once = builder().maxRetries(1).build();
+        S3Store once = S3Store.builder(clients.client(Clients.CREDENTIALS, "us-east-1", 2), "bucket").build();
         ZarrException e = assertThrows(ZarrException.class, () -> once.get("k"));
         assertTrue(e.getMessage().contains("503 SlowDown"), e.getMessage());
 
-        S3Store refused = builder().endpoint("http://127.0.0.1:1").maxRetries(1).build();
-        assertThrows(ZarrException.class, () -> refused.get("k")); // nothing listens there
+        S3Client nowhere = clients.client(Clients.CREDENTIALS, "us-east-1", 1, "http://127.0.0.1:1");
+        assertThrows(ZarrException.class, () -> S3Store.builder(nowhere, "bucket").build().get("k")); // nothing listens
     }
 
     @Test
@@ -263,92 +282,63 @@ class S3StoreTest {
                 .writeInts(values);
         ZarrArray array = Zarr.openArray(store);
         List<int[]> blocks = array.blocks().parallel().map(Selection::readInts).toList();
-        int[] all = blocks.stream().flatMapToInt(java.util.Arrays::stream).toArray();
+        int[] all = blocks.stream().flatMapToInt(Arrays::stream).toArray();
         assertArrayEquals(values, all);
         assertEquals(List.of(), s3.refusals);
     }
 
+    /**
+     * The SDK checksums what it writes (a CRC-32 trailer on an {@code aws-chunked} body), which some
+     * S3-compatible stores refuse; a client built for them computes checksums only where S3 requires them.
+     */
     @Test
-    void requestsAddressTheBucketByHostOrPath() throws Exception {
-        S3Store aws = S3Store.builder("my-bucket").region("eu-west-1").build();
-        assertEquals("https://my-bucket.s3.eu-west-1.amazonaws.com/a%20b",
-                aws.uri(aws.objectPath("a b"), "").toString());
-        S3Store dotted = S3Store.builder("my.bucket").region("eu-west-1").build();
-        assertEquals("https://s3.eu-west-1.amazonaws.com/my.bucket/a", dotted.uri(dotted.objectPath("a"), "").toString());
-        S3Store minio = S3Store.builder("bucket").endpoint("http://127.0.0.1:9000/").prefix("p").build();
-        assertEquals("http://127.0.0.1:9000/bucket/p/k", minio.uri(minio.objectPath("k"), "").toString());
-        S3Store gcs = S3Store.builder("bucket").endpoint("https://storage.googleapis.com").pathStyle(false).build();
-        assertEquals("https://bucket.storage.googleapis.com/k", gcs.uri(gcs.objectPath("k"), "").toString());
-        S3Store gateway = S3Store.builder("bucket").endpoint("https://host/gw/").build();
-        assertEquals("https://host/gw/bucket/k", gateway.uri(gateway.objectPath("k"), "").toString());
-        assertThrows(IllegalArgumentException.class,
-                () -> S3Store.builder("my.bucket").pathStyle(false).build());
+    void aClientForOtherStoresWritesWithoutTheChecksumTrailer() {
+        S3Store checksummed = builder().build();
+        checksummed.set("a", bytes("with a trailer"));
+        assertEquals(List.of("STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER"), s3.putPayloads);
 
-        assertEquals("h", S3Store.hostHeader(URI.create("https://h:443/x").toURL()));
-        assertEquals("h", S3Store.hostHeader(URI.create("https://h/x").toURL()));
-        assertEquals("h:9000", S3Store.hostHeader(URI.create("http://h:9000/x").toURL()));
-        assertEquals("[::1]:9000", S3Store.hostHeader(URI.create("http://[::1]:9000/x").toURL()));
+        s3.putPayloads.clear();
+        S3Client plain = clients.client(Clients.CREDENTIALS, "us-east-1", 3,
+                b -> b.requestChecksumCalculation(RequestChecksumCalculation.WHEN_REQUIRED)
+                        .responseChecksumValidation(ResponseChecksumValidation.WHEN_REQUIRED));
+        S3Store store = S3Store.builder(plain, "bucket").build();
+        store.set("b", bytes("without one"));
+        assertTrue(s3.putPayloads.stream().noneMatch(p -> p.endsWith("TRAILER")), s3.putPayloads.toString());
+        assertArrayEquals(bytes("without one"), store.get("b").orElseThrow());
+        assertArrayEquals(bytes("with a trailer"), store.get("a").orElseThrow());
+        assertEquals(List.of(), s3.refusals);
     }
 
     @Test
     void theBuildersCheckTheirSettings() {
+        S3Client client = clients.signed();
         for (String bucket : new String[] {"", "a/b", "a b", "x".repeat(256)}) {
-            assertThrows(IllegalArgumentException.class, () -> S3Store.builder(bucket), bucket);
+            assertThrows(IllegalArgumentException.class, () -> S3Store.builder(client, bucket), bucket);
         }
-        assertThrows(IllegalArgumentException.class, () -> S3Store.builder("b").region(""));
-        assertThrows(IllegalArgumentException.class, () -> S3Store.builder("b").region("us east"));
-        for (String endpoint : new String[] {"ftp://h", "h:9000", "http://h?x=1", "http://u@h", "/path", "not a url"}) {
-            assertThrows(IllegalArgumentException.class, () -> S3Store.builder("b").endpoint(endpoint), endpoint);
+        assertThrows(NullPointerException.class, () -> S3Store.builder(null, "b"));
+        assertThrows(IllegalArgumentException.class, () -> S3Store.builder(client, "b").prefix("a/../b"));
+        assertThrows(IllegalArgumentException.class, () -> S3Store.builder(client, "b").prefix("a//b"));
+        assertThrows(IllegalArgumentException.class, () -> S3Store.builder(client, "b").missingStatuses(200));
+        assertThrows(IllegalArgumentException.class, () -> S3Store.builder(client, "b").missingStatuses());
+
+        S3Store fromUrl = S3Store.fromUrl(client, "s3://my-bucket/data/image.zarr/").build();
+        assertEquals("s3://my-bucket/data/image.zarr (" + s3.endpoint() + ", us-east-1)", fromUrl.toString());
+        assertEquals("s3://my-bucket/ (" + s3.endpoint() + ", us-east-1)",
+                S3Store.fromUrl(client, "S3://my-bucket").build().toString());
+        for (String url : new String[] {"http://b/x", "s3://", "s3:///x", "s3://b/x?y", "s3://b/x#y", "s3://b/a/../c"}) {
+            assertThrows(IllegalArgumentException.class, () -> S3Store.fromUrl(client, url), url);
         }
-        assertThrows(IllegalArgumentException.class, () -> S3Store.builder("b").prefix("a/../b"));
-        assertThrows(IllegalArgumentException.class, () -> S3Store.builder("b").prefix("a//b"));
-        assertThrows(IllegalArgumentException.class, () -> S3Store.builder("b").credentials("", "s"));
-        assertThrows(IllegalArgumentException.class, () -> S3Store.builder("b").credentials("k", "s", "t\r\nx"));
-        assertThrows(IllegalArgumentException.class, () -> S3Store.builder("b").maxRetries(-1));
-        assertThrows(IllegalArgumentException.class, () -> S3Store.builder("b").maxRetries(11));
-        assertThrows(IllegalArgumentException.class, () -> S3Store.builder("b").timeoutMillis(-1));
-        assertThrows(IllegalArgumentException.class, () -> S3Store.builder("b").missingStatuses(200));
-
-        S3Store fromUrl = S3Store.fromUrl("s3://my-bucket/data/image.zarr").build();
-        assertEquals("https://my-bucket.s3.us-east-1.amazonaws.com/data/image.zarr/zarr.json",
-                fromUrl.uri(fromUrl.objectPath("zarr.json"), "").toString());
-        assertEquals("s3://my-bucket/data/image.zarr (https://my-bucket.s3.us-east-1.amazonaws.com, us-east-1)",
-                fromUrl.toString());
-        S3Store top = S3Store.fromUrl("S3://my-bucket").build();
-        assertEquals("/zarr.json", top.objectPath("zarr.json"));
-        for (String url : new String[] {"http://b/x", "s3://", "s3:///x", "s3://b/x?y", "s3://b/a/../c"}) {
-            assertThrows(IllegalArgumentException.class, () -> S3Store.fromUrl(url), url);
-        }
-    }
-
-    @Test
-    void credentialsComeFromTheEnvironment() {
-        Map<String, String> env = Map.of("AWS_ACCESS_KEY_ID", FakeS3.ACCESS_KEY, "AWS_SECRET_ACCESS_KEY", FakeS3.SECRET,
-                "AWS_REGION", "eu-west-1");
-        S3Store store = S3Store.builder("bucket").endpoint(s3.endpoint()).fromEnvironment(env::get).clock(CLOCK).build();
-        assertTrue(store.isWritable());
-        assertTrue(store.toString().contains("eu-west-1"), store.toString());
-        s3.region = "eu-west-1";
-        store.set("k", bytes("v"));
-        assertArrayEquals(bytes("v"), store.get("k").orElseThrow());
-
-        // an explicit region wins; AWS_DEFAULT_REGION is the fallback
-        assertTrue(S3Store.builder("b").region("ap-south-1").fromEnvironment(env::get).build().toString()
-                .contains("ap-south-1"));
-        Map<String, String> fallback = Map.of("AWS_ACCESS_KEY_ID", "k", "AWS_SECRET_ACCESS_KEY", "s",
-                "AWS_DEFAULT_REGION", "sa-east-1");
-        assertTrue(S3Store.builder("b").fromEnvironment(fallback::get).build().toString().contains("sa-east-1"));
-        assertThrows(IllegalStateException.class,
-                () -> S3Store.builder("b").fromEnvironment(Map.of("AWS_ACCESS_KEY_ID", "k")::get));
-        assertFalse(S3Store.builder("b").fromEnvironment(env::get).anonymous().build().isWritable());
     }
 
     @Test
     void theDescriptionNeverHoldsTheSecret() {
-        S3Store store = builder().credentials("AKIDEXAMPLE", "secret-value", "token-value").build();
+        S3Store store = S3Store.builder(clients.client(StaticCredentialsProvider.create(
+                AwsSessionCredentials.create("AKIDEXAMPLE", "secret-value", "token-value")), "us-east-1", 1),
+                "bucket").build();
         assertFalse(store.toString().contains("secret-value"));
         assertFalse(store.toString().contains("token-value"));
         ZarrException e = assertThrows(ZarrException.class, () -> store.get("k")); // the fake refuses the signature
         assertFalse(e.getMessage().contains("secret-value"), e.getMessage());
+        assertFalse(e.getMessage().contains("token-value"), e.getMessage());
     }
 }

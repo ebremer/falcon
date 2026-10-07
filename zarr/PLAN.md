@@ -27,10 +27,11 @@ It is **Falcon Phase 2**; the HDF5 module (Phase 1) is the sibling and the templ
 >     non-empty buffers of a cross-check matrix.
 >   - numcodecs' filters run byte for byte as numcodecs does (772 vectors).
 >   - gzip, zlib, and the CRC-32 checksums come from `java.util.zip`.
-> - **Stores:** memory, filesystem, ZIP (read and written), read-only HTTP (byte ranges; listing from
->   directory index pages when asked), and S3-compatible object storage (SigV4).
+> - **Stores:** memory, filesystem, ZIP (read and written), and read-only HTTP (byte ranges; listing from
+>   directory index pages when asked). Amazon S3 and S3-compatible storage are the `s3` module's
+>   `S3Store`, over the AWS SDK (moved out of this module on 2026-10-07, so it keeps no dependencies).
 > - **Robustness:** corrupt input fails with typed exceptions, fuzzed under a small heap and stack;
->   handles are safe across threads; an opt-in decoded-chunk cache. 939 tests, and 19 more under a small
+>   handles are safe across threads; an opt-in decoded-chunk cache. 917 tests, and 19 more under a small
 >   heap, pass; the public API's Javadoc is complete and checked by the compile.
 >
 > **Remaining** (tracked in [`TODO.md`](TODO.md)): nothing from the review; the non-goals below.
@@ -83,7 +84,8 @@ Package layout (`com.ebremer.falcon.zarr.*`); the first four are exported:
 com.ebremer.falcon.zarr             Public API: Zarr, ZarrGroup, ZarrArray, ZarrNode, ArraySpec, Selection …
         …zarr.datatype              Zarr data types; element byte layout; fill-value JSON codec
         …zarr.json                  Hand-written JSON model + reader + writer (no JDK JSON in java.base)
-        …zarr.store                 Store SPI; Memory, FileSystem, Zip, Http, and S3 stores; byte-range reads
+        …zarr.store                 Store SPI; Memory, FileSystem, Zip, and Http stores; byte-range reads
+                                    (S3: the s3 module's S3Store, over the AWS SDK)
         …zarr.metadata              zarr.json / v2 parse and serialize; consolidated metadata; extension fields
         …zarr.chunk                 Regular and rectilinear chunk grids; chunk key encoding (default / v2)
         …zarr.codec                 Codec pipeline + bytes / vlen / transpose / cast_value / reshape / gzip /
@@ -106,9 +108,11 @@ The data model is Zarr's own; only the compression codecs are shared with HDF5, 
   touch-only-needed-chunks selection reader; zero runtime dependencies; a JPMS module on JDK 25.
 
 **Non-goals / deferred**
-- ~~**Cloud object stores**~~ — done in P2 (F1, 2026-10-06): `S3Store` signs its requests with SigV4
-  (`javax.crypto`, in `java.base`) and covers S3, GCS through HMAC keys, MinIO, and R2; `HttpStore` takes
-  auth headers. Azure Shared Key and GCS OAuth remain out of scope (SAS URLs and bearer tokens work).
+- ~~**Cloud object stores**~~ — done in P2 (F1, 2026-10-06): `HttpStore` takes auth headers, and an
+  `S3Store` signed its requests with SigV4 (`javax.crypto`, in `java.base`). On 2026-10-07, by Erich's
+  decision, S3 moved to a module of its own, `s3`, over the AWS SDK for Java 2.x (its credential chain,
+  retries, and endpoints), which also reads HDF5 from S3; this module's hand-written `S3Store` was removed.
+  Azure Shared Key and GCS OAuth remain out of scope (SAS URLs and bearer tokens work).
 - ~~**Consolidated metadata**~~ — done in P2 (F2, 2026-10-06): read (v3 inline, v2 `.zmetadata`) and
   written (v3; v2 since F17).
 - ~~**Other registered extensions**~~ — done in P2 (F14, 2026-10-06): the `rectilinear` chunk grid (the
@@ -131,7 +135,7 @@ The data model is Zarr's own; only the compression codecs are shared with HDF5, 
 | Language level | JDK 25, `--release 25` | Matches the reactor. |
 | Dependencies | None at runtime; JUnit 5 test-only | "Pure JDK" mandate. |
 | JSON | **Hand-written** reader/writer (`zarr.json`) | `java.base` has no JSON; keeps zero-dependency. Small, spec-scoped (objects, arrays, strings, numbers, booleans, null; UTF-8; the special float strings). |
-| Stores | Filesystem (`java.nio.file`), memory, ZIP (read and written by hand; CRC-32 and inflate from `java.util.zip`), HTTP and S3 (`HttpURLConnection`); **byte-range reads** in the SPI | Byte-range reads make sharding and partial selections cheap. `java.net.http` would be a module beyond `java.base`, so the remote stores use `java.net.HttpURLConnection`. |
+| Stores | Filesystem (`java.nio.file`), memory, ZIP (read and written by hand; CRC-32 and inflate from `java.util.zip`), HTTP (`HttpURLConnection`); **byte-range reads** in the SPI. S3 in the `s3` module, over the AWS SDK | Byte-range reads make sharding and partial selections cheap. `java.net.http` would be a module beyond `java.base`, so `HttpStore` uses `java.net.HttpURLConnection`. S3 is a module of its own so that this one keeps no dependencies. |
 | Codecs | `bytes` / `transpose` / `vlen-*` hand-written; `gzip` via `java.util.zip`; `crc32c` via `java.util.zip.CRC32C`; `sharding_indexed` hand-written; `blosc`/`zstd` **from scratch** (Z8), in `core` | All pure-JDK; external compressors implemented from the published formats, not wrapped. |
 | Data model | Own N-D array/dtype/chunk model; only the codecs are shared, in `core` (§10) | A shared model would distort both formats' models (§10). |
 | Endianness | Per the `bytes` codec `endian` config | The spec puts byte order in the codec, not the data type. |
@@ -180,7 +184,7 @@ The data model is Zarr's own; only the compression codecs are shared with HDF5, 
 | `FileSystemStore` | ✓ | ✓ | ✓ | Z0 / Z7 |
 | `ZipStore` | ✓ | ✓ (written in place, F13) | ✓ (STORED entries) | Z8 / F13 |
 | `HttpStore` (read-only) | ✓ (lists from HTML index pages, opt-in, F13) | — | ✓ (Range) | Z8 (optional) |
-| `S3Store` (SigV4) | ✓ | ✓ | ✓ | F1 |
+| `S3Store` (the `s3` module, AWS SDK) | ✓ | ✓ | ✓ | F1; the SDK since 2026-10-07 |
 
 ## 6. Roadmap — stages Z0–Z9
 

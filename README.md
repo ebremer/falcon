@@ -1,18 +1,21 @@
 # Falcon
 
 **Falcon** is a multi-module, **pure-JDK 25, zero-runtime-dependency** toolkit for scientific-data
-formats — no native libraries, no third-party dependencies.
+formats — no native libraries, no third-party dependencies. The one exception is optional: the `s3`
+module reads both formats from Amazon S3 through the AWS SDK.
 
 | Module | Package | What it is | Status |
 |---|---|---|---|
 | [`hdf5`](hdf5) | `com.ebremer.falcon.hdf5` | HDF5 reader/writer implementing the [HDF5 File Format Specification v4.0](https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html) (HDF5 2.0) | Read-complete, write-broad; pre-1.0 |
 | [`zarr`](zarr) | `com.ebremer.falcon.zarr` | [Zarr](https://zarr.dev/) reader/writer (v3 core; v2 read) | Built |
 | [`core`](core) | `com.ebremer.falcon.core` | Pure-Java compression codecs both formats share (zstd, Blosc and Blosc2, LZ4, LZF, bitshuffle, bzip2, ZFP, SZ, zlib, byte shuffle) and their checksums (Fletcher-32, lookup3); exported only to Falcon's modules | Built |
+| [`s3`](s3) | `com.ebremer.falcon.s3` | Amazon S3 (and S3-compatible storage) for both formats, over the AWS SDK for Java 2.x: a Zarr store and an HDF5 range reader. Optional, and Falcon's only module with dependencies | Built |
 
 See **[PLAN.md](PLAN.md)** for the umbrella roadmap and **[CLAUDE.md](CLAUDE.md)** for conventions. Each
 module has its own plan, remaining-work list, and user guide:
 [hdf5](hdf5/PLAN.md) ([TODO](hdf5/TODO.md), [guide](hdf5/USER_GUIDE.md)) ·
-[zarr](zarr/PLAN.md) ([TODO](zarr/TODO.md), [guide](zarr/USER_GUIDE.md)).
+[zarr](zarr/PLAN.md) ([TODO](zarr/TODO.md), [guide](zarr/USER_GUIDE.md)) ·
+[s3](s3/USER_GUIDE.md) (guide).
 
 ## Requirements
 
@@ -26,12 +29,14 @@ mvn verify              # whole reactor (parent + all modules)
 mvn -pl hdf5 -am test   # the HDF5 module (and core, which it depends on)
 mvn -pl zarr -am test   # the Zarr module (and core)
 mvn -pl core test       # just the shared codecs
+mvn -pl s3 -am test     # the S3 module (and the formats and core)
 mvn verify -Pcoverage   # ...with a coverage report per module, in target/site/jacoco/
 ```
 
 Each module builds its jar with a sources jar and a Javadoc jar beside it. Builds are reproducible: the
 same sources give byte-identical jars. The build checks its own preconditions (JDK 25, Maven 3.9) and
-fails on any dependency beyond Falcon's own modules and JUnit 5 for tests.
+fails on any dependency beyond Falcon's own modules and JUnit 5 for tests, but for the AWS SDK and the
+three libraries it brings, at their approved versions, in the `s3` module alone.
 
 The build is hermetic: conformance fixtures are committed, so no HDF5, h5py, or zarr-python is needed at
 build time. (Those are the dev-time reference oracles that *generate* the fixtures — never Falcon
@@ -61,6 +66,7 @@ try (Hdf5File h5 = Hdf5File.open(Path.of("data.h5"))) {
 
 Files open from a path (memory-mapped), from a `byte[]`, or through a `RangeReader` (an object store,
 HTTP byte ranges, any channel), which Falcon reads on demand: the metadata and only the data asked for.
+The `s3` module's `S3RangeReader` reads an HDF5 file from Amazon S3 this way.
 A resolver opens the other files such a file names (external raw data, virtual-dataset sources, the
 files its external links lead to and its references point into).
 
@@ -127,14 +133,16 @@ Fortran order, and NumPy string, byte, time, structured, and object dtypes, and 
 and written, so a remote hierarchy opens in one request; rectilinear chunk grids and the extension data
 types zarr-python writes (datetimes, fixed-size strings and bytes, structs) are read and written too.
 Stores: in-memory, filesystem, ZIP (read
-and written), read-only HTTP (byte-range; listing from directory index pages), and S3-compatible object
-storage (Amazon S3, Google Cloud Storage, MinIO, R2; requests signed with SigV4). Full walkthrough in the
-**[Zarr User Guide](zarr/USER_GUIDE.md)**.
+and written), and read-only HTTP (byte-range; listing from directory index pages); Amazon S3 and
+S3-compatible storage (Google Cloud Storage, MinIO, R2) through the `s3` module's `S3Store`, over the AWS
+SDK. Full walkthrough in the **[Zarr User Guide](zarr/USER_GUIDE.md)**, and the
+**[S3 User Guide](s3/USER_GUIDE.md)**.
 
 ## Design highlights
 
 - **Zero runtime dependencies** — only `java.base` (the format modules depend on Falcon's own `core`,
-  which itself needs only `java.base`). `deflate`/`gzip` use `java.util.zip`; everything else is
+  which itself needs only `java.base`). The optional `s3` module is the exception: it uses the AWS SDK,
+  so that the format modules need not. `deflate`/`gzip` use `java.util.zip`; everything else is
   hand-written in pure Java: HDF5 `szip` (CCSDS 121.0 extended-Rice), the `zstd` (RFC 8878), `blosc`
   and Blosc2, LZ4, LZF, bitshuffle, bzip2, ZFP, and SZ codecs in `core` (Zarr codecs and HDF5 filters
   alike), the Jenkins lookup3 /

@@ -1,0 +1,130 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.ebremer</groupId>
+        <artifactId>falcon</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>s3</artifactId>
+    <packaging>jar</packaging>
+
+    <name>Falcon S3</name>
+    <description>Amazon S3 for Falcon's formats, over the AWS SDK for Java 2.x: a Zarr store and an HDF5
+        range reader. Falcon's one module with runtime dependencies beyond java.base.</description>
+
+    <dependencies>
+        <!-- The AWS SDK's S3 client, without the two HTTP clients it brings by default (Netty, and Apache
+             HttpClient 5): the SDK's url-connection-client takes their place, over the JDK's
+             HttpURLConnection. The SDK and what it brings (reactive-streams, slf4j-api, eventstream) were
+             approved by Erich on 2026-10-07 (CLAUDE.md); the enforcer below admits exactly those. -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>s3</artifactId>
+            <version>${aws.sdk.version}</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>software.amazon.awssdk</groupId>
+                    <artifactId>netty-nio-client</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>software.amazon.awssdk</groupId>
+                    <artifactId>apache5-client</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>software.amazon.awssdk</groupId>
+                    <artifactId>apache-client</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>url-connection-client</artifactId>
+            <version>${aws.sdk.version}</version>
+        </dependency>
+        <!-- The formats this module adapts S3 to, each optional: an application brings the one it uses. -->
+        <dependency>
+            <groupId>com.ebremer</groupId>
+            <artifactId>zarr</artifactId>
+            <version>${project.version}</version>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>com.ebremer</groupId>
+            <artifactId>hdf5</artifactId>
+            <version>${project.version}</version>
+            <optional>true</optional>
+        </dependency>
+        <!-- Test only. -->
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!-- This module alone may depend on the AWS SDK: the parent's ban admits it here, at the approved
+                 version, with the three libraries it brings at theirs. An SDK upgrade that brings another
+                 library fails here until that library is approved. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-enforcer-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>enforce</id>
+                        <configuration>
+                            <rules>
+                                <bannedDependencies>
+                                    <includes combine.children="append">
+                                        <include>software.amazon.awssdk:*:${aws.sdk.version}</include>
+                                        <include>software.amazon.eventstream:eventstream:1.0.1</include>
+                                        <include>org.reactivestreams:reactive-streams:1.0.4</include>
+                                        <include>org.slf4j:slf4j-api:1.7.36</include>
+                                    </includes>
+                                </bannedDependencies>
+                            </rules>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <!-- The tests' FakeS3 uses the JDK's com.sun.net.httpserver, as zarr's HTTP tests do: the test compile
+                 patches the tests into the module, which must then read jdk.httpserver; the tests run on the
+                 class path (see the parent POM). -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <executions>
+                    <!-- The public API's Javadoc stays complete, as in the format modules. -->
+                    <execution>
+                        <id>default-compile</id>
+                        <configuration>
+                            <showWarnings>true</showWarnings>
+                            <compilerArgs>
+                                <arg>-Xdoclint:all/protected</arg>
+                                <arg>-Xdoclint/package:com.ebremer.falcon.s3</arg>
+                                <arg>-Werror</arg>
+                            </compilerArgs>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>default-testCompile</id>
+                        <configuration>
+                            <compilerArgs>
+                                <arg>--add-modules=jdk.httpserver</arg>
+                                <arg>--add-reads</arg>
+                                <arg>com.ebremer.falcon.s3=jdk.httpserver</arg>
+                            </compilerArgs>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

@@ -53,8 +53,9 @@ import java.util.TreeSet;
  *       loses them; give the {@code https} URL.</li>
  * </ul>
  *
- * <p>For S3-compatible object storage with credentials, listing, and writing, see {@link S3Store}; a
- * public bucket, or a presigned or SAS URL, needs only this store.
+ * <p>For Amazon S3 or S3-compatible object storage with credentials, listing, and writing, see the
+ * {@code S3Store} of Falcon's {@code s3} module (over the AWS SDK); a public bucket, or a presigned or SAS
+ * URL, needs only this store.
  *
  * <p>It may be used from several threads at once.
  */

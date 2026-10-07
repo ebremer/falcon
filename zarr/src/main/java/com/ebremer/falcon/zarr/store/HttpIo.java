@@ -12,8 +12,8 @@ import java.util.Objects;
 import java.util.Set;
 
 /**
- * What {@link HttpStore} and {@link S3Store} share: percent-encoding a key, reading bounded bodies, and
- * checking request headers.
+ * {@link HttpStore}'s HTTP plumbing, which {@link DirectoryListing} shares: percent-encoding a key, reading
+ * bounded bodies, and checking request headers.
  */
 final class HttpIo {
 
@@ -147,25 +147,6 @@ final class HttpIo {
                 throw new ZarrException("asked for " + len + " bytes of '" + key + "' but the server sends more");
             }
             return body;
-        }
-    }
-
-    /**
-     * The first {@code max} bytes of an error response's body, or none; the rest is not read. Failing to
-     * read it is not an error: the status already says what went wrong.
-     */
-    static byte[] errorBody(HttpURLConnection connection, int max) {
-        try (InputStream error = connection.getErrorStream()) {
-            if (error != null) {
-                return error.readNBytes(max);
-            }
-        } catch (IOException e) {
-            return new byte[0];
-        }
-        try (InputStream in = connection.getInputStream()) { // a 3xx's body is not an "error stream"
-            return in.readNBytes(max);
-        } catch (IOException e) {
-            return new byte[0];
         }
     }
 

@@ -176,6 +176,21 @@ does. Tests: zarr 921 + 19.
     dimensions.
   - `ArraySpec.Builder` refuses, at `build()`, a zfpy array of elements zfp does not compress.
 
+**S3 moves to its own module (2026-10-07).** By Erich's decision, Amazon S3 is now the `s3` module's
+`S3Store` (`com.ebremer.falcon.s3`), over the AWS SDK for Java 2.x, which also reads HDF5 from S3
+(`S3RangeReader`); see [`../s3/USER_GUIDE.md`](../s3/USER_GUIDE.md). This module keeps no dependencies.
+Tests: zarr 917 + 19 (`S3StoreTest`, `SigV4Test`, and `XmlTest` left with the code), s3 18.
+- Removed: `com.ebremer.falcon.zarr.store.S3Store`, and with it the SigV4 signer and the XML reader.
+  `HttpStore` is unchanged.
+- The new `S3Store` takes an `S3Client` the application builds and closes: region, credentials (the SDK's
+  whole chain: profiles, SSO, instance and container roles, which F1 left out), endpoint, retries, and
+  timeouts are the client's. `prefix`, `readOnly`, and `missingStatuses` are as before; F1's
+  `region`, `endpoint`, `pathStyle`, `credentials`, `fromEnvironment`, `anonymous`, `timeoutMillis`, and
+  `maxRetries` map to the SDK's builder (the s3 guide has the table). The default is now the SDK's
+  credential chain, where F1's was anonymous.
+- `FakeS3` moved to the s3 module's tests; it now also checks what the SDK sends: `UNSIGNED-PAYLOAD`
+  reads, and `aws-chunked` uploads whose chunk and trailer signatures and CRC-32 trailer it verifies.
+
 
 1. ~~**Z1/Z2 — node replacement destroys or corrupts data.**~~ Done 2026-10-05 (below).
 2. ~~**Z3/C1 — chunk cache.**~~ ~~Reads are stale across handles~~ (Z3, done 2026-10-05), ~~and concurrent
@@ -963,6 +978,8 @@ what was done, then gives the original finding.
         nesting.
     - **Not done:** `~/.aws` profiles, instance roles, SSO; Azure Shared Key (SAS URLs work through
       `HttpStore`); GCS OAuth (a bearer token through the `HttpStore` hook works for reads).
+    - **Superseded 2026-10-07:** this `S3Store` was replaced by the `s3` module's, over the AWS SDK, which
+      has the profiles, roles, and SSO this one lacked (see *S3 moves to its own module* above).
     - Tests:
       - `SigV4Test`: AWS's four worked examples from the S3 API reference, and 9 vectors made with botocore
         1.43.108 (a dev-time oracle in the scratchpad, never committed): keys with spaces, unicode, `%`,

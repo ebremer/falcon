@@ -8,9 +8,9 @@
  * a root directory (the canonical on-disk Zarr layout); {@link com.ebremer.falcon.zarr.store.ZipStore}
  * reads and writes a ZIP archive; {@link com.ebremer.falcon.zarr.store.HttpStore} reads over HTTP(S), with
  * headers of the caller's for authorization, and lists keys from a server's directory listing pages when
- * asked to; {@link com.ebremer.falcon.zarr.store.S3Store} reads, lists, and
- * writes S3-compatible object storage (Amazon S3, Google Cloud Storage, MinIO, R2), signing its requests.
- * {@link com.ebremer.falcon.zarr.store.StoreKeys} holds the shared key rules and listing logic.
+ * asked to. {@link com.ebremer.falcon.zarr.store.StoreKeys} holds the shared key rules and listing logic.
+ * Amazon S3 and S3-compatible object storage are read, listed, and written by the {@code S3Store} of
+ * Falcon's {@code s3} module, over the AWS SDK, which keeps this module free of dependencies.
  *
  * <p>The package is exported: a caller opens a store and passes it to
  * {@link com.ebremer.falcon.zarr.Zarr#open(com.ebremer.falcon.zarr.store.Store)}, and may implement

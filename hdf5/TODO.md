@@ -29,7 +29,7 @@ version-1 object headers) are done (see *Done* at the end). Falcon now:
   - HDF5 1.6.2-era chunked layouts (layout message versions 1 and 2), VAX floats, and File Space Info
     version 0.
 - opens files from a path (mapped), from bytes, or through a `RangeReader` (an object store, HTTP
-  ranges, any channel) that it reads on demand;
+  ranges, any channel) that it reads on demand; the `s3` module's `S3RangeReader` reads one from Amazon S3;
 - looks objects up by path, reads integers as floating point as libhdf5 converts them, and reports each
   dataset's layout, chunk shape, filters, and storage size as libhdf5 does;
 - reads every datatype class: compound members by name, enumeration names, arrays, complex numbers (as

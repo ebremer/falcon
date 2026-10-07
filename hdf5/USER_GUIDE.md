@@ -99,6 +99,17 @@ own, so by default it opens no other file. A resolver (`ExternalFileAccess.resol
 external raw data and virtual-dataset sources wherever they are, such as next to it in the same store;
 `allowDirectory(...)` or `unrestricted()` let it open local ones (see *Files outside the HDF5 file*).
 
+**Amazon S3.** Falcon's `s3` module (`com.ebremer.falcon.s3`, over the AWS SDK; this module stays free of
+dependencies) has a `RangeReader` for an object in S3 or S3-compatible storage, and a resolver that opens
+the files it names from beside it in the bucket (see [`../s3/USER_GUIDE.md`](../s3/USER_GUIDE.md)):
+
+```java
+try (S3Client s3 = S3Client.create();
+     Hdf5File h5 = Hdf5File.open(S3RangeReader.open(s3, "s3://my-bucket/data/scan.h5"))) {
+    ...
+}
+```
+
 ### Links
 
 A group holds links. `links()` lists every one, and each `Link` is `Hard`, `Soft`, `External`, or

@@ -11,9 +11,12 @@ writers of scientific-data formats:
 - **`core`** module (`com.ebremer.falcon.core`) — the pure-Java compression codecs both formats use
   (zstd, Blosc, LZ4, LZF, bitshuffle, bzip2, ZFP, SZ, zlib, byte shuffle) and their shared checksums
   (Fletcher-32, lookup3), exported only to Falcon's own modules.
+- **`s3`** module (`com.ebremer.falcon.s3`) — Amazon S3 for both formats over the AWS SDK for Java 2.x:
+  a Zarr `Store` and an HDF5 `RangeReader`. Optional, and the **only** module with runtime dependencies
+  (see the approval gate below); the format modules are optional dependencies of it.
 
-The full roadmap is in [`PLAN.md`](PLAN.md); each module has its own `PLAN.md`, `TODO.md`, and
-`USER_GUIDE.md`.
+The full roadmap is in [`PLAN.md`](PLAN.md); each format module has its own `PLAN.md`, `TODO.md`, and
+`USER_GUIDE.md`, and `s3` a `USER_GUIDE.md`.
 
 ## Commit policy (IMPORTANT)
 
@@ -38,6 +41,7 @@ Verify before pushing anywhere: `git log --format='%an <%ae> | %cn <%ce>'` — e
 mvn verify                 # build/test the whole reactor (parent + all modules)
 mvn -pl hdf5 -am test      # test the hdf5 module (-am also builds core, which it depends on)
 mvn -pl hdf5 -am compile   # compile the hdf5 module
+mvn -pl s3 -am test        # test the s3 module (-am builds core, hdf5, and zarr too)
 ```
 
 - **JDK 25 required.** The parent POM sets `<maven.compiler.release>25</maven.compiler.release>`.
@@ -54,9 +58,16 @@ mvn -pl hdf5 -am compile   # compile the hdf5 module
   Approved since, build scope only (2026-10-05): `maven-source-plugin`, `maven-javadoc-plugin`,
   `maven-enforcer-plugin`, `jacoco-maven-plugin`, and pinning the versions of the plugins Maven's default
   lifecycle runs.
+  Approved since, runtime scope, **in the `s3` module only** (2026-10-07): the AWS SDK for Java 2.x
+  (`software.amazon.awssdk:s3` and `url-connection-client`, 2.55.12, with the SDK modules they bring, the
+  SDK's Netty and Apache HTTP clients excluded) and the three libraries it brings:
+  `org.reactivestreams:reactive-streams` 1.0.4, `org.slf4j:slf4j-api` 1.7.36, and
+  `software.amazon.eventstream:eventstream` 1.0.1. The s3 module's enforcer rule admits exactly these; an
+  SDK upgrade that brings another library needs approval again.
 - **Pure JDK, zero runtime dependencies.** Every shipped artifact must depend on nothing beyond
-  `java.base`. JUnit 5 is allowed but **test scope only**. Do not add runtime dependencies —
-  including compression libraries.
+  `java.base`, except the optional `s3` module (the approved AWS SDK above). JUnit 5 is allowed but
+  **test scope only**. Do not add runtime dependencies — including compression libraries — and keep the
+  SDK out of `core`, `hdf5`, and `zarr`.
   - `deflate` uses `java.util.zip`.
   - **`szip` is IN scope** and must be implemented from scratch in pure Java as CCSDS 121.0
     extended-Rice / adaptive entropy coding (libaec-compatible), **not** by wrapping native code.
