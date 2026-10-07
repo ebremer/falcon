@@ -1,0 +1,33 @@
+name: Zarr conformance tests
+
+# The Zarr community's conformance tests (https://github.com/Bisaloo/zarr-conformance-tests), the suite zarr-java
+# runs too: its action calls "$ZARR_CLI --array_path=<array>" on each of its arrays, here
+# "java -jar falcon.jar conformance", and uploads the JUnit report as the artifact conformance-test-results.
+# tools/conformance/run_conformance.sh runs the same tests locally.
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+
+      - name: Build falcon.jar
+        run: mvn -B --no-transfer-progress -pl cli -am package -DskipTests
+
+      # Pinned to v0.0.2's commit (keep in step with SUITE_TAG in tools/conformance/run_conformance.sh).
+      - name: Run the conformance tests
+        uses: Bisaloo/zarr-conformance-tests@05220cfbf2c600efdf3a2546bab4e0e8e99bd97e # v0.0.2
+        with:
+          zarr-cli: java -jar ${{ github.workspace }}/cli/target/falcon.jar conformance

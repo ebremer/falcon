@@ -44,7 +44,9 @@ three libraries it brings, at their approved versions, in the `s3` and `cli` mod
 
 The build is hermetic: conformance fixtures are committed, so no HDF5, h5py, or zarr-python is needed at
 build time. (Those are the dev-time reference oracles that *generate* the fixtures — never Falcon
-dependencies.)
+dependencies.) The Zarr community's [conformance tests](https://github.com/Bisaloo/zarr-conformance-tests)
+run against the `falcon` command in CI as well, and `bash tools/conformance/run_conformance.sh` runs them
+locally ([how](cli/USER_GUIDE.md#conformance)).
 
 ## HDF5
 

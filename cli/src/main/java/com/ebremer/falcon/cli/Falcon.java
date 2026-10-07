@@ -67,6 +67,7 @@ public final class Falcon {
         commands.put("convert", new ConvertCommand());
         commands.put("copy", new CopyCommand());
         commands.put("consolidate", new ConsolidateCommand());
+        commands.put("conformance", new ConformanceCommand());
         JCommander.Builder builder = JCommander.newBuilder().programName("falcon").addObject(main)
                 .expandAtSign(false).columnSize(100);
         commands.forEach(builder::addCommand);
@@ -125,6 +126,7 @@ public final class Falcon {
                   convert      Convert an HDF5 file to Zarr, or a Zarr store to HDF5
                   copy         Copy a Zarr store, or re-encode it (Zarr v2 or v3, compression, chunks)
                   consolidate  Write a Zarr group's consolidated metadata
+                  conformance  Read a Zarr array's values: the command the Zarr conformance tests call
 
                 A source is a local HDF5 file, a Zarr store (a directory, or a .zip of one), or an http(s):// or
                 s3://bucket/key URL of either.

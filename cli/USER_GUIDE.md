@@ -20,6 +20,7 @@ falcon consolidate scan.zarr                           # consolidated metadata
 - [dump](#dump)
 - [convert](#convert)
 - [copy and consolidate](#copy-and-consolidate)
+- [conformance](#conformance)
 - [S3 and HTTP options](#s3-and-http-options)
 - [Errors and exit status](#errors-and-exit-status)
 - [What is and isn't supported](#what-is-and-isnt-supported)
@@ -245,6 +246,22 @@ Filters only HDF5 has (szip, n-bit) give way to the default.
 `consolidate <store> [<path>]` writes a group's consolidated metadata: inside its `zarr.json` (v3), or a
 v2 group's `.zmetadata`, as zarr-python writes them.
 
+## conformance
+
+`conformance --array_path=<array>` is the command line the Zarr community's conformance tests
+([zarr-conformance-tests](https://github.com/Bisaloo/zarr-conformance-tests), the suite zarr-java runs too)
+call: it reads every value of the Zarr array there and prints them, as `dump` does, and exits with 0 if it
+could. The suite runs it as `java -jar falcon.jar conformance` on each of its arrays, in CI
+(`.github/workflows/conformance.yml`) and locally:
+
+```bash
+mvn -pl cli -am package -DskipTests
+bash tools/conformance/run_conformance.sh    # fetches the suite and bats into cli/target/conformance
+python -I tools/conformance/check_values.py  # and compares every value with zarr-python's
+```
+
+The suite checks only the exit status; `check_values.py` reads each of its arrays with zarr-python too.
+
 ## S3 and HTTP options
 
 Every command takes these:
@@ -274,7 +291,8 @@ summary counts them; the command still succeeds.
 
 **Checked:** `tools/fixtures/check_cli.py` converts files h5py 3.16 and zarr-python 3.4 write, in both
 directions and through Zarr v2, v3, and ZIP, and reads every result back with them: values, types,
-attributes, and fill values agree.
+attributes, and fill values agree. The Zarr community's conformance tests pass (see
+[conformance](#conformance)), with the values zarr-python reads.
 
 **Not supported:**
 - writing an HDF5 file to S3 or HTTP (write it locally, and upload it), and reading a ZIP archive from S3 or

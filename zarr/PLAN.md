@@ -313,6 +313,11 @@ store written by zarr-python (§8). Stages are dependency-ordered.
 4. **Property-based round-trips**: random shapes/chunkings/dtypes/codecs, assert lossless.
 5. **Robustness/fuzz**: truncated/corrupt metadata and chunks raise typed exceptions with context —
    never crash the JVM or return silently-wrong data.
+6. **Community conformance**: the Zarr community's cross-implementation suite
+   ([zarr-conformance-tests](https://github.com/Bisaloo/zarr-conformance-tests), v0.0.2, the one zarr-java
+   runs) reads its arrays through the `falcon conformance` command, in CI
+   (`.github/workflows/conformance.yml`) and with `tools/conformance/run_conformance.sh`;
+   `tools/conformance/check_values.py` compares the values with zarr-python's.
 
 **Reference oracle.** zarr-python (v3) + numcodecs, installed as a **dev-time tool**
 (`tools/fixtures/requirements.txt`), analogous to h5py for HDF5 — *not* a Falcon dependency. Committed
