@@ -103,7 +103,9 @@ A failure of Falcon's that is not a typed exception is a bug, whatever h5py does
 agree, 60 are refused by both, Falcon reads more of 62, and the 2 that differ are listed in the script with
 their reasons (a file whose metadata is in a metadata cache image, which Falcon does not read yet, and an
 h5py bug the HDF5 library's expected output confirms). The counts depend on h5py's build: on Linux, CI's,
-h5py also reads szip data and 16-byte long doubles, so more files agree. `-v` lists every difference, and
+h5py also reads szip data, so more files agree, and a third file is a known difference (h5py there returns
+16-byte long double complex numbers unconverted, where libhdf5's own conversion gives Falcon's values). `-v`
+lists every difference, and
 `cli/target/hdf5-conformance/report.json` holds them all.
 
 ### HDF5: the CVE files

@@ -51,5 +51,6 @@ Thumbs.db
 /scratch/
 *.h5.tmp
 
-# Project conventions for Claude Code: kept locally, not in the repository
+# Project conventions for Claude Code, and the plans (the root's and each module's): kept locally, not in the repository
 /CLAUDE.md
+PLAN.md

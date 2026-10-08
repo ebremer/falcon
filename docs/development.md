@@ -24,8 +24,7 @@ falcon/
 └── .github/workflows/   CI
 ```
 
-Each module has a `USER_GUIDE.md`; `hdf5` and `zarr` also have a `PLAN.md` (the design and roadmap) and a
-`TODO.md` (what is left). `PLAN.md` at the root is the umbrella roadmap.
+Each module has a `USER_GUIDE.md`; `hdf5` and `zarr` also have a `TODO.md` (what is left).
 
 ## Building
 

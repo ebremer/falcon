@@ -462,7 +462,8 @@ What they found, fixed:
   now ends at its first NUL whatever its padding, as h5dump and h5py read it, and a space-padded one then loses
   its trailing spaces. `ElementsStringsTest`.
 - **16-byte long doubles were refused** ("floating-point layout not supported: 15-bit exponent, 112-bit mantissa";
-  `tcomplex.h5`'s long double complex numbers, which h5py reads on Linux, found by the harness's first CI run):
+  `tcomplex.h5`'s long double complex numbers, found by the harness's first CI run; h5py on Linux returns them
+  unconverted, but libhdf5's own conversion gives Falcon's values, so the harness lists the file as known):
   a mantissa of more than 64 bits now keeps its top 64 bits and a sticky bit for the rest, and an implied
   leading bit joins the significand before its one rounding to a double. `ElementsWideFloatsTest` (x87 values
   in 16 bytes, as libhdf5 describes them, and IEEE binary128 with its ties and sticky bits).

@@ -38,8 +38,10 @@ Falcon at commit `7fb984d` with local changes. What each check does, and how to 
 
 <!-- results:end -->
 
-The HDF5 counts depend on h5py's build: on Linux, as in CI, h5py also reads szip data and 16-byte long doubles,
-which h5py on Windows cannot, so more files agree there and fewer are ones where Falcon reads more.
+The HDF5 counts depend on h5py's build: on Linux, as in CI, h5py also reads szip data, which h5py on Windows
+cannot, so more files agree there and fewer are ones where Falcon reads more. It also reads `tcomplex.h5`'s
+16-byte long double complex numbers there, but unconverted (libhdf5's own conversion gives Falcon's values), so
+that file is a third known difference.
 
 ## What the numbers mean
 

@@ -15,11 +15,10 @@ command, parses its command line with JCommander (and brings the SDK through `s3
 | [`s3`](s3) | `com.ebremer.falcon.s3` | Amazon S3 (and S3-compatible storage) for both formats, over the AWS SDK for Java 2.x: a Zarr store and an HDF5 range reader. Optional, and with the `cli`, Falcon's only modules with dependencies | Built |
 | [`cli`](cli) | `com.ebremer.falcon.cli` | The `falcon` command, one runnable jar: `ls`, `info`, and `dump` of HDF5 files and Zarr stores, `convert` between them, `copy` and `consolidate` Zarr, `ome validate` and `ome pyramid`; local, HTTP, and S3 | Built |
 
-See **[PLAN.md](PLAN.md)** for the umbrella roadmap and **[CLAUDE.md](CLAUDE.md)** for conventions. Each
-module has its own plan, remaining-work list, and user guide:
-[hdf5](hdf5/PLAN.md) ([TODO](hdf5/TODO.md), [guide](hdf5/USER_GUIDE.md)) ·
-[zarr](zarr/PLAN.md) ([TODO](zarr/TODO.md), [guide](zarr/USER_GUIDE.md)) ·
-[ome](ome/USER_GUIDE.md) (guide) · [s3](s3/USER_GUIDE.md) (guide) · [cli](cli/USER_GUIDE.md) (guide).
+Each module has its own user guide, and `hdf5` and `zarr` a remaining-work list too:
+[hdf5](hdf5/USER_GUIDE.md) ([TODO](hdf5/TODO.md)) ·
+[zarr](zarr/USER_GUIDE.md) ([TODO](zarr/TODO.md)) ·
+[ome](ome/USER_GUIDE.md) · [s3](s3/USER_GUIDE.md) · [cli](cli/USER_GUIDE.md).
 
 **Documentation site:** how-to guides for every module, the command, and testing, in [`docs/`](docs/index.md),
 published by GitHub Pages at <https://ebremer.github.io/falcon/> (see [`docs/README.md`](docs/README.md)).

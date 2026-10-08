@@ -69,6 +69,10 @@ KNOWN = {
     "tools/test/testfiles/h5clear_mdc_image.h5":
         "written with a metadata cache image (H5Pset_mdc_image_config), so its metadata is in the cache image "
         "block (format specification III.J), not at its own addresses: Falcon does not read that block yet",
+    "tools/test/testfiles/tcomplex.h5":
+        "h5py 3.16 on Linux returns its long double complex numbers (16 bytes, a 112-bit mantissa) unconverted, "
+        "their bytes taken for x87 values (0.0 for 10.0); libhdf5's own conversion to native long double complex "
+        "gives Falcon's values, the file's DatasetDoubleComplex's (h5py on Windows cannot read them)",
     "tools/test/testfiles/tcomplex_be.h5":
         "h5py 3.16 returns a sequence of big-endian complex numbers unswapped (1.157e-41 for 10.0); h5dump's "
         "expected output (tools/test/h5dump/expected/tcomplex_be.ddl) gives Falcon's values",
@@ -591,9 +595,9 @@ def main():
             print(f"            {line}")
         if not args.verbose and len(r["differences"]) > 5:
             print(f"            ... and {len(r['differences']) - 5} more (-v lists them)")
-    if not args.files:
-        for name in sorted(set(KNOWN) - {r["file"] for r in results if r["outcome"] == "known"}):
-            print(f"stale     {name}: listed in KNOWN but no longer differs")
+    # only a file that now agrees: one h5py cannot read (as on another platform's h5py) cannot show its difference
+    for name in sorted(r["file"] for r in results if r["file"] in KNOWN and r["outcome"] == "agree"):
+        print(f"stale     {name}: listed in KNOWN but no longer differs")
     print(f"\n{len(results)} files from {HDF5_REPOSITORY} {HDF5_TAG}, against h5py {h5py.version.version} "
           f"(HDF5 {h5py.version.hdf5_version}): " + ", ".join(f"{counts[k]} {k}" for k in
           ("agree", "both refuse", "Falcon reads more", "known", "differs") if counts[k])
