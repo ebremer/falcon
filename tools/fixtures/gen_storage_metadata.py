@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """Records what libhdf5 reports about every dataset's storage in Falcon's HDF5 fixtures, as the oracle
-for Dataset.layout(), chunkShape(), filters(), and storageSize():
+for Dataset.layout(), chunkShape(), filters(), storageSize(), and storageOffset():
 
     python tools/fixtures/gen_storage_metadata.py
 
 writes hdf5/src/test/resources/fixtures/storage_metadata.txt, one line per dataset, tab-separated:
 
-    file  path  layout  chunk-dims|-  storage-size  filter-count  [id  flags  client-data|-  name]...
+    file  path  layout  chunk-dims|-  storage-size  offset|-  filter-count  [id  flags  client-data|-  name]...
 
 The layout is libhdf5's H5D_layout_t name (COMPACT, CONTIGUOUS, CHUNKED, VIRTUAL); the storage size is
-H5Dget_storage_size; each filter is what H5Pget_filter2 reports. Run it after regenerating fixtures. No
-filter plugin is loaded, so filter names come from the file or from libhdf5's own filters, as they would
-for any reader.
+H5Dget_storage_size; the offset is H5Dget_offset, where the dataset's data lies from the start of the file
+(a user block included), or - for a dataset that has no one place: compact, chunked, or virtual data, data
+in external files, and contiguous data never written; each filter is what H5Pget_filter2 reports. Run it
+after regenerating fixtures. No filter plugin is loaded, so filter names come from the file or from
+libhdf5's own filters, as they would for any reader.
 """
 import os
 import sys
@@ -41,7 +43,9 @@ def describe(dataset):
     dcpl = dataset.id.get_create_plist()
     layout = dcpl.get_layout()
     chunks = ",".join(str(c) for c in dcpl.get_chunk()) if layout == h5py.h5d.CHUNKED else "-"
-    fields = [LAYOUTS[layout], chunks, str(dataset.id.get_storage_size()), str(dcpl.get_nfilters())]
+    offset = dataset.id.get_offset()
+    fields = [LAYOUTS[layout], chunks, str(dataset.id.get_storage_size()),
+              "-" if offset is None else str(offset), str(dcpl.get_nfilters())]
     for i in range(dcpl.get_nfilters()):
         code, flags, values, name = dcpl.get_filter(i)
         fields += [str(code), str(flags), " ".join(str(v) for v in values) or "-",

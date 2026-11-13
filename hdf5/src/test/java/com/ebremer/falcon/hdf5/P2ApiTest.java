@@ -97,11 +97,14 @@ class P2ApiTest {
                 assertEquals(f[2], dataset.layout().name(), what + " layout");
                 assertEquals(f[3], dataset.chunkShape().map(P2ApiTest::joined).orElse("-"), what + " chunk shape");
                 assertEquals(Long.parseLong(f[4]), dataset.storageSize(), what + " storage size");
+                // H5Dget_offset: where contiguous data lies in the file, a user block included (P2 A13).
+                assertEquals(f[5], dataset.storageOffset().isPresent() ? Long.toString(dataset.storageOffset().getAsLong()) : "-",
+                        what + " storage offset");
                 List<Filter> filters = dataset.filters();
-                assertEquals(Integer.parseInt(f[5]), filters.size(), what + " filters");
+                assertEquals(Integer.parseInt(f[6]), filters.size(), what + " filters");
                 for (int i = 0; i < filters.size(); i++) {
                     Filter filter = filters.get(i);
-                    int at = 6 + 4 * i;
+                    int at = 7 + 4 * i;
                     assertEquals(Integer.parseInt(f[at]), filter.id(), what + " filter id");
                     assertEquals((Integer.parseInt(f[at + 1]) & 1) != 0, filter.optional(), what + " optional");
                     long[] expected = f[at + 2].equals("-") ? new long[0]

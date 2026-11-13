@@ -294,6 +294,17 @@ public final class HdfBuffer {
         return segment != null ? segment.asSlice(off, len) : paged.read(base + off, len);
     }
 
+    /**
+     * The {@code len} bytes stored at {@code off} as a view of the mapped or in-memory bytes (throws
+     * {@link HdfFormatException} if out of range): nothing is read or copied, and the view is of the file's
+     * own bytes there, also where this buffer reads them {@linkplain #redirected from elsewhere}. Null if the
+     * bytes are {@linkplain #readOnDemand() read on demand}.
+     */
+    public MemorySegment storedSlice(long off, long len) {
+        checkRange(off, len);
+        return segment != null ? segment.asSlice(off, len) : paged.stored(base + off, len);
+    }
+
     // ---------------------------------------------------------- cursor reads
 
     public byte readByte() {

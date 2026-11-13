@@ -85,6 +85,11 @@ public final class PagedSource extends ByteSource {
         return this;
     }
 
+    @Override
+    MemorySegment stored(long position, long length) {
+        return null; // read on demand: no bytes to view
+    }
+
     /** The bytes in a page. */
     int pageSize() {
         return pageSize;

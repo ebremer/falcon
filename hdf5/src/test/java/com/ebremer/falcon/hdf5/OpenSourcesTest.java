@@ -95,6 +95,7 @@ class OpenSourcesTest {
             }
             case Dataset dataset -> {
                 attempt(out, () -> dataset.layout() + " " + dataset.storageSize() + " " + dataset.filters());
+                attempt(out, dataset::storageOffset);
                 attempt(out, () -> Arrays.toString(dataset.dataspace().dimensions()));
                 attempt(out, () -> Arrays.hashCode(dataset.readRawBytes()));
             }

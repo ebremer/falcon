@@ -296,6 +296,25 @@ never written.
 `fillValueBytes()` gives the dataset's fill value, as one element's bytes in the datatype's byte order,
 when the file defines one; elements never written read as it. Empty means the default, all zeros.
 
+Contiguous data can also be read where it lies, without Falcon reading it into an array:
+
+```java
+OptionalLong offset = ds.storageOffset();            // bytes from the start of the file (H5Dget_offset)
+Optional<MemorySegment> bytes = ds.storageSegment(); // those bytes of a mapped or in-memory file: a view
+
+MemorySegment view = bytes.orElseThrow();            // any size, read at random, nothing copied
+long entry = view.get(ValueLayout.JAVA_LONG_UNALIGNED.withOrder(ByteOrder.BIG_ENDIAN), 8L * i);
+```
+
+`storageOffset()` is where the data's first byte is, a user block included: its `storageSize()` bytes
+follow from there, unfiltered and in the datatype's byte order, the bytes `readRawBytes()` returns. It is
+empty for compact, chunked, and virtual data, for data in external files, and for contiguous data never
+written. `storageSegment()` is that range of a file opened from a path (the mapping itself, so data past
+2 GB is there at once) or from a `byte[]`: read-only, and safe to read from several threads. It lasts while
+the file is open: `close()` unmaps a mapped file, and reading the segment afterwards throws
+`IllegalStateException`. A file read through a `RangeReader` has no bytes to view, so its
+`storageSegment()` is empty: read the ranges you want at `storageOffset()` with your own reader.
+
 ### Selections and streaming
 
 Read part of a dataset without materializing the whole of it: only the chunks that hold selected

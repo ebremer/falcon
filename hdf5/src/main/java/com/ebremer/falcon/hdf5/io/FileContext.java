@@ -13,8 +13,8 @@ import java.util.function.Supplier;
  * superblock's "size of offsets" (file address width) and "size of lengths" (object size width). The
  * file's own path, root group, and {@link OpenOptions} are carried too, so soft links can resolve
  * absolute paths and external raw data and virtual-dataset sources can be located and read as asked, and
- * so are the superblock extension, which locates the shared-message table, and the root group's symbol
- * table as a version 0&ndash;1 superblock caches it.
+ * so are the superblock extension, which locates the shared-message table, the root group's symbol
+ * table as a version 0&ndash;1 superblock caches it, and where in the file its addresses start.
  *
  * <p>Shared by every object of one open file, including across threads: it is immutable apart from the
  * (thread-safe) decoded-chunk cache, the lazily read shared-message table, the per-file resources (such as
@@ -33,6 +33,7 @@ public final class FileContext {
     private final long superblockExtensionAddress;
     private final long rootBTreeAddress; // the root group's symbol table, as the superblock caches it
     private final long rootHeapAddress;
+    private final long baseAddress; // where in the file address 0 is: the size of its user block
     private final ChunkCache chunkCache; // per-file decoded-chunk cache
     private volatile SharedMessageTable sharedMessageTable; // read on first use, then cached
     private final ConcurrentHashMap<Class<?>, AutoCloseable> resources = new ConcurrentHashMap<>();
@@ -40,12 +41,16 @@ public final class FileContext {
 
     public FileContext(HdfBuffer buffer, int sizeOfOffsets, int sizeOfLengths) {
         this(buffer, sizeOfOffsets, sizeOfLengths, null, HdfBuffer.UNDEFINED_ADDRESS, OpenOptions.defaults(),
-                HdfBuffer.UNDEFINED_ADDRESS, HdfBuffer.UNDEFINED_ADDRESS, HdfBuffer.UNDEFINED_ADDRESS);
+                HdfBuffer.UNDEFINED_ADDRESS, HdfBuffer.UNDEFINED_ADDRESS, HdfBuffer.UNDEFINED_ADDRESS, 0);
     }
 
+    /**
+     * @param buffer      the file's bytes from its base address on: address 0 is the buffer's first byte
+     * @param baseAddress where in the file that is, in bytes from its start: 0 unless it has a user block
+     */
     public FileContext(HdfBuffer buffer, int sizeOfOffsets, int sizeOfLengths, Path path, long rootAddress,
                        OpenOptions options, long superblockExtensionAddress, long rootBTreeAddress,
-                       long rootHeapAddress) {
+                       long rootHeapAddress, long baseAddress) {
         this.buffer = buffer;
         this.sizeOfOffsets = sizeOfOffsets;
         this.sizeOfLengths = sizeOfLengths;
@@ -55,6 +60,7 @@ public final class FileContext {
         this.superblockExtensionAddress = superblockExtensionAddress;
         this.rootBTreeAddress = rootBTreeAddress;
         this.rootHeapAddress = rootHeapAddress;
+        this.baseAddress = baseAddress;
         this.chunkCache = new ChunkCache(options.chunkCacheSize());
     }
 
@@ -114,6 +120,15 @@ public final class FileContext {
     /** The address of the root group's local heap, cached as {@link #rootBTreeAddress()} is, or undefined. */
     public long rootHeapAddress() {
         return rootHeapAddress;
+    }
+
+    /**
+     * Where in the file its addresses start, in bytes from the start of the file: every address the file
+     * records, and every offset into {@link #buffer()}, is that far from the file's first byte. It is where
+     * the superblock lies, so 0 unless the file starts with a user block, and libhdf5's {@code H5F_BASE_ADDR}.
+     */
+    public long baseAddress() {
+        return baseAddress;
     }
 
     /** The file's shared-message (SOHM) table, read on first use. */

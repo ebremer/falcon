@@ -3,6 +3,7 @@ package com.ebremer.falcon.hdf5.io;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -153,6 +154,38 @@ class RedirectedBufferTest {
         assertEquals(500, buffer.segmentSlice(500, 400).address() - whole.address());
         assertEquals(2010, buffer.segmentSlice(1010, 20).address() - whole.address(), "inside a range");
         assertFalse(buffer.segmentSlice(990, 20).heapBase().filter(base -> base == stored).isPresent(), "across an edge: a copy");
+    }
+
+    /** The bytes stored at an address, whatever a range puts there: where a dataset's own data is read in place. */
+    @Test
+    void storedSlicesAreTheFilesOwnBytes() throws IOException {
+        byte[] stored = stored();
+        MemorySegment whole = MemorySegment.ofArray(stored);
+        HdfBuffer buffer = new HdfBuffer(whole).redirected(ADDRESSES, LENGTHS, SOURCES);
+        assertArrayEquals(stored, buffer.storedSlice(0, SIZE).toArray(ValueLayout.JAVA_BYTE), "the whole file, as stored");
+        // In a range, across its edges, and between two: always a view, of the bytes that lie there.
+        for (long[] range : new long[][] {{1000, 300}, {1010, 20}, {990, 20}, {1290, 20}, {500, 400}, {95, 70}, {0, 8}, {4090, 6}}) {
+            MemorySegment slice = buffer.storedSlice(range[0], range[1]);
+            assertSame(stored, slice.heapBase().orElseThrow(), "a view, at " + range[0]);
+            assertEquals(range[0], slice.address() - whole.address(), "of the bytes at " + range[0]);
+            assertEquals(range[1], slice.byteSize());
+        }
+        assertFalse(Arrays.equals(buffer.storedSlice(1000, 300).toArray(ValueLayout.JAVA_BYTE), buffer.getBytes(1000, 300)),
+                "the range's bytes are read from elsewhere");
+        // A view of part of the buffer is of the bytes stored in that part.
+        HdfBuffer part = buffer.slice(900, 600);
+        assertEquals(1000, part.storedSlice(100, 300).address() - whole.address());
+        assertEquals(1000, new HdfBuffer(whole).slice(900, 600).storedSlice(100, 300).address() - whole.address(), "not redirected");
+        assertThrows(HdfFormatException.class, () -> buffer.storedSlice(SIZE - 3, 4));
+        assertThrows(HdfFormatException.class, () -> buffer.storedSlice(-1, 4));
+        assertThrows(HdfFormatException.class, () -> part.storedSlice(590, 20));
+        // Read on demand, there are no bytes to view; a range outside the file is refused first.
+        for (int pageSize : new int[] {7, 4096}) {
+            HdfBuffer paged = redirected(pageSize);
+            assertNull(paged.storedSlice(1000, 300), "read in pages of " + pageSize);
+            assertNull(paged.slice(900, 600).storedSlice(100, 300));
+            assertThrows(HdfFormatException.class, () -> paged.storedSlice(SIZE - 3, 4));
+        }
     }
 
     @Test

@@ -1,14 +1,15 @@
 # Falcon HDF5 — remaining work (prioritized)
 
-**Status (2026-11-13, after P2 S1–S10, A1–A12, PF1–PF14, WF1–WF11, all of P3, and P1 C1–C2):** build green,
-**1405 HDF5 tests** (144 at the review, 187 after the top 10, 206 after P0, 228 after P1, 243 after S1–S3, 256
+**Status (2026-11-13, after P2 S1–S10, A1–A13, PF1–PF14, WF1–WF11, all of P3, and P1 C1–C2):** build green,
+**1516 HDF5 tests** (144 at the review, 187 after the top 10, 206 after P0, 228 after P1, 243 after S1–S3, 256
 after S4–S7, 439 after A2–A6, 610 after PF1–PF4, 677 after A1–A10, 692 after A11–A12, 707 after WF1–WF4,
 743 after WF5–WF9, 782 after WF7 and WF10, 850 after WF11 and PF5–PF7, 855 after P3, 1117 after S8–S9; the
 checksum tests then moved to `core`, S10's ZFP added four, and its Blosc2 and SZ eleven: 1128; 1133 after the
-conformance harness, 1311 after C1 and C2, 1341 after PF9 and PF10, 1366 after PF11, 1405 after PF12–PF14),
-plus 149 in the `core` module. The review's top 10, every P1 item, **P2 S1–S10**, **A1–A12**, **PF1–PF14**,
-**WF1–WF11**, **every P3 item**, the P0 zstd fix (Z6/Z7, in `core`), and the P0 found with S8 (types libhdf5
-refuses in version-1 object headers) are done (see *Done* at the end). Falcon now:
+conformance harness, 1311 after C1 and C2, 1341 after PF9 and PF10, 1366 after PF11, 1405 after PF12–PF14,
+1516 after A13), plus 149 in the `core` module. The review's top 10, every P1 item, **P2 S1–S10**,
+**A1–A13**, **PF1–PF14**, **WF1–WF11**, **every P3 item**, the P0 zstd fix (Z6/Z7, in `core`), and the P0
+found with S8 (types libhdf5 refuses in version-1 object headers) are done (see *Done* at the end). Falcon
+now:
 
 - reads the files the review showed it misreading:
   - real libhdf5 szip and scale-offset data;
@@ -36,6 +37,8 @@ refuses in version-1 object headers) are done (see *Done* at the end). Falcon no
   ranges, any channel) that it reads on demand; the `s3` module's `S3RangeReader` reads one from Amazon S3;
 - looks objects up by path, reads integers as floating point as libhdf5 converts them, and reports each
   dataset's layout, chunk shape, filters, and storage size as libhdf5 does;
+- says where contiguous data lies in its file, and gives those bytes of a mapped file as a view of it, for
+  a caller that reads them in place;
 - reads every datatype class: compound members by name, enumeration names, arrays, complex numbers (as
   libhdf5 converts them), bit fields, opaque data, and time values (as `Instant`s);
 - selects regular hyperslabs with gaps and single points, reading only the chunks they touch, and
@@ -83,6 +86,18 @@ refuses in version-1 object headers) are done (see *Done* at the end). Falcon no
 
 P0, P1, and P3 are empty, and so is P2 but for its known limits and non-goals: C1 and C2, which the HDF5
 conformance harness found, were the last open items.
+
+**P2 A13 (2026-11-13)** adds API, and changes no result:
+- **New: `Dataset.storageOffset()`** (an `OptionalLong`): where contiguous data lies in its file, in bytes
+  from the file's start, a user block included, as libhdf5's `H5Dget_offset` reports. Empty for compact,
+  chunked, and virtual data, for data in external files, and for contiguous data never written.
+- **New: `Dataset.storageSegment()`** (an `Optional<MemorySegment>`): those bytes of a file opened from a
+  path or from a `byte[]`, as a read-only view of the mapping or the array: nothing is copied, and nothing
+  read. Empty wherever the offset is, and for a file read on demand, whose bytes the caller reads at the
+  offset.
+- **A segment lasts while its file is open:** `Hdf5File.close()` unmaps a mapped file, as it always has,
+  and a segment of it read afterwards throws `IllegalStateException`.
+- **`storage_metadata.txt` has a column more,** the offset, after the storage size.
 
 **P2 PF12–PF14 (2026-11-13)** add no API, and change no result:
 - **The chunk index of a file read through a `RangeReader` is read ahead (PF12).** The nodes of a version 1
@@ -420,7 +435,8 @@ review baseline. Abbreviations: `W` = `Hdf5Writer.java`; other paths are under
 **Tooling.**
 - Regenerate fixtures with `tools/fixtures/gen_fixtures.py`. Pass names to regenerate only those. Then
   rerun `tools/fixtures/gen_storage_metadata.py`, which records libhdf5's storage report for every
-  dataset (the oracle for `Dataset.layout()`, `chunkShape()`, `filters()`, and `storageSize()`).
+  dataset (the oracle for `Dataset.layout()`, `chunkShape()`, `filters()`, `storageSize()`, and
+  `storageOffset()`).
 - Check writer interop with `tools/fixtures/check_hdf5_writer.py [--python114 PATH]`.
 - `mdc_image.h5` is a file libhdf5 2.0.0 cannot read back (see *Done — 2026-11-13*): set `FALCON_H5CLEAR_114`
   to the `h5clear` of an HDF5 1.14 and `gen_fixtures.py mdc_image` checks it through that library.
@@ -467,8 +483,14 @@ empty.
 
 ### Read API
 
-- A1–A12 are done (see *Done — 2026-10-05 (P2: A11, A12)*, *(P2: A1, A4, A7–A10)*, and
-  *(P2: A2, A3, A5, A6)*).
+- A1–A13 are done (see *Done — 2026-11-13 (P2: A13)*, *Done — 2026-10-05 (P2: A11, A12)*,
+  *(P2: A1, A4, A7–A10)*, and *(P2: A2, A3, A5, A6)*). Not done around A13:
+  - **Which file a dataset reached through an external link is in** is not said: its `storageOffset()` is
+    an offset in the link's file, which the caller knows only from the link. Its `storageSegment()` needs
+    no file.
+  - **A crafted cache image that names a dataset's raw data** is read differently by the two: the segment
+    is the bytes stored there, which libhdf5 reads too (raw data does not go through its metadata cache),
+    and `readRawBytes()` and the typed reads are still the image's. No file libhdf5 writes has one.
 
 ### Write features & API
 
@@ -527,6 +549,55 @@ empty.
 
 - D1, D2, D3, D4, D6, B1, B2, and B3 are done (see *Done — 2026-10-05 (P3: D2, D6, B1–B3)* and
   *(P3: D1, D3, D4)*). P3 is empty.
+
+## Done — 2026-11-13 (P2: A13)
+
+Asked for by BeakGraph, which keeps its indexes in contiguous byte datasets and reads them where they lie,
+at random: it wants each dataset's place in the file, not its values in an array.
+
+- [x] **A13 — contiguous data read in place.**
+  - **`Dataset.storageOffset()`.** How many bytes from the start of the file the data's first byte is, as
+    libhdf5's `H5Dget_offset` reports: the layout's address, and the file's base address, which is where
+    its superblock lies (a user block's size; libhdf5's `H5F_BASE_ADDR`) and which `io.FileContext` now
+    carries (`baseAddress()`). The dataset's `storageSize()` bytes follow from there, unfiltered, in the
+    datatype's byte order.
+    - **Only contiguous data stored in the file has one place:** compact, chunked, and virtual data, data
+      in external files, and contiguous data never written have none, as in libhdf5.
+    - **The place is checked first,** as a read checks it: data recorded outside the file is an
+      `HdfFormatException`, not an offset.
+  - **`Dataset.storageSegment()`.** Those bytes as a read-only `MemorySegment`, where the file is mapped
+    (`open(Path)`) or in memory (`open(byte[])`): a slice of the mapping, or of the array. Nothing is
+    copied and nothing read, so data past 2 GB is there at once, for any number of threads.
+    - **Not for a file read on demand** (a `RangeReader`, or a file system that cannot map): a segment
+      would be the whole dataset, read. The caller reads the ranges it wants at the offset.
+    - **It lasts while the file is open.** `Hdf5File.close()` unmaps a mapped file, and its segments then
+      throw `IllegalStateException`: Falcon keeps no mapping alive for a segment someone holds.
+    - **The file's own bytes** (`io.HdfBuffer.storedSlice`, `io.ByteSource.stored`): in a file with a
+      metadata cache image, the view is of what is stored at the data's address, whatever an entry of the
+      image stands for there, as the offset says.
+  - **The oracle.** `gen_storage_metadata.py` records `H5Dget_offset` (h5py's `DatasetID.get_offset`) for
+    every dataset of the fixtures, a column of `storage_metadata.txt` after the storage size: 1,043
+    offsets, and none for 489 chunked, 2 compact, and 32 virtual datasets, nor for 32 contiguous ones
+    (external, or never written). The other columns are as they were.
+- **Tests:**
+  - `P2ApiTest`'s storage check holds every dataset of the fixtures to libhdf5's offset: the user-block
+    files and the cache image after a user block among them.
+  - `StorageOffsetTest` (7): every one of those datasets, in a file opened from its path, from its bytes,
+    and through a `RangeReader`, has the same offset, the file's bytes there are what `readRawBytes()`
+    returns, and its segment is those bytes, read-only, a slice of the mapping or of the array (none for
+    the file read on demand); a segment of a file in memory shows a change of the array; a mapped file's
+    ends with it; files Falcon writes in both formats, given whole and a piece at a time, and the same
+    after user blocks of 512, 1,024, and 8,192 bytes, each byte that much further on; a 3 MiB dataset
+    through a reader that counts, found without its data read; both cache-image fixtures; a dataset
+    recorded one byte past the file's end, and at it, refused, and at the last place it fits, read.
+  - `io.RedirectedBufferTest` gained one: a stored slice is a view of the bytes at its address in a
+    range, across its edges, and between two, and there is none of bytes read in pages.
+  - `RobustnessTest` asks every dataset of every corrupted file for both, and `OpenSourcesTest` compares
+    the offsets of every fixture however it is opened.
+  - `StorageOffsetTest`, `P2ApiTest`, and `io.RedirectedBufferTest` fail when the code is broken on
+    purpose, 9 ways (the base address left out, of the offset and of the file; an offset for data never
+    written; a segment of a file read on demand; the stored view read through the redirected ranges; a
+    segment left writable, copied, or a byte short; a stored slice not checked against the file).
 
 ## Done — 2026-11-13 (P2: PF12–PF14)
 

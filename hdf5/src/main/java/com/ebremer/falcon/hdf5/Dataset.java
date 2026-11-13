@@ -32,6 +32,10 @@ import java.nio.file.Path;
  * virtual. {@link #select} and {@link #blocks} read part of a dataset; {@link #layout()},
  * {@link #chunkShape()}, {@link #filters()} and {@link #storageSize()} describe its storage. Elements
  * never written read back as the fill value.
+ *
+ * <p>Contiguous data need not be read into an array at all: {@link #storageOffset()} says where in the
+ * file it lies, and {@link #storageSegment()} is those bytes of a mapped file, for a caller that reads them
+ * in place.
  */
 public final class Dataset extends Hdf5Object {
 
@@ -180,6 +184,51 @@ public final class Dataset extends Hdf5Object {
             case DataLayout.Chunked chunked -> chunkIndex(chunked).storedBytes();
             case DataLayout.Virtual v -> 0;
         };
+    }
+
+    /**
+     * Where this dataset's raw data lies in its file, as libhdf5's {@code H5Dget_offset} reports: how many
+     * bytes from the start of the file its first byte is, a user block included. Only
+     * {@linkplain Layout#CONTIGUOUS contiguous} data stored in the file lies in one place: its
+     * {@link #storageSize()} bytes follow from there, unfiltered and in the datatype's byte order, the bytes
+     * {@link #readRawBytes()} returns. So a caller can read them itself, whole or a range at a time, from
+     * the file or through whatever it reads the file with; {@link #storageSegment()} gives them directly
+     * where the file is mapped or in memory. The file is the one the dataset is in: for a dataset reached
+     * through an external link, the file the link names.
+     *
+     * @return the offset in bytes from the start of the file; empty for compact, chunked, and virtual data,
+     *         for data in external files, and for contiguous data never written
+     * @throws HdfFormatException if the file does not hold that many bytes there
+     */
+    public java.util.OptionalLong storageOffset() {
+        ctx.checkOpen();
+        return dataLayout() instanceof DataLayout.Contiguous c && contiguousBlock(c) != null
+                ? java.util.OptionalLong.of(ctx.baseAddress() + c.address()) : java.util.OptionalLong.empty();
+    }
+
+    /**
+     * This dataset's raw data as a view of the file's bytes, where the file is mapped
+     * ({@link Hdf5File#open(java.nio.file.Path)}) or held in memory ({@link Hdf5File#open(byte[])}): the
+     * {@link #storageSize()} bytes at {@link #storageOffset()}, as they are stored. Nothing is copied, and
+     * nothing is read until the caller reads the segment, so data of any size (past 2 GB, too) is there at
+     * once, to be read at random. The segment is read-only, and may be read from several threads at once.
+     *
+     * <p>It is the file's own memory, and lasts while the file is open: {@link Hdf5File#close()} unmaps a
+     * mapped file, and reading the segment afterwards throws {@link IllegalStateException}. So close the
+     * file only when nothing reads its segments any more.
+     *
+     * @return the data's bytes, read-only; empty wherever {@link #storageOffset()} is empty, and for a file
+     *         read on demand (through a {@link RangeReader}, or from a file system that cannot map it), whose
+     *         bytes the caller reads at {@link #storageOffset()} instead
+     * @throws HdfFormatException if the file does not hold that many bytes there
+     */
+    public java.util.Optional<MemorySegment> storageSegment() {
+        ctx.checkOpen();
+        if (!(dataLayout() instanceof DataLayout.Contiguous c) || contiguousBlock(c) == null) {
+            return java.util.Optional.empty();
+        }
+        MemorySegment stored = ctx.buffer().storedSlice(c.address(), byteCount());
+        return stored == null ? java.util.Optional.empty() : java.util.Optional.of(stored.asReadOnly());
     }
 
     /** {@code H5Z_FLAG_OPTIONAL}: a chunk may skip the filter. */

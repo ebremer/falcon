@@ -126,6 +126,20 @@ long bytes = ds.storageSize();                  // bytes in the file, compressed
 Datatype type = ds.datatype();
 ```
 
+### Read contiguous data where it lies
+
+```java
+try (Hdf5File h5 = Hdf5File.open(path)) {                             // mapped
+    MemorySegment bytes = h5.root().dataset("index").storageSegment().orElseThrow();
+    long entry = bytes.get(ValueLayout.JAVA_LONG_UNALIGNED, 8L * i);  // no copy, any size, at random
+}
+```
+
+`storageSegment()` is the data of a contiguous dataset as a read-only view of a mapped file (or of a
+`byte[]`), valid until the file is closed. `storageOffset()` says where those bytes lie in the file, as
+libhdf5's `H5Dget_offset` does, for a file read through a `RangeReader`: read the ranges you want there with
+your own reader. Both are empty for data that is not in one place: compact, chunked, virtual, or external.
+
 ### Open a file from memory, a channel, or anywhere else
 
 ```java

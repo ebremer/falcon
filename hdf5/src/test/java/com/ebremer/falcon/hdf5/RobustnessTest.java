@@ -183,6 +183,8 @@ class RobustnessTest {
                 dataset.chunkShape();
                 dataset.filters();
                 dataset.storageSize(); // walks the whole chunk index
+                dataset.storageOffset();
+                dataset.storageSegment();
                 long[] dims = dataset.dataspace().dimensions();
                 if (dataset.dataspace().elementCount() * dataset.datatype().size() > MAX_READ_BYTES) {
                     // A dataset this large may be valid (chunked and sparse): reading it whole needs that

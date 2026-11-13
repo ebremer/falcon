@@ -228,7 +228,7 @@ public final class Hdf5File implements AutoCloseable {
                     superblock.superblockExtensionAddress());
             FileContext ctx = new FileContext(data, superblock.sizeOfOffsets(), superblock.sizeOfLengths(),
                     path, superblock.rootObjectHeaderAddress(), options, superblock.superblockExtensionAddress(),
-                    superblock.rootBTreeAddress(), superblock.rootHeapAddress());
+                    superblock.rootBTreeAddress(), superblock.rootHeapAddress(), base);
             Group root = Group.root(ctx, superblock.rootObjectHeaderAddress());
             return new Hdf5File(release, superblock, ctx, root, data != stored);
         } catch (UncheckedIOException e) {

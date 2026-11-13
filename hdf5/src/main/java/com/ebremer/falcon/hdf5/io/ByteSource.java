@@ -37,4 +37,11 @@ abstract sealed class ByteSource permits PagedSource, RedirectedSource {
 
     /** The source that reads these bytes on demand, each read a request of a store; null if none does. */
     abstract PagedSource paged();
+
+    /**
+     * The {@code length} bytes stored at {@code position}, as a view of the mapped or in-memory bytes they
+     * are in: the file's own bytes there, whatever is read from elsewhere. Null if the bytes are read on
+     * demand, where there is nothing to view.
+     */
+    abstract MemorySegment stored(long position, long length);
 }

@@ -62,6 +62,11 @@ final class RedirectedSource extends ByteSource {
     }
 
     @Override
+    MemorySegment stored(long position, long length) {
+        return file.storedSlice(position, length); // the bytes there, not those a range stands for
+    }
+
+    @Override
     byte get(long position) {
         int i = rangeAt(position);
         return file.getByte(i < starts.length && starts[i] <= position ? sources[i] + (position - starts[i]) : position);
