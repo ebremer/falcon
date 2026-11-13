@@ -6596,14 +6596,22 @@ public final class Hdf5Writer implements AutoCloseable {
         }
     }
 
+    // The values of a typed array as little-endian elements (P2 PF14): integers copied in one move, and
+    // floats an element at a time, since a NaN is written as the one NaN it always was
+    // (Float.floatToIntBits, Double.doubleToLongBits), whatever its bits.
+
+    private static final java.lang.foreign.ValueLayout.OfShort LE_SHORTS =
+            java.lang.foreign.ValueLayout.JAVA_SHORT_UNALIGNED.withOrder(java.nio.ByteOrder.LITTLE_ENDIAN);
+    private static final java.lang.foreign.ValueLayout.OfInt LE_INTS =
+            java.lang.foreign.ValueLayout.JAVA_INT_UNALIGNED.withOrder(java.nio.ByteOrder.LITTLE_ENDIAN);
+    private static final java.lang.foreign.ValueLayout.OfLong LE_LONGS =
+            java.lang.foreign.ValueLayout.JAVA_LONG_UNALIGNED.withOrder(java.nio.ByteOrder.LITTLE_ENDIAN);
+
     private static byte[] float32Bytes(float[] data) {
         byte[] out = new byte[data.length * 4];
+        java.lang.foreign.MemorySegment target = java.lang.foreign.MemorySegment.ofArray(out);
         for (int i = 0; i < data.length; i++) {
-            int v = Float.floatToIntBits(data[i]);
-            out[i * 4] = (byte) v;
-            out[i * 4 + 1] = (byte) (v >>> 8);
-            out[i * 4 + 2] = (byte) (v >>> 16);
-            out[i * 4 + 3] = (byte) (v >>> 24);
+            target.set(LE_INTS, 4L * i, Float.floatToIntBits(data[i]));
         }
         return out;
     }
@@ -6641,32 +6649,19 @@ public final class Hdf5Writer implements AutoCloseable {
 
     private static byte[] intBytes(int[] data) {
         byte[] out = new byte[data.length * 4];
-        for (int i = 0; i < data.length; i++) {
-            int v = data[i];
-            out[i * 4] = (byte) v;
-            out[i * 4 + 1] = (byte) (v >>> 8);
-            out[i * 4 + 2] = (byte) (v >>> 16);
-            out[i * 4 + 3] = (byte) (v >>> 24);
-        }
+        java.lang.foreign.MemorySegment.copy(data, 0, java.lang.foreign.MemorySegment.ofArray(out), LE_INTS, 0, data.length);
         return out;
     }
 
     private static byte[] shortBytes(short[] data) {
         byte[] out = new byte[data.length * 2];
-        for (int i = 0; i < data.length; i++) {
-            out[i * 2] = (byte) data[i];
-            out[i * 2 + 1] = (byte) (data[i] >>> 8);
-        }
+        java.lang.foreign.MemorySegment.copy(data, 0, java.lang.foreign.MemorySegment.ofArray(out), LE_SHORTS, 0, data.length);
         return out;
     }
 
     private static byte[] longBytes(long[] data) {
         byte[] out = new byte[data.length * 8];
-        for (int i = 0; i < data.length; i++) {
-            for (int b = 0; b < 8; b++) {
-                out[i * 8 + b] = (byte) (data[i] >>> (8 * b));
-            }
-        }
+        java.lang.foreign.MemorySegment.copy(data, 0, java.lang.foreign.MemorySegment.ofArray(out), LE_LONGS, 0, data.length);
         return out;
     }
 
@@ -6683,11 +6678,9 @@ public final class Hdf5Writer implements AutoCloseable {
 
     private static byte[] doubleBytes(double[] data) {
         byte[] out = new byte[data.length * 8];
+        java.lang.foreign.MemorySegment target = java.lang.foreign.MemorySegment.ofArray(out);
         for (int i = 0; i < data.length; i++) {
-            long v = Double.doubleToLongBits(data[i]);
-            for (int b = 0; b < 8; b++) {
-                out[i * 8 + b] = (byte) (v >>> (8 * b));
-            }
+            target.set(LE_LONGS, 8L * i, Double.doubleToLongBits(data[i]));
         }
         return out;
     }

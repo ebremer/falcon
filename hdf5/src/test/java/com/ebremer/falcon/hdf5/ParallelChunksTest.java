@@ -351,13 +351,14 @@ class ParallelChunksTest {
             try (FileChannel channel = FileChannel.open(file)) {
                 Recording reader = new Recording(RangeReader.of(channel));
                 // One request at a time, so that the reading thread makes them all, in an order of its own
-                // (several at once are ChunksReadTogetherTest's); and small pages, so that there are many.
+                // (several at once are ChunksReadTogetherTest's); and small pages, so that there are many
+                // (fewer since P2 PF12, which reads the pages of a chunk index together).
                 OpenOptions options = OpenOptions.defaults().decodeThreads(threads).readerPageSize(512).readerRequests(1);
                 try (Hdf5File h5 = Hdf5File.open(reader, options)) {
                     reads(h5, "whole");
                     reads(h5, "rows");
                 }
-                assertTrue(reader.requests.size() > 20, "requests: " + reader.requests.size());
+                assertTrue(reader.requests.size() > 10, "requests: " + reader.requests.size());
                 assertEquals(1, reader.threads.stream().distinct().count(), "only the reading thread reads the file");
                 if (expected == null) {
                     expected = List.copyOf(reader.requests);

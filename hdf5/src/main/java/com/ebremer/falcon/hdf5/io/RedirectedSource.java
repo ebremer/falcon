@@ -108,6 +108,29 @@ final class RedirectedSource extends ByteSource {
         }
     }
 
+    @Override
+    int ahead(long[] positions, int from, int to, long length) {
+        // Each range where its bytes are stored; one across the edge of a redirected range is left to its read.
+        long[] stored = new long[to - from];
+        for (int k = 0; k < stored.length; k++) {
+            long position = positions[from + k];
+            if (position < 0 || position >= size() || length > size() - position) {
+                stored[k] = -1;
+                continue;
+            }
+            int i = rangeAt(position);
+            long end = position + length;
+            if (i == starts.length || starts[i] >= end) {
+                stored[k] = position;
+            } else if (starts[i] <= position && end <= ends[i]) {
+                stored[k] = sources[i] + (position - starts[i]);
+            } else {
+                stored[k] = -1;
+            }
+        }
+        return file.ahead(stored, 0, stored.length, length);
+    }
+
     /**
      * Fills {@code target} with the bytes from {@code position} on, a piece at a time: each piece lies in one
      * range, or between two. {@code range} is {@link #rangeAt} of {@code position}.

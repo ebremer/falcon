@@ -164,6 +164,10 @@ class ChunksReadTogetherTest {
     /** 64 chunks of some 32 KiB each, stored one after another: a whole read asks for them in one request. */
     @Test
     void chunksNextToEachOtherComeInOneRequest() throws IOException {
+        // -Dtest=ChunksReadTogetherTest also selects it in the fuzz execution, whose 128 MB heap holds a
+        // request to 1 MiB: these 2 MB of chunks are two requests there.
+        org.junit.jupiter.api.Assumptions.assumeTrue(Runtime.getRuntime().maxMemory() >= 512L << 20,
+                "needs a heap in which a request may be 2 MiB");
         double[] data = noise(512 * 512, 3);
         Path file = dir.resolve("together.h5");
         try (Hdf5Writer w = Hdf5Writer.create(file)) {
@@ -190,7 +194,8 @@ class ChunksReadTogetherTest {
             store.reset();
             assertArrayEquals(data, dataset.readDoubles());
             List<long[]> requests = store.sorted();
-            assertEquals(1, requests.size(), "one request, where each chunk's pages were " + stored / PAGE);
+            assertEquals(1, requests.size(), "one request, where each chunk's pages were " + stored / PAGE + ": "
+                    + requests.stream().map(r -> r[0] + "+" + r[1]).toList() + " by " + store.threads);
             assertEquals(first, requests.get(0)[0]);
             assertEquals(end - first, requests.get(0)[1], "from the first chunk's first byte to the last one's last");
             assertSame(Thread.currentThread(), store.threads.get(0), "one request: the reading thread makes it");

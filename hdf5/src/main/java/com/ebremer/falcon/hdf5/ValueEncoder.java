@@ -1,6 +1,8 @@
 package com.ebremer.falcon.hdf5;
 
 import com.ebremer.falcon.hdf5.datatype.Datatype;
+import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
 import java.math.BigInteger;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
@@ -15,6 +17,10 @@ import java.util.Map;
  * taking the values its {@code read()} returns. Values must fit their type exactly; nothing is rounded or
  * wrapped except a number written to a floating-point type, which is rounded to the nearest, as libhdf5
  * converts it.
+ *
+ * <p>Values that are the type's own, one after another, are copied in one move (P2 PF14): a Java array of
+ * {@code short}s to a 16-bit integer type, of {@code double}s to a 64-bit float, and so on, in either byte
+ * order. Anything else is encoded an element at a time.
  *
  * <table>
  *   <caption>The Java values each datatype class takes</caption>
@@ -66,6 +72,28 @@ final class ValueEncoder {
     @FunctionalInterface
     private interface Place {
         long at(long k);
+
+        /** The elements one after another from {@code base} on, each {@code stride} bytes after the one before. */
+        record Run(long base, long stride) implements Place {
+            @Override
+            public long at(long k) {
+                return base + k * stride;
+            }
+        }
+
+        /** Where the member at {@code offset} of each element is. */
+        default Place member(long offset) {
+            return this instanceof Run run ? new Run(run.base() + offset, run.stride()) : k -> at(k) + offset;
+        }
+
+        /**
+         * Where the parts of the elements are, each element {@code n} parts of {@code size} bytes: one after
+         * another too, when the parts fill their elements.
+         */
+        default Place parts(int n, int size) {
+            return this instanceof Run run && run.stride() == (long) n * size ? new Run(run.base(), size)
+                    : k -> at(k / n) + (k % n) * size;
+        }
     }
 
     /**
@@ -82,7 +110,7 @@ final class ValueEncoder {
                     + " bytes are too many to write at once");
         }
         ValueEncoder.Writer writer = new ValueEncoder.Writer(new byte[(int) bytes], heap, what);
-        writer.put(type, count, values, k -> k * type.size());
+        writer.put(type, count, values, new Place.Run(0, type.size()));
         return new Encoded(writer.out, writer.ids, writer.refs);
     }
 
@@ -124,7 +152,7 @@ final class ValueEncoder {
                     if (!(c.base() instanceof Datatype.FloatingPoint base)) {
                         throw new IllegalArgumentException(what + ": a complex type is a pair of floats");
                     }
-                    floats(base, 2 * count, values, k -> place.at(k / 2) + (k % 2) * base.size());
+                    floats(base, 2 * count, values, place.parts(2, base.size()));
                 }
                 case Datatype.StringType s -> strings(s, count, values, place);
                 case Datatype.VariableLength v -> variableLength(v, count, values, place);
@@ -137,7 +165,7 @@ final class ValueEncoder {
                         if (!columns.containsKey(member.name())) {
                             throw new IllegalArgumentException(what + ": no values for compound member '" + member.name() + "'");
                         }
-                        put(member.type(), count, columns.get(member.name()), k -> place.at(k) + member.offset());
+                        put(member.type(), count, columns.get(member.name()), place.member(member.offset()));
                     }
                     for (Object name : columns.keySet()) {
                         if (c.members().stream().noneMatch(m -> m.name().equals(name))) {
@@ -147,8 +175,7 @@ final class ValueEncoder {
                 }
                 case Datatype.Array a -> {
                     int n = a.elementCount();
-                    int baseSize = a.base().size();
-                    put(a.base(), count * n, values, k -> place.at(k / n) + (k % n) * baseSize);
+                    put(a.base(), count * n, values, place.parts(n, a.base().size()));
                 }
                 case Datatype.Reference r -> references(r, count, values, place);
             }
@@ -164,6 +191,10 @@ final class ValueEncoder {
                 throw new HdfUnsupportedException(what + ": integers wider than 64 bits are not written");
             }
             requireLength(values, count, fp);
+            if (plain && members == null && place instanceof Place.Run run && run.stride() == fp.size()
+                    && copied(fp, values, run.base())) {
+                return;
+            }
             for (long k = 0; k < count; k++) {
                 long value = integerAt(values, (int) k, fp);
                 if (members != null && !members.contains(value)) {
@@ -180,6 +211,65 @@ final class ValueEncoder {
                     System.arraycopy(element, 0, out, pos, element.length);
                 }
             }
+        }
+
+        /**
+         * Copies {@code values} to {@code base} on in one move, if they are the type's own: a Java array of
+         * elements of its size, every one of which fits it. Any value fits a signed type of its own size, and
+         * any that is not negative an unsigned one.
+         *
+         * @return false, nothing copied, if they are not: each is then encoded, and the one that does not
+         *         fit refused, in its turn
+         */
+        boolean copied(Datatype.FixedPoint fp, Object values, long base) {
+            boolean signed = fp.signed();
+            MemorySegment target = MemorySegment.ofArray(out);
+            switch (values) {
+                case byte[] a when fp.size() == 1 -> {
+                    if (!signed) {
+                        for (byte v : a) {
+                            if (v < 0) {
+                                return false;
+                            }
+                        }
+                    }
+                    System.arraycopy(a, 0, out, (int) base, a.length);
+                }
+                case short[] a when fp.size() == 2 -> {
+                    if (!signed) {
+                        for (short v : a) {
+                            if (v < 0) {
+                                return false;
+                            }
+                        }
+                    }
+                    MemorySegment.copy(a, 0, target, ValueLayout.JAVA_SHORT_UNALIGNED.withOrder(fp.byteOrder()), base, a.length);
+                }
+                case int[] a when fp.size() == 4 -> {
+                    if (!signed) {
+                        for (int v : a) {
+                            if (v < 0) {
+                                return false;
+                            }
+                        }
+                    }
+                    MemorySegment.copy(a, 0, target, ValueLayout.JAVA_INT_UNALIGNED.withOrder(fp.byteOrder()), base, a.length);
+                }
+                case long[] a when fp.size() == 8 -> {
+                    if (!signed) {
+                        for (long v : a) {
+                            if (v < 0) {
+                                return false;
+                            }
+                        }
+                    }
+                    MemorySegment.copy(a, 0, target, ValueLayout.JAVA_LONG_UNALIGNED.withOrder(fp.byteOrder()), base, a.length);
+                }
+                default -> {
+                    return false;
+                }
+            }
+            return true;
         }
 
         /** Element {@code i} of {@code values} as an integer of {@code fp}, checked to fit. */
@@ -273,6 +363,19 @@ final class ValueEncoder {
                 throw new HdfUnsupportedException(what + ": values are written only to IEEE 754 binary16, 32 and 64 floats");
             }
             requireLength(values, count, fp);
+            if (place instanceof Place.Run run && run.stride() == size) {
+                // The type's own values, one after another: their bits as they are, in one move.
+                if (size == 8 && values instanceof double[] a) {
+                    MemorySegment.copy(a, 0, MemorySegment.ofArray(out),
+                            ValueLayout.JAVA_DOUBLE_UNALIGNED.withOrder(fp.byteOrder()), run.base(), a.length);
+                    return;
+                }
+                if (size == 4 && values instanceof float[] a) {
+                    MemorySegment.copy(a, 0, MemorySegment.ofArray(out),
+                            ValueLayout.JAVA_FLOAT_UNALIGNED.withOrder(fp.byteOrder()), run.base(), a.length);
+                    return;
+                }
+            }
             boolean le = fp.byteOrder() == ByteOrder.LITTLE_ENDIAN;
             for (long k = 0; k < count; k++) {
                 int i = (int) k;

@@ -20,7 +20,9 @@ import java.util.function.Supplier;
  * an eighth of the grid or more reads the whole index instead (one pass, cheaper than as many lookups), as
  * does every read once the lookups made add up to the cells in the grid; from then on the index is kept,
  * and every read finds its chunks there by coordinate. An index whose chunks cannot be looked up one at a
- * time (a single chunk) is read whole.
+ * time (a single chunk) is read whole. A read that looks up several cells says which first
+ * ({@link ChunkLookup#ahead}: P2 PF12), so that an index whose parts lie apart in a file read on demand can
+ * read those it needs together.
  *
  * <p>Once kept, a selection is answered one of two ways, whichever touches less: by looking up each
  * chunk-grid cell the selection covers (a binary search apiece), or, when the selection covers more cells
@@ -126,6 +128,9 @@ public final class ChunkIndex {
         if (!direct(cells)) {
             return loaded().overlapping(first, last, cells);
         }
+        if (cells > 1) {
+            lookup.ahead(axes(first, last));
+        }
         List<ChunkRecord> out = new ArrayList<>();
         long[] cell = first.clone();
         while (true) {
@@ -168,6 +173,9 @@ public final class ChunkIndex {
         if (!direct(combinations)) {
             return loaded().inGrid(cells, combinations);
         }
+        if (combinations > 1) {
+            lookup.ahead(cells);
+        }
         List<ChunkRecord> out = new ArrayList<>();
         int[] at = new int[rank];
         while (true) {
@@ -191,6 +199,21 @@ public final class ChunkIndex {
                 return out;
             }
         }
+    }
+
+    /**
+     * The grid coordinates from {@code first} to {@code last} in each dimension, for a hint of the cells a
+     * read is about to look up: of each dimension no more than a hint names in all.
+     */
+    private static long[][] axes(long[] first, long[] last) {
+        long[][] axes = new long[first.length][];
+        for (int d = 0; d < axes.length; d++) {
+            axes[d] = new long[(int) Math.min(ChunkLookup.AHEAD_CELLS, last[d] - first[d] + 1)];
+            for (int k = 0; k < axes[d].length; k++) {
+                axes[d][k] = first[d] + k;
+            }
+        }
+        return axes;
     }
 
     /**

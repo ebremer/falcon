@@ -42,7 +42,7 @@ import software.amazon.awssdk.services.s3.model.S3Exception;
  * few requests of 64&nbsp;KiB. The chunks one read needs come in as few requests as their places in the
  * object allow, of up to 8&nbsp;MiB each, and up to eight of those are sent at once
  * ({@link com.ebremer.falcon.hdf5.OpenOptions#readerRequests}), from the reading thread and virtual threads
- * beside it.
+ * beside it; the pages of a chunk index that a read needs are sent for the same way.
  *
  * <p><b>Other files.</b> An HDF5 file read this way has no directory, so by default it opens no other file
  * (the files its external links, virtual datasets, external raw data, and references name).

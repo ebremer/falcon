@@ -8,20 +8,26 @@ import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.TreeSet;
 
 /**
  * A file's bytes read on demand from a {@link RangeReader}, for files that are not mapped: small reads
  * (the format's metadata) come from cached pages, and large ones (a chunk, a run of contiguous data) go to
  * the reader directly. The page size and how many pages are kept are {@code OpenOptions.readerPageSize}
- * and {@code readerCacheSize} (64 KiB and 16 MiB by default).
+ * and {@code readerCacheSize} (64 KiB and 16 MiB by default). Pages a caller says it is about to read are
+ * read ahead of it, several at once ({@link #ahead}: P2 PF12).
  *
  * <p>Thread-safe: the page cache is synchronized, and a page two threads miss at once is simply read
  * twice. The reader is called from the thread that reads, and, by a read of several ranges at once (see
- * {@link RangeBatch}), from virtual threads beside it. An {@link IOException} from the reader surfaces as {@link UncheckedIOException}, since the
- * format parsers above read without checked exceptions.
+ * {@link RangeBatch}) or of pages ahead, from virtual threads beside it. An {@link IOException} from the
+ * reader surfaces as {@link UncheckedIOException}, since the format parsers above read without checked
+ * exceptions.
  */
 public final class PagedSource extends ByteSource {
 
@@ -29,6 +35,8 @@ public final class PagedSource extends ByteSource {
     private static final long MAX_ARRAY = Integer.MAX_VALUE - 8;
     /** The most one call to the reader is asked for (a {@link ByteBuffer} is int-indexed). */
     private static final int MAX_REQUEST = 1 << 30;
+    /** A read ahead fills no more than this fraction of the pages kept, so what it reads is there when read. */
+    private static final int AHEAD_FRACTION = 4;
 
     private final RangeReader reader;
     private final long size;
@@ -155,6 +163,83 @@ public final class PagedSource extends ByteSource {
         return uncached;
     }
 
+    /**
+     * Reads into the cache the pages that hold the {@code length} bytes at each of
+     * {@code positions[from..to)} and are not there: pages next to each other, or with one between them, in
+     * one request of at most {@link RangeBatch#MAX_REQUEST} bytes, and up to {@link #requests} requests at
+     * once. A range is taken if its pages, with those of the ranges before it, are no more than a quarter of
+     * what the cache keeps (the first is cut to that). A request that fails reads nothing, and no further
+     * one is started: the pages are read, and the failure thrown, by the read that needs them.
+     */
+    @Override
+    int ahead(long[] positions, int from, int to, long length) {
+        long room = maxPages / AHEAD_FRACTION;
+        if (room < 1 || length <= 0 || closed) {
+            return to - from; // nothing read ahead would be kept: every range is read in its turn
+        }
+        TreeSet<Long> wanted = new TreeSet<>();
+        int taken = 0;
+        synchronized (pages) {
+            List<Long> missing = new ArrayList<>();
+            for (int i = from; i < to; i++, taken++) {
+                long position = positions[i];
+                if (position < 0 || position >= size) {
+                    continue; // none of it is in the file, which its read will say
+                }
+                long last = (position + Math.min(length, size - position) - 1) / pageSize;
+                missing.clear();
+                for (long index = position / pageSize; index <= last && missing.size() <= room; index++) {
+                    if (!pages.containsKey(index) && !wanted.contains(index)) { // not a use of the page
+                        missing.add(index);
+                    }
+                }
+                if (wanted.size() + missing.size() > room) {
+                    if (!wanted.isEmpty()) {
+                        break; // the next read ahead's first
+                    }
+                    missing.subList((int) room, missing.size()).clear();
+                }
+                wanted.addAll(missing);
+            }
+        }
+        if (wanted.isEmpty()) {
+            return taken;
+        }
+        long most = Math.max(1, RangeBatch.MAX_REQUEST / pageSize); // the pages of one request
+        List<long[]> runs = new ArrayList<>(); // each the first and the last page of a request
+        long[] run = null;
+        for (long index : wanted) {
+            if (run == null || index - run[1] > 2 || index - run[0] >= most) {
+                run = new long[] {index, index};
+                runs.add(run);
+            } else {
+                run[1] = index;
+            }
+        }
+        RangeBatch.atOnce(requests, runs.size(), request -> load(runs.get(request)[0], runs.get(request)[1]));
+        return taken;
+    }
+
+    /** Reads pages {@code first} to {@code last} in one request, into the cache; false if it failed. */
+    private boolean load(long first, long last) {
+        try {
+            long start = first * pageSize;
+            byte[] bytes = new byte[(int) (Math.min(size, (last + 1) * pageSize) - start)];
+            fetch(start, MemorySegment.ofArray(bytes));
+            if (first == last) {
+                keep(first, MemorySegment.ofArray(bytes));
+                return true;
+            }
+            for (long index = first; index <= last; index++) { // each page its own bytes, to be dropped alone
+                int at = (int) ((index - first) * pageSize);
+                keep(index, MemorySegment.ofArray(Arrays.copyOfRange(bytes, at, Math.min(bytes.length, at + pageSize))));
+            }
+            return true;
+        } catch (RuntimeException | Error unread) {
+            return false; // a hint: the read that needs these pages reads them, and fails if it must
+        }
+    }
+
     /** Fills {@code target} from the cached pages covering {@code [position, position + length)}. */
     private void copy(long position, MemorySegment target, long length) {
         long done = 0;
@@ -187,6 +272,11 @@ public final class PagedSource extends ByteSource {
         long start = index * pageSize;
         MemorySegment page = MemorySegment.ofArray(new byte[(int) Math.min(pageSize, size - start)]);
         fetch(start, page);
+        return keep(index, page);
+    }
+
+    /** Puts page {@code index} in the cache, dropping the pages longest unused beyond those kept; the page there. */
+    private MemorySegment keep(long index, MemorySegment page) {
         synchronized (pages) {
             MemorySegment raced = pages.putIfAbsent(index, page);
             if (raced != null) {

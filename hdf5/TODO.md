@@ -1,14 +1,14 @@
 # Falcon HDF5 — remaining work (prioritized)
 
-**Status (2026-11-13, after P2 S1–S10, A1–A12, PF1–PF11, WF1–WF11, all of P3, and P1 C1–C2):** build green,
-**1366 HDF5 tests** (144 at the review, 187 after the top 10, 206 after P0, 228 after P1, 243 after S1–S3, 256
+**Status (2026-11-13, after P2 S1–S10, A1–A12, PF1–PF14, WF1–WF11, all of P3, and P1 C1–C2):** build green,
+**1405 HDF5 tests** (144 at the review, 187 after the top 10, 206 after P0, 228 after P1, 243 after S1–S3, 256
 after S4–S7, 439 after A2–A6, 610 after PF1–PF4, 677 after A1–A10, 692 after A11–A12, 707 after WF1–WF4,
 743 after WF5–WF9, 782 after WF7 and WF10, 850 after WF11 and PF5–PF7, 855 after P3, 1117 after S8–S9; the
 checksum tests then moved to `core`, S10's ZFP added four, and its Blosc2 and SZ eleven: 1128; 1133 after the
-conformance harness, 1311 after C1 and C2, 1341 after PF9 and PF10, 1366 after PF11), plus 147 in the `core`
-module. The review's top 10, every P1 item, **P2 S1–S10**, **A1–A12**, **PF1–PF11**, **WF1–WF11**,
-**every P3 item**, the P0 zstd fix (Z6/Z7, in `core`), and the P0 found with S8 (types libhdf5 refuses in
-version-1 object headers) are done (see *Done* at the end). Falcon now:
+conformance harness, 1311 after C1 and C2, 1341 after PF9 and PF10, 1366 after PF11, 1405 after PF12–PF14),
+plus 149 in the `core` module. The review's top 10, every P1 item, **P2 S1–S10**, **A1–A12**, **PF1–PF14**,
+**WF1–WF11**, **every P3 item**, the P0 zstd fix (Z6/Z7, in `core`), and the P0 found with S8 (types libhdf5
+refuses in version-1 object headers) are done (see *Done* at the end). Falcon now:
 
 - reads the files the review showed it misreading:
   - real libhdf5 szip and scale-offset data;
@@ -83,6 +83,21 @@ version-1 object headers) are done (see *Done* at the end). Falcon now:
 
 P0, P1, and P3 are empty, and so is P2 but for its known limits and non-goals: C1 and C2, which the HDF5
 conformance harness found, were the last open items.
+
+**P2 PF12–PF14 (2026-11-13)** add no API, and change no result:
+- **The chunk index of a file read through a `RangeReader` is read ahead (PF12).** The nodes of a version 1
+  B-tree lie apart in the file, a page each: a read that needs several asks for their pages together, up to
+  `readerRequests` requests at once, where it asked for a page after another. A read returns what it did.
+- **The requests differ again,** so a reader that counts them sees pages asked for several at a time, and
+  pages next to each other in one request. No more is read ahead at a time than a quarter of the pages kept
+  (`readerCacheSize`); with fewer than four pages kept, nothing is.
+- **A page that could not be read ahead is asked for again** by the read that needs it, which fails then as
+  it did. So a store's passing failure of one such request no longer fails the read.
+- **The byte shuffle (PF13, in `core`) and the writer's encoding of typed arrays (PF14)** give the bytes they
+  gave, sooner: nothing else about a filter or a write changes.
+- **Measured** (`BENCHMARKS.md`): the 235 MB dataset of the public file in S3, 1.0–1.8 s, from 2.5–2.7; a
+  16,384-chunk dataset through a reader that answers each request after 20 ms, 1.1 s, from 6.5; unshuffling
+  32 MiB of 8-byte elements, 2.5 ms, from 25; encoding 4 million `double`s, 4 ms, from 13.
 
 **P2 PF11 (2026-11-13)** adds API, and changes no result:
 - **New: `OpenOptions.readerRequests(requests)`** (default `DEFAULT_READER_REQUESTS`, 8): the most requests one
@@ -480,26 +495,31 @@ empty.
 
 ### Performance
 
-- PF1–PF11 are done (see *Done — 2026-11-13 (P2: PF11)*, *(P2: PF9, PF10)*, *Done — 2026-10-05 (P2: PF8)*,
-  *(P2: WF11, PF5–PF7)* and *(P2: PF1–PF4)*). Strided single elements of contiguous data are still copied
-  one by one (runs of adjacent elements are one copy); a benchmark shows no gain worth the change yet.
-- **Measured with PF11, and not done** (2026-11-13; a public NetCDF-4 file in S3, over HTTPS):
-  - **The chunk index of a remote file is read a page at a time.** Of the 2.8 s a whole read of 2,304
-    chunks takes, 1.5 are 36 requests for pages of the dataset's version 1 B-tree, whose nodes lie among
-    the chunks, one request after another; the chunks themselves are 4 requests, sent at once. A node's
-    children are known once it is read, so a level's nodes could be read together, as chunks are
-    (`io.RangeBatch`). The array indexes of the latest format lie in one place and need it less.
+- PF1–PF14 are done (see *Done — 2026-11-13 (P2: PF12–PF14)*, *(P2: PF11)*, *(P2: PF9, PF10)*, *Done —
+  2026-10-05 (P2: PF8)*, *(P2: WF11, PF5–PF7)* and *(P2: PF1–PF4)*). Strided single elements of contiguous
+  data are still copied one by one (runs of adjacent elements are one copy); a benchmark shows no gain worth
+  the change yet.
+- **Measured with PF12, and not done** (2026-11-13; the public NetCDF-4 file in S3, over HTTPS: 2,304
+  deflated chunks of `int16`, 235 MB of elements, read whole in 1.0–1.8 s):
+  - **A read's output is filled with the fill value an element at a time** (`ChunkedReader.tileFill`), all of
+    it, before a chunk is read, whether or not chunks will cover it: 0.36 s of that read, alone on the
+    reading thread. Filled by copies that double (the first element, then two, four, ...), 23 ms; and a
+    fill value of zeros needs no filling at all. 32 MiB of `float64`: 12 ms against 3.6. It costs every read
+    of a chunked dataset whose fill value is defined, mapped or remote.
+  - **What is left of that read is its chunks:** 31 MB in 4 requests of up to 8 MiB, sent at once, and their
+    decoding, about a second. Whether 8 requests of 4 MiB would come sooner was not measured.
+  - **The indexes of the latest format are still read a page at a time:** a fixed array's data block, an
+    extensible array's blocks, a version 2 B-tree's nodes. They lie in fewer places than a version 1
+    B-tree's nodes, so they take fewer pages (64 KiB of a fixed array is 4,096 chunks), but a dataset of a
+    million chunks is still some 250 requests, one after another. `HdfBuffer.ahead` reads a run of pages in
+    one request: each index would say what it is about to read, as `ChunkBTreeV1` does. Not counted.
   - **Other data of a remote file is still a request a run:** a strided selection of contiguous data, the
     heap collections of variable-length elements, a virtual dataset's sources. Not counted.
 - **Measured with PF9 and PF10, and not done** (2026-11-13; 2048 × 2048 `float64`, 32 processors):
-  - **The byte shuffle moves a byte at a time:** unshuffling the 1,024 chunks takes 30 ms of a
-    shuffle + gzip read's 104 on one thread; a loop for 8-byte elements (a `long` assembled from eight
-    streams) takes 5.4 ms. It is `core`'s, so Zarr's shuffle and Blosc's would gain too.
-  - **The writer encodes typed arrays an element at a time:** `ValueEncoder` takes 15 ms for 4 million
-    `double`s and 28 ms for as many `int`s; one bulk copy takes 4.6 ms. Of a contiguous write's 37 ms, 24
-    are the file write and its flush to disk.
   - **An unfiltered chunk is copied twice,** from the mapping to an array and from there to its place: a
     whole read takes 14 ms chunked against 7 contiguous.
+  - **A shuffle on the way out is 12 ms where one undone is 2.5** (32 MiB of 8-byte elements, with PF13):
+    its eight streams are written a byte each. Not looked into further.
   - **Not worth doing:** a bulk copy for `readDoubles` (4.6 ms against the loop's 5.2), and keeping whole
     reads out of the chunk cache (124 ms with it, 128 without).
 
@@ -507,6 +527,130 @@ empty.
 
 - D1, D2, D3, D4, D6, B1, B2, and B3 are done (see *Done — 2026-10-05 (P3: D2, D6, B1–B3)* and
   *(P3: D1, D3, D4)*). P3 is empty.
+
+## Done — 2026-11-13 (P2: PF12–PF14)
+
+Three of the four things measured with PF9–PF11 and left: the chunk index of a remote file, read a page at a
+time; the byte shuffle, moved a byte at a time; and the writer's typed arrays, encoded an element at a time.
+(The fourth, an unfiltered chunk copied twice, is still open.)
+
+- [x] **PF12 — a remote file's chunk index read ahead.** A version 1 B-tree, the index of a file libhdf5
+  writes by default, has its nodes among the chunks they were written with: in a file read through a
+  `RangeReader`, a page each, and a request each, one after another.
+  - **`HdfBuffer.ahead(offsets, from, to, length)`**: a hint that those ranges are about to be read. Of
+    bytes read on demand (`io.PagedSource.ahead`), the pages that hold them and are not cached are read
+    now: pages next to each other, or with one between, in one request of at most 8 MiB, and up to
+    `readerRequests` requests at once, the calling thread making them one after another and virtual threads
+    the others (`RangeBatch.atOnce`, which a batch of ranges now shares).
+    - **No more than the cache keeps for it:** a call takes ranges until their pages are a quarter of the
+      pages kept, and returns how many it took; the caller hints the rest when it has read those. So a page
+      read ahead is still there when it is read. With fewer than four pages kept, nothing is read ahead.
+    - **Only a hint:** it never fails, and changes nothing a read returns. A range outside the file is
+      passed over. A request that fails reads nothing, and no further one is started: the read that needs
+      those pages asks for them again, and fails then as it would have.
+    - Mapped or in memory there is nothing to read ahead. A view reads ahead at its own offsets, and bytes
+      read from elsewhere (a metadata cache image's) where they are stored.
+  - **The walk** (`ChunkBTreeV1.read`, a read of the whole index) hints the nodes below a node before it goes
+    down to the first of them, as many at a time as the hint takes. It reads each node as before, from the
+    page cache, in the same order: so it finds, and a damaged tree fails it with, what it did.
+    - A node is taken to have room for 64 entries (libhdf5's default, K = 32), or for as many as any node
+      walked so far holds, up to 1,024: the file's own K is in its superblock, not in the tree. A node with
+      more than it was taken to have has the rest of its pages read in one request when the walk comes to
+      it.
+  - **Lookups** (`ChunkLookup.ahead(cells)`, new, which does nothing by default): a read of several chunks
+    that looks each up says which cells first (`ChunkIndex`: a box, and a strided selection's cells; the
+    first 4,096 of them). `ChunkBTreeV1` then reads the nodes on the paths to them a level at a time: the
+    root names the nodes below it that the cells are under, those are read together, and so on to the
+    leaves. The lookups that follow find every node cached.
+  - **Not done:** the indexes of the latest format (see *Performance*), and points, which look their chunks
+    up one at a time.
+  - **Measured** (`BENCHMARKS.md`). The public NetCDF-4 file in S3 (2,304 chunks, a tree of two levels):
+    read whole in 1.0–1.8 s, from 2.5–2.7; its index in 0.2 s, 8 requests at once, where its 36 requests in a
+    row took 1.5. A 1,000 × 1,000 box of it, 0.17–0.23 s, from 0.30–0.35. Files h5py wrote, through a reader
+    that answers each request after 20 ms: 2,304 chunks whole, 0.34 s, from 1.1; 16,384 chunks (three levels)
+    whole, 1.1 s, from 6.5, and a box of a tenth of each side, 0.13 s, from 0.44. A file Falcon wrote, whose
+    index lies in one place, is read as it was.
+- [x] **PF13 — the byte shuffle an element at a time** (`core`'s `ByteShuffle`, so HDF5's shuffle filter,
+  Zarr's `shuffle` codec, and Blosc's shuffle).
+  - **Undone:** an element of 2, 4, or 8 bytes is put together from its streams and written whole.
+    Unshuffling 32 MiB (1,024 chunks of 32 KiB) of 8-byte elements takes 2.5 ms, from 25; of 4-byte ones
+    1.6, from 22; of 2-byte ones 1.8, from 26.
+  - **Applied:** an element of 4 or 8 bytes is read whole and its bytes put to their streams: 12 ms, from
+    24–25.
+  - **Other sizes,** and 2-byte elements applied, move a byte position at a time, so each stream is read or
+    written from end to end: 10–12 ms, from 23–27.
+  - The bytes are the same: trailing bytes that are no whole element are still copied through.
+- [x] **PF14 — the writer copies values of the type's own in one move.** A Java array whose elements are the
+  datatype's size (`byte[]`, `short[]`, `int[]`, `long[]` to an integer type of 1, 2, 4, or 8 bytes;
+  `float[]` and `double[]` to an IEEE float of 4 or 8) is copied with one `MemorySegment.copy`, in the type's
+  byte order. The writer had two loops for it, both a byte at a time:
+  - **The per-type methods** (`doubleDataset`, `intChunkedDataset`, `floatDataset`, the array, complex and
+    sequence datasets, a compound's fields, array attributes: five helpers of `Hdf5Writer`'s own). Integers
+    are now one copy, little-endian. Floats are not: these methods have always written a NaN as the one
+    canonical NaN (`Double.doubleToLongBits`), whatever its bits, which a copy would not; they go an element
+    at a time still, a whole element now and not a byte. The file holds the bytes it held. The call that
+    takes 4 million values: `doubleDataset` 5.2–5.6 ms, from 10–12; `longDataset` 4.7–4.8, from 9–12;
+    `intDataset` 2.4–2.8, from 5–7; `shortDataset` 1.1–1.7, from 3.3–3.8; `floatDataset` 4.5–5.5, from 7–9.
+  - **The typed API** (`ValueEncoder`: values written to a dataset or an attribute of any datatype), below.
+    It keeps a NaN's bits, as it did; the two differed in that before, and still do.
+  - **Only where each value fits:** any value fits a signed type of its own size. For an unsigned type the
+    array is looked through for a negative value first; if there is one, the values are encoded an element
+    at a time as before, and that element refused with the message it had.
+  - **Only where the values lie one after another:** a dataset's or an attribute's elements, an array
+    type's, a complex number's two parts, a variable-length row's. A compound's members, each at its offset
+    in its record, are placed as before, and so are an enumeration's values (checked against its members)
+    and integers of fewer bits than their bytes.
+  - Encoding 4 million values (`ValueEncoder`): `double[]` 4.1 ms, from 12.7; `int[]` 1.9, from 14.6;
+    `float[]` 1.9, from 10.8; `short[]` to `uint16` 1.8, from 13.1; `long[]` 4.1, from 21.5. Values of
+    another kind (`long[]` to `int32`) are as they were.
+  - **A file written whole does not show it:** a contiguous dataset of 32 MiB, written, flushed and moved
+    into place, takes 36–64 ms from one run to the next, before and after alike; the 5 ms saved is less
+    than the flush varies by.
+- **Tests:**
+  - `io.ReadAheadTest` (13): six pages apart are six requests, in flight together, each by a thread of its
+    own, and the reads that follow make none; pages next to each other, or one apart, are one request; a
+    request held to 8 MiB; the file's short last page; no more than a quarter of the pages kept, a range
+    taken whole or left, a long one cut; a cache too small; no more requests at once than asked for; ranges
+    outside the file; a request that fails (an `IOException`, another exception, too few bytes) left to the
+    read that needs it, and none started after it; a closed file; bytes in memory; a view; redirected bytes.
+  - `btree.ChunkBTreeV1Test` (9), on trees built node by node, so that where each lies is known: a walk of
+    a four-level tree asks for each of its 88 nodes once, eight at once, and with one request at a time
+    makes the same requests itself; nodes back to back come in a few requests; with 1 to 160 pages kept the
+    walk finds the same chunks, and no leaf is asked for twice; a node of 200 entries is read in two
+    requests; the nodes 30 lookups need are those the lookups alone would ask for, read a level at a time,
+    and the lookups then ask for nothing; a hint of 40 thousand million cells, of no cells, of cells of
+    another rank; each of 69 nodes damaged 11 ways (signature, type, level, entry count, child addresses,
+    key order, chunk size) gives the walk and the lookups what it gives them from memory, on 1 and 8
+    requests at once and with a small cache; a hint of a tree that loops (the root under itself, or under
+    its child, or a node under itself) ends, at the node a lookup fails on; a store that fails a leaf fails
+    the walk with the same exception however it reads, and one that fails once does not.
+  - `ChunkIndexReadAheadTest` (9): the reads of seven datasets of libhdf5's files (version 1 B-trees of two
+    and three levels, and fixed and extensible arrays and a version 2 B-tree beside them) are the same from
+    memory and through a reader with pages of 512 bytes, 4 KiB and 64 KiB, from one page kept to the
+    default, on 1 to 64 requests at once, never more in flight than asked for; a read of several cells
+    gives its hint before it looks any up (a box's cells, a strided selection's), and none for one cell or
+    for a read of more than an eighth of the grid; a hint names no more than 4,096 cells of a dimension.
+  - `ValueEncoderTest` (5): every integer type of 1 to 8 bytes, signed and not, in both byte orders, is the
+    bytes written a value at a time, and the bytes the same values give encoded an element at a time; floats
+    are their bits, NaNs of any payload among them; values that do not fit are refused by their element, with
+    the message they had; arrays, complex numbers, compounds (members apart, an array inside a record, one
+    member with a gap before it), times and bit fields; no values.
+  - `WriteTypedArraysTest` (3): every per-type method, in both formats, with every kind of NaN, the
+    infinities, the zeros and the extremes among the values: the file holds each value little-endian and
+    each NaN as the canonical one. It passes on the commit before, too, as do `ValueEncoderTest` and
+    `ByteShuffleTest`: the bytes are the ones the old loops made.
+  - `core`'s `ByteShuffleTest` gained two: every element size from 1 to 17, at ten lengths, within a range
+    of a larger array, is the definition (and nothing around the range is touched); the bytes of 2-, 4-
+    and 8-byte numbers with their high bits set.
+  - All of these fail when the code is broken on purpose, 39 ways (pages read ahead one request at
+    a time, without regard to the pages kept, not kept, a failure thrown; the walk or the lookups reading
+    nothing ahead, or the wrong node; a byte from the wrong stream; negative values copied to an unsigned
+    type, the machine's byte order, members copied as if they filled their records, a NaN written with the
+    bits it has, ...). Two of them were first missed, and showed what was not tested: that a hint of a tree
+    that loops ends, and that a read gives the hint at all.
+  - `ParallelChunksTest`'s reader sees fewer requests (the pages of an index come together), and
+    `ChunksReadTogetherTest`'s one-request check says what it needs of the heap.
+- **Benchmarks** gained a shuffled dataset (read, and written), and the write of an `int32` dataset.
 
 ## Done — 2026-11-13 (P2: PF11)
 

@@ -53,6 +53,7 @@ class Benchmarks {
             w.doubleDataset("contiguous", data, new long[] {side, side});
             w.doubleChunkedDataset("chunked", data, new long[] {side, side}, new long[] {64, 64});
             w.doubleChunkedDataset("gzip", data, new long[] {side, side}, new long[] {64, 64}).deflate(4);
+            w.doubleChunkedDataset("shuffled", data, new long[] {side, side}, new long[] {64, 64}).shuffle().deflate(4);
         }
 
         System.out.println();
@@ -68,6 +69,7 @@ class Benchmarks {
             row("read whole: contiguous", () -> root.dataset("contiguous").readDoubles().length);
             row("read whole: chunked (1,024 chunks)", () -> root.dataset("chunked").readDoubles().length);
             row("read whole: chunked + gzip", () -> root.dataset("gzip").readDoubles().length);
+            row("read whole: chunked + shuffle + gzip", () -> root.dataset("shuffled").readDoubles().length);
 
             Dataset chunked = root.dataset("chunked");
             Dataset contiguous = root.dataset("contiguous");
@@ -98,6 +100,9 @@ class Benchmarks {
         try (Hdf5File h5 = Hdf5File.open(file, OpenOptions.defaults().decodeThreads(1))) {
             Dataset gzip = h5.root().dataset("gzip");
             row("read whole: chunked + gzip, one thread", () -> gzip.readDoubles().length);
+            // P2 PF13: the byte shuffle, undone an element at a time.
+            Dataset shuffled = h5.root().dataset("shuffled");
+            row("read whole: chunked + shuffle + gzip, one thread", () -> shuffled.readDoubles().length);
         }
         try (Hdf5File h5 = Hdf5File.open(file, OpenOptions.defaults().chunkCacheSize(0))) {
             Dataset gzip = h5.root().dataset("gzip");
@@ -133,6 +138,29 @@ class Benchmarks {
         row("write: chunked + gzip, one thread", () -> {
             try (Hdf5Writer w = Hdf5Writer.create(written).encodeThreads(1)) {
                 w.doubleChunkedDataset("d", data, shape, chunk).deflate(4);
+            }
+            return Files.size(written);
+        });
+        // P2 PF13: the byte shuffle before the deflate. P2 PF14: values of the type's own, copied in one move.
+        row("write: chunked + shuffle + gzip", () -> {
+            try (Hdf5Writer w = Hdf5Writer.create(written)) {
+                w.doubleChunkedDataset("d", data, shape, chunk).shuffle().deflate(4);
+            }
+            return Files.size(written);
+        });
+        row("write: chunked + shuffle + gzip, one thread", () -> {
+            try (Hdf5Writer w = Hdf5Writer.create(written).encodeThreads(1)) {
+                w.doubleChunkedDataset("d", data, shape, chunk).shuffle().deflate(4);
+            }
+            return Files.size(written);
+        });
+        int[] ints = new int[data.length];
+        for (int i = 0; i < ints.length; i++) {
+            ints[i] = (int) data[i];
+        }
+        row("write: contiguous, int32 (16 MiB)", () -> {
+            try (Hdf5Writer w = Hdf5Writer.create(written)) {
+                w.intDataset("d", ints, shape);
             }
             return Files.size(written);
         });

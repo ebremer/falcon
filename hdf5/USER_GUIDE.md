@@ -98,6 +98,9 @@ several threads, whichever they are. Falcon reads through it on demand:
   and up to 8 calls are made at once, by the reading thread and virtual threads beside it.
   `OpenOptions.readerRequests(n)` sets how many; 1 still puts chunks together, and makes the calls one
   after another from the reading thread. See *Performance notes*.
+- **So is a chunk index.** The index of a file libhdf5 writes by default (a NetCDF-4 file's, say) is a
+  version 1 B-tree, whose nodes lie apart in the file, each in a page of its own. A read that needs several
+  of them asks for their pages together, up to `readerRequests(n)` calls at once, not a page after another.
 
 ```java
 Hdf5File.open(reader, OpenOptions.defaults()
@@ -939,6 +942,22 @@ also fail to be read at all: that is `java.io.UncheckedIOException`, wrapping th
   A whole read of 1,024 gzip chunks through a reader that answers each request after 20 ms takes 0.14 s in
   7 requests, where it took 10 s in 481; a 235 MB dataset of a public file in S3, read over HTTPS, takes
   3 s, where it took 24 (see [`BENCHMARKS.md`](BENCHMARKS.md)). A mapped file is read as before.
+- **A remote file's chunk index is read ahead.** A version 1 B-tree (the index libhdf5 writes by default)
+  is read a node at a time, and in a file read through a `RangeReader` each node is a request:
+  - a read of the whole index asks for the nodes below a node together, before it goes down to them;
+  - a read of a few chunks asks for the nodes on its chunks' paths, a level at a time;
+  - up to `readerRequests(n)` requests are in flight at once, pages next to each other in one of them, and
+    no more is read ahead than a quarter of the pages kept (`readerCacheSize`), so each page is still
+    there when it is read;
+  - nothing a read returns changes. A page that could not be read ahead is asked for again by the read
+    that needs it, which fails then if it must.
+
+  That dataset in S3 takes 1.0–1.8 s, where it took 2.5–2.7 with its chunks read together; a 1,000 × 1,000
+  box of it 0.2 s, from 0.3. The indexes of the latest file format are still read a page at a time.
+- **Write values as the dataset's own type.** A `double[]` written to a 64-bit float dataset, an `int[]`
+  to a 32-bit integer one, and so on (of either byte order, signed or not) is copied in one move. Values
+  of another kind (a `long[]` to a 32-bit dataset, say) are converted and checked an element at a time:
+  three to seven times as long for that step (see [`BENCHMARKS.md`](BENCHMARKS.md)).
 - **Measuring.** `Benchmarks` (opt-in) times the common read paths, and writing a dataset; see
   [`BENCHMARKS.md`](BENCHMARKS.md).
 - **Concurrent reads.** An open `Hdf5File` and everything obtained from it may be read from many

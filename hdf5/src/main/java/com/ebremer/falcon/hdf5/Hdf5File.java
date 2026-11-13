@@ -59,8 +59,8 @@ import java.util.Optional;
  * progress when another thread closes the file may fail with {@link IllegalStateException}. A read of
  * several filtered chunks decodes them on several threads itself ({@link OpenOptions#decodeThreads}). Only
  * the reading thread reads a mapped file; a file read through a {@link RangeReader} is read by it and, when
- * a read's chunks take several requests, by virtual threads beside it ({@link OpenOptions#readerRequests}),
- * all of which have finished when the read returns or fails.
+ * a read's chunks or the nodes of its chunk index take several requests, by virtual threads beside it
+ * ({@link OpenOptions#readerRequests}), all of which have finished when the read returns or fails.
  */
 public final class Hdf5File implements AutoCloseable {
 

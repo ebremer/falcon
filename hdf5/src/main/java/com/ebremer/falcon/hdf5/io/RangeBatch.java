@@ -6,6 +6,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.IntPredicate;
 
 /**
  * Ranges of a file that is read on demand, read together (P2 PF11): the stored bytes of the chunks one read
@@ -126,10 +127,20 @@ public final class RangeBatch {
     public void read() {
         Request[] plan = plan();
         made = plan.length;
-        int workers = Math.min(requests, plan.length);
+        atOnce(requests, plan.length, request -> plan[request].read(buffer));
+    }
+
+    /**
+     * Makes {@code count} requests, {@code make} called with the number of each (it returns false if the
+     * request failed), up to {@code atOnce} of them at once: the calling thread makes them one after another,
+     * and virtual threads make the others beside it. They are started in their order, and none is started
+     * after one has failed; every one that was started has finished when this returns.
+     */
+    static void atOnce(int atOnce, int count, IntPredicate make) {
+        int workers = Math.min(atOnce, count);
         if (workers < 2) {
-            for (Request request : plan) {
-                if (!request.read(buffer)) {
+            for (int request = 0; request < count; request++) {
+                if (!make.test(request)) {
                     return;
                 }
             }
@@ -141,10 +152,10 @@ public final class RangeBatch {
             while (!failed.get()) {
                 // A request, once taken, is made: so every request before a failed one has been made too.
                 int taken = next.getAndIncrement();
-                if (taken >= plan.length) {
+                if (taken >= count) {
                     return;
                 }
-                if (!plan[taken].read(buffer)) {
+                if (!make.test(taken)) {
                     failed.set(true);
                 }
             }

@@ -17,9 +17,10 @@ import java.util.Objects;
  * selection of contiguous data) with one call each. The chunks one read needs it reads together: those next
  * to each other in the file, or no more than a page apart, in one call of up to 8&nbsp;MiB, and up to eight
  * calls at once ({@link OpenOptions#readerRequests}), from the reading thread and from virtual threads of
- * its own beside it. So implementations must allow calls from several threads at once (the file's objects
- * may be read concurrently, too), and must not depend on which thread calls. Falcon never closes the source:
- * close it, if it needs closing, after closing the {@link Hdf5File}.
+ * its own beside it. The pages that hold the nodes of a chunk index it reads the same way, several calls at
+ * once, when a read needs several of them. So implementations must allow calls from several threads at once
+ * (the file's objects may be read concurrently, too), and must not depend on which thread calls. Falcon
+ * never closes the source: close it, if it needs closing, after closing the {@link Hdf5File}.
  *
  * <pre>{@code
  * try (SeekableByteChannel channel = Files.newByteChannel(path);

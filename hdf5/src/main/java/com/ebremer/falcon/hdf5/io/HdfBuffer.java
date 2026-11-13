@@ -104,6 +104,39 @@ public final class HdfBuffer {
         return paged == null ? null : paged.paged();
     }
 
+    /** True if these bytes are read on demand, through a {@code RangeReader}: a read of bytes not cached is a request. */
+    public boolean readOnDemand() {
+        return paged() != null;
+    }
+
+    /**
+     * A hint that the {@code length} bytes at each of {@code offsets[from..to)} are about to be read, in that
+     * order (P2 PF12): the nodes of a B-tree one level down, say, which lie apart in the file. Of bytes read
+     * on demand, the pages that hold them and are not cached are read now, pages next to each other in one
+     * request and several requests at once ({@code OpenOptions.readerRequests}), so that the reads that follow
+     * find them cached and make no request each.
+     *
+     * <p>Only a hint. It reads ahead no more than a quarter of the pages the cache keeps, so that what it
+     * reads is still there when it is read: it returns how many of the ranges it took, and the caller hints
+     * the rest when it has read those. It changes nothing a read returns, and it never fails: a range outside
+     * these bytes is passed over, and one that cannot be read is read again by the read that needs it, which
+     * fails then as it would have. Mapped or in memory, there is nothing to read ahead.
+     *
+     * @return how many of the ranges, from {@code from} on, were taken: at least one, if there are any
+     */
+    public int ahead(long[] offsets, int from, int to, long length) {
+        int count = Math.max(0, to - from);
+        if (paged == null || count == 0 || length <= 0) {
+            return count;
+        }
+        long[] positions = new long[count];
+        for (int k = 0; k < count; k++) {
+            long off = offsets[from + k];
+            positions[k] = off < 0 || off >= size ? -1 : base + off;
+        }
+        return Math.max(1, paged.ahead(positions, 0, count, length));
+    }
+
     // ------------------------------------------------------------------ cursor
 
     public long position() {

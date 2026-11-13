@@ -27,6 +27,14 @@ abstract sealed class ByteSource permits PagedSource, RedirectedSource {
      */
     abstract void copyRequest(long position, byte[] destination, int offset, int length);
 
+    /**
+     * A hint that the {@code length} bytes at each of {@code positions[from..to)} are about to be read (see
+     * {@link HdfBuffer#ahead}). A position that is negative names nothing.
+     *
+     * @return how many of the ranges, from {@code from} on, were taken
+     */
+    abstract int ahead(long[] positions, int from, int to, long length);
+
     /** The source that reads these bytes on demand, each read a request of a store; null if none does. */
     abstract PagedSource paged();
 }

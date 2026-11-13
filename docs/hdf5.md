@@ -264,7 +264,10 @@ A file read through a `RangeReader` may also fail to be read at all: `java.io.Un
 - **Tune the caches** with `OpenOptions` (`chunkCacheSize`, `readerPageSize`, `readerCacheSize`) for large or
   remote files.
 - **A remote file's chunks are read together.** Chunks next to each other in the file come in one request,
-  and up to 8 requests are made at once; `OpenOptions.readerRequests(n)` sets how many.
+  and up to 8 requests are made at once; `OpenOptions.readerRequests(n)` sets how many. The nodes of its
+  chunk index (a version 1 B-tree, as libhdf5 writes by default) are asked for the same way.
+- **Write a dataset's own type:** a `double[]` to a 64-bit float dataset, an `int[]` to a 32-bit integer
+  one. Those are copied in one move; other values are converted an element at a time.
 - **Compressed chunks use every processor.** A read decodes its chunks, and a writer compresses them, on
   several threads at once, with the same result as on one. `OpenOptions.decodeThreads(n)` and
   `Hdf5Writer.encodeThreads(n)` set how many at most; 1 keeps the work on the calling thread.

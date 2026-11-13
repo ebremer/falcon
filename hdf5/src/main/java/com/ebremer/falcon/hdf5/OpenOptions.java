@@ -248,6 +248,12 @@ public final class OpenOptions {
      * still puts chunks together, and makes the requests one after another from the reading thread alone.
      * A request of less than a page comes from the cached pages, as any small read does.
      *
+     * <p>The same number of requests reads a chunk index ahead (P2 PF12). The nodes of a version 1 B-tree,
+     * which is the index of a file libhdf5 writes by default (a NetCDF-4 file's, say), lie apart in the
+     * file, each in a page of its own: a read that needs several of them (all of them, for a whole read)
+     * asks for their pages together instead of a page after another, no more at a time than a quarter of
+     * the pages kept ({@link #readerCacheSize}).
+     *
      * @param requests the most requests one read has in flight at once, at least 1 (default
      *                 {@link #DEFAULT_READER_REQUESTS}, 8); 1 for one at a time
      * @return a copy of these options with that many requests at once

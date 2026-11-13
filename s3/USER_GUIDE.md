@@ -136,6 +136,8 @@ try (S3Client s3 = S3Client.create();
 - The chunks one read needs are not a `GetObject` each: chunks next to each other in the object, or no more
   than a page apart, come in one, of up to 8 MiB, and up to 8 are sent at once, from the reading thread and
   virtual threads beside it. `OpenOptions.readerRequests(n)` sets how many; 1 sends them one after another.
+- The pages of a chunk index are sent for the same way: a version 1 B-tree's nodes lie apart in the object,
+  and a read that needs several of them does not wait for one before it asks for the next.
 - Every read carries `If-Match` with the ETag the object had when opened, so an object replaced while the
   file is open fails the next read (an `IOException`, surfacing as `UncheckedIOException` from the read
   that needed it) instead of mixing two files' bytes.
