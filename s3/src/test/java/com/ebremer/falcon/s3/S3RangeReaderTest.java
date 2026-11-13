@@ -92,6 +92,54 @@ class S3RangeReaderTest {
         assertEquals(List.of(), s3.refusals);
     }
 
+    /**
+     * A read's chunks are not asked for one at a time: those stored one after another come in one ranged
+     * {@code GetObject}, and those apart in several, sent at once.
+     */
+    @Test
+    void aReadsChunksComeInFewRequestsSeveralAtOnce() throws IOException {
+        int[] big = IntStream.range(0, 1 << 20).map(i -> i * 7).toArray(); // 4 MiB in 64 chunks of 64 KiB
+        byte[] file = upload("data/chunks.h5",
+                w -> w.intChunkedDataset("big", big, new long[] {big.length}, new long[] {1 << 14}));
+        S3RangeReader reader = S3RangeReader.open(clients.signed(), "s3://bucket/data/chunks.h5");
+        try (Hdf5File h5 = Hdf5File.open(reader, OpenOptions.defaults().chunkCacheSize(0))) {
+            com.ebremer.falcon.hdf5.Dataset dataset = h5.root().dataset("big");
+            assertEquals(1 << 20, dataset.dataspace().dimensions()[0]);
+
+            int before = clients.gets(s3, "/bucket/data/chunks.h5").size();
+            assertArrayEquals(big, dataset.readInts());
+            List<String> whole = clients.gets(s3, "/bucket/data/chunks.h5");
+            whole = whole.subList(before, whole.size());
+            assertTrue(whole.stream().mapToLong(S3RangeReaderTest::length).max().orElse(0) == 4 << 20,
+                    "the 64 chunks in one request: " + whole);
+            assertTrue(whole.size() <= 4, "and the chunk index beside it: " + whole);
+
+            // Every fourth chunk: 16 chunks, each three chunks from the next, so a request each.
+            s3.rangeMillis = 100;
+            before += whole.size();
+            int[] apart = dataset.select(new long[] {0}, new long[] {4L << 14}, new long[] {16}, new long[] {1 << 14}).readInts();
+            for (int i = 0; i < 16; i++) {
+                assertArrayEquals(Arrays.copyOfRange(big, 4 * i << 14, (4 * i + 1) << 14),
+                        Arrays.copyOfRange(apart, i << 14, (i + 1) << 14));
+            }
+            List<String> ranges = clients.gets(s3, "/bucket/data/chunks.h5");
+            ranges = ranges.subList(before, ranges.size());
+            assertEquals(16, ranges.size(), ranges.toString());
+            assertTrue(ranges.stream().allMatch(r -> length(r) == 4 << 14), ranges.toString());
+            int atOnce = s3.mostRangesInFlight.get();
+            assertTrue(atOnce > 1 && atOnce <= OpenOptions.DEFAULT_READER_REQUESTS, atOnce + " requests at once");
+        }
+        assertEquals(0, s3.rangesInFlight.get());
+        assertTrue(s3.ifMatches.stream().allMatch(FakeS3.eTag(file)::equals), s3.ifMatches.toString());
+        assertEquals(List.of(), s3.refusals);
+    }
+
+    /** The number of bytes a {@code Range} header, {@code bytes=first-last}, asks for. */
+    private static long length(String range) {
+        String[] span = range.substring("bytes=".length()).split("-");
+        return Long.parseLong(span[1]) - Long.parseLong(span[0]) + 1;
+    }
+
     @Test
     void anObjectReplacedWhileOpenFailsItsNextRead() throws IOException {
         upload("f.h5", w -> w.intDataset("x", new int[] {1, 2, 3}, new long[] {3}));

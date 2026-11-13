@@ -39,7 +39,10 @@ import software.amazon.awssdk.services.s3.model.S3Exception;
  * {@link #read} is a {@code GetObject} with a {@code Range}, and with {@code If-Match} naming that ETag, so
  * an object replaced while the file is open fails the read instead of mixing two files' bytes. HDF5 reads
  * metadata in cached pages (see {@link com.ebremer.falcon.hdf5.OpenOptions}), so a file's first reads are a
- * few requests of 64&nbsp;KiB, and each chunk is one request.
+ * few requests of 64&nbsp;KiB. The chunks one read needs come in as few requests as their places in the
+ * object allow, of up to 8&nbsp;MiB each, and up to eight of those are sent at once
+ * ({@link com.ebremer.falcon.hdf5.OpenOptions#readerRequests}), from the reading thread and virtual threads
+ * beside it.
  *
  * <p><b>Other files.</b> An HDF5 file read this way has no directory, so by default it opens no other file
  * (the files its external links, virtual datasets, external raw data, and references name).

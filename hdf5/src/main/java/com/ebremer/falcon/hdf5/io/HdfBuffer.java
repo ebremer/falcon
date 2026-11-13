@@ -84,6 +84,26 @@ public final class HdfBuffer {
         return size;
     }
 
+    /** True if the {@code len} bytes at {@code off} lie within these bytes. */
+    public boolean holds(long off, long len) {
+        return off >= 0 && len >= 0 && off <= size && len <= size - off;
+    }
+
+    /**
+     * A batch of ranges of these bytes to read together, in few requests and several of those at once, when
+     * the bytes are read on demand through a {@code RangeReader}; null when they are mapped or in memory,
+     * where reading a range is a copy and there is nothing to gain.
+     */
+    public RangeBatch batch() {
+        PagedSource source = paged();
+        return source == null ? null : new RangeBatch(this, source.pageSize(), source.requests());
+    }
+
+    /** The source that reads these bytes on demand, or null. */
+    PagedSource paged() {
+        return paged == null ? null : paged.paged();
+    }
+
     // ------------------------------------------------------------------ cursor
 
     public long position() {
@@ -198,6 +218,19 @@ public final class HdfBuffer {
         }
     }
 
+    /**
+     * Copies as {@link #copyTo} does, as one request of a {@link RangeBatch}: of bytes read on demand, a
+     * range short of a page comes from the cached pages only where that costs no more than one read.
+     */
+    void copyRequest(long off, byte[] destination, int destinationOffset, int len) {
+        checkRange(off, len);
+        if (segment != null) {
+            MemorySegment.copy(segment, ValueLayout.JAVA_BYTE, off, destination, destinationOffset, len);
+        } else {
+            paged.copyRequest(base + off, destination, destinationOffset, len);
+        }
+    }
+
     /** True if the {@code sig.length} bytes at {@code off} equal {@code sig}. */
     public boolean hasSignature(long off, byte[] sig) {
         if (off < 0 || off > size - sig.length) {
@@ -286,7 +319,7 @@ public final class HdfBuffer {
 
     private void checkRange(long off, long len) {
         // Overflow-safe: never compute off+len (a corrupt address near Long.MAX would wrap negative).
-        if (off < 0 || len < 0 || off > size || len > size - off) {
+        if (!holds(off, len)) {
             throw new HdfFormatException(
                     "read out of bounds: offset=" + off + " length=" + len + " size=" + size);
         }

@@ -135,8 +135,8 @@ Hdf5File fromAnywhere = Hdf5File.open(myRangeReader);               // your own 
 ```
 
 A `RangeReader` has two methods, `size()` and `read(position, buffer)`. Falcon reads through it on
-demand: metadata in cached pages, data a chunk at a time. That is how files in S3 or behind an HTTP server
-are read: see [S3 and HTTP](cloud.md).
+demand: metadata in cached pages, and the chunks a read needs in few requests, several of them at once.
+That is how files in S3 or behind an HTTP server are read: see [S3 and HTTP](cloud.md).
 
 ### Follow external links, virtual datasets, and external data
 
@@ -263,6 +263,8 @@ A file read through a `RangeReader` may also fail to be read at all: `java.io.Un
   read.
 - **Tune the caches** with `OpenOptions` (`chunkCacheSize`, `readerPageSize`, `readerCacheSize`) for large or
   remote files.
+- **A remote file's chunks are read together.** Chunks next to each other in the file come in one request,
+  and up to 8 requests are made at once; `OpenOptions.readerRequests(n)` sets how many.
 - **Compressed chunks use every processor.** A read decodes its chunks, and a writer compresses them, on
   several threads at once, with the same result as on one. `OpenOptions.decodeThreads(n)` and
   `Hdf5Writer.encodeThreads(n)` set how many at most; 1 keeps the work on the calling thread.

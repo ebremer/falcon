@@ -214,6 +214,51 @@ class Benchmarks {
             System.out.printf("RangeReader: a 4 x 4 selection of the gzip dataset read %,d of %,d bytes%n",
                     bytes.get(), Files.size(file));
         }
+
+        // P2 PF11: through a reader that answers each request after 20 ms, as a store at some distance does.
+        // The chunks a read needs are asked for together: one request at a time, and eight at once. No chunk
+        // cache, so that every run reads its chunks again.
+        try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ)) {
+            AtomicLong requests = new AtomicLong();
+            RangeReader slow = new RangeReader() {
+                @Override
+                public long size() throws IOException {
+                    return channel.size();
+                }
+
+                @Override
+                public void read(long position, ByteBuffer destination) throws IOException {
+                    requests.incrementAndGet();
+                    try {
+                        Thread.sleep(20);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                    RangeReader.of(channel).read(position, destination);
+                }
+            };
+            for (int atOnce : new int[] {1, OpenOptions.DEFAULT_READER_REQUESTS}) {
+                String how = atOnce == 1 ? "one request at a time" : atOnce + " requests at once";
+                try (Hdf5File h5 = Hdf5File.open(slow, OpenOptions.defaults().chunkCacheSize(0).readerRequests(atOnce))) {
+                    Dataset gzip = h5.root().dataset("gzip");
+                    sink += gzip.readDoubles().length; // the chunk index is read once
+                    requests.set(0);
+                    row("20 ms a request: read whole gzip, " + how, () -> gzip.readDoubles().length);
+                    System.out.printf("%60s%n", "(" + requests.get() / (WARMUP + RUNS) + " requests a read)");
+                    requests.set(0);
+                    row("20 ms a request: 20 random 128 x 128, " + how, () -> {
+                        Random random = new Random(7);
+                        long n = 0;
+                        for (int i = 0; i < 20; i++) {
+                            long[] at = {random.nextInt(1920), random.nextInt(1920)};
+                            n += gzip.select(at, new long[] {128, 128}).readDoubles().length;
+                        }
+                        return n;
+                    });
+                    System.out.printf("%60s%n", "(" + requests.get() / (WARMUP + RUNS) + " requests for the 20)");
+                }
+            }
+        }
         System.out.println("\nsink=" + sink);
     }
 

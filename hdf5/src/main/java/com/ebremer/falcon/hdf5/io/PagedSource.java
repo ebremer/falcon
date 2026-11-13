@@ -19,7 +19,8 @@ import java.util.Map;
  * and {@code readerCacheSize} (64 KiB and 16 MiB by default).
  *
  * <p>Thread-safe: the page cache is synchronized, and a page two threads miss at once is simply read
- * twice. An {@link IOException} from the reader surfaces as {@link UncheckedIOException}, since the
+ * twice. The reader is called from the thread that reads, and, by a read of several ranges at once (see
+ * {@link RangeBatch}), from virtual threads beside it. An {@link IOException} from the reader surfaces as {@link UncheckedIOException}, since the
  * format parsers above read without checked exceptions.
  */
 public final class PagedSource extends ByteSource {
@@ -33,29 +34,57 @@ public final class PagedSource extends ByteSource {
     private final long size;
     private final int pageSize;   // bytes per cached page
     private final long maxPages;  // pages kept, at least one
+    private final int requests;   // the most requests one read makes at once (see RangeBatch)
     private final LinkedHashMap<Long, MemorySegment> pages = new LinkedHashMap<>(16, 0.75f, true); // LRU
     private volatile boolean closed;
 
-    private PagedSource(RangeReader reader, long size, int pageSize, long cacheBytes) {
+    private PagedSource(RangeReader reader, long size, int pageSize, long cacheBytes, int requests) {
         this.reader = reader;
         this.size = size;
         this.pageSize = pageSize;
         this.maxPages = Math.max(1, cacheBytes / pageSize);
+        this.requests = requests;
     }
 
     /**
      * A source over {@code reader}, whose size is read now, reading pages of {@code pageSize} bytes and
-     * keeping up to {@code cacheBytes} of them (at least one).
+     * keeping up to {@code cacheBytes} of them (at least one), each read making one request at a time.
      */
     public static PagedSource open(RangeReader reader, int pageSize, long cacheBytes) throws IOException {
+        return open(reader, pageSize, cacheBytes, 1);
+    }
+
+    /**
+     * As above, a read of several ranges (a read's chunks: see {@link RangeBatch}) making up to
+     * {@code requests} requests of the reader at once.
+     */
+    public static PagedSource open(RangeReader reader, int pageSize, long cacheBytes, int requests) throws IOException {
         if (pageSize < 1) {
             throw new IllegalArgumentException("page size must be positive: " + pageSize);
+        }
+        if (requests < 1) {
+            throw new IllegalArgumentException("requests at once must be at least 1: " + requests);
         }
         long size = reader.size();
         if (size < 0) {
             throw new IOException("the range reader reports a negative size: " + size);
         }
-        return new PagedSource(reader, size, pageSize, cacheBytes);
+        return new PagedSource(reader, size, pageSize, cacheBytes, requests);
+    }
+
+    @Override
+    PagedSource paged() {
+        return this;
+    }
+
+    /** The bytes in a page. */
+    int pageSize() {
+        return pageSize;
+    }
+
+    /** The most requests one read makes of the reader at once. */
+    int requests() {
+        return requests;
     }
 
     /** The file's size in bytes. */
@@ -92,6 +121,38 @@ public final class PagedSource extends ByteSource {
         } else {
             copy(position, target, length);
         }
+    }
+
+    /**
+     * Copies as {@link #copy} does, but never in two reads of the store where one will do: bytes short of a
+     * page come from the cached pages if at most one of those has to be read first, and else, lying across
+     * two pages neither of which is cached, are read as they are, in one request.
+     */
+    @Override
+    void copyRequest(long position, byte[] destination, int offset, int length) {
+        MemorySegment target = MemorySegment.ofArray(destination).asSlice(offset, length);
+        if (length >= pageSize || uncached(position, length) > 1) {
+            fetch(position, target);
+        } else {
+            copy(position, target, length);
+        }
+    }
+
+    /** How many of the pages that hold the {@code length} bytes at {@code position} are not cached. */
+    private int uncached(long position, long length) {
+        if (length == 0) {
+            return 0;
+        }
+        long last = (position + length - 1) / pageSize;
+        int uncached = 0;
+        synchronized (pages) {
+            for (long index = position / pageSize; index <= last; index++) {
+                if (!pages.containsKey(index)) { // not a use of the page: its place in the cache is kept
+                    uncached++;
+                }
+            }
+        }
+        return uncached;
     }
 
     /** Fills {@code target} from the cached pages covering {@code [position, position + length)}. */

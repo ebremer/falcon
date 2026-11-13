@@ -14,8 +14,11 @@ import java.util.Objects;
  * that part needs.
  *
  * <p>Falcon reads metadata in pages of 64&nbsp;KiB, which it caches, and reads larger ranges (a chunk, a
- * selection of contiguous data) with one call each. Implementations must allow calls from several
- * threads at once, since the file's objects may be read concurrently. Falcon never closes the source:
+ * selection of contiguous data) with one call each. The chunks one read needs it reads together: those next
+ * to each other in the file, or no more than a page apart, in one call of up to 8&nbsp;MiB, and up to eight
+ * calls at once ({@link OpenOptions#readerRequests}), from the reading thread and from virtual threads of
+ * its own beside it. So implementations must allow calls from several threads at once (the file's objects
+ * may be read concurrently, too), and must not depend on which thread calls. Falcon never closes the source:
  * close it, if it needs closing, after closing the {@link Hdf5File}.
  *
  * <pre>{@code

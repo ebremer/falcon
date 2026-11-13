@@ -57,6 +57,11 @@ final class RedirectedSource extends ByteSource {
     }
 
     @Override
+    PagedSource paged() {
+        return file.paged();
+    }
+
+    @Override
     byte get(long position) {
         int i = rangeAt(position);
         return file.getByte(i < starts.length && starts[i] <= position ? sources[i] + (position - starts[i]) : position);
@@ -85,6 +90,19 @@ final class RedirectedSource extends ByteSource {
             file.copyTo(position, destination, offset, length);
         } else if (starts[i] <= position && end <= ends[i]) {
             file.copyTo(sources[i] + (position - starts[i]), destination, offset, length);
+        } else {
+            fill(position, MemorySegment.ofArray(destination).asSlice(offset, length), i);
+        }
+    }
+
+    @Override
+    void copyRequest(long position, byte[] destination, int offset, int length) {
+        int i = rangeAt(position);
+        long end = position + length;
+        if (i == starts.length || starts[i] >= end) {
+            file.copyRequest(position, destination, offset, length);
+        } else if (starts[i] <= position && end <= ends[i]) {
+            file.copyRequest(sources[i] + (position - starts[i]), destination, offset, length);
         } else {
             fill(position, MemorySegment.ofArray(destination).asSlice(offset, length), i);
         }

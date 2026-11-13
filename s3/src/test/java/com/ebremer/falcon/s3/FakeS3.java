@@ -70,6 +70,9 @@ public final class FakeS3 implements AutoCloseable {
     volatile boolean encodeKeys = true;    // honour encoding-type=url
     volatile String movedTo;               // a region: every request answers 301 PermanentRedirect
     final AtomicInteger failNext = new AtomicInteger(); // answer this many requests 503 SlowDown
+    volatile int rangeMillis;              // a GET with a Range waits this long before it is answered
+    final AtomicInteger rangesInFlight = new AtomicInteger();     // GETs with a Range being answered
+    final AtomicInteger mostRangesInFlight = new AtomicInteger(); // the most of them at once
 
     private final HttpServer server;
 
@@ -93,6 +96,26 @@ public final class FakeS3 implements AutoCloseable {
     }
 
     private void handle(HttpExchange exchange) throws IOException {
+        boolean ranged = exchange.getRequestMethod().equals("GET") && exchange.getRequestHeaders().getFirst("Range") != null;
+        if (ranged) {
+            mostRangesInFlight.accumulateAndGet(rangesInFlight.incrementAndGet(), Math::max);
+        }
+        try {
+            if (ranged && rangeMillis > 0) {
+                Thread.sleep(rangeMillis);
+            }
+            answer(exchange);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            exchange.close();
+        } finally {
+            if (ranged) {
+                rangesInFlight.decrementAndGet();
+            }
+        }
+    }
+
+    private void answer(HttpExchange exchange) throws IOException {
         try (exchange) {
             URI uri = exchange.getRequestURI();
             String rawPath = uri.getRawPath();

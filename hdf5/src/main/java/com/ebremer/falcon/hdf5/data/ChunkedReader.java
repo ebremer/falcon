@@ -12,6 +12,7 @@ import com.ebremer.falcon.hdf5.index.ImplicitIndex;
 import com.ebremer.falcon.hdf5.io.ChunkWorkers;
 import com.ebremer.falcon.hdf5.io.FileContext;
 import com.ebremer.falcon.hdf5.io.HdfBuffer;
+import com.ebremer.falcon.hdf5.io.RangeBatch;
 import com.ebremer.falcon.hdf5.layout.ChunkLookup;
 import com.ebremer.falcon.hdf5.layout.ChunkRecord;
 import com.ebremer.falcon.hdf5.layout.DataLayout;
@@ -22,7 +23,8 @@ import java.util.List;
  * byte array: each chunk the {@link ChunkIndex} finds overlapping is read, its filter pipeline reversed,
  * and its in-bounds part copied into place. Boundary chunks that extend past the dataset extent
  * contribute only their valid elements; any elements no chunk covers keep the fill value. The filters of
- * several chunks are reversed on several threads at once (P2 PF9).
+ * several chunks are reversed on several threads at once (P2 PF9), and the chunks of a file read on demand
+ * are read in few requests, several of those at once (P2 PF11).
  */
 public final class ChunkedReader {
 
@@ -72,8 +74,9 @@ public final class ChunkedReader {
 
         int[] chunkDims = layout.chunkDimensions();
         Chunks chunks = new Chunks(ctx, layout, datasetDims, pipeline, elementSize, chunkBytes(chunkDims, elementSize));
-        chunks.forEach(index.overlapping(new long[datasetDims.length], datasetDims, datasetDims), (chunk, bytes) ->
-                copyChunk(output, datasetDims, chunkDims, chunk.offset(), bytes, elementSize));
+        List<ChunkRecord> overlapping = index.overlapping(new long[datasetDims.length], datasetDims, datasetDims);
+        chunks.forEach(overlapping, (bytes, i) ->
+                copyChunk(output, datasetDims, chunkDims, overlapping.get(i).offset(), bytes, elementSize));
         return output;
     }
 
@@ -90,8 +93,9 @@ public final class ChunkedReader {
 
         int[] chunkDims = layout.chunkDimensions();
         Chunks chunks = new Chunks(ctx, layout, datasetDims, pipeline, elementSize, chunkBytes(chunkDims, elementSize));
-        chunks.forEach(index.overlapping(selOffset, selCount, datasetDims), (chunk, bytes) ->
-                copyIntersection(output, selOffset, selCount, chunk.offset(), chunkDims, datasetDims, bytes, elementSize));
+        List<ChunkRecord> overlapping = index.overlapping(selOffset, selCount, datasetDims);
+        chunks.forEach(overlapping, (bytes, i) -> copyIntersection(output, selOffset, selCount,
+                overlapping.get(i).offset(), chunkDims, datasetDims, bytes, elementSize));
         return output;
     }
 
@@ -114,28 +118,34 @@ public final class ChunkedReader {
         Chunks chunks = new Chunks(ctx, layout, datasetDims, pipeline, elementSize, chunkBytes(chunkDims, elementSize));
         int rank = datasetDims.length;
         if (selection instanceof SelectedElements.Listed points) {
-            // Order the points by the chunk they fall in, then read each chunk once for all of its points.
+            // Order the points by the chunk they fall in, then read each chunk once for all of its points:
+            // the chunks are looked up first, so that those of a file read on demand can be read together.
             int n = (int) points.count();
             int[] order = byCell(points, n, chunkDims, datasetDims);
-            chunks.decoding(n, reads -> {
-                long[] cell = new long[rank];
-                long[] next = new long[rank];
-                for (int k = 0; k < n; ) {
-                    cellOf(points.at(order[k]), chunkDims, cell);
-                    int end = k + 1;
-                    while (end < n && java.util.Arrays.equals(cellOf(points.at(order[end]), chunkDims, next), cell)) {
-                        end++;
-                    }
-                    ChunkRecord chunk = index.at(cell);
-                    if (chunk != null) {
-                        int first = k;
-                        int past = end;
-                        reads.read(chunk, bytes ->
-                                copyPoints(bytes, chunk.offset(), chunkDims, points, order, first, past, output, elementSize));
-                    }
-                    k = end;
+            List<ChunkRecord> holding = new java.util.ArrayList<>();
+            int[] ends = new int[16]; // chunk i holds the points order[ends[2 * i]] to order[ends[2 * i + 1]]
+            long[] cell = new long[rank];
+            long[] next = new long[rank];
+            for (int k = 0; k < n; ) {
+                cellOf(points.at(order[k]), chunkDims, cell);
+                int end = k + 1;
+                while (end < n && java.util.Arrays.equals(cellOf(points.at(order[end]), chunkDims, next), cell)) {
+                    end++;
                 }
-            });
+                ChunkRecord chunk = index.at(cell);
+                if (chunk != null) {
+                    if (2 * holding.size() == ends.length) {
+                        ends = java.util.Arrays.copyOf(ends, 2 * ends.length);
+                    }
+                    ends[2 * holding.size()] = k;
+                    ends[2 * holding.size() + 1] = end;
+                    holding.add(chunk);
+                }
+                k = end;
+            }
+            int[] bounds = ends;
+            chunks.forEach(holding, (bytes, i) -> copyPoints(bytes, holding.get(i).offset(), chunkDims, points, order,
+                    bounds[2 * i], bounds[2 * i + 1], output, elementSize));
             return output;
         }
         SelectedElements.Product product = (SelectedElements.Product) selection;
@@ -143,8 +153,9 @@ public final class ChunkedReader {
         for (int d = 0; d < rank; d++) {
             cells[d] = product.cells(d, chunkDims[d]);
         }
-        chunks.forEach(index.inGrid(cells), (chunk, bytes) -> {
-            long[] offset = chunk.offset();
+        List<ChunkRecord> inGrid = index.inGrid(cells);
+        chunks.forEach(inGrid, (bytes, i) -> {
+            long[] offset = inGrid.get(i).offset();
             long[] box = new long[rank];
             for (int d = 0; d < rank; d++) {
                 box[d] = Math.max(0, Math.min(chunkDims[d], datasetDims[d] - offset[d]));
@@ -331,20 +342,47 @@ public final class ChunkedReader {
      * them to {@link ChunkWorkers}, where the filters are reversed and the decoded elements copied to their
      * places in the read's output. Each chunk's elements have places of their own there, so the copies need no
      * ordering.
+     *
+     * <p>The chunks of a file read on demand, through a {@code RangeReader}, are not read one request at a
+     * time (P2 PF11; {@code OpenOptions.readerRequests}): the reading thread reads the stored bytes of the
+     * chunks ahead a {@link RangeBatch} at a time, those next to each other in the file in one request and
+     * several requests at once, and then hands each chunk on in turn as before.
      */
     private record Chunks(FileContext ctx, DataLayout.Chunked layout, long[] datasetDims, FilterPipeline pipeline,
                           int elementSize, int chunkBytes) {
 
         /** Reads chunks: each one's decoded bytes go to {@code copy}, on this thread or another, once. */
         private interface Reads {
+            /** Reads the chunk from the file, or takes it from the chunk cache. */
             void read(ChunkRecord chunk, java.util.function.Consumer<byte[]> copy);
+
+            /** Decodes a filtered chunk whose stored bytes, {@code raw}, have been read. */
+            void decode(ChunkRecord chunk, byte[] raw, java.util.function.Consumer<byte[]> copy);
         }
 
-        /** Hands each of {@code chunks}' decoded bytes to {@code copy}, which may run on several threads at once. */
-        void forEach(List<ChunkRecord> chunks, java.util.function.BiConsumer<ChunkRecord, byte[]> copy) {
+        /**
+         * Hands the decoded bytes of each of {@code chunks}, with its place in the list, to {@code copy},
+         * which may run on several threads at once.
+         */
+        void forEach(List<ChunkRecord> chunks, java.util.function.ObjIntConsumer<byte[]> copy) {
             decoding(chunks.size(), reads -> {
-                for (ChunkRecord chunk : chunks) {
-                    reads.read(chunk, bytes -> copy.accept(chunk, bytes));
+                // Each chunk of a file that is mapped or in memory is read when its turn comes: a copy.
+                RangeBatch batch = chunks.isEmpty() ? null : ctx.buffer().batch();
+                if (batch == null) {
+                    for (int i = 0; i < chunks.size(); i++) {
+                        int at = i;
+                        reads.read(chunks.get(i), bytes -> copy.accept(bytes, at));
+                    }
+                    return;
+                }
+                Ahead ahead = new Ahead(this, batch);
+                for (int from = 0; from < chunks.size(); ) {
+                    int past = ahead.read(chunks, from);
+                    for (int i = from; i < past; i++) {
+                        int at = i;
+                        ahead.take(i - from, chunks.get(i), reads, bytes -> copy.accept(bytes, at));
+                    }
+                    from = past;
                 }
             });
         }
@@ -357,7 +395,17 @@ public final class ChunkedReader {
             int threads = pipeline == null || !ChunkWorkers.worthwhile(atMost, chunkBytes) ? 1
                     : ChunkWorkers.threads(ctx.options().decodeThreads());
             if (threads < 2) {
-                body.accept((chunk, copy) -> copy.accept(read(chunk)));
+                body.accept(new Reads() {
+                    @Override
+                    public void read(ChunkRecord chunk, java.util.function.Consumer<byte[]> copy) {
+                        copy.accept(Chunks.this.read(chunk));
+                    }
+
+                    @Override
+                    public void decode(ChunkRecord chunk, byte[] raw, java.util.function.Consumer<byte[]> copy) {
+                        copy.accept(Chunks.this.decode(chunk, raw));
+                    }
+                });
                 return;
             }
             ChunkWorkers.<Void>run(threads, null, workers -> {
@@ -441,7 +489,11 @@ public final class ChunkedReader {
                 copy.accept(cached);
                 return;
             }
-            byte[] raw = chunks.ctx().buffer().getBytes(chunk.address(), chunk.size());
+            decode(chunk, chunks.ctx().buffer().getBytes(chunk.address(), chunk.size()), copy);
+        }
+
+        @Override
+        public void decode(ChunkRecord chunk, byte[] raw, java.util.function.Consumer<byte[]> copy) {
             // In flight a chunk holds its stored bytes, its decoded ones, and a filter's output between them.
             long chunkCost = raw.length + 2L * chunks.chunkBytes();
             if (chunks.chunkBytes() >= ChunkWorkers.PIECE_BYTES) {
@@ -479,6 +531,74 @@ public final class ChunkedReader {
                 }
                 return null;
             });
+        }
+    }
+
+    /**
+     * The chunks of a read of a file read on demand, their stored bytes read ahead a {@link RangeBatch} at a
+     * time. A chunk the chunk cache holds needs no reading. One whose stored bytes cannot be read as they
+     * are recorded (they lie outside the file, or are too few for an unfiltered chunk) is left out of the
+     * batch and read when its turn comes, where it fails as it always has.
+     */
+    private static final class Ahead {
+        private final Chunks chunks;
+        private final RangeBatch batch;
+        // Of each chunk of the batch: its decoded bytes, if the chunk cache had them; else its range in the
+        // batch, or -1 if it is read in its turn.
+        private final List<byte[]> cached = new java.util.ArrayList<>();
+        private int[] ranges = new int[16];
+
+        Ahead(Chunks chunks, RangeBatch batch) {
+            this.chunks = chunks;
+            this.batch = batch;
+        }
+
+        /**
+         * Reads the stored bytes of the chunks from {@code list.get(from)} on, as many as the batch takes.
+         *
+         * @return the place in the list after the last of them
+         */
+        int read(List<ChunkRecord> list, int from) {
+            batch.clear();
+            cached.clear();
+            HdfBuffer buffer = chunks.ctx().buffer();
+            int past = from;
+            for (; past < list.size(); past++) {
+                ChunkRecord chunk = list.get(past);
+                boolean filtered = chunks.filtered(chunk);
+                byte[] decoded = filtered ? chunks.ctx().chunkCache().get(chunk.address()) : null;
+                int range = -1;
+                if (decoded == null) {
+                    int length = filtered ? chunk.size() : chunks.chunkBytes();
+                    if ((filtered || chunk.size() >= length) && buffer.holds(chunk.address(), length)) {
+                        if (!batch.add(chunk.address(), length)) {
+                            break; // the batch is full: this chunk is the next one's first
+                        }
+                        range = batch.size() - 1;
+                    }
+                }
+                if (cached.size() == ranges.length) {
+                    ranges = java.util.Arrays.copyOf(ranges, 2 * ranges.length);
+                }
+                ranges[cached.size()] = range;
+                cached.add(decoded);
+            }
+            batch.read();
+            return past;
+        }
+
+        /** Hands on chunk {@code i} of those read, {@code chunk}: decoded, to be decoded, or to be read. */
+        void take(int i, ChunkRecord chunk, Chunks.Reads reads, java.util.function.Consumer<byte[]> copy) {
+            byte[] decoded = cached.set(i, null);
+            if (decoded != null) {
+                copy.accept(decoded);
+            } else if (ranges[i] < 0) {
+                reads.read(chunk, copy);
+            } else if (chunks.filtered(chunk)) {
+                reads.decode(chunk, batch.bytes(ranges[i]), copy);
+            } else {
+                copy.accept(batch.bytes(ranges[i]));
+            }
         }
     }
 

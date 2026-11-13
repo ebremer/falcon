@@ -87,12 +87,17 @@ Hdf5File.open(reader, options);                          // your own RangeReader
 ```
 
 A `RangeReader` has two methods, `size()` and `read(position, buffer)`, and must allow calls from
-several threads. Falcon reads through it on demand:
+several threads, whichever they are. Falcon reads through it on demand:
 - **Metadata** is read in pages, which are cached: 64 KiB pages and 16 MiB per file by default. Larger
   pages suit a high-latency store, as fewer requests each fetch more.
 - **Data** is read only where a read asks for it: a chunk or contiguous run of a page or more in one
   call, a smaller one through the pages. Reading a small selection of a large remote file fetches the
   metadata and the pages or chunks around that selection, not the file.
+- **The chunks one read needs are read together,** not a call each. Chunks next to each other in the file,
+  or no more than a page apart (the bytes between are read and dropped), come in one call of up to 8 MiB;
+  and up to 8 calls are made at once, by the reading thread and virtual threads beside it.
+  `OpenOptions.readerRequests(n)` sets how many; 1 still puts chunks together, and makes the calls one
+  after another from the reading thread. See *Performance notes*.
 
 ```java
 Hdf5File.open(reader, OpenOptions.defaults()
@@ -100,7 +105,8 @@ Hdf5File.open(reader, OpenOptions.defaults()
         .readerCacheSize(256L << 20)    // keep up to 256 MiB of them
         .chunkCacheSize(512L << 20)     // and up to 512 MiB of decoded chunks
         .objectCacheSize(64L << 20)     // and up to 64 MiB of objects' metadata (see Performance notes)
-        .decodeThreads(8));             // and decode a read's chunks on at most 8 threads (see Performance notes)
+        .decodeThreads(8)               // decode a read's chunks on at most 8 threads (see Performance notes)
+        .readerRequests(16));           // and ask the reader for them with up to 16 requests at once
 ```
 
 A reader failure surfaces from the read that needed the bytes as `java.io.UncheckedIOException`, or as
@@ -906,8 +912,7 @@ also fail to be read at all: that is `java.io.UncheckedIOException`, wrapping th
   them or more) reverses their filters on several threads at once: the reading thread, and the common
   `ForkJoinPool`'s. `OpenOptions.decodeThreads(n)` sets how many at most (one for each processor by
   default; 1 for the reading thread alone). Nothing else about the read changes:
-  - the reading thread alone reads the file, a chunk after another, so a `RangeReader` sees the same
-    requests, in the same order;
+  - the file is read as it is on one thread: the decoding threads never read it;
   - the read returns the same bytes, and a damaged file fails it with the same exception, the first one
     thread would have met;
   - the chunks being decoded at once are held to an eighth of the heap, so large chunks are decoded
@@ -917,6 +922,23 @@ also fail to be read at all: that is `java.io.UncheckedIOException`, wrapping th
   [`BENCHMARKS.md`](BENCHMARKS.md)). Unfiltered chunks have nothing to decode, and are copied as before.
 - **So are the chunks a writer filters.** `Hdf5Writer.encodeThreads(n)` is the same setting for writes
   (see [Chunking and filters](#chunking-and-filters)).
+- **A remote file's chunks are read together.** Through a `RangeReader`, each request costs a round trip
+  to the store, so a read does not ask for its chunks one at a time:
+  - chunks next to each other in the file, or no more than a page apart, come in one request, of at most
+    8 MiB (a larger chunk is a request of its own);
+  - up to `OpenOptions.readerRequests(n)` requests are in flight at once (8 by default): the reading thread
+    makes them one after another, and virtual threads make the others beside it. One request alone is made
+    by the reading thread, and `readerRequests(1)` makes them all there, one after another;
+  - a request of less than a page comes from the cached pages if at most one of them has to be read first,
+    so small reads near each other still share a page;
+  - the read returns the same bytes, and fails where it would have failed one request at a time. After a
+    request fails no further one is started, so a store that does not answer costs one wait;
+  - the chunks read ahead of their decoding are held to a sixteenth of the heap, and to 8 MiB a request
+    at once: a long read is read a batch at a time.
+
+  A whole read of 1,024 gzip chunks through a reader that answers each request after 20 ms takes 0.14 s in
+  7 requests, where it took 10 s in 481; a 235 MB dataset of a public file in S3, read over HTTPS, takes
+  3 s, where it took 24 (see [`BENCHMARKS.md`](BENCHMARKS.md)). A mapped file is read as before.
 - **Measuring.** `Benchmarks` (opt-in) times the common read paths, and writing a dataset; see
   [`BENCHMARKS.md`](BENCHMARKS.md).
 - **Concurrent reads.** An open `Hdf5File` and everything obtained from it may be read from many

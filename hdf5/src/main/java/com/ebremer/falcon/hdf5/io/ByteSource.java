@@ -20,4 +20,13 @@ abstract sealed class ByteSource permits PagedSource, RedirectedSource {
 
     /** Copies {@code length} bytes at {@code position} into {@code destination} from {@code offset}. */
     abstract void copy(long position, byte[] destination, int offset, int length);
+
+    /**
+     * Copies as {@link #copy} does, for one request of several a read makes together (see {@link RangeBatch}):
+     * the bytes come from cached pages only where that costs the store no more than one read.
+     */
+    abstract void copyRequest(long position, byte[] destination, int offset, int length);
+
+    /** The source that reads these bytes on demand, each read a request of a store; null if none does. */
+    abstract PagedSource paged();
 }

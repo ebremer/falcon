@@ -93,8 +93,11 @@ try (Hdf5File h5 = Hdf5File.open(new HttpRangeReader(URI.create("https://example
 }
 ```
 
-Falcon calls `read` from several threads at once, which `HttpClient` allows. The `falcon` command has such a
-reader built in, which also pins the file's ETag so that a file replaced mid-read fails rather than mixing
+Falcon calls `read` from several threads at once, which `HttpClient` allows: a read does not ask for its
+chunks one at a time. Chunks next to each other in the file come in one request of up to 8 MiB, and up to 8
+requests are in flight at once, from the reading thread and virtual threads beside it
+(`OpenOptions.readerRequests(n)` sets how many; 1 makes them one after another). The `falcon` command has such
+a reader built in, which also pins the file's ETag so that a file replaced mid-read fails rather than mixing
 two files' bytes.
 
 ## Amazon S3

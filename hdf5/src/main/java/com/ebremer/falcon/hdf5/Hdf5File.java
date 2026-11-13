@@ -57,8 +57,10 @@ import java.util.Optional;
  * the mapping is read without shared cursors, the decoded-chunk cache is synchronized, and lazily parsed
  * metadata is safely published. Close the file only once those reads have finished; a read already in
  * progress when another thread closes the file may fail with {@link IllegalStateException}. A read of
- * several filtered chunks decodes them on several threads itself ({@link OpenOptions#decodeThreads}); only
- * the reading thread reads the file.
+ * several filtered chunks decodes them on several threads itself ({@link OpenOptions#decodeThreads}). Only
+ * the reading thread reads a mapped file; a file read through a {@link RangeReader} is read by it and, when
+ * a read's chunks take several requests, by virtual threads beside it ({@link OpenOptions#readerRequests}),
+ * all of which have finished when the read returns or fails.
  */
 public final class Hdf5File implements AutoCloseable {
 
@@ -130,7 +132,8 @@ public final class Hdf5File implements AutoCloseable {
         SeekableByteChannel channel = Files.newByteChannel(path, StandardOpenOption.READ);
         PagedSource source;
         try {
-            source = PagedSource.open(RangeReader.of(channel), options.readerPageSize(), options.readerCacheSize());
+            source = PagedSource.open(RangeReader.of(channel), options.readerPageSize(), options.readerCacheSize(),
+                    options.readerRequests());
         } catch (IOException | RuntimeException e) {
             channel.close();
             throw e;
@@ -201,7 +204,8 @@ public final class Hdf5File implements AutoCloseable {
     public static Hdf5File open(RangeReader reader, OpenOptions options) throws IOException {
         Objects.requireNonNull(reader, "reader");
         Objects.requireNonNull(options, "options");
-        PagedSource source = PagedSource.open(reader, options.readerPageSize(), options.readerCacheSize());
+        PagedSource source = PagedSource.open(reader, options.readerPageSize(), options.readerCacheSize(),
+                options.readerRequests());
         return open(new HdfBuffer(source), null, source::close, options);
     }
 

@@ -131,8 +131,11 @@ try (S3Client s3 = S3Client.create();
 
 - `S3RangeReader.open(client, "s3://bucket/key")` or `open(client, bucket, key)` sends one `HeadObject`,
   for the object's size and ETag; a missing object is a `FileNotFoundException`.
-- Each read is one `GetObject` with a `Range`. HDF5 reads metadata in cached pages of 64 KiB and each
-  chunk with one read; `OpenOptions.readerPageSize(...)` and `readerCacheSize(...)` tune the pages.
+- Each read is one `GetObject` with a `Range`. HDF5 reads metadata in cached pages of 64 KiB;
+  `OpenOptions.readerPageSize(...)` and `readerCacheSize(...)` tune the pages.
+- The chunks one read needs are not a `GetObject` each: chunks next to each other in the object, or no more
+  than a page apart, come in one, of up to 8 MiB, and up to 8 are sent at once, from the reading thread and
+  virtual threads beside it. `OpenOptions.readerRequests(n)` sets how many; 1 sends them one after another.
 - Every read carries `If-Match` with the ETag the object had when opened, so an object replaced while the
   file is open fails the next read (an `IOException`, surfacing as `UncheckedIOException` from the read
   that needed it) instead of mixing two files' bytes.

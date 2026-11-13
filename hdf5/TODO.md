@@ -1,12 +1,12 @@
 # Falcon HDF5 — remaining work (prioritized)
 
-**Status (2026-11-13, after P2 S1–S10, A1–A12, PF1–PF10, WF1–WF11, all of P3, and P1 C1–C2):** build green,
-**1341 HDF5 tests** (144 at the review, 187 after the top 10, 206 after P0, 228 after P1, 243 after S1–S3, 256
+**Status (2026-11-13, after P2 S1–S10, A1–A12, PF1–PF11, WF1–WF11, all of P3, and P1 C1–C2):** build green,
+**1366 HDF5 tests** (144 at the review, 187 after the top 10, 206 after P0, 228 after P1, 243 after S1–S3, 256
 after S4–S7, 439 after A2–A6, 610 after PF1–PF4, 677 after A1–A10, 692 after A11–A12, 707 after WF1–WF4,
 743 after WF5–WF9, 782 after WF7 and WF10, 850 after WF11 and PF5–PF7, 855 after P3, 1117 after S8–S9; the
 checksum tests then moved to `core`, S10's ZFP added four, and its Blosc2 and SZ eleven: 1128; 1133 after the
-conformance harness, 1311 after C1 and C2, 1341 after PF9 and PF10), plus 147 in the `core`
-module. The review's top 10, every P1 item, **P2 S1–S10**, **A1–A12**, **PF1–PF10**, **WF1–WF11**,
+conformance harness, 1311 after C1 and C2, 1341 after PF9 and PF10, 1366 after PF11), plus 147 in the `core`
+module. The review's top 10, every P1 item, **P2 S1–S10**, **A1–A12**, **PF1–PF11**, **WF1–WF11**,
 **every P3 item**, the P0 zstd fix (Z6/Z7, in `core`), and the P0 found with S8 (types libhdf5 refuses in
 version-1 object headers) are done (see *Done* at the end). Falcon now:
 
@@ -83,6 +83,22 @@ version-1 object headers) are done (see *Done* at the end). Falcon now:
 
 P0, P1, and P3 are empty, and so is P2 but for its known limits and non-goals: C1 and C2, which the HDF5
 conformance harness found, were the last open items.
+
+**P2 PF11 (2026-11-13)** adds API, and changes no result:
+- **New: `OpenOptions.readerRequests(requests)`** (default `DEFAULT_READER_REQUESTS`, 8): the most requests one
+  read makes of a `RangeReader` at once. 1 makes them one after another, from the reading thread.
+- **The chunks one read needs of a file read through a `RangeReader` are read together:** chunks next to
+  each other in the file, or no more than a page apart, in one request of at most 8 MiB, and several
+  requests at once. A read returns the same bytes, and fails where it would have failed one request at a
+  time.
+- **A `RangeReader` is called from threads of Falcon's own:** virtual threads beside the reading thread. Its
+  contract already asked for calls from several threads at once; now one read makes them. A reader that
+  depends on which thread calls it (a thread-local, say) needs `readerRequests(1)`.
+- **The requests differ,** so a reader that counts them sees fewer, and larger: a request no longer stands
+  for one chunk or one page. A chunk smaller than a page may be asked for as it is, where its pages were.
+- **Memory:** the chunks read ahead of their decoding are held to a sixteenth of the heap.
+- **Measured** (`BENCHMARKS.md`): 1,024 gzip chunks through a reader that answers each request after 20 ms,
+  0.14 s in 7 requests, from 10 s in 481; a 235 MB dataset of a public file in S3, 2.8–3.1 s, from 24.
 
 **P2 PF9, PF10 (2026-11-13)** add API, and change no result:
 - **New: `OpenOptions.decodeThreads(threads)`** (default `DEFAULT_DECODE_THREADS`, one for each processor) and
@@ -464,14 +480,18 @@ empty.
 
 ### Performance
 
-- PF1–PF10 are done (see *Done — 2026-11-13 (P2: PF9, PF10)*, *Done — 2026-10-05 (P2: PF8)*,
+- PF1–PF11 are done (see *Done — 2026-11-13 (P2: PF11)*, *(P2: PF9, PF10)*, *Done — 2026-10-05 (P2: PF8)*,
   *(P2: WF11, PF5–PF7)* and *(P2: PF1–PF4)*). Strided single elements of contiguous data are still copied
   one by one (runs of adjacent elements are one copy); a benchmark shows no gain worth the change yet.
+- **Measured with PF11, and not done** (2026-11-13; a public NetCDF-4 file in S3, over HTTPS):
+  - **The chunk index of a remote file is read a page at a time.** Of the 2.8 s a whole read of 2,304
+    chunks takes, 1.5 are 36 requests for pages of the dataset's version 1 B-tree, whose nodes lie among
+    the chunks, one request after another; the chunks themselves are 4 requests, sent at once. A node's
+    children are known once it is read, so a level's nodes could be read together, as chunks are
+    (`io.RangeBatch`). The array indexes of the latest format lie in one place and need it less.
+  - **Other data of a remote file is still a request a run:** a strided selection of contiguous data, the
+    heap collections of variable-length elements, a virtual dataset's sources. Not counted.
 - **Measured with PF9 and PF10, and not done** (2026-11-13; 2048 × 2048 `float64`, 32 processors):
-  - **Chunks of a remote file are fetched one request at a time.** A whole read of the 1,024 gzip chunks
-    makes 479 requests of a `RangeReader`, one after another (64 of 512 KiB chunks), though the chunks lie
-    back to back in the file. Reading adjacent chunks in one request, and several requests at once, would
-    need a way to ask a `RangeReader` for several ranges. Counted, not timed against a store.
   - **The byte shuffle moves a byte at a time:** unshuffling the 1,024 chunks takes 30 ms of a
     shuffle + gzip read's 104 on one thread; a loop for 8-byte elements (a `long` assembled from eight
     streams) takes 5.4 ms. It is `core`'s, so Zarr's shuffle and Blosc's would gain too.
@@ -487,6 +507,68 @@ empty.
 
 - D1, D2, D3, D4, D6, B1, B2, and B3 are done (see *Done — 2026-10-05 (P3: D2, D6, B1–B3)* and
   *(P3: D1, D3, D4)*). P3 is empty.
+
+## Done — 2026-11-13 (P2: PF11)
+
+Found with PF9 and PF10: a whole read of 1,024 gzip chunks through a `RangeReader` made 479 requests, one
+after another, though the chunks lie back to back in the file.
+
+- [x] **PF11 — a remote file's chunks read together.**
+  - **`io.RangeBatch`.** Ranges of a file read on demand, read in as few requests as their places allow,
+    several requests at once.
+    - **Fewer requests:** in the order of their offsets, a range joins the request before it if it starts
+      no more than a page (`readerPageSize`) after that request's end and the two stay within a request's
+      size, 8 MiB (less with a small heap, never under 1 MiB). The bytes between are read and dropped. A
+      range larger than a request is one of its own. Ranges may be added in any order, and overlap.
+    - **At once:** up to `readerRequests` requests in flight. The calling thread makes them one after
+      another, and virtual threads make the others beside it; one request alone starts no thread. Every
+      thread has finished when `read()` returns, interrupted or not.
+    - **Failures** are kept, and thrown when the caller takes a range of the failed request: taking the
+      ranges in turn, it fails where it would have reading them one at a time. Requests are started in the
+      order of the first range each holds, and none after one has failed, so the first range to fail is
+      the same whatever is in flight, and a store that does not answer costs one wait.
+    - **Bounds:** a batch takes ranges up to a sixteenth of the heap, and no more than fills every request
+      (64 MiB at 8 requests); the caller reads a long list batch after batch.
+    - **The cached pages:** a request of a page or more goes to the reader directly, as before. A smaller
+      one comes from the cached pages if at most one of them has to be read first; lying across two pages
+      neither of which is cached, it is read as it is, in one request where it was two.
+  - **Reads** (`ChunkedReader`: whole reads, boxes, strided selections, points; a point selection now looks
+    its chunks up before reading any). For a file read through a `RangeReader`, the reading thread reads the
+    stored bytes of the chunks ahead a batch at a time, then hands each on in turn, to be decoded on several
+    threads as before (PF9). A chunk the chunk cache holds is not read. A chunk recorded outside the file,
+    or an unfiltered one recorded too short, is left out of the batch and read in its turn, where it fails
+    as it always has. A mapped file, or one in memory, is read as before.
+  - **No new method of `RangeReader`,** which this file had said it would take: its contract already asks
+    for calls from several threads at once, and S3 answers one range a request anyway. `S3RangeReader` and
+    the `falcon` command's HTTP reader are unchanged, and gain.
+  - **New: `OpenOptions.readerRequests(requests)`** and `DEFAULT_READER_REQUESTS` (8).
+  - **Measured** (`BENCHMARKS.md`): each request answered after 20 ms, a whole read of 1,024 gzip chunks
+    takes 136 ms in 7 requests, from 10,040 in 481; of 64 chunks of 512 KiB, 97 ms, from 1,394; a 512 × 512
+    box, 106 ms, from 1,102. A 235 MB dataset of a public NetCDF-4 file in S3, over HTTPS: 2.8–3.1 s in 40
+    requests, from 23.9–24.5 in 497. A mapped file's reads are unchanged.
+- **Tests:**
+  - `io.RangeBatchTest` (16): ranges next to each other, a page apart, and farther; a request held to its
+    size; the budget; ranges in any order, overlapping, and empty; the cached pages; requests at once, no
+    more than asked for, the others on virtual threads, none alive afterwards; one request, and one at a
+    time, on the calling thread, in the order wanted; an interrupted caller; a failed request's ranges; no
+    request after a failure; the first range to fail, 10 times over on 1, 3 and 8 requests at once; an
+    `Error`; views, redirected bytes, and bytes in memory.
+  - `ChunksReadTogetherTest` (9): the eight datasets of `ParallelChunksTest`'s file, in both formats, read
+    the same (whole, a box, strided, points) on 1, 2, 8 and 64 requests at once, with pages of 512 bytes,
+    4 KiB and 64 KiB, with and without the chunk cache; 64 chunks stored one after another are one request,
+    two by two of them two, one chunk one; cached chunks are not asked for; 24 MiB of chunks are read in
+    requests of at most 8 MiB, each chunk once; 16 chunks apart are 16 requests, exactly 1, 4 and 8 at
+    once; with a request the store fails and an earlier chunk damaged, the read fails with the chunk's
+    checksum on 1 to 32 requests at once, and with the store's failure undamaged; a chunk recorded outside
+    the file fails as it does in memory; the option.
+  - `S3RangeReaderTest` gained a read through the AWS SDK: 64 chunks in one ranged `GetObject`, and 16
+    chunks apart in 16, several in flight at once.
+  - Both test classes fail when the batch is broken on purpose, nine ways (ranges never put together, the
+    gap not bridged, requests out of order, going on after a failure, unbounded, a failure thrown early, a
+    range outside the file put in a batch, the chunk cache not asked, a small request always from the pages).
+  - `ParallelChunksTest`'s check that a reader sees the same requests however many threads decode now reads
+    with one request at a time.
+- **Benchmarks** gained the rows through a reader that answers each request after 20 ms.
 
 ## Done — 2026-11-13 (P2: PF9, PF10)
 

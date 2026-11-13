@@ -31,13 +31,72 @@ chunked 64 × 64 (1,024 chunks), and chunked with gzip. The rows:
   for every handle of it, so the listing row opens the file with `objectCacheSize(0)` to time the listing
   itself.
 - **Remote reads:** how many bytes a 4 × 4 selection of the gzip dataset fetches through a
-  `RangeReader`.
+  `RangeReader`; and (P2 PF11) through a reader that answers each request after 20 ms, the whole read of
+  the gzip dataset and 20 random 128 × 128 selections of it, with one request at a time
+  (`readerRequests(1)`) and eight at once, and the requests each takes.
 - **Threads** (P2 PF9, PF10): the whole read of the gzip dataset, and 1,000 random 4 × 4 selections of it
   with no chunk cache, with its chunks decoded on every thread and on the reading thread alone
   (`decodeThreads(1)`).
 - **Writes** (P2 PF10): a file of one dataset (create, write, close: the flush to disk and the move into
   place included), contiguous, chunked, and chunked with gzip, that one with its chunks filtered on every
   thread and on the writer's alone (`encodeThreads(1)`).
+
+## P2 PF11: a remote file's chunks read together
+
+Through a `RangeReader` a request is a round trip to a store, and a read asked for its chunks one at a time:
+chunks smaller than a page a page at a time, larger ones a chunk at a time. Now the chunks a read needs
+are put into as few requests as their places in the file allow (those next to each other, or no more than a
+page apart, in one request of at most 8 MiB), and up to eight requests are made at once
+(`OpenOptions.readerRequests`).
+
+**A reader that answers each request after 20 ms** (a throwaway harness over the file's channel, on the
+machine below; a file of three 32 MiB datasets, opened anew for each read, no chunk cache; the commit before
+and this one):
+
+| read | before | | after | |
+|---|--:|--:|--:|--:|
+| | time | requests | time | requests |
+| open the file and find the dataset | 43 ms | 2 | 43 ms | 2 |
+| whole: 1,024 gzip chunks of 32 KiB | 10,040 ms | 481 | **136 ms** | 7 |
+| whole: 64 gzip chunks of 512 KiB | 1,394 ms | 66 | **97 ms** | 6 |
+| whole: 1,024 unfiltered chunks of 32 KiB | 10,684 ms | 515 | **93 ms** | 6 |
+| a 512 × 512 box of the gzip chunks (81 chunks) | 1,102 ms | 53 | **106 ms** | 12 |
+| 20 random 128 × 128 boxes (4 to 9 chunks each) | 2,745 ms | 132 | **493 ms** | 62 |
+| 20 random 4 × 4 boxes (one chunk, mostly) | 628 ms | 30 | 489 ms | 23 |
+| 4 chunks of 512 KiB, apart from each other | 128 ms | 6 | 69 ms | 6 |
+
+The times include opening the file (two requests). A request of the reader is counted whether it is a page
+of metadata or 8 MiB of chunks; the bytes asked for are the same to within 1 % for the whole reads, and
+fewer for the boxes (2.6 MB against 3.4 for the 512 × 512 box), since chunks are asked for as they are,
+not as the pages they lie in.
+
+**A real store.** A public NetCDF-4 file in Amazon S3 (GOES-16 `ABI-L2-CMIPF`, 31 MB), read over HTTPS with a
+`RangeReader` on the JDK's `HttpClient`, from a workstation, two runs each: its `CMI` variable is 10,848 ×
+10,848 `int16` in 2,304 deflated chunks.
+
+| read | before | | after | |
+|---|--:|--:|--:|--:|
+| | time | requests | time | requests |
+| whole (235 MB of elements, 31 MB stored) | 23.9–24.5 s | 497 | **2.8–3.1 s** | 40 |
+| a 1,000 × 1,000 box (25 chunks, of little data) | 330–437 ms | 8 | 341–588 ms | 7 |
+
+The bytes read are the same (compared by hash). Of the 40 requests, 4 are the chunks (8.3, 8.4, 8.3, and
+6.3 MB, sent at once), and 36 are pages of the chunk index, a version 1 B-tree whose nodes lie among the
+chunks: they are still read one after another, 1.5 of the 2.8 seconds. That is the next thing to gain (see
+`TODO.md`). The box reads few bytes; its time is the index's pages.
+
+**`Benchmarks`' rows** (each request answered after 20 ms; the file already open, its chunk index read):
+
+| operation | one request at a time | eight at once | requests |
+|---|--:|--:|--:|
+| read whole: 1,024 gzip chunks | 117 ms | 48 ms | 4 |
+| 20 random 128 × 128 selections | 1,231 ms | 428 ms | 59 |
+
+One request at a time already has the chunks together: the whole read is 4 requests either way, and it is
+the putting together that takes it from 481. Eight at once then overlap their waits.
+
+What does not change: the bytes a read returns; where a read fails (`ChunksReadTogetherTest`); and a mapped
+file, which is read as before (the rows above this section's are within their run-to-run spread).
 
 ## P2 PF9, PF10: chunks filtered on several threads
 
@@ -65,7 +124,8 @@ Why each improves, and what bounds it:
   thread decodes itself; the rest decode two or four at once.
 
 What does not change: the bytes a read returns, the exception a damaged file fails it with, the requests a
-`RangeReader` sees, and every byte of a file written (`ParallelChunksTest`).
+`RangeReader` sees (one at a time: PF11, above, has since put them together), and every byte of a file
+written (`ParallelChunksTest`).
 
 **Small chunks.** Handing a chunk to another thread costs some microseconds, which is more than a chunk of a
 few hundred bytes takes to decode. So chunks smaller than 32 KiB are filtered several to a piece of work, and

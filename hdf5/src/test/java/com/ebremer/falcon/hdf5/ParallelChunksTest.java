@@ -40,7 +40,7 @@ class ParallelChunksTest {
 
     private static final int ROWS = 300;
     private static final int COLUMNS = 250;
-    private static final double[] DOUBLES = new double[ROWS * COLUMNS];
+    static final double[] DOUBLES = new double[ROWS * COLUMNS];
     private static final int[] INTS = new int[400 * 64];
     private static final int[] HALF = new int[32 * 4096];
     private static final String[] STRINGS = new String[5000];
@@ -70,7 +70,7 @@ class ParallelChunksTest {
      * one at a time); through third-party filters; and partly written (so filtered on close). {@code threads}
      * 0 leaves the writer's default.
      */
-    private static void write(Path file, Hdf5Writer.Format format, int threads) throws IOException {
+    static void write(Path file, Hdf5Writer.Format format, int threads) throws IOException {
         try (Hdf5Writer w = Hdf5Writer.create(file, format)) {
             if (threads > 0) {
                 assertSame(w, w.encodeThreads(threads));
@@ -173,7 +173,7 @@ class ParallelChunksTest {
     // ------------------------------------------------------------------ reading
 
     /** Everything a read can return of the dataset at {@code path}: whole, a box, a strided selection, points. */
-    private static List<Object> reads(Hdf5File h5, String path) {
+    static List<Object> reads(Hdf5File h5, String path) {
         Dataset dataset = h5.root().dataset(path);
         long[] dims = dataset.dataspace().dimensions();
         int rank = dims.length;
@@ -202,7 +202,7 @@ class ParallelChunksTest {
         return out;
     }
 
-    private static void assertSameReads(List<Object> expected, List<Object> actual, String what) {
+    static void assertSameReads(List<Object> expected, List<Object> actual, String what) {
         assertEquals(expected.size(), actual.size());
         for (int i = 0; i < expected.size(); i++) {
             assertArrayEquals((byte[]) expected.get(i), (byte[]) actual.get(i), what + ", read " + i);
@@ -350,13 +350,14 @@ class ParallelChunksTest {
         for (int threads : new int[] {1, 8}) {
             try (FileChannel channel = FileChannel.open(file)) {
                 Recording reader = new Recording(RangeReader.of(channel));
-                // pages smaller than a chunk, so that each chunk is a request of its own
-                OpenOptions options = OpenOptions.defaults().decodeThreads(threads).readerPageSize(512);
+                // One request at a time, so that the reading thread makes them all, in an order of its own
+                // (several at once are ChunksReadTogetherTest's); and small pages, so that there are many.
+                OpenOptions options = OpenOptions.defaults().decodeThreads(threads).readerPageSize(512).readerRequests(1);
                 try (Hdf5File h5 = Hdf5File.open(reader, options)) {
                     reads(h5, "whole");
                     reads(h5, "rows");
                 }
-                assertTrue(reader.requests.size() > 200, "requests: " + reader.requests.size());
+                assertTrue(reader.requests.size() > 20, "requests: " + reader.requests.size());
                 assertEquals(1, reader.threads.stream().distinct().count(), "only the reading thread reads the file");
                 if (expected == null) {
                     expected = List.copyOf(reader.requests);
