@@ -22,7 +22,7 @@ import java.util.Map;
  * twice. An {@link IOException} from the reader surfaces as {@link UncheckedIOException}, since the
  * format parsers above read without checked exceptions.
  */
-public final class PagedSource {
+public final class PagedSource extends ByteSource {
 
     /** The largest read that goes into a heap array; larger ones are allocated off-heap. */
     private static final long MAX_ARRAY = Integer.MAX_VALUE - 8;
@@ -59,6 +59,7 @@ public final class PagedSource {
     }
 
     /** The file's size in bytes. */
+    @Override
     public long size() {
         return size;
     }
@@ -67,6 +68,7 @@ public final class PagedSource {
      * The {@code length} bytes at {@code position}, as a segment that starts there: a view of a cached
      * page when they lie in one, else a copy. The caller has checked the range lies within the file.
      */
+    @Override
     MemorySegment read(long position, long length) {
         long first = position / pageSize;
         if (length > 0 && first == (position + length - 1) / pageSize) {
@@ -82,6 +84,7 @@ public final class PagedSource {
     }
 
     /** Copies {@code length} bytes at {@code position} into {@code destination} from {@code offset}. */
+    @Override
     void copy(long position, byte[] destination, int offset, int length) {
         MemorySegment target = MemorySegment.ofArray(destination).asSlice(offset, length);
         if (length >= pageSize) {
@@ -160,6 +163,7 @@ public final class PagedSource {
     }
 
     /** The byte at {@code position} (used for single-byte reads, which are frequent in parsing). */
+    @Override
     byte get(long position) {
         long index = position / pageSize;
         return page(index).get(ValueLayout.JAVA_BYTE, position - index * pageSize);

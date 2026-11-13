@@ -10,7 +10,7 @@ import com.ebremer.falcon.hdf5.header.SharedMessage;
 import com.ebremer.falcon.hdf5.heap.FractalHeap;
 import com.ebremer.falcon.hdf5.heap.LocalHeap;
 import com.ebremer.falcon.hdf5.io.FileContext;
-import com.ebremer.falcon.hdf5.io.HdfBuffer;
+import com.ebremer.falcon.hdf5.message.SymbolTableMessage;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -27,7 +27,8 @@ import java.util.List;
  *
  * <p>Only files the writer can change safely open: 8-byte addresses and lengths, the default file
  * driver, no persistent free-space tracking or paged allocation (which keep their own record of the
- * file's space), and not marked as open by a writer.
+ * file's space), no metadata cache image (whose entries would hide what is written at their addresses), and
+ * not marked as open by a writer.
  */
 final class ExistingFile implements AutoCloseable {
 
@@ -70,6 +71,10 @@ final class ExistingFile implements AutoCloseable {
             if (file.driverInfo().isPresent()) {
                 throw new HdfUnsupportedException("a file of the " + file.driverInfo().get().driverId()
                         + " driver is not changed");
+            }
+            if (file.hasMetadataCacheImage()) {
+                throw new HdfUnsupportedException("a file with a metadata cache image is not changed: its metadata"
+                        + " is in the image, not at its own addresses; write it out first (h5clear -m)");
             }
             if (file.fileSpaceInfo().isPresent()) {
                 FileSpaceInfo space = file.fileSpaceInfo().get();
@@ -192,14 +197,19 @@ final class ExistingFile implements AutoCloseable {
         return entries;
     }
 
-    /** The symbol table (B-tree, local heap) of the group whose header is at {@code address}, or null. */
+    /**
+     * The symbol table (B-tree, local heap) of the group whose header is at {@code address}, or null: what
+     * its Symbol Table message says, but for the root group, whose message, where it is corrupt, is mended
+     * from the superblock's copy of it as libhdf5 mends it ({@code H5G__stab_valid}).
+     */
     long[] symbolTable(long address) {
         HeaderMessage message = header(address).find(MessageType.SYMBOL_TABLE);
         if (message == null) {
             return null;
         }
-        HdfBuffer body = message.body();
-        return new long[] {body.getAddress(0, 8), body.getAddress(8, 8)};
+        SymbolTableMessage table = address == rootAddress ? SymbolTableMessage.parseRoot(ctx, message)
+                : SymbolTableMessage.parse(ctx, message);
+        return new long[] {table.btreeAddress(), table.localHeapAddress()};
     }
 
     // ------------------------------------------------------------------ attributes

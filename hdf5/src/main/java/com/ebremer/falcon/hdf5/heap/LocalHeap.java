@@ -24,6 +24,11 @@ public final class LocalHeap {
         this.dataSegmentSize = dataSegmentSize;
     }
 
+    /** Whether a local heap is at {@code addr}. */
+    public static boolean isHeap(FileContext ctx, long addr) {
+        return ctx.buffer().hasSignature(addr, HEAP);
+    }
+
     public static LocalHeap parse(FileContext ctx, long addr) {
         HdfBuffer buf = ctx.buffer();
         if (!buf.hasSignature(addr, HEAP)) {

@@ -56,10 +56,13 @@ def main():
             continue
         try:
             with h5py.File(os.path.join(FIXTURES, file), "r") as f:
-                for path, dataset in datasets(f):
-                    lines.append("\t".join([file, path] + describe(dataset)))
-        except OSError as e:  # a file libhdf5 itself cannot open is not an oracle
+                rows = ["\t".join([file, path] + describe(dataset)) for path, dataset in datasets(f)]
+        except (OSError, RuntimeError) as e:
+            # A file libhdf5 itself cannot open, or cannot walk, is not an oracle: corrupt_stab.h5, whose root
+            # group it mends only when it may write, and mdc_image.h5, whose cache image 2.0.0 cannot load.
             print(f"skipped {file}: {e}", file=sys.stderr)
+            continue
+        lines.extend(rows)
     with open(OUT, "w", encoding="utf-8", newline="\n") as out:
         out.write("".join(line + "\n" for line in lines))
     print(f"wrote {len(lines)} datasets to {OUT}")

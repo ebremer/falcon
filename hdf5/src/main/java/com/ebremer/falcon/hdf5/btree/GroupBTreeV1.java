@@ -33,6 +33,13 @@ public final class GroupBTreeV1 {
         // Static walker only.
     }
 
+    /** Whether a group B-tree node is at {@code address}: what libhdf5's {@code H5B_valid} asks of it. */
+    public static boolean isNode(FileContext ctx, long address) {
+        HdfBuffer buf = ctx.buffer();
+        return buf.hasSignature(address, TREE) && address <= buf.size() - 5
+                && buf.getUnsignedByte(address + 4) == NODE_TYPE_GROUP;
+    }
+
     /** Enumerates every symbol-table entry reachable from the B-tree rooted at {@code btreeAddress}. */
     public static List<SymbolTableEntry> readEntries(FileContext ctx, long btreeAddress) {
         List<SymbolTableEntry> out = new ArrayList<>();

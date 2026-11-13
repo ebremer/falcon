@@ -41,6 +41,7 @@ class RobustnessTest {
         "bzip2.h5",
         "zfp.h5",
         "blosc2.h5",
+        "mdc_image.h5", "mdc_image_userblock.h5", "corrupt_stab.h5",
     };
 
     @Test

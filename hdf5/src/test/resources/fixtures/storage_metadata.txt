@@ -56,6 +56,59 @@ blosc2.h5	/r2_special_f4	CHUNKED	8,8	1460	1	32026	1	1 64 4 256 5 1 1 2 8 8	blosc
 blosc2.h5	/r2_zlib_exact_f8	CHUNKED	8,8	4704	1	32026	1	1 128 8 512 1 1 4 2 8 8	blosc2
 blosc2.h5	/r3_zstd_noshuffle_i2	CHUNKED	3,4,5	7463	1	32026	1	1 64 2 120 1 0 5 3 3 4 5	blosc2
 blosc2.h5	/r4_blosclz_bitshuffle_f4	CHUNKED	2,3,4,5	10912	1	32026	1	1 48 4 480 9 2 0 4 2 3 4 5	blosc2
+blosc2_write.h5	/array_2d_blosclz_5_1	CHUNKED	25,20	10722	1	32026	1	1 0 2 3000 5 1 0 2 25 20	blosc2
+blosc2_write.h5	/array_2d_lz4_5_2	CHUNKED	25,20	10196	1	32026	1	1 0 2 3000 5 2 1 2 25 20	blosc2
+blosc2_write.h5	/compound_1d_lz4hc_5_1	CHUNKED	250	2192	1	32026	1	1 0 12 3000 5 1 2	blosc2
+blosc2_write.h5	/compound_2d_blosclz_5_1	CHUNKED	8,16	5269	1	32026	1	1 0 12 1536 5 1 0 2 8 16	blosc2
+blosc2_write.h5	/compound_2d_lz4_5_3	CHUNKED	8,16	7547	1	32026	1	1 0 12 1536 5 3 1 2 8 16	blosc2
+blosc2_write.h5	/f4_1d_blosclz_1_3	CHUNKED	300	4826	1	32026	1	1 0 4 1200 1 3 0	blosc2
+blosc2_write.h5	/f4_1d_blosclz_5_0	CHUNKED	300	4845	1	32026	1	1 0 4 1200 5 0 0	blosc2
+blosc2_write.h5	/f4_1d_blosclz_5_1	CHUNKED	300	2932	1	32026	1	1 0 4 1200 5 1 0	blosc2
+blosc2_write.h5	/f4_1d_lz4_0_1	CHUNKED	300	5616	1	32026	1	1 0 4 1200 0 1 1	blosc2
+blosc2_write.h5	/f4_1d_lz4_5_1	CHUNKED	300	2934	1	32026	1	1 0 4 1200 5 1 1	blosc2
+blosc2_write.h5	/f4_1d_lz4_5_4	CHUNKED	300	4800	1	32026	1	1 0 4 1200 5 4 1	blosc2
+blosc2_write.h5	/f4_1d_lz4_9_2	CHUNKED	300	2278	1	32026	1	1 0 4 1200 9 2 1	blosc2
+blosc2_write.h5	/f4_1d_lz4_block4096	CHUNKED	300	2934	1	32026	1	1 4096 4 1200 5 1 1	blosc2
+blosc2_write.h5	/f4_1d_lz4hc_5_1	CHUNKED	300	2696	1	32026	1	1 0 4 1200 5 1 2	blosc2
+blosc2_write.h5	/f4_1d_shuffle_blosclz_fletcher32	CHUNKED	300	3339	3	2	1	4	shuffle	32026	1	1 0 4 1200 5 1 0	blosc2	3	0	-	fletcher32
+blosc2_write.h5	/f4_1d_zlib_5_1	CHUNKED	300	2508	1	32026	1	1 0 4 1200 5 1 4	blosc2
+blosc2_write.h5	/f4_1d_zlib_9_2	CHUNKED	300	2165	1	32026	1	1 0 4 1200 9 2 4	blosc2
+blosc2_write.h5	/f4_1d_zstd_5_1	CHUNKED	300	2480	1	32026	1	1 0 4 1200 5 1 5	blosc2
+blosc2_write.h5	/f4_3d_blosclz_5_1	CHUNKED	5,9,8	2544	1	32026	1	1 0 4 1440 5 1 0 3 5 9 8	blosc2
+blosc2_write.h5	/f4_3d_zlib_6_2	CHUNKED	5,9,8	2023	1	32026	1	1 0 4 1440 6 2 4 3 5 9 8	blosc2
+blosc2_write.h5	/f4_big_blosclz_5_1	CHUNKED	256,512	268064	1	32026	1	1 0 4 524288 5 1 0 2 256 512	blosc2
+blosc2_write.h5	/f4_big_lz4_1_2	CHUNKED	256,512	195316	1	32026	1	1 0 4 524288 1 2 1 2 256 512	blosc2
+blosc2_write.h5	/f4_big_lz4hc_5_1	CHUNKED	256,512	203483	1	32026	1	1 0 4 524288 5 1 2 2 256 512	blosc2
+blosc2_write.h5	/f4_big_zlib_5_3	CHUNKED	256,512	263481	1	32026	1	1 0 4 524288 5 3 4 2 256 512	blosc2
+blosc2_write.h5	/f4_big_zstd_1_1	CHUNKED	256,512	181500	1	32026	1	1 0 4 524288 1 1 5 2 256 512	blosc2
+blosc2_write.h5	/f8_2d_blosclz_5_1	CHUNKED	16,50	5575	1	32026	1	1 0 8 6400 5 1 0 2 16 50	blosc2
+blosc2_write.h5	/f8_2d_lz4_3_2	CHUNKED	16,50	4882	1	32026	1	1 0 8 6400 3 2 1 2 16 50	blosc2
+blosc2_write.h5	/f8_2d_lz4_5_4	CHUNKED	16,50	19200	1	32026	1	1 0 8 6400 5 4 1 2 16 50	blosc2
+blosc2_write.h5	/f8_2d_lz4_fletcher32	CHUNKED	16,50	4856	2	32026	1	1 0 8 6400 5 2 1 2 16 50	blosc2	3	0	-	fletcher32
+blosc2_write.h5	/f8_2d_zstd_9_3	CHUNKED	16,50	4808	1	32026	1	1 0 8 6400 9 3 5 2 16 50	blosc2
+blosc2_write.h5	/f8_4d_blosclz_9_3	CHUNKED	3,5,4,7	5788	1	32026	1	1 0 8 3360 9 3 0 4 3 5 4 7	blosc2
+blosc2_write.h5	/f8_4d_lz4_5_1	CHUNKED	3,5,4,7	2685	1	32026	1	1 0 8 3360 5 1 1 4 3 5 4 7	blosc2
+blosc2_write.h5	/f8_4d_lz4_block512	CHUNKED	3,5,4,7	4118	1	32026	1	1 512 8 3360 5 2 1 4 3 5 4 7	blosc2
+blosc2_write.h5	/i2_2d_blosclz_0_1	CHUNKED	32,32	27840	1	32026	1	1 0 2 2048 0 1 0 2 32 32	blosc2
+blosc2_write.h5	/i2_2d_blosclz_5_1	CHUNKED	32,32	15127	1	32026	1	1 0 2 2048 5 1 0 2 32 32	blosc2
+blosc2_write.h5	/i2_2d_blosclz_block1024	CHUNKED	32,32	15455	1	32026	1	1 1024 2 2048 5 1 0 2 32 32	blosc2
+blosc2_write.h5	/i2_2d_lz4_5_2	CHUNKED	32,32	16241	1	32026	1	1 0 2 2048 5 2 1 2 32 32	blosc2
+blosc2_write.h5	/i2_2d_lz4hc_9_3	CHUNKED	32,32	17898	1	32026	1	1 0 2 2048 9 3 2 2 32 32	blosc2
+blosc2_write.h5	/i2_2d_scaleoffset_blosclz	CHUNKED	32,32	14361	2	6	1	2 0 1024 0 2 1 0 1 0 0 0 0 0 0 0 0 0 0 0 0	scaleoffset	32026	1	1 0 2 2048 5 1 0 2 32 32	blosc2
+blosc2_write.h5	/i2_2d_shuffle_lz4	CHUNKED	32,32	16326	2	2	1	2	shuffle	32026	1	1 0 2 2048 5 1 1 2 32 32	blosc2
+blosc2_write.h5	/i2_2d_zlib_1_0	CHUNKED	32,32	15796	1	32026	1	1 0 2 2048 1 0 4 2 32 32	blosc2
+blosc2_write.h5	/i2_2d_zstd_3_1	CHUNKED	32,32	12486	1	32026	1	1 0 2 2048 3 1 5 2 32 32	blosc2
+blosc2_write.h5	/i4_5d_blosclz_5_1	CHUNKED	2,4,5,3,2	3476	1	32026	1	1 0 4 960 5 1 0 5 2 4 5 3 2	blosc2
+blosc2_write.h5	/i4_5d_lz4_5_2	CHUNKED	2,4,5,3,2	2827	1	32026	1	1 0 4 960 5 2 1 5 2 4 5 3 2	blosc2
+blosc2_write.h5	/i8_1d_blosclz_5_1	CHUNKED	2048	7429	1	32026	1	1 0 8 16384 5 1 0	blosc2
+blosc2_write.h5	/i8_1d_lz4_8_3	CHUNKED	2048	16805	1	32026	1	1 0 8 16384 8 3 1	blosc2
+blosc2_write.h5	/u1_3d_blosclz_5_1	CHUNKED	10,30,16	28261	1	32026	1	1 0 1 4800 5 1 0 3 10 30 16	blosc2
+blosc2_write.h5	/u1_3d_lz4_7_3	CHUNKED	10,30,16	27983	1	32026	1	1 0 1 4800 7 3 1 3 10 30 16	blosc2
+blosc2_write.h5	/u1_3d_lz4hc_4_2	CHUNKED	10,30,16	26982	1	32026	1	1 0 1 4800 4 2 2 3 10 30 16	blosc2
+blosc2_write.h5	/u1_3d_zlib_block100000	CHUNKED	10,30,16	26570	1	32026	1	1 100000 1 4800 5 1 4 3 10 30 16	blosc2
+blosc2_write.h5	/v300_1d_lz4_5_1	CHUNKED	16	9334	1	32026	1	1 0 300 4800 5 1 1	blosc2
+blosc2_write.h5	/zeros_2d_blosclz_5_1	CHUNKED	32,32	960	1	32026	1	1 0 4 4096 5 1 0 2 32 32	blosc2
+blosc2_write.h5	/zeros_2d_lz4_5_0	CHUNKED	32,32	960	1	32026	1	1 0 4 4096 5 0 1 2 32 32	blosc2
 btree_k_earliest.h5	/d	CHUNKED	5	40	0
 btree_k_latest.h5	/d	CHUNKED	5	40	0
 bzip2.h5	/bzip2_be_f8	CHUNKED	40,7	11127	1	307	1	9	bzip2
@@ -827,6 +880,8 @@ links.h5	/links/sub/y	CONTIGUOUS	-	4	0
 links_ext.h5	/y	CONTIGUOUS	-	4	0
 links_old.h5	/data/x	CONTIGUOUS	-	12	0
 links_old.h5	/links/sub/y	CONTIGUOUS	-	4	0
+mdc_image_userblock.h5	/chunked	CHUNKED	8	166	1	1	1	4	deflate
+mdc_image_userblock.h5	/grp/data	CONTIGUOUS	-	24	0
 metadata.h5	/commented	CONTIGUOUS	-	12	0
 metadata.h5	/hardlink	CONTIGUOUS	-	12	0
 metadata.h5	/timed	CONTIGUOUS	-	12	0
@@ -1241,6 +1296,60 @@ sz.h5	/u4_3d_abs	CHUNKED	5,9,8	760	1	32017	1	3 6 8 9 5 0 1071225241 2576980378 0
 sz.h5	/u8_1d_rel	CHUNKED	128	1064	1	32017	1	1 8 0 128 1 0 0 1062232653 3539053052 0 0 0 0	SZ compressor/decompressor for floating-point data.
 sz.h5	/u8_2d_abs	CHUNKED	16,16	1310	1	32017	1	2 8 16 16 0 1074266112 0 0 0 0 0 0 0	SZ compressor/decompressor for floating-point data.
 sz.h5	/u8_3d_abs	CHUNKED	5,9,8	758	1	32017	1	3 8 8 9 5 0 1071225241 2576980378 0 0 0 0 0 0	SZ compressor/decompressor for floating-point data.
+sz_write.h5	/f4_1d_abs3	CHUNKED	64	1141	1	32017	1	1 0 0 64 0 1062232653 3539053052 0 0 0 0 0 0	SZ compressor/decompressor for floating-point data.
+sz_write.h5	/f4_1d_defaults	CHUNKED	64	1204	1	32017	1	1 0 0 64 10 0 0 0 0 1055193269 2296604913 0 0	SZ compressor/decompressor for floating-point data.
+sz_write.h5	/f4_1d_pwr3	CHUNKED	64	1204	1	32017	1	1 0 0 64 10 0 0 0 0 1062232653 3539053052 0 0	SZ compressor/decompressor for floating-point data.
+sz_write.h5	/f4_1d_pwr6	CHUNKED	64	1201	1	32017	1	1 0 0 64 10 0 0 0 0 1051772663 2696277389 0 0	SZ compressor/decompressor for floating-point data.
+sz_write.h5	/f4_1d_rel4	CHUNKED	64	1201	1	32017	1	1 0 0 64 1 0 0 1058682594 3944497965 0 0 0 0	SZ compressor/decompressor for floating-point data.
+sz_write.h5	/f4_3d_abs3	CHUNKED	5,9,8	2821	1	32017	1	3 0 8 9 5 0 1062232653 3539053052 0 0 0 0 0 0	SZ compressor/decompressor for floating-point data.
+sz_write.h5	/f4_3d_pwr3	CHUNKED	5,9,8	2823	1	32017	1	3 0 8 9 5 10 0 0 0 0 1062232653 3539053052 0 0	SZ compressor/decompressor for floating-point data.
+sz_write.h5	/f4_3d_rel3	CHUNKED	5,9,8	707	1	32017	1	3 0 8 9 5 1 0 0 1062232653 3539053052 0 0 0 0	SZ compressor/decompressor for floating-point data.
+sz_write.h5	/f4_constant_abs3	CHUNKED	50	88	1	32017	1	1 0 0 50 0 1062232653 3539053052 0 0 0 0 0 0	SZ compressor/decompressor for floating-point data.
+sz_write.h5	/f4_lead1_abs3	CHUNKED	1,100	1600	1	32017	1	1 0 0 1 0 1062232653 3539053052 0 0 0 0 0 0	SZ compressor/decompressor for floating-point data.
+sz_write.h5	/f4_noise_abs7	CHUNKED	100	900	1	32017	1	1 0 0 100 0 1048238066 2596056904 0 0 0 0 0 0	SZ compressor/decompressor for floating-point data.
+sz_write.h5	/f4_short_abs3	CHUNKED	4,4	256	1	32017	1	2 0 4 4 0 1062232653 3539053052 0 0 0 0 0 0	SZ compressor/decompressor for floating-point data.
+sz_write.h5	/f4_twenty_abs3	CHUNKED	20	160	1	32017	1	1 0 0 20 0 1062232653 3539053052 0 0 0 0 0 0	SZ compressor/decompressor for floating-point data.
+sz_write.h5	/f4_wide_pwr3	CHUNKED	15,40	4626	1	32017	1	2 0 40 15 10 0 0 0 0 1062232653 3539053052 0 0	SZ compressor/decompressor for floating-point data.
+sz_write.h5	/f4_wide_pwr6	CHUNKED	15,40	4622	1	32017	1	2 0 40 15 10 0 0 0 0 1051772663 2696277389 0 0	SZ compressor/decompressor for floating-point data.
+sz_write.h5	/f8_2d_abs4	CHUNKED	16,16	10017	1	32017	1	2 1 16 16 0 1058682594 3944497965 0 0 0 0 0 0	SZ compressor/decompressor for floating-point data.
+sz_write.h5	/f8_2d_abs4_fletcher32	CHUNKED	16,16	10041	2	32017	1	2 1 16 16 0 1058682594 3944497965 0 0 0 0 0 0	SZ compressor/decompressor for floating-point data.	3	0	-	fletcher32
+sz_write.h5	/f8_2d_pwr2	CHUNKED	16,16	4051	1	32017	1	2 1 16 16 10 0 0 0 0 1065646817 1202590843 0 0	SZ compressor/decompressor for floating-point data.
+sz_write.h5	/f8_2d_pwr6	CHUNKED	16,16	9911	1	32017	1	2 1 16 16 10 0 0 0 0 1051772663 2696277389 0 0	SZ compressor/decompressor for floating-point data.
+sz_write.h5	/f8_2d_rel3	CHUNKED	16,16	2941	1	32017	1	2 1 16 16 1 0 0 1062232653 3539053052 0 0 0 0	SZ compressor/decompressor for floating-point data.
+sz_write.h5	/f8_4d_abs3	CHUNKED	3,5,4,7	2378	1	32017	1	4 1 7 4 5 3 0 1062232653 3539053052 0 0 0 0 0 0	SZ compressor/decompressor for floating-point data.
+sz_write.h5	/f8_4d_pwr3	CHUNKED	3,5,4,7	5087	1	32017	1	4 1 7 4 5 3 10 0 0 0 0 1062232653 3539053052 0 0	SZ compressor/decompressor for floating-point data.
+sz_write.h5	/f8_unit_dims_abs3	CHUNKED	1,1,16,1,20	3164	1	32017	1	2 1 20 16 0 1062232653 3539053052 0 0 0 0 0 0	SZ compressor/decompressor for floating-point data.
+sz_write.h5	/f8_unit_dims_pwr2	CHUNKED	1,1,16,1,20	2879	1	32017	1	2 1 20 16 10 0 0 0 0 1065646817 1202590843 0 0	SZ compressor/decompressor for floating-point data.
+sz_write.h5	/f8_wide_pwr2	CHUNKED	30,20	8797	1	32017	1	2 1 20 30 10 0 0 0 0 1065646817 1202590843 0 0	SZ compressor/decompressor for floating-point data.
+sz_write.h5	/f8_wide_pwr6	CHUNKED	30,20	5399	1	32017	1	2 1 20 30 10 0 0 0 0 1051772663 2696277389 0 0	SZ compressor/decompressor for floating-point data.
+sz_write.h5	/i1_1d_abs_int	CHUNKED	40	217	1	32017	1	1 3 0 40 0 1074266112 0 0 0 0 0 0 0	SZ compressor/decompressor for floating-point data.
+sz_write.h5	/i1_1d_rel3	CHUNKED	40	217	1	32017	1	1 3 0 40 1 0 0 1062232653 3539053052 0 0 0 0	SZ compressor/decompressor for floating-point data.
+sz_write.h5	/i2_noise_abs_int	CHUNKED	100	488	1	32017	1	1 5 0 100 0 1074266112 0 0 0 0 0 0 0	SZ compressor/decompressor for floating-point data.
+sz_write.h5	/i4_2d_abs_int	CHUNKED	11,20	1903	1	32017	1	2 7 20 11 0 1074266112 0 0 0 0 0 0 0	SZ compressor/decompressor for floating-point data.
+sz_write.h5	/i4_2d_rel3	CHUNKED	11,20	1356	1	32017	1	2 7 20 11 1 0 0 1062232653 3539053052 0 0 0 0	SZ compressor/decompressor for floating-point data.
+sz_write.h5	/i8_big_abs_int	CHUNKED	8,20	1437	1	32017	1	2 9 20 8 0 1074266112 0 0 0 0 0 0 0	SZ compressor/decompressor for floating-point data.
+sz_write.h5	/input/f4_1d	CONTIGUOUS	-	1000	0
+sz_write.h5	/input/f4_3d	CONTIGUOUS	-	2880	0
+sz_write.h5	/input/f4_constant	CONTIGUOUS	-	400	0
+sz_write.h5	/input/f4_lead1	CONTIGUOUS	-	1600	0
+sz_write.h5	/input/f4_noise	CONTIGUOUS	-	800	0
+sz_write.h5	/input/f4_short	CONTIGUOUS	-	256	0
+sz_write.h5	/input/f4_twenty	CONTIGUOUS	-	160	0
+sz_write.h5	/input/f4_wide	CONTIGUOUS	-	4800	0
+sz_write.h5	/input/f8_2d	CONTIGUOUS	-	9600	0
+sz_write.h5	/input/f8_4d	CONTIGUOUS	-	6720	0
+sz_write.h5	/input/f8_unit_dims	CONTIGUOUS	-	7680	0
+sz_write.h5	/input/f8_wide	CONTIGUOUS	-	9600	0
+sz_write.h5	/input/i1_1d	CONTIGUOUS	-	90	0
+sz_write.h5	/input/i2_noise	CONTIGUOUS	-	400	0
+sz_write.h5	/input/i4_2d	CONTIGUOUS	-	2640	0
+sz_write.h5	/input/i8_big	CONTIGUOUS	-	2560	0
+sz_write.h5	/input/u2_3d	CONTIGUOUS	-	1024	0
+sz_write.h5	/input/u4_4d	CONTIGUOUS	-	3360	0
+sz_write.h5	/input/u8_2d	CONTIGUOUS	-	4800	0
+sz_write.h5	/u2_3d_abs_int	CHUNKED	4,8,8	1124	1	32017	1	3 4 8 8 4 0 1074266112 0 0 0 0 0 0 0	SZ compressor/decompressor for floating-point data.
+sz_write.h5	/u4_4d_abs_int	CHUNKED	2,5,6,7	2877	1	32017	1	4 6 7 6 5 2 0 1074266112 0 0 0 0 0 0 0	SZ compressor/decompressor for floating-point data.
+sz_write.h5	/u8_2d_abs_int	CHUNKED	10,30	2127	1	32017	1	2 8 30 10 0 1074266112 0 0 0 0 0 0 0	SZ compressor/decompressor for floating-point data.
 szip.h5	/be_i16_nn	CHUNKED	200	153	1	4	1	177 8 16 200	Unknown library filter
 szip.h5	/f32_nn	CHUNKED	1024	1111	1	4	1	169 32 32 1024	Unknown library filter
 szip.h5	/f64_nn	CHUNKED	512	3482	1	4	1	169 16 64 512	Unknown library filter
@@ -1433,3 +1542,57 @@ zfp.h5	/i4_2d_precision	CHUNKED	11,20	525	1	32013	1	269504785 91252346 268435486
 zfp.h5	/i4_4d_rate	CHUNKED	4,4,4,9	768	1	32013	1	269504785 91252346 805503116 2146435840	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
 zfp.h5	/i8_1d_accuracy	CHUNKED	100	466	1	32013	1	269504785 91252346 1585 3408920576	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
 zfp.h5	/i8_3d_reversible	CHUNKED	4,8,8	2754	1	32013	1	269504785 91252346 7340153 2281701424	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
+zfp_write.h5	/f4_1d_acc1e-2	CHUNKED	64	633	1	32013	1	269504785 91252346 1010 3401580544	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
+zfp_write.h5	/f4_1d_defaults	CHUNKED	64	995	1	32013	1	269504785 91252346 1010 4293918720 3767042048 493487	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
+zfp_write.h5	/f4_1d_expert	CHUNKED	64	1600	1	32013	1	269504785 91252346 1010 4293918720 3260514503 526571	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
+zfp_write.h5	/f4_1d_prec24	CHUNKED	64	743	1	32013	1	269504785 91252346 1010 2171600896	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
+zfp_write.h5	/f4_1d_rate6	CHUNKED	64	192	1	32013	1	269504785 91252346 1010 24117248	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
+zfp_write.h5	/f4_1d_rev	CHUNKED	64	890	1	32013	1	269504785 91252346 1010 2281701376	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
+zfp_write.h5	/f4_3d_acc1e-2	CHUNKED	5,9,8	3114	1	32013	1	269504785 91252346 8388730 3401580608	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
+zfp_write.h5	/f4_3d_rate40	CHUNKED	5,9,8	7680	1	32013	1	269504785 91252346 8388730 4293918784 3305081343 493487	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
+zfp_write.h5	/f4_3d_rate6	CHUNKED	5,9,8	1152	1	32013	1	269504785 91252346 8388730 401604672	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
+zfp_write.h5	/f4_3d_rev	CHUNKED	5,9,8	4521	1	32013	1	269504785 91252346 8388730 2281701440	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
+zfp_write.h5	/f4_tiny_rate6	CHUNKED	8,8	48	1	32013	1	269504785 91252346 1879048310 99614720	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
+zfp_write.h5	/f4_tiny_rev	CHUNKED	8,8	202	1	32013	1	269504785 91252346 1879048310 2281701376	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
+zfp_write.h5	/f8_2d_acc0	CHUNKED	16,16	9489	1	32013	1	269504785 91252346 4026532087 4293918720 3767042048 493487	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
+zfp_write.h5	/f8_2d_acc1e-2	CHUNKED	16,16	3007	1	32013	1	269504785 91252346 4026532087 3401580544	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
+zfp_write.h5	/f8_2d_expert	CHUNKED	16,16	7327	1	32013	1	269504785 91252346 4026532087 4293918720 3260514503 526571	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
+zfp_write.h5	/f8_2d_prec24	CHUNKED	16,16	3089	1	32013	1	269504785 91252346 4026532087 2171600896	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
+zfp_write.h5	/f8_2d_prec64	CHUNKED	16,16	9489	1	32013	1	269504785 91252346 4026532087 4293918720 3767042048 493487	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
+zfp_write.h5	/f8_2d_rate6	CHUNKED	16,16	1152	1	32013	1	269504785 91252346 4026532087 99614720	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
+zfp_write.h5	/f8_2d_rate6_fletcher32	CHUNKED	16,16	1176	2	32013	1	269504785 91252346 4026532087 99614720	H5Z-ZFP-1.1.1 (ZFP-1.0.1)	3	0	-	fletcher32
+zfp_write.h5	/f8_2d_rev	CHUNKED	16,16	9036	1	32013	1	269504785 91252346 4026532087 2281701376	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
+zfp_write.h5	/f8_4d_prec24	CHUNKED	3,5,4,7	3773	1	32013	1	269504785 91252346 1073938543 2171601408	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
+zfp_write.h5	/f8_4d_rate40	CHUNKED	3,5,4,7	10240	1	32013	1	269504785 91252346 1073938543 4293919232 3556747263 493487	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
+zfp_write.h5	/f8_4d_rate6	CHUNKED	3,5,4,7	1536	1	32013	1	269504785 91252346 1073938543 1609564672	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
+zfp_write.h5	/f8_4d_rev	CHUNKED	3,5,4,7	15139	1	32013	1	269504785 91252346 1073938543 2281701888	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
+zfp_write.h5	/f8_specials_acc1e-2	CHUNKED	8,10	789	1	32013	1	269504785 91252346 1879048343 3401580544	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
+zfp_write.h5	/f8_specials_rate6	CHUNKED	8,10	432	1	32013	1	269504785 91252346 1879048343 99614720	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
+zfp_write.h5	/f8_specials_rev	CHUNKED	8,10	3116	1	32013	1	269504785 91252346 1879048343 2281701376	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
+zfp_write.h5	/f8_unit_dims_expert	CHUNKED	1,1,16,1,20	5140	1	32013	1	269504785 91252346 4026532151 4293918720 3260514503 526571	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
+zfp_write.h5	/f8_unit_dims_rate6	CHUNKED	1,1,16,1,20	720	1	32013	1	269504785 91252346 4026532151 99614720	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
+zfp_write.h5	/f8_unit_dims_rev	CHUNKED	1,1,16,1,20	6674	1	32013	1	269504785 91252346 4026532151 2281701376	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
+zfp_write.h5	/f8_zeros_expert	CHUNKED	8,8	400	1	32013	1	269504785 91252346 1879048311 4293918720 3260514503 526571	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
+zfp_write.h5	/f8_zeros_rate6	CHUNKED	8,8	192	1	32013	1	269504785 91252346 1879048311 99614720	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
+zfp_write.h5	/f8_zeros_rev	CHUNKED	8,8	4	1	32013	1	269504785 91252346 1879048311 2281701376	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
+zfp_write.h5	/i4_2d_acc1e-2	CHUNKED	11,20	1605	1	32013	1	269504785 91252346 2684354868 3401580544	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
+zfp_write.h5	/i4_2d_prec24	CHUNKED	11,20	885	1	32013	1	269504785 91252346 2684354868 2171600896	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
+zfp_write.h5	/i4_2d_rate6	CHUNKED	11,20	540	1	32013	1	269504785 91252346 2684354868 99614720	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
+zfp_write.h5	/i4_2d_rev	CHUNKED	11,20	1916	1	32013	1	269504785 91252346 2684354868 2281701376	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
+zfp_write.h5	/i8_3d_expert	CHUNKED	4,8,8	1200	1	32013	1	269504785 91252346 7340153 4293918768 3260514503 526571	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
+zfp_write.h5	/i8_3d_prec24	CHUNKED	4,8,8	36	1	32013	1	269504785 91252346 7340153 2171600944	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
+zfp_write.h5	/i8_3d_rate40	CHUNKED	4,8,8	2560	1	32013	1	269504785 91252346 7340153 4293918768 3305081343 493487	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
+zfp_write.h5	/i8_3d_rev	CHUNKED	4,8,8	2759	1	32013	1	269504785 91252346 7340153 2281701424	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
+zfp_write.h5	/input/f4_1d	CONTIGUOUS	-	1000	0
+zfp_write.h5	/input/f4_3d	CONTIGUOUS	-	2880	0
+zfp_write.h5	/input/f4_tiny	CONTIGUOUS	-	256	0
+zfp_write.h5	/input/f8_2d	CONTIGUOUS	-	9600	0
+zfp_write.h5	/input/f8_4d	CONTIGUOUS	-	6720	0
+zfp_write.h5	/input/f8_specials	CONTIGUOUS	-	2400	0
+zfp_write.h5	/input/f8_unit_dims	CONTIGUOUS	-	7680	0
+zfp_write.h5	/input/f8_zeros	CONTIGUOUS	-	1152	0
+zfp_write.h5	/input/i4_2d	CONTIGUOUS	-	2640	0
+zfp_write.h5	/input/i8_3d	CONTIGUOUS	-	4096	0
+zfp_write.h5	/input/u4_1d	CONTIGUOUS	-	360	0
+zfp_write.h5	/u4_1d_prec24	CHUNKED	40	300	1	32013	1	269504785 91252346 624 2171600896	H5Z-ZFP-1.1.1 (ZFP-1.0.1)
+zfp_write.h5	/u4_1d_rev	CHUNKED	40	317	1	32013	1	269504785 91252346 624 2281701376	H5Z-ZFP-1.1.1 (ZFP-1.0.1)

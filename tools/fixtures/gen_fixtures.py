@@ -5,7 +5,8 @@
     python tools/fixtures/gen_fixtures.py szip unwritten  # just the named ones (see FIXTURES)
 
 Requirements: tools/fixtures/requirements.txt (h5py 3.16 / HDF5 2.0, numpy, and imagecodecs for the
-real-format szip chunks).
+real-format szip chunks). With FALCON_H5CLEAR_114 naming the h5clear of an HDF5 1.14, mdc_image.h5 is also
+checked through that library, the only one that reads it (see build_mdc_image).
 
 Both fixtures hold the same logical tree; they differ only in on-disk format:
 
@@ -22,6 +23,8 @@ Logical tree:
 """
 import ctypes
 import os
+import shutil
+import subprocess
 import sys
 import h5py
 import numpy as np
@@ -2314,7 +2317,236 @@ def build_tracked_order(f):
         dd.attrs[f"q{19 - i:02d}"] = np.int32(i)
 
 
+class _CacheImageConfig(ctypes.Structure):
+    """H5AC_cache_image_config_t (H5ACpublic.h)."""
+    _fields_ = [("version", ctypes.c_int), ("generate_image", ctypes.c_bool),
+                ("save_resize_status", ctypes.c_bool), ("entry_ageout", ctypes.c_int)]
+
+
+def _cache_image_file(path, userblock=0, libver=(h5py.h5f.LIBVER_LATEST, h5py.h5f.LIBVER_LATEST)):
+    """Creates ``path`` so that libhdf5 writes a metadata cache image when it closes (H5Pset_mdc_image_config,
+    which h5py does not wrap). The image needs a superblock extension, so a version 2-3 superblock: format
+    bounds from HDF5 1.8 on."""
+    fapl = h5py.h5p.create(h5py.h5p.FILE_ACCESS)
+    fapl.set_libver_bounds(*libver)
+    config = _CacheImageConfig(1, True, False, -1)  # H5AC__CURR_CACHE_IMAGE_CONFIG_VERSION; no entry ageout
+    if _hdf5_library().H5Pset_mdc_image_config(ctypes.c_int64(fapl.id), ctypes.byref(config)) < 0:
+        raise RuntimeError("H5Pset_mdc_image_config failed")
+    fcpl = h5py.h5p.create(h5py.h5p.FILE_CREATE)
+    if userblock:
+        fcpl.set_userblock(userblock)
+    return h5py.File(h5py.h5f.create(path.encode(), h5py.h5f.ACC_TRUNC, fcpl=fcpl, fapl=fapl))
+
+
+def _cache_image_entries(path, userblock=0):
+    """The (address, size) of every entry of the metadata cache image of ``path``, after checking that the
+    file has one (a Metadata Cache Image message, type 0x18, in its superblock extension) and that its root
+    object header is in the image only: what makes the file a test of reading the image."""
+    data = open(path, "rb").read()[userblock:]
+    if data[8] not in (2, 3) or data[9] != 8 or data[10] != 8:
+        raise RuntimeError("expected a version 2-3 superblock with 8-byte addresses and lengths")
+    extension, root = int.from_bytes(data[20:28], "little"), int.from_bytes(data[36:44], "little")
+    body, size, _ = _extension_message(data, extension, 0x18)
+    address, length = (int.from_bytes(data[body + 1 + 8 * i:body + 9 + 8 * i], "little") for i in range(2))
+    if data[address:address + 4] != b"MDCI" or int.from_bytes(data[address + 6:address + 14], "little") != length:
+        raise RuntimeError("no metadata cache image block where the message says")
+    stored = int.from_bytes(data[address + length - 4:address + length], "little")
+    if _lookup3(data[address:address + length - 4]) != stored:
+        raise RuntimeError("the metadata cache image's checksum is not the lookup3 hash of what precedes it")
+    entries, p = [], address + 18
+    for _ in range(int.from_bytes(data[address + 14:address + 18], "little")):
+        parents = int.from_bytes(data[p + 8:p + 10], "little")
+        entry = int.from_bytes(data[p + 14:p + 22], "little"), int.from_bytes(data[p + 22:p + 30], "little")
+        entries.append(entry)
+        p += 30 + 8 * parents + entry[1]
+    if p != address + length - 4:
+        raise RuntimeError("the metadata cache image's entries do not end at its checksum")
+    if root not in [a for a, _ in entries] or data[root:root + 4] == b"OHDR":
+        raise RuntimeError("the root object header is not in the metadata cache image only")
+    return entries
+
+
+def _mdc_image_tree(f):
+    """One of each kind of metadata a cache image may hold."""
+    record = np.dtype([("a", "<i4"), ("b", "<f8")])
+    f.attrs["title"] = "metadata cache image"
+    scalars = f.create_group("scalars")
+    scalars.create_dataset("i4", data=np.arange(10, dtype="<i4"))
+    scalars.create_dataset("f8", data=np.arange(5, dtype="<f8") * 0.25)
+    scalars.create_dataset("be_u2", data=np.arange(6, dtype=">u2").reshape(2, 3))
+    _compact(scalars, "compact", np.arange(4, dtype="<i2"))
+    dense = f.create_group("dense")  # more than 8 links: a fractal heap and a version-2 B-tree
+    for i in range(24):
+        if i % 3 == 0:
+            dense.create_group(f"g{i:02d}")
+        else:
+            dense.create_dataset(f"d{i:02d}", data=np.full(3, i, dtype="<i4"))
+    attrs = f.create_dataset("attrs", data=np.arange(3, dtype="<f4"))
+    for i in range(12):  # more than 8 attributes: dense storage too
+        attrs.attrs[f"a{i:02d}"] = np.arange(i + 1, dtype="<i8")
+    attrs.attrs["text"] = "variable-length text"  # in a global heap collection
+    chunked = f.create_group("chunked")
+    chunked.create_dataset("fixed", data=np.arange(600, dtype="<i4").reshape(20, 30), chunks=(5, 10),
+                           compression="gzip", shuffle=True)  # a fixed array
+    extensible = chunked.create_dataset("extensible", shape=(40,), maxshape=(None,), chunks=(8,), dtype="<f8")
+    extensible[:] = np.arange(40) * 0.5  # an extensible array
+    btree = chunked.create_dataset("btree", shape=(6, 6), maxshape=(None, None), chunks=(3, 3), dtype="<i2",
+                                   fletcher32=True)
+    btree[...] = np.arange(36).reshape(6, 6)  # a version-2 B-tree
+    chunked.create_dataset("single", data=np.arange(50, dtype="<u1"), chunks=(50,), compression="gzip")
+    f.create_dataset("strings", data=np.array(["alpha", "beta", "", "gamma delta"], dtype=object),
+                     dtype=h5py.string_dtype("utf-8"))
+    f["soft"] = h5py.SoftLink("/scalars/i4")
+    f["record"] = record  # a committed datatype
+    f.create_dataset("records", data=np.array([(1, 1.5), (2, 2.5), (3, 3.5)], dtype=record), dtype=f["record"])
+
+
+def _same_tree(a, b, path="/"):
+    """Raises unless the groups ``a`` and ``b`` hold the same links, objects, attributes, and values."""
+    def same_attributes(x, y, where):
+        if sorted(x.attrs) != sorted(y.attrs):
+            raise RuntimeError(f"{where}: attributes {sorted(x.attrs)} and {sorted(y.attrs)}")
+        for name in x.attrs:
+            if not np.array_equal(np.asarray(x.attrs[name]), np.asarray(y.attrs[name])):
+                raise RuntimeError(f"{where}: attribute {name} differs")
+
+    same_attributes(a, b, path)
+    if sorted(a) != sorted(b):
+        raise RuntimeError(f"{path}: links {sorted(a)} and {sorted(b)}")
+    for name in a:
+        where = path.rstrip("/") + "/" + name
+        link, other = a.get(name, getlink=True), b.get(name, getlink=True)
+        if type(link) is not type(other):
+            raise RuntimeError(f"{where}: {link} and {other}")
+        if isinstance(link, h5py.SoftLink):
+            if link.path != other.path:
+                raise RuntimeError(f"{where}: soft links to {link.path} and {other.path}")
+            continue
+        x, y = a[name], b[name]
+        if type(x) is not type(y):
+            raise RuntimeError(f"{where}: {x} and {y}")
+        if isinstance(x, h5py.Group):
+            _same_tree(x, y, where)
+        elif isinstance(x, h5py.Dataset):
+            same_attributes(x, y, where)
+            if (x.shape, x.dtype, x.chunks, x.compression) != (y.shape, y.dtype, y.chunks, y.compression):
+                raise RuntimeError(f"{where}: {x} and {y}")
+            if not np.array_equal(x[...], y[...]):
+                raise RuntimeError(f"{where}: values differ")
+        elif x.dtype != y.dtype:  # a committed datatype
+            raise RuntimeError(f"{where}: datatypes {x.dtype} and {y.dtype}")
+
+
+def _check_cache_image_with_hdf5_114(path, tree, libver):
+    """Has an HDF5 1.14 write the cache image of a copy of ``path`` out (h5clear -m: opening a file to write
+    it loads its image, and closing it writes the entries where they belong), then checks that this libhdf5
+    reads from the copy what ``tree`` writes to a file of its own. Needs the h5clear of an HDF5 1.14, named
+    by the environment variable FALCON_H5CLEAR_114; without it, says so and checks nothing."""
+    h5clear = os.environ.get("FALCON_H5CLEAR_114")
+    if not h5clear:
+        print(f"note: {os.path.basename(path)} is not checked through HDF5 1.14 (set FALCON_H5CLEAR_114 to its "
+              "h5clear to check it)")
+        return
+    copy, plain = path + ".tmp", path[:-3] + "_plain.h5.tmp"
+    try:
+        shutil.copyfile(path, copy)
+        subprocess.run([h5clear, "-m", copy], check=True, capture_output=True)
+        subprocess.run([h5clear, "-s", copy], check=True, capture_output=True)  # 1.14.6 leaves it marked as open
+        if b"MDCI" in open(copy, "rb").read():
+            raise RuntimeError("h5clear -m left the metadata cache image in place")
+        with h5py.File(plain, "w", libver=libver) as f:
+            tree(f)
+        with h5py.File(copy, "r") as a, h5py.File(plain, "r") as b:
+            _same_tree(a, b)
+        print(f"{os.path.basename(path)}: HDF5 1.14 wrote its cache image out, and the file reads as written")
+    finally:
+        for temporary in (copy, plain):
+            if os.path.exists(temporary):
+                os.remove(temporary)
+
+
+def build_mdc_image(out):
+    """Files closed with a metadata cache image (H5Pset_mdc_image_config): the metadata libhdf5 held in its
+    cache -- every object header, heap, B-tree, and chunk index here -- is written in one block, the image,
+    that a Metadata Cache Image message in the superblock extension points at, and not at its own addresses,
+    which hold zeros.
+
+    mdc_image.h5 has one of each kind of metadata, in the formats of HDF5 1.10 to 1.14. libhdf5 2.0.0's
+    release builds cannot read it back: H5C__reconstruct_cache_entry reads an entry's flush-dependency flags
+    in debug builds only, so an entry with flush-dependency children (a fractal heap's, an extensible
+    array's) fails as "non-parent entry has children". HDF5 1.14 reads it, which is why it keeps to that
+    library's formats: with FALCON_H5CLEAR_114 set, 1.14's h5clear writes the image of a copy out, and the
+    copy must read as the same tree written without an image.
+
+    mdc_image_userblock.h5 begins with a user block, so the image's addresses are relative to the
+    superblock; it has no such entries, and libhdf5 2.0.0 reads it back."""
+    path = os.path.join(out, "mdc_image.h5")
+    libver = (h5py.h5f.LIBVER_V110, h5py.h5f.LIBVER_V114)
+    with _cache_image_file(path, libver=libver) as f:
+        _mdc_image_tree(f)
+    _cache_image_entries(path)
+    try:
+        with h5py.File(path, "r") as f:  # read-only: opening it for writing would write the image's entries out
+            if (len(f["dense"]) != 24 or len(f["attrs"].attrs) != 13
+                    or not np.array_equal(f["chunked/fixed"][...], np.arange(600).reshape(20, 30))
+                    or not np.array_equal(f["soft"][...], np.arange(10))):
+                raise RuntimeError("libhdf5 does not read back what was written")
+    except (KeyError, OSError) as e:
+        if "non-parent entry has children" not in str(e):
+            raise
+        print("note: this libhdf5 cannot read mdc_image.h5 back (see build_mdc_image)")
+    _check_cache_image_with_hdf5_114(path, _mdc_image_tree, ("v110", "v114"))
+
+    path = os.path.join(out, "mdc_image_userblock.h5")
+    with _cache_image_file(path, userblock=512) as f:
+        f.create_group("grp").create_dataset("data", data=np.arange(6, dtype="<i4"))
+        f.create_dataset("chunked", data=np.arange(40, dtype="<f8"), chunks=(8,), compression="gzip")
+        f.attrs["note"] = "user block"
+    with open(path, "r+b") as fh:
+        fh.write(b"falcon fixture: a user block before a file with a metadata cache image".ljust(512, b" "))
+    _cache_image_entries(path, userblock=512)
+    with h5py.File(path, "r") as f:
+        if (not np.array_equal(f["grp/data"][...], np.arange(6)) or f.attrs["note"] != "user block"
+                or not np.array_equal(f["chunked"][...], np.arange(40))):
+            raise RuntimeError("libhdf5 does not read back what was written")
+
+
+def build_corrupt_stab(out):
+    """corrupt_stab.h5: old_style_groups.h5's tree, in a file whose root group's Symbol Table message points
+    at no B-tree and no local heap (both addresses 0), as in the HDF5 library's test/testfiles/
+    corrupt_stab_msg.h5. The superblock's root symbol table entry still caches the two addresses (cache type
+    1), and libhdf5 repairs the message from them when it opens the file for writing (H5G__stab_valid)."""
+    path = os.path.join(out, "corrupt_stab.h5")
+    with h5py.File(path, "w", libver="earliest") as f:
+        build(f)
+    data = bytearray(open(path, "rb").read())
+    if data[8] != 0 or data[13] != 8:
+        raise RuntimeError("expected a version-0 superblock with 8-byte addresses")
+    entry = 24 + 4 * 8  # the root group's symbol table entry: name offset, header, cache type, reserved, scratch
+    header = int.from_bytes(data[entry + 8:entry + 16], "little")
+    if int.from_bytes(data[entry + 16:entry + 20], "little") != 1:
+        raise RuntimeError("the root symbol table entry caches no symbol table")
+    body, size, _ = _extension_message(data, header, 0x11)
+    if size != 16 or data[body:body + 16] != data[entry + 24:entry + 40]:
+        raise RuntimeError("the root symbol table entry does not cache the Symbol Table message's addresses")
+    data[body:body + 16] = bytes(16)
+    open(path, "wb").write(data)
+    copy = path + ".tmp"  # libhdf5 changes the file it repairs
+    shutil.copyfile(path, copy)
+    try:
+        with h5py.File(copy, "r+") as f:
+            if sorted(f) != ["alpha", "empty", "root_ds"] or not np.array_equal(f["root_ds"][...], np.arange(4)):
+                raise RuntimeError("libhdf5 does not repair the Symbol Table message")
+        repaired = open(copy, "rb").read()
+        if repaired[body:body + 16] != repaired[entry + 24:entry + 40]:
+            raise RuntimeError("libhdf5 left the Symbol Table message as it was")
+    finally:
+        os.remove(copy)
+
+
 FIXTURES = {
+    "mdc_image": lambda: build_mdc_image(OUT),
+    "corrupt_stab": lambda: build_corrupt_stab(OUT),
     "vds_loop": lambda: build_vds_loop(OUT),
     "links": lambda: build_links(OUT),
     "heap_limits": lambda: _with_file("heap_limits.h5", build_heap_limits, libver="latest"),

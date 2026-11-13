@@ -8,7 +8,8 @@ import java.nio.ByteOrder;
 
 /**
  * A random-access, little-endian reader over a file's bytes: a {@link MemorySegment} (a mapped file, or
- * bytes in memory), or a {@link PagedSource} that reads them on demand.
+ * bytes in memory), a {@link PagedSource} that reads them on demand, or either with some ranges
+ * {@linkplain #redirected read from elsewhere in the file}.
  *
  * <p>HDF5 stores all format metadata little-endian, so every multi-byte accessor here reads
  * little-endian (using <em>unaligned</em> layouts, since on-disk fields are not aligned). The class
@@ -36,7 +37,7 @@ public final class HdfBuffer {
             ValueLayout.JAVA_LONG_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
 
     private final MemorySegment segment; // the bytes, when all are mapped or in memory; else null
-    private final PagedSource paged;     // otherwise, where they are read from on demand
+    private final ByteSource paged;      // otherwise, where they are read from: on demand, or redirected
     private final long base;             // where this view starts in paged
     private final long size;
     private long position;
@@ -51,7 +52,7 @@ public final class HdfBuffer {
         this(null, source, 0, source.size());
     }
 
-    private HdfBuffer(MemorySegment segment, PagedSource paged, long base, long size) {
+    private HdfBuffer(MemorySegment segment, ByteSource paged, long base, long size) {
         this.segment = segment;
         this.paged = paged;
         this.base = base;
@@ -61,6 +62,21 @@ public final class HdfBuffer {
     /** Wraps a byte array (handy for tests and small in-memory metadata blocks). */
     public static HdfBuffer of(byte[] bytes) {
         return new HdfBuffer(MemorySegment.ofArray(bytes));
+    }
+
+    /**
+     * These bytes with some ranges read from elsewhere in them: the {@code lengths[i]} bytes at
+     * {@code addresses[i]} are those stored at {@code sources[i]}. This is how a file's metadata cache image
+     * is read, whose entries stand for the bytes at their own addresses. Every other read is as before, and
+     * a read that lies within one range, or outside them all, is still a view of the stored bytes.
+     *
+     * @param addresses each range's first address, ascending
+     * @param lengths   each range's length, positive; a range ends at or before the next one's address
+     * @param sources   where each range's bytes are stored
+     * @throws IllegalArgumentException if the ranges are not ascending and apart, or reach outside this buffer
+     */
+    public HdfBuffer redirected(long[] addresses, long[] lengths, long[] sources) {
+        return new HdfBuffer(null, new RedirectedSource(this, addresses, lengths, sources), 0, size);
     }
 
     /** The number of readable bytes. */
@@ -205,7 +221,7 @@ public final class HdfBuffer {
     /**
      * The {@code len} bytes at {@code off} as a segment that starts there (throws
      * {@link HdfFormatException} if out of range): a view of the mapped or in-memory bytes, or the bytes
-     * read from a paged source.
+     * read from a paged or redirected source.
      */
     public MemorySegment segmentSlice(long off, long len) {
         checkRange(off, len);

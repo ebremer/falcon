@@ -56,6 +56,16 @@ file tracks object times), and `referenceCount()` (its hard links).
 `close()` may be called more than once; after it, reading anything obtained from the file throws
 `HdfClosedException`, and `isOpen()` returns false.
 
+Two kinds of file that libhdf5 reads in a way of its own are read the same way:
+- **A file closed with a metadata cache image** (`H5Pset_mdc_image_config`) keeps its metadata in one
+  block, the image, and not at each structure's own address, where libhdf5 writes it only when it next
+  opens the file for writing. Falcon reads the metadata from the image, whose checksum it verifies when it
+  opens the file.
+- **A root group whose Symbol Table message is corrupt**, in a file of the original format, is read
+  through the copy of the message's two addresses that the superblock keeps, as libhdf5 mends the
+  message from it when it opens the file for writing. (libhdf5 does not read such a file it may not
+  write; Falcon does.)
+
 `Hdf5File.open(path, options)` takes `OpenOptions`, which hold the external-file policy below and how
 virtual datasets with unlimited mappings are read (see *References and virtual datasets*):
 
@@ -776,6 +786,9 @@ try (Hdf5Writer w = Hdf5Writer.open(Path.of("data.h5"))) {
     in the shared-message heap, as unused space.
   - A group or object whose links or attributes drop below its minimum for dense storage (6) goes back to
     compact messages, as libhdf5 moves them.
+  - A root group's Symbol Table message that is corrupt (see *Open a file and walk the tree*) is mended
+    in the file from the superblock's copy, as libhdf5 mends it, so that libhdf5 then reads the file
+    without writing it.
 - **In place:**
   - New data and metadata go after the file's end. `close()` writes them, with a journal of every write it
     will make over the file's own structures (the superblock, changed object headers and indexes), and
@@ -794,6 +807,8 @@ try (Hdf5Writer w = Hdf5Writer.open(Path.of("data.h5"))) {
 - **Refused** (`HdfUnsupportedException`):
   - files with 4-byte addresses, of a non-default driver (family, multi), that track their free space
     persistently or in pages, or that are marked as open by a writer (with no journal of Falcon's to redo);
+  - files with a metadata cache image, whose metadata is in the image and not where a change would be
+    written (`h5clear -m` writes the image out, after which the file opens);
   - writing into datasets filtered by a filter Falcon does not know (it writes into LZF, Blosc, LZ4,
     bitshuffle, Zstandard, bzip2, ZFP, Blosc2, and SZ datasets, with their client data), or with client
     data Falcon cannot write as the plugin does (c-blosc2's filter and codec plugins; SZ client data with
@@ -813,9 +828,9 @@ Every failure Falcon raises is an unchecked `HdfException`:
 - `HdfFormatException` — bytes on disk violate the spec (bad signature/checksum, out-of-range address,
   truncated or corrupt input). Corrupt input fails this way rather than as a raw runtime exception, a
   JVM crash, or an infinite loop: every checksummed metadata structure (object headers, B-trees,
-  fractal heaps, chunk indexes), every `fletcher32` chunk, and every zstd frame's checksum is verified,
-  loops and over-deep nesting in the file's structure are detected, and decompression is bounded by the
-  chunk size.
+  fractal heaps, chunk indexes, a metadata cache image), every `fletcher32` chunk, and every zstd frame's
+  checksum is verified, loops and over-deep nesting in the file's structure are detected, and
+  decompression is bounded by the chunk size.
 
   Bytes that no checksum covers cannot be checked: raw data without `fletcher32`, the global heap
   (variable-length data), the direct blocks of a fractal heap that does not checksum them, and the

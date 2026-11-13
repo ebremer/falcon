@@ -10,6 +10,7 @@ import com.ebremer.falcon.hdf5.io.PagedSource;
 import com.ebremer.falcon.hdf5.message.BTreeKValuesMessage;
 import com.ebremer.falcon.hdf5.message.DriverInfoMessage;
 import com.ebremer.falcon.hdf5.message.FileSpaceInfoMessage;
+import com.ebremer.falcon.hdf5.superblock.MetadataCacheImage;
 import com.ebremer.falcon.hdf5.superblock.Superblock;
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -26,7 +27,8 @@ import java.util.Optional;
  *
  * <p>Open a file, walk its hierarchy from {@link #root()}, and {@link #close()} to unmap it (or use
  * try-with-resources). A file that begins with a user block (as MATLAB v7.3 {@code .mat} files do) is
- * read like any other.
+ * read like any other, and so is one closed with a metadata cache image ({@code H5Pset_mdc_image_config}),
+ * whose metadata is read from the image.
  *
  * <pre>{@code
  * try (Hdf5File h5 = Hdf5File.open(Path.of("data.h5"))) {
@@ -62,12 +64,14 @@ public final class Hdf5File implements AutoCloseable {
     private final Superblock superblock;
     private final FileContext ctx;
     private final Group root;
+    private final boolean cacheImage; // whether its metadata is read from a metadata cache image
 
-    private Hdf5File(Runnable release, Superblock superblock, FileContext ctx, Group root) {
+    private Hdf5File(Runnable release, Superblock superblock, FileContext ctx, Group root, boolean cacheImage) {
         this.release = release;
         this.superblock = superblock;
         this.ctx = ctx;
         this.root = root;
+        this.cacheImage = cacheImage;
     }
 
     /**
@@ -211,10 +215,16 @@ public final class Hdf5File implements AutoCloseable {
             if (base != 0) {
                 data = data.slice(base, data.size() - base);
             }
+            // A file closed with a metadata cache image keeps its metadata in the image, not at its own
+            // addresses: read each of the image's entries where it belongs.
+            HdfBuffer stored = data;
+            data = MetadataCacheImage.apply(stored, superblock.sizeOfOffsets(), superblock.sizeOfLengths(),
+                    superblock.superblockExtensionAddress());
             FileContext ctx = new FileContext(data, superblock.sizeOfOffsets(), superblock.sizeOfLengths(),
-                    path, superblock.rootObjectHeaderAddress(), options, superblock.superblockExtensionAddress());
+                    path, superblock.rootObjectHeaderAddress(), options, superblock.superblockExtensionAddress(),
+                    superblock.rootBTreeAddress(), superblock.rootHeapAddress());
             Group root = Group.root(ctx, superblock.rootObjectHeaderAddress());
-            return new Hdf5File(release, superblock, ctx, root);
+            return new Hdf5File(release, superblock, ctx, root, data != stored);
         } catch (UncheckedIOException e) {
             release.run();
             throw e.getCause(); // a reader failure while opening is the open's own I/O error
@@ -236,6 +246,11 @@ public final class Hdf5File implements AutoCloseable {
     /** This file's context, which every object read from it shares. */
     FileContext context() {
         return ctx;
+    }
+
+    /** Whether the file was closed with a metadata cache image, from which its metadata is read. */
+    boolean hasMetadataCacheImage() {
+        return cacheImage;
     }
 
     /**

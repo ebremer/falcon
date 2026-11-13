@@ -109,7 +109,8 @@ def hdf5_result():
     s = json.loads(path.read_text(encoding="utf-8"))
     text = (f"{s['files']} files{' (a subset)' if s['subset'] else ''}: {s['agree']} agree, "
             f"{s['both refuse']} refused by both, Falcon reads more of {s['Falcon reads more']}, "
-            f"{s['known']} known differences (listed in the runner); {s['unexpected']} unexpected")
+            f"{s['known']} known difference{'' if s['known'] == 1 else 's'} (listed in the runner); "
+            f"{s['unexpected']} unexpected")
     if s["untyped"]:
         text += f"; {s['untyped']} with untyped Falcon failures"
     return Result("pass" if not s["unexpected"] else "FAIL", text,

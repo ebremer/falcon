@@ -1,6 +1,8 @@
 package com.ebremer.falcon.hdf5.message;
 
+import com.ebremer.falcon.hdf5.btree.GroupBTreeV1;
 import com.ebremer.falcon.hdf5.header.HeaderMessage;
+import com.ebremer.falcon.hdf5.heap.LocalHeap;
 import com.ebremer.falcon.hdf5.io.FileContext;
 
 /**
@@ -30,5 +32,24 @@ public final class SymbolTableMessage {
         long btree = ctx.buffer().getAddress(off, ctx.sizeOfOffsets());
         long heap = ctx.buffer().getAddress(off + ctx.sizeOfOffsets(), ctx.sizeOfOffsets());
         return new SymbolTableMessage(btree, heap);
+    }
+
+    /**
+     * The root group's Symbol Table message, repaired as libhdf5 repairs it when it opens a file for writing
+     * ({@code H5G__stab_valid}): an address of the message at which there is no B-tree node, or no local heap,
+     * gives way to the one a version 0&ndash;1 superblock caches in its root symbol table entry, if there is
+     * one there. A message whose addresses are good, or which the superblock cannot mend, is as it is stored.
+     */
+    public static SymbolTableMessage parseRoot(FileContext ctx, HeaderMessage message) {
+        SymbolTableMessage stored = parse(ctx, message);
+        long btree = stored.btreeAddress;
+        long heap = stored.localHeapAddress;
+        if (!GroupBTreeV1.isNode(ctx, btree) && GroupBTreeV1.isNode(ctx, ctx.rootBTreeAddress())) {
+            btree = ctx.rootBTreeAddress();
+        }
+        if (!LocalHeap.isHeap(ctx, heap) && LocalHeap.isHeap(ctx, ctx.rootHeapAddress())) {
+            heap = ctx.rootHeapAddress();
+        }
+        return btree == stored.btreeAddress && heap == stored.localHeapAddress ? stored : new SymbolTableMessage(btree, heap);
     }
 }

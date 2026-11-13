@@ -66,9 +66,6 @@ TYPED = {"HdfException", "HdfFormatException", "HdfUnsupportedException", "HdfCl
 
 # Differences understood and accepted: the file's path in the checkout, and why.
 KNOWN = {
-    "tools/test/testfiles/h5clear_mdc_image.h5":
-        "written with a metadata cache image (H5Pset_mdc_image_config), so its metadata is in the cache image "
-        "block (format specification III.J), not at its own addresses: Falcon does not read that block yet",
     "tools/test/testfiles/tcomplex.h5":
         "h5py 3.16 on Linux returns its long double complex numbers (16 bytes, a 112-bit mantissa) unconverted, "
         "their bytes taken for x87 values (0.0 for 10.0); libhdf5's own conversion to native long double complex "

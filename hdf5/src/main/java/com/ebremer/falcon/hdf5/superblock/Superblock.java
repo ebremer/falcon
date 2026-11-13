@@ -38,10 +38,12 @@ public final class Superblock {
     private final long rootObjectHeaderAddress;
     private final int[] btreeK;           // group leaf, group internal, indexed storage; null if not stored
     private final long driverInfoAddress; // versions 0-1: the driver information block
+    private final long rootBTreeAddress;  // versions 0-1: the root group's symbol table, if its entry caches it
+    private final long rootHeapAddress;
 
     private Superblock(long location, int version, int sizeOfOffsets, int sizeOfLengths, long baseAddress,
                        long superblockExtensionAddress, long endOfFileAddress, long rootObjectHeaderAddress,
-                       int[] btreeK, long driverInfoAddress) {
+                       int[] btreeK, long driverInfoAddress, long rootBTreeAddress, long rootHeapAddress) {
         this.location = location;
         this.version = version;
         this.sizeOfOffsets = sizeOfOffsets;
@@ -52,6 +54,8 @@ public final class Superblock {
         this.rootObjectHeaderAddress = rootObjectHeaderAddress;
         this.btreeK = btreeK;
         this.driverInfoAddress = driverInfoAddress;
+        this.rootBTreeAddress = rootBTreeAddress;
+        this.rootHeapAddress = rootHeapAddress;
     }
 
     /**
@@ -111,6 +115,20 @@ public final class Superblock {
         return driverInfoAddress;
     }
 
+    /**
+     * The address of the root group's B-tree that the root group symbol table entry of a version 0&ndash;1
+     * superblock caches (spec section III.C, cache type 1), else undefined. It is a copy of what the root
+     * group's Symbol Table message holds, which libhdf5 falls back on when that message is corrupt.
+     */
+    public long rootBTreeAddress() {
+        return rootBTreeAddress;
+    }
+
+    /** The address of the root group's local heap, cached as {@link #rootBTreeAddress()} is, else undefined. */
+    public long rootHeapAddress() {
+        return rootHeapAddress;
+    }
+
     /** Locates and parses the superblock of a mapped HDF5 file. */
     public static Superblock parse(HdfBuffer buf) {
         long addr = findSuperblock(buf);
@@ -143,16 +161,21 @@ public final class Superblock {
         long extension = buf.getAddress(addressesStart + sizeOfOffsets, sizeOfOffsets);
         long endOfFile = buf.getAddress(addressesStart + 2L * sizeOfOffsets, sizeOfOffsets);
         long driverInfo = buf.getAddress(addressesStart + 3L * sizeOfOffsets, sizeOfOffsets);
-        // Root group symbol-table entry: link-name offset (O), then object-header address (O).
+        // Root group symbol-table entry: link-name offset (O), object-header address (O), cache type (4),
+        // reserved (4), then a 16-byte scratch pad: for cache type 1, the group's B-tree and local heap (O each).
         long rootEntry = addressesStart + 4L * sizeOfOffsets;
         long rootObjectHeader = buf.getAddress(rootEntry + sizeOfOffsets, sizeOfOffsets);
+        long scratchPad = rootEntry + 2L * sizeOfOffsets + 8;
+        boolean cached = sizeOfOffsets <= 8 && buf.getInt(rootEntry + 2L * sizeOfOffsets) == 1;
+        long rootBTree = cached ? buf.getAddress(scratchPad, sizeOfOffsets) : HdfBuffer.UNDEFINED_ADDRESS;
+        long rootHeap = cached ? buf.getAddress(scratchPad + sizeOfOffsets, sizeOfOffsets) : HdfBuffer.UNDEFINED_ADDRESS;
         int[] btreeK = {
             buf.getUnsignedShort(addr + 16), // group leaf-node K
             buf.getUnsignedShort(addr + 18), // group internal-node K
             version == 1 ? buf.getUnsignedShort(addr + 24) : DEFAULT_INDEXED_STORAGE_K,
         };
         return new Superblock(addr, version, sizeOfOffsets, sizeOfLengths, baseAddress,
-                extension, endOfFile, rootObjectHeader, btreeK, driverInfo);
+                extension, endOfFile, rootObjectHeader, btreeK, driverInfo, rootBTree, rootHeap);
     }
 
     private static Superblock parseChecksummed(HdfBuffer buf, long addr, int version) {
@@ -171,6 +194,7 @@ public final class Superblock {
                     "superblock checksum mismatch: stored=0x%08x computed=0x%08x", stored, computed));
         }
         return new Superblock(addr, version, sizeOfOffsets, sizeOfLengths, baseAddress,
-                extension, endOfFile, rootObjectHeader, null, HdfBuffer.UNDEFINED_ADDRESS);
+                extension, endOfFile, rootObjectHeader, null, HdfBuffer.UNDEFINED_ADDRESS,
+                HdfBuffer.UNDEFINED_ADDRESS, HdfBuffer.UNDEFINED_ADDRESS);
     }
 }

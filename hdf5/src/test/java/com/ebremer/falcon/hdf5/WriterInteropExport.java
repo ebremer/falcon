@@ -261,6 +261,9 @@ class WriterInteropExport {
         // --- P2 S8: the third-party filters, written new and into files the plugins wrote
         writePluginFilters(dir);
 
+        // --- P1 C2: a root group whose Symbol Table message is corrupt, mended when the file is changed
+        writeRepairs(dir);
+
         Files.writeString(dir.resolve("manifest.json"), json(Map.of("files", files)), StandardCharsets.UTF_8);
     }
 
@@ -668,6 +671,36 @@ class WriterInteropExport {
         Path file = dir.resolve(name);
         Files.copy(Fixtures.path(fixture), file, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
         return file;
+    }
+
+    /**
+     * A file whose root group's Symbol Table message points at nothing (P1 C2), which libhdf5 can read only
+     * when it may write, and mend, it: changed in place by Falcon, which mends the message as libhdf5 does,
+     * it is a file libhdf5 reads without writing.
+     */
+    private void writeRepairs(Path dir) throws IOException {
+        Path kept = fixture(dir, "corrupt_stab.h5", "edit_corrupt_stab.h5");
+        begin(dir, "edit_corrupt_stab.h5", "earliest");
+        try (Hdf5Writer w = Hdf5Writer.open(kept)) {
+            w.dataset("root_ds").stringAttribute("note", "changed"); // the root group's links stay as they are
+        }
+        group("/").put("children", List.of("alpha", "empty", "root_ds"));
+        dataset("/root_ds", range(4)).put("attrs", Map.of("note", List.of("changed")));
+        dataset("/alpha/beta/gamma", range(6));
+        dataset("/alpha/delta", new double[] {1.5, 2.5, 3.5});
+        group("/empty").put("count", 0);
+
+        Path added = fixture(dir, "corrupt_stab.h5", "edit_corrupt_stab_added.h5");
+        begin(dir, "edit_corrupt_stab_added.h5", "earliest");
+        try (Hdf5Writer w = Hdf5Writer.open(added)) {
+            w.intDataset("added", new int[] {7, 8, 9}, new long[] {3}); // the root group's symbol table is written anew
+            w.delete("empty");
+        }
+        group("/").put("children", List.of("added", "alpha", "root_ds"));
+        objects.getLast().put("absent", List.of("empty"));
+        dataset("/added", new int[] {7, 8, 9});
+        dataset("/root_ds", range(4));
+        dataset("/alpha/beta/gamma", range(6));
     }
 
     /** Files changed in place (P2 WF6): files Falcon wrote, and files libhdf5 wrote. */

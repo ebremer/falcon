@@ -321,8 +321,8 @@ public final class Hdf5Writer implements AutoCloseable {
      * @return the writer, which writes the changes over the file on {@link #close()}
      * @throws IOException if the file cannot be read or opened for writing
      * @throws HdfUnsupportedException for a file Falcon does not change: with 4-byte addresses, of a file
-     *         driver other than the default (family, multi, ...), tracking its free space, or marked as open
-     *         by a writer (without a journal of Falcon's to redo)
+     *         driver other than the default (family, multi, ...), tracking its free space, with a metadata
+     *         cache image, or marked as open by a writer (without a journal of Falcon's to redo)
      */
     public static Hdf5Writer open(Path path) throws IOException {
         OutputFile.recover(path); // a change interrupted while it was written over the file: redone first
@@ -4098,6 +4098,16 @@ public final class Hdf5Writer implements AutoCloseable {
             byte[] body = symbolTable.body();
             long btree = u64(body, 0);
             long heap = u64(body, 8);
+            if (group.address == existing.rootAddress) {
+                // A root group's message that points at no B-tree or heap is mended from the superblock's copy
+                // of it, in the file too, as libhdf5 mends it when it opens a file for writing (H5G__stab_valid).
+                long[] table = existing.symbolTable(group.address);
+                if (table[0] != btree || table[1] != heap) {
+                    btree = table[0];
+                    heap = table[1];
+                    editor.replace(symbolTable, symbolTableBody(new SymbolTable(btree, heap)));
+                }
+            }
             // A subgroup opened in it whose symbol table changed is cached anew in its entry.
             boolean cacheChanged = false;
             for (GroupSpec subgroup : group.groups) {

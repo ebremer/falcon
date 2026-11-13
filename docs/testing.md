@@ -99,12 +99,12 @@ a JSON manifest of everything in it (every link, object, attribute, and value), 
 manifest in a process of its own and compares the two. Each file then **agrees**; is **refused by both**
 (files of the multi-file drivers, and files broken on purpose); is one where **Falcon reads more** (region
 references, new-style references, szip data, VAX floats, and damaged files libhdf5 refuses); or **differs**.
-A failure of Falcon's that is not a typed exception is a bug, whatever h5py does. A run on Windows: 310 files
-agree, 60 are refused by both, Falcon reads more of 62, and the 2 that differ are listed in the script with
-their reasons (a file whose metadata is in a metadata cache image, which Falcon does not read yet, and an
-h5py bug the HDF5 library's expected output confirms). The counts depend on h5py's build: on Linux, CI's,
-h5py also reads szip data, so more files agree, and a third file is a known difference (h5py there returns
-16-byte long double complex numbers unconverted, where libhdf5's own conversion gives Falcon's values). `-v`
+A failure of Falcon's that is not a typed exception is a bug, whatever h5py does. A run on Windows: 311 files
+agree, 61 are refused by both, Falcon reads more of 61, and the 1 that differs is listed in the script with
+its reason (an h5py bug the HDF5 library's expected output confirms). The counts depend on h5py's build: on
+Linux, CI's, h5py also reads szip data, so more files agree, and a second file is a known difference (h5py
+there returns 16-byte long double complex numbers unconverted, where libhdf5's own conversion gives Falcon's
+values). `-v`
 lists every difference, and
 `cli/target/hdf5-conformance/report.json` holds them all.
 

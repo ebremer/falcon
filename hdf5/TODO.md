@@ -1,10 +1,11 @@
 # Falcon HDF5 — remaining work (prioritized)
 
-**Status (2026-10-06, after P2 S1–S10, A1–A12, PF1–PF8, WF1–WF11, and all of P3):** build green,
-**1128 HDF5 tests** (144 at the review, 187 after the top 10, 206 after P0, 228 after P1, 243 after S1–S3, 256
+**Status (2026-11-13, after P2 S1–S10, A1–A12, PF1–PF8, WF1–WF11, all of P3, and P1 C1–C2):** build green,
+**1311 HDF5 tests** (144 at the review, 187 after the top 10, 206 after P0, 228 after P1, 243 after S1–S3, 256
 after S4–S7, 439 after A2–A6, 610 after PF1–PF4, 677 after A1–A10, 692 after A11–A12, 707 after WF1–WF4,
 743 after WF5–WF9, 782 after WF7 and WF10, 850 after WF11 and PF5–PF7, 855 after P3, 1117 after S8–S9; the
-checksum tests then moved to `core`, S10's ZFP added four, and its Blosc2 and SZ eleven), plus 147 in the `core`
+checksum tests then moved to `core`, S10's ZFP added four, and its Blosc2 and SZ eleven: 1128; 1133 after the
+conformance harness, 1311 after C1 and C2), plus 147 in the `core`
 module. The review's top 10, every P1 item, **P2 S1–S10**, **A1–A12**, **PF1–PF8**, **WF1–WF11**,
 **every P3 item**, the P0 zstd fix (Z6/Z7, in `core`), and the P0 found with S8 (types libhdf5 refuses in
 version-1 object headers) are done (see *Done* at the end). Falcon now:
@@ -27,7 +28,10 @@ version-1 object headers) are done (see *Done* at the end). Falcon now:
     included), ZFP, and SZ, through Falcon Core's codecs (ZFP's and SZ's lossy values bit for bit libzfp's
     and libSZ's, but for SZ's doubles under a point-wise relative bound);
   - HDF5 1.6.2-era chunked layouts (layout message versions 1 and 2), VAX floats, and File Space Info
-    version 0.
+    version 0;
+  - files closed with a metadata cache image, whose metadata is read from the image;
+  - a root group whose Symbol Table message is corrupt, through the superblock's copy of it, as libhdf5
+    mends it.
 - opens files from a path (mapped), from bytes, or through a `RangeReader` (an object store, HTTP
   ranges, any channel) that it reads on demand; the `s3` module's `S3RangeReader` reads one from Amazon S3;
 - looks objects up by path, reads integers as floating point as libhdf5 converts them, and reports each
@@ -50,7 +54,7 @@ version-1 object headers) are done (see *Done* at the end). Falcon now:
   - every handle of an object shares what any of them read of it, in a bounded per-file cache;
   - selected elements come out of each chunk a run at a time;
 - writes files that **HDF5 2.0 and 1.14 read, and change**, checked by `tools/fixtures/check_hdf5_writer.py`.
-  The last run (2026-10-06) read 548/548 objects with HDF5 2.0 and hdf5plugin 7.1.0; HDF5 1.14.6 last read
+  The last run (2026-11-13) read 557/557 objects with HDF5 2.0 and hdf5plugin 7.1.0; HDF5 1.14.6 last read
   298/298, before S8. Each library then changed every file (an attribute on every object, a dataset in every
   group, a row on every growable dataset, the shared attributes a file names deleted) and read it all back;
   each refused a change left interrupted.
@@ -75,8 +79,25 @@ version-1 object headers) are done (see *Done* at the end). Falcon now:
   fuzzing under a 128 MB heap and 256 KB stack, confines external files to the HDF5 file's directory by
   default, and supports concurrent reads of one open file.
 
-P0, P1, and P3 are empty, and so is P2 but for its known limits and non-goals: S10, writing Blosc2 and SZ,
-was the last open item.
+P0, P1, and P3 are empty, and so is P2 but for its known limits and non-goals: C1 and C2, which the HDF5
+conformance harness found, were the last open items.
+
+**P1 C1, C2 (2026-11-13)** change behaviour, and no API:
+- **A file closed with a metadata cache image** (`H5Pset_mdc_image_config`) reads; it failed with
+  `HdfFormatException` ("unrecognized object header"). An image that is not what its message says (its place,
+  its length, its checksum, an entry outside the file or over another) fails the open with
+  `HdfFormatException`.
+- **`Hdf5File.open` reads the superblock extension,** when the file has one, to look for the image: one more
+  read when a file is opened through a `RangeReader`. An extension that cannot be read does not fail the open,
+  as it did not.
+- **A file whose extension names an image that is not there** fails the open, where it was read without it:
+  `cve_2020_10812.h5` of the HDF5 library's test files, which libhdf5 refuses too.
+- **`Hdf5Writer.open` refuses a file with a metadata cache image** (`HdfUnsupportedException`).
+- **A root group whose Symbol Table message is corrupt** reads, through the superblock's copy of its two
+  addresses; it failed with `HdfFormatException` ("expected local heap signature").
+- **`Hdf5Writer.open` mends that message** in the file when it closes, as libhdf5 does. It used to write
+  the message's bad addresses over the superblock's copy when a session left the root group's links alone,
+  which lost the root group (a P0, below).
 
 **S10's Blosc2 and SZ (2026-10-06)** write the Blosc2 (32026) and SZ (32017) filters: Falcon Core gains a
 c-blosc2 encoder (chunks, frames, b2nd arrays) and an SZ 2.1.12 compressor. `Hdf5Writer.DatasetWriter` gains
@@ -355,6 +376,8 @@ review baseline. Abbreviations: `W` = `Hdf5Writer.java`; other paths are under
   rerun `tools/fixtures/gen_storage_metadata.py`, which records libhdf5's storage report for every
   dataset (the oracle for `Dataset.layout()`, `chunkShape()`, `filters()`, and `storageSize()`).
 - Check writer interop with `tools/fixtures/check_hdf5_writer.py [--python114 PATH]`.
+- `mdc_image.h5` is a file libhdf5 2.0.0 cannot read back (see *Done — 2026-11-13*): set `FALCON_H5CLEAR_114`
+  to the `h5clear` of an HDF5 1.14 and `gen_fixtures.py mdc_image` checks it through that library.
 - The Python environment is pinned in `tools/fixtures/requirements.txt`.
 
 ## Next up — top 10
@@ -373,21 +396,9 @@ written file that libhdf5 rejects or misreads.
 
 ## P1 — valid files that fail; hardening; concurrency; test gaps
 
-The items of 2026-10-05 are done (see *Done — 2026-10-05 (P1)*). Open, found by the HDF5 conformance harness
-(`tools/conformance/run_hdf5_conformance.py`, see *Done — 2026-10-07*), on the HDF5 library's own test files:
-
-- **C1 — files with a metadata cache image.** A file written with `H5Pset_mdc_image_config` keeps its metadata
-  in the metadata cache image block (format specification III.J, pointed to by the superblock extension's
-  Metadata Cache Image message, IV.A.3.y), not at each entry's own address, so Falcon finds zeros where the root
-  object header should be (`tools/test/testfiles/h5clear_mdc_image.h5`: "unrecognized object header at 48").
-  Fix: read the block (signature `MDCI`, version 0, its entries' addresses, types, and images, and its
-  checksum) and serve those addresses from it. Listed in the harness's `KNOWN` until then.
-- **C2 — a corrupt symbol table message, repaired as libhdf5 repairs it.** When an old-style group's Symbol
-  Table message points at no local heap or B-tree, libhdf5 (`H5G__stab_valid`) uses the addresses its parent's
-  symbol table entry caches in its scratch pad (cache type 1) instead; Falcon reads neither the cache nor the
-  repair, and cannot list the group (`test/testfiles/corrupt_stab_msg.h5`: "expected local heap signature
-  'HEAP' at 0"). h5py 3.16 cannot read that file either (`H5Oget_info` fails), so the harness does not fail
-  on it.
+The items of 2026-10-05 are done (see *Done — 2026-10-05 (P1)*), and so are C1 and C2, which the HDF5
+conformance harness found on the HDF5 library's own test files (see *Done — 2026-11-13 (P1: C1, C2)*). P1 is
+empty.
 
 ## P2 — features, API, performance
 
@@ -404,6 +415,9 @@ The items of 2026-10-05 are done (see *Done — 2026-10-05 (P1)*). Open, found b
     outside its bound. libSZ reads Falcon's streams correctly.
   - **zstd's bytes** are Falcon's own wherever a plugin uses zstd (Zstandard, Blosc, Blosc2, bitshuffle, and SZ's
     last stage): valid frames that libzstd reads, not libzstd's.
+  - **A subgroup's corrupt Symbol Table message** is not mended (C2 mends the root group's, as libhdf5 does):
+    its parent's symbol table entry caches its B-tree and heap as the superblock caches the root group's, and
+    libhdf5 does not use that copy either.
 
 ### Read API
 
@@ -419,6 +433,11 @@ The items of 2026-10-05 are done (see *Done — 2026-10-05 (P1)*). Open, found b
   - **Not planned: writing through a virtual dataset of variable-length or reference data** (Falcon reads
     none either: its elements point into each source's own heaps and objects), **or converting types** on
     the way (other than the byte order), which libhdf5 does.
+  - **Not done: changing a file that has a metadata cache image** (C1 reads one). `Hdf5Writer.open` refuses
+    it: what a session wrote at an entry's address would stay hidden behind the image. libhdf5, opening such
+    a file for writing, loads the image, writes each entry at its address when it closes, and drops the
+    message and the block; Falcon would have to write the entries out the same way, through its journal,
+    before it changed anything. `h5clear -m` does it meanwhile.
   - **Not planned: reusing space a session frees** (a deleted object's, a replaced attribute's, an old
     symbol table's). A session writes only after the file's end until `close()`, which is what lets
     `abort()` and a crash before `close()` leave the file as it was, and the journal stay small; libhdf5
@@ -438,6 +457,107 @@ The items of 2026-10-05 are done (see *Done — 2026-10-05 (P1)*). Open, found b
 
 - D1, D2, D3, D4, D6, B1, B2, and B3 are done (see *Done — 2026-10-05 (P3: D2, D6, B1–B3)* and
   *(P3: D1, D3, D4)*). P3 is empty.
+
+## Done — 2026-11-13 (P1: C1, C2)
+
+Both were found by the HDF5 conformance harness, on the HDF5 library's own test files. The fixtures are libhdf5
+2.0's, through h5py (`gen_fixtures.py mdc_image corrupt_stab`). The library's sources at `hdf5_2.0.0`
+(`H5Cimage.c`, `H5Groot.c`, `H5Gstab.c`) and the format specification (III.J, IV.A.3.y) are the reference.
+
+- [x] **C1 — files with a metadata cache image.**
+  - **The format.** A file closed with `H5Pset_mdc_image_config` holds what libhdf5's metadata cache held
+    (every entry but the superblock and its extension) in one block, the image, which a Metadata Cache Image
+    message (type 24) in the superblock extension points at. Each entry is the bytes of one piece of metadata
+    as they belong at its own address. libhdf5 writes them there only when it next opens the file for writing:
+    until then that address holds zeros, or what an earlier flush left.
+  - **Reading.** `Hdf5File.open` reads the extension, when the file has one, and then the image block
+    (`superblock.MetadataCacheImage`): its signature, version, flags, length (the message's), and checksum,
+    then each entry's address, length, and where its bytes are. An entry's type, ring, age, and flush
+    dependencies, which libhdf5's cache needs, are skipped. The file is then read through
+    `io.RedirectedSource`: a read within an entry's range comes from the image, and any other from where it
+    is. Both are views of the mapped file, as before; only a read that crosses the edge of a range is copied
+    together. No parser changed: each reads the addresses it read.
+  - **Refused when the file is opened,** with `HdfFormatException`: a block that is not where the message
+    says, of another length, or that fails its checksum (which libhdf5 writes, and does not check); an entry
+    of no length, outside the file, or past the block's end; entries that overlap (libhdf5 refuses two at
+    one address). An image holding the cache's resize status, which libhdf5 neither writes nor reads, is
+    `HdfUnsupportedException`.
+  - **A file is not read without its image.** Where an application flushed the file and changed it
+    afterwards, the entries' own addresses hold the metadata as it was at the flush: that would read without
+    an error, and be wrong. So `cve_2020_10812.h5`, a fuzzed file whose extension (a version-1 object header,
+    without a checksum) names an image of 256 MiB outside its 2,565 bytes, now fails the open, as it does in
+    libhdf5; Falcon read its one dataset, by not looking for the image.
+  - **An extension that cannot be read** does not fail the open, as before: the file is read as it is.
+  - **Changing such a file** is refused (`Hdf5Writer.open`, `HdfUnsupportedException`): see *Write features
+    & API*.
+  - **Found in libhdf5:**
+    - 2.0.0's release builds cannot read back an image that holds a flush-dependency parent: a fractal
+      heap's header, an extensible array's (so any file with a dense group, or a dataset that can grow).
+      `H5C__reconstruct_cache_entry` reads that flag of an entry under `#ifndef NDEBUG` only, then refuses
+      the entry's children ("non-parent entry has children"). HDF5 1.14.6 reads such an image, so
+      `mdc_image.h5` keeps to the formats of HDF5 1.10 to 1.14, and 1.14.6 is its oracle.
+    - 1.14.6's `h5clear -m` leaves the file marked as open by a writer ("infinite loop closing library");
+      `h5clear -s` clears the mark.
+  - **Oracles:**
+    - `mdc_image.h5`: one of each kind of metadata (version-2 object headers and their continuation chunks,
+      dense links and attributes in fractal heaps and version-2 B-trees, a fixed array, an extensible array,
+      and a version-2 B-tree of chunks, a global heap collection, the free-space managers): 69 entries, 9 of
+      them in flush dependencies, none of them at its own address.
+    - `mdc_image_userblock.h5`: an image after a 512-byte user block, of 8 entries, which libhdf5 2.0.0
+      reads back.
+    - `gen_fixtures.py`, with `FALCON_H5CLEAR_114` naming the `h5clear` of an HDF5 1.14: that library writes
+      the image of a copy of `mdc_image.h5` out, and libhdf5 2.0 must then read from the copy the tree that
+      the same code writes without an image.
+    - Once, by hand: Falcon's manifest of `mdc_image.h5` (`falcon conformance --hdf5`: 41 paths, every
+      link, attribute, and value) is its manifest of that copy, and agrees with h5py's of it.
+    - The conformance harness: `h5clear_mdc_image.h5` agrees with h5py, and has left `KNOWN`.
+  - Tests:
+    - `CacheImageTest`: the fixtures by path, by name, and through a `RangeReader` in 512-byte pages; an
+      image that is corrupt, misplaced, resized, or cut off; the writer's refusal.
+    - `superblock.MetadataCacheImageTest`: crafted blocks with addresses of 2, 4, and 8 bytes, each
+      refusal, and 20,000 blocks changed at random (read, or refused with a typed exception).
+    - `io.RedirectedBufferTest`: every accessor across every edge of a range, over a segment and over pages
+      of 7 bytes to 64 KiB.
+    - The fixtures also join `OpenSourcesTest` and `RobustnessTest`.
+- [x] **C2 — a corrupt symbol table message, repaired as libhdf5 repairs it.**
+  - **What libhdf5 does** (`H5G_mkroot`, `H5G__stab_valid`): for the root group only, when a version 0–1
+    superblock's root symbol table entry caches its symbol table (cache type 1) and the file is open for
+    writing. It checks that the Symbol Table message's B-tree address reaches a group B-tree node, and its
+    heap address a local heap; takes the superblock's for one that does not; and writes the message back.
+    Opened read-only, it mends nothing, so h5py does not read `corrupt_stab_msg.h5` at all.
+  - **Reading.** `Group` reads the root group's message through `SymbolTableMessage.parseRoot`, which makes
+    the same two checks (`GroupBTreeV1.isNode`, `LocalHeap.isHeap`) and takes the superblock's address
+    (`Superblock.rootBTreeAddress`, `rootHeapAddress`, carried by `FileContext`) for one that reaches
+    nothing, if the superblock's does. A good message is read as it is, whatever the superblock says, and
+    one the superblock cannot mend fails as before.
+  - **Changing** (`Hdf5Writer.open`): the root group is read the same way, and its message is written back
+    mended. libhdf5 then reads the file without having to write it.
+  - **P0, found on the way: the writer lost the root group of such a file.** A session that left the root
+    group's links alone (one that set an attribute of the root group, say) wrote the message's bad addresses
+    into the superblock's root entry, over the only good copy: neither Falcon nor libhdf5 could then find
+    the root group's links. (`SymbolTableRepairTest.theWriterKeepsTheSuperblocksCopyWhenTheRootGroupsLinksStay`.)
+  - **Oracles:**
+    - `corrupt_stab.h5`: `old_style_groups.h5`'s tree, its root group's message zeroed as in the library's
+      file. `gen_fixtures.py` checks that libhdf5 reads a copy it opens for writing, and that the message
+      then says what the superblock's entry says.
+    - The conformance harness: Falcon reads all of `corrupt_stab_msg.h5` (`/DS1` too), which h5py cannot.
+    - `check_hdf5_writer.py`: libhdf5 reads, without writing, two copies Falcon changed
+      (`edit_corrupt_stab.h5`, whose root group's links stay; `edit_corrupt_stab_added.h5`, whose symbol
+      table is written anew), and then changes them.
+  - Tests: `SymbolTableRepairTest` (each address alone, and wrong in each way; a good message; a superblock
+    that cannot mend it; the three ways of changing the file).
+- **The conformance harness after both** (Windows, h5py 3.16): of 434 files, 311 agree, 61 are refused by
+  both, Falcon reads more of 61, and 1 differs for a known reason. The run before gave 310, 60, 62, and 2.
+  Three files changed: `h5clear_mdc_image.h5` agrees; Falcon reads `/DS1` of `corrupt_stab_msg.h5`; and
+  `cve_2020_10812.h5` is refused by both (C1, above).
+- **Storage metadata.** `gen_storage_metadata.py` skips a file libhdf5 cannot walk (it stopped at
+  `corrupt_stab.h5`). `storage_metadata.txt`, regenerated, also gains the rows of `blosc2_write.h5`,
+  `sz_write.h5`, and `zfp_write.h5`, fixtures written since it was last made: 163 rows more, on which
+  `P2ApiTest.storageMetadataMatchesLibhdf5` passes, and with which
+  `PerformanceTest.selectionsReadWhatTheWholeDatasetHolds`, run on every chunked dataset the file lists,
+  runs 132 times more.
+- **Tests:** hdf5 1133 → 1311: 39 of them new, and 139 more runs of the tests that take every fixture, or every
+  dataset of `storage_metadata.txt`.
 
 ## Done — 2026-10-07 (the HDF5 conformance harness and the CVE files)
 

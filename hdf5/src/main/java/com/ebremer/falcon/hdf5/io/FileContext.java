@@ -13,7 +13,8 @@ import java.util.function.Supplier;
  * superblock's "size of offsets" (file address width) and "size of lengths" (object size width). The
  * file's own path, root group, and {@link OpenOptions} are carried too, so soft links can resolve
  * absolute paths and external raw data and virtual-dataset sources can be located and read as asked, and
- * so is the superblock extension, which locates the shared-message table.
+ * so are the superblock extension, which locates the shared-message table, and the root group's symbol
+ * table as a version 0&ndash;1 superblock caches it.
  *
  * <p>Shared by every object of one open file, including across threads: it is immutable apart from the
  * (thread-safe) decoded-chunk cache, the lazily read shared-message table, the per-file resources (such as
@@ -30,6 +31,8 @@ public final class FileContext {
     private final long rootAddress;
     private final OpenOptions options;
     private final long superblockExtensionAddress;
+    private final long rootBTreeAddress; // the root group's symbol table, as the superblock caches it
+    private final long rootHeapAddress;
     private final ChunkCache chunkCache; // per-file decoded-chunk cache
     private volatile SharedMessageTable sharedMessageTable; // read on first use, then cached
     private final ConcurrentHashMap<Class<?>, AutoCloseable> resources = new ConcurrentHashMap<>();
@@ -37,11 +40,12 @@ public final class FileContext {
 
     public FileContext(HdfBuffer buffer, int sizeOfOffsets, int sizeOfLengths) {
         this(buffer, sizeOfOffsets, sizeOfLengths, null, HdfBuffer.UNDEFINED_ADDRESS, OpenOptions.defaults(),
-                HdfBuffer.UNDEFINED_ADDRESS);
+                HdfBuffer.UNDEFINED_ADDRESS, HdfBuffer.UNDEFINED_ADDRESS, HdfBuffer.UNDEFINED_ADDRESS);
     }
 
     public FileContext(HdfBuffer buffer, int sizeOfOffsets, int sizeOfLengths, Path path, long rootAddress,
-                       OpenOptions options, long superblockExtensionAddress) {
+                       OpenOptions options, long superblockExtensionAddress, long rootBTreeAddress,
+                       long rootHeapAddress) {
         this.buffer = buffer;
         this.sizeOfOffsets = sizeOfOffsets;
         this.sizeOfLengths = sizeOfLengths;
@@ -49,6 +53,8 @@ public final class FileContext {
         this.rootAddress = rootAddress;
         this.options = options;
         this.superblockExtensionAddress = superblockExtensionAddress;
+        this.rootBTreeAddress = rootBTreeAddress;
+        this.rootHeapAddress = rootHeapAddress;
         this.chunkCache = new ChunkCache(options.chunkCacheSize());
     }
 
@@ -94,6 +100,20 @@ public final class FileContext {
     /** The superblock extension's object-header address, or undefined if the file has none. */
     public long superblockExtensionAddress() {
         return superblockExtensionAddress;
+    }
+
+    /**
+     * The address of the root group's B-tree as a version 0&ndash;1 superblock caches it in its root symbol
+     * table entry, or undefined: what stands in for the root group's Symbol Table message where that is
+     * corrupt.
+     */
+    public long rootBTreeAddress() {
+        return rootBTreeAddress;
+    }
+
+    /** The address of the root group's local heap, cached as {@link #rootBTreeAddress()} is, or undefined. */
+    public long rootHeapAddress() {
+        return rootHeapAddress;
     }
 
     /** The file's shared-message (SOHM) table, read on first use. */

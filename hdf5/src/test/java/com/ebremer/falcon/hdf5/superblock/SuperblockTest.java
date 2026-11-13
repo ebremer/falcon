@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.ebremer.falcon.hdf5.Fixtures;
+import com.ebremer.falcon.hdf5.io.HdfBuffer;
 import com.ebremer.falcon.hdf5.io.MappedHdfFile;
 import java.io.IOException;
 import org.junit.jupiter.api.Test;
@@ -20,6 +21,9 @@ class SuperblockTest {
             assertEquals(0, sb.baseAddress());
             assertTrue(sb.rootObjectHeaderAddress() > 0);
             assertTrue(sb.rootObjectHeaderAddress() < sb.endOfFileAddress());
+            // its root symbol table entry caches the root group's symbol table: a B-tree node and a local heap
+            assertTrue(file.buffer().hasSignature(sb.rootBTreeAddress(), new byte[] {'T', 'R', 'E', 'E'}));
+            assertTrue(file.buffer().hasSignature(sb.rootHeapAddress(), new byte[] {'H', 'E', 'A', 'P'}));
         }
     }
 
@@ -33,6 +37,8 @@ class SuperblockTest {
             assertEquals(0, sb.baseAddress());
             assertTrue(sb.rootObjectHeaderAddress() > 0);
             assertTrue(sb.rootObjectHeaderAddress() < sb.endOfFileAddress());
+            assertEquals(HdfBuffer.UNDEFINED_ADDRESS, sb.rootBTreeAddress(), "no root symbol table entry to cache one");
+            assertEquals(HdfBuffer.UNDEFINED_ADDRESS, sb.rootHeapAddress());
         }
     }
 }

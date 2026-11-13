@@ -184,7 +184,7 @@ public final class Group extends Hdf5Object {
         ObjectHeader header = header();
         HeaderMessage symbolTable = header.find(MessageType.SYMBOL_TABLE);
         if (symbolTable != null) {
-            SymbolTableMessage message = SymbolTableMessage.parse(ctx, symbolTable);
+            SymbolTableMessage message = symbolTable(symbolTable);
             LocalHeap heap = LocalHeap.parse(ctx, message.localHeapAddress());
             SymbolTableEntry entry = GroupBTreeV1.find(ctx, message.btreeAddress(), heap,
                     name.getBytes(StandardCharsets.UTF_8));
@@ -441,7 +441,7 @@ public final class Group extends Hdf5Object {
 
     /** Old-style storage: symbol-table entries, whose names (and soft-link paths) live in a local heap. */
     private List<Link> loadOldStyleLinks(HeaderMessage symbolTable) {
-        SymbolTableMessage message = SymbolTableMessage.parse(ctx, symbolTable);
+        SymbolTableMessage message = symbolTable(symbolTable);
         LocalHeap heap = LocalHeap.parse(ctx, message.localHeapAddress());
         List<SymbolTableEntry> entries = GroupBTreeV1.readEntries(ctx, message.btreeAddress());
         List<Link> result = new ArrayList<>(entries.size());
@@ -449,6 +449,15 @@ public final class Group extends Hdf5Object {
             result.add(oldStyleLink(heap, heap.name(ctx, entry.linkNameOffset()), entry));
         }
         return result;
+    }
+
+    /**
+     * This group's symbol table: what its Symbol Table message says, but for the root group, whose message,
+     * where it is corrupt, is mended from the superblock's copy of it as libhdf5 mends it.
+     */
+    private SymbolTableMessage symbolTable(HeaderMessage message) {
+        return objectHeaderAddress() == ctx.rootAddress() ? SymbolTableMessage.parseRoot(ctx, message)
+                : SymbolTableMessage.parse(ctx, message);
     }
 
     /** The link a symbol-table entry named {@code name} stands for: soft (its target in the heap) or hard. */

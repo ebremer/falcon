@@ -1,7 +1,7 @@
 package com.ebremer.falcon.hdf5.header;
 
 /**
- * Numeric identifiers for the 24 HDF5 object-header message types (spec section IV.A.2).
+ * Numeric identifiers for the 25 HDF5 object-header message types (spec section IV.A.3).
  */
 public final class MessageType {
 
@@ -29,6 +29,7 @@ public final class MessageType {
     public static final int ATTRIBUTE_INFO = 21;
     public static final int OBJECT_REFERENCE_COUNT = 22;
     public static final int FILE_SPACE_INFO = 23;
+    public static final int METADATA_CACHE_IMAGE = 24;
 
     private MessageType() {
         // No instances.
