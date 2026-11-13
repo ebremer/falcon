@@ -4,8 +4,8 @@ import java.util.Objects;
 
 /**
  * How {@link Hdf5File#open(java.nio.file.Path, OpenOptions)} reads a file: which other files it may
- * open, how it sets the extent of virtual datasets with unlimited mappings, and how much it caches.
- * Immutable: each setter returns a changed copy.
+ * open, how it sets the extent of virtual datasets with unlimited mappings, how much it caches, and how
+ * many threads decode a read's chunks. Immutable: each setter returns a changed copy.
  *
  * <pre>{@code
  * Hdf5File.open(path, OpenOptions.defaults()
@@ -17,8 +17,8 @@ import java.util.Objects;
  * }</pre>
  *
  * The virtual-dataset settings are libhdf5's dataset access properties {@code H5Pset_virtual_view} and
- * {@code H5Pset_virtual_printf_gap}. They, and the cache sizes, apply to every dataset of the file, and to
- * the source files its virtual datasets open.
+ * {@code H5Pset_virtual_printf_gap}. They, the cache sizes, and the decoding threads apply to every dataset
+ * of the file, and to the source files its virtual datasets open.
  */
 public final class OpenOptions {
 
@@ -41,6 +41,11 @@ public final class OpenOptions {
     public static final long DEFAULT_READER_CACHE_SIZE = 16L << 20;
     /** The default size of the cache of objects' metadata: 16 MiB. */
     public static final long DEFAULT_OBJECT_CACHE_SIZE = 16L << 20;
+    /**
+     * The default number of threads that decode one read's chunks: the processors the Java virtual machine
+     * had when this class was loaded ({@link Runtime#availableProcessors()}).
+     */
+    public static final int DEFAULT_DECODE_THREADS = Runtime.getRuntime().availableProcessors();
     /** The smallest page size: 512 bytes, libhdf5's smallest file-space page. */
     private static final int MIN_READER_PAGE_SIZE = 512;
     /** The largest page size: 1 GiB. */
@@ -48,7 +53,7 @@ public final class OpenOptions {
 
     private static final OpenOptions DEFAULTS = new OpenOptions(ExternalFileAccess.sameDirectory(),
             VirtualView.LAST_AVAILABLE, 0, DEFAULT_CHUNK_CACHE_SIZE, DEFAULT_READER_PAGE_SIZE, DEFAULT_READER_CACHE_SIZE,
-            DEFAULT_OBJECT_CACHE_SIZE);
+            DEFAULT_OBJECT_CACHE_SIZE, DEFAULT_DECODE_THREADS);
 
     private final ExternalFileAccess externalFileAccess;
     private final VirtualView virtualView;
@@ -57,9 +62,11 @@ public final class OpenOptions {
     private final int readerPageSize;
     private final long readerCacheSize;
     private final long objectCacheSize;
+    private final int decodeThreads;
 
     private OpenOptions(ExternalFileAccess externalFileAccess, VirtualView virtualView, long virtualPrintfGap,
-                        long chunkCacheSize, int readerPageSize, long readerCacheSize, long objectCacheSize) {
+                        long chunkCacheSize, int readerPageSize, long readerCacheSize, long objectCacheSize,
+                        int decodeThreads) {
         this.externalFileAccess = externalFileAccess;
         this.virtualView = virtualView;
         this.virtualPrintfGap = virtualPrintfGap;
@@ -67,13 +74,14 @@ public final class OpenOptions {
         this.readerPageSize = readerPageSize;
         this.readerCacheSize = readerCacheSize;
         this.objectCacheSize = objectCacheSize;
+        this.decodeThreads = decodeThreads;
     }
 
     /**
      * The defaults: {@link ExternalFileAccess#sameDirectory()}, {@link VirtualView#LAST_AVAILABLE}, a printf
-     * gap of 0, a 16 MiB decoded-chunk cache, a 16 MiB object cache, and, for a file read through a
-     * {@link RangeReader}, 64 KiB pages and a 16 MiB page cache. The virtual-dataset settings are libhdf5's
-     * defaults.
+     * gap of 0, a 16 MiB decoded-chunk cache, a 16 MiB object cache, a decoding thread for each processor,
+     * and, for a file read through a {@link RangeReader}, 64 KiB pages and a 16 MiB page cache. The
+     * virtual-dataset settings are libhdf5's defaults.
      *
      * @return the default options
      */
@@ -90,7 +98,7 @@ public final class OpenOptions {
      */
     public OpenOptions externalFileAccess(ExternalFileAccess access) {
         return new OpenOptions(Objects.requireNonNull(access, "access"), virtualView, virtualPrintfGap,
-                chunkCacheSize, readerPageSize, readerCacheSize, objectCacheSize);
+                chunkCacheSize, readerPageSize, readerCacheSize, objectCacheSize, decodeThreads);
     }
 
     /**
@@ -102,7 +110,7 @@ public final class OpenOptions {
      */
     public OpenOptions virtualView(VirtualView view) {
         return new OpenOptions(externalFileAccess, Objects.requireNonNull(view, "view"), virtualPrintfGap,
-                chunkCacheSize, readerPageSize, readerCacheSize, objectCacheSize);
+                chunkCacheSize, readerPageSize, readerCacheSize, objectCacheSize, decodeThreads);
     }
 
     /**
@@ -119,7 +127,7 @@ public final class OpenOptions {
             throw new IllegalArgumentException("printf gap must not be negative: " + gap);
         }
         return new OpenOptions(externalFileAccess, virtualView, gap, chunkCacheSize, readerPageSize, readerCacheSize,
-                objectCacheSize);
+                objectCacheSize, decodeThreads);
     }
 
     /**
@@ -138,7 +146,7 @@ public final class OpenOptions {
             throw new IllegalArgumentException("chunk cache size must not be negative: " + bytes);
         }
         return new OpenOptions(externalFileAccess, virtualView, virtualPrintfGap, bytes, readerPageSize, readerCacheSize,
-                objectCacheSize);
+                objectCacheSize, decodeThreads);
     }
 
     /**
@@ -157,7 +165,7 @@ public final class OpenOptions {
                     + MAX_READER_PAGE_SIZE + ": " + bytes);
         }
         return new OpenOptions(externalFileAccess, virtualView, virtualPrintfGap, chunkCacheSize, bytes, readerCacheSize,
-                objectCacheSize);
+                objectCacheSize, decodeThreads);
     }
 
     /**
@@ -174,7 +182,7 @@ public final class OpenOptions {
             throw new IllegalArgumentException("reader cache size must not be negative: " + bytes);
         }
         return new OpenOptions(externalFileAccess, virtualView, virtualPrintfGap, chunkCacheSize, readerPageSize, bytes,
-                objectCacheSize);
+                objectCacheSize, decodeThreads);
     }
 
     /**
@@ -195,7 +203,31 @@ public final class OpenOptions {
             throw new IllegalArgumentException("object cache size must not be negative: " + bytes);
         }
         return new OpenOptions(externalFileAccess, virtualView, virtualPrintfGap, chunkCacheSize, readerPageSize,
-                readerCacheSize, bytes);
+                readerCacheSize, bytes, decodeThreads);
+    }
+
+    /**
+     * These options with a different number of threads decoding a read's chunks (P2 PF9). A read that
+     * covers several filtered chunks reverses their filters (inflates them, say) on up to this many threads
+     * at once: the reading thread, and threads of the common {@link java.util.concurrent.ForkJoinPool}, so
+     * never more than that pool has, and one. The reading thread alone still reads the file, one chunk
+     * after another as before, and the read returns the same bytes, or fails with the same exception,
+     * whatever the number. The chunks being decoded at once are held to an eighth of the heap, so large
+     * chunks are decoded fewer at a time. 1 decodes on the reading thread alone, as does a read of one
+     * chunk, of less than 64 KiB of chunks (decoded sooner than handed to another thread), or of unfiltered
+     * chunks, which have nothing to decode.
+     *
+     * @param threads the most threads decoding one read's chunks at once, at least 1 (default
+     *                {@link #DEFAULT_DECODE_THREADS}, one for each processor); 1 for the reading thread alone
+     * @return a copy of these options with that many decoding threads
+     * @throws IllegalArgumentException if {@code threads} is less than 1
+     */
+    public OpenOptions decodeThreads(int threads) {
+        if (threads < 1) {
+            throw new IllegalArgumentException("decoding threads must be at least 1: " + threads);
+        }
+        return new OpenOptions(externalFileAccess, virtualView, virtualPrintfGap, chunkCacheSize, readerPageSize,
+                readerCacheSize, objectCacheSize, threads);
     }
 
     /**
@@ -261,10 +293,20 @@ public final class OpenOptions {
         return objectCacheSize;
     }
 
+    /**
+     * The most threads that decode one read's chunks at once.
+     *
+     * @return the decoding threads; 1 if the reading thread decodes alone
+     */
+    public int decodeThreads() {
+        return decodeThreads;
+    }
+
     @Override
     public String toString() {
         return "OpenOptions[virtualView=" + virtualView + ", virtualPrintfGap=" + virtualPrintfGap
                 + ", chunkCacheSize=" + chunkCacheSize + ", readerPageSize=" + readerPageSize
-                + ", readerCacheSize=" + readerCacheSize + ", objectCacheSize=" + objectCacheSize + "]";
+                + ", readerCacheSize=" + readerCacheSize + ", objectCacheSize=" + objectCacheSize
+                + ", decodeThreads=" + decodeThreads + "]";
     }
 }

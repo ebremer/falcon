@@ -16,7 +16,8 @@ import org.junit.jupiter.api.io.TempDir;
 /**
  * A small pure-JDK benchmark of the HDF5 read paths: open and walk, whole and partial reads of chunked
  * and contiguous data, streaming in blocks, reads of virtual datasets, lookups by name, and reading
- * through a {@link RangeReader}. It is <b>not</b> a normal test: it is skipped unless run with
+ * through a {@link RangeReader}; and of writing a dataset, contiguous, chunked, and filtered. It is
+ * <b>not</b> a normal test: it is skipped unless run with
  * {@code -Dfalcon.bench=true}, so it never slows CI.
  *
  * <pre>
@@ -91,6 +92,50 @@ class Benchmarks {
             }
             row("100,000 random points, chunked", () -> chunked.selectPoints(points).readDoubles().length);
         }
+
+        // P2 PF9: filtered chunks decoded on several threads, and on the reading thread alone. The small
+        // selections are read with no chunk cache, so that each decodes the one to four chunks it covers.
+        try (Hdf5File h5 = Hdf5File.open(file, OpenOptions.defaults().decodeThreads(1))) {
+            Dataset gzip = h5.root().dataset("gzip");
+            row("read whole: chunked + gzip, one thread", () -> gzip.readDoubles().length);
+        }
+        try (Hdf5File h5 = Hdf5File.open(file, OpenOptions.defaults().chunkCacheSize(0))) {
+            Dataset gzip = h5.root().dataset("gzip");
+            row("1,000 random 4 x 4 selections, gzip, no cache", () -> randomSelections(gzip, 1000));
+        }
+        try (Hdf5File h5 = Hdf5File.open(file, OpenOptions.defaults().chunkCacheSize(0).decodeThreads(1))) {
+            Dataset gzip = h5.root().dataset("gzip");
+            row("1,000 random 4 x 4 selections, gzip, no cache, one thread", () -> randomSelections(gzip, 1000));
+        }
+
+        // P2 PF10: writing (create, one dataset, close), its chunks filtered on several threads and on one.
+        Path written = dir.resolve("written.h5");
+        long[] shape = {side, side};
+        long[] chunk = {64, 64};
+        row("write: contiguous", () -> {
+            try (Hdf5Writer w = Hdf5Writer.create(written)) {
+                w.doubleDataset("d", data, shape);
+            }
+            return Files.size(written);
+        });
+        row("write: chunked (1,024 chunks)", () -> {
+            try (Hdf5Writer w = Hdf5Writer.create(written)) {
+                w.doubleChunkedDataset("d", data, shape, chunk);
+            }
+            return Files.size(written);
+        });
+        row("write: chunked + gzip", () -> {
+            try (Hdf5Writer w = Hdf5Writer.create(written)) {
+                w.doubleChunkedDataset("d", data, shape, chunk).deflate(4);
+            }
+            return Files.size(written);
+        });
+        row("write: chunked + gzip, one thread", () -> {
+            try (Hdf5Writer w = Hdf5Writer.create(written).encodeThreads(1)) {
+                w.doubleChunkedDataset("d", data, shape, chunk).deflate(4);
+            }
+            return Files.size(written);
+        });
 
         try (Hdf5File h5 = Hdf5File.open(Fixtures.path("vds.h5"))) {
             Dataset vds = h5.root().dataset("vds");

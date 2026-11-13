@@ -7,6 +7,8 @@
  * "size of lengths" fields and the all-ones "undefined address" sentinel.
  * {@link com.ebremer.falcon.hdf5.io.MappedHdfFile} memory-maps a file read-only via the Foreign
  * Function &amp; Memory API, so files larger than 2&nbsp;GB are handled without per-mapping limits.
+ * {@link com.ebremer.falcon.hdf5.io.ChunkWorkers} runs the filters of one read's or one write's chunks on
+ * several threads, the file still read and written by the calling thread alone.
  *
  * <p>Internal package &mdash; not exported.
  */

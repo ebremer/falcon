@@ -13,6 +13,7 @@ import com.ebremer.falcon.hdf5.filter.Nbit;
 import com.ebremer.falcon.hdf5.filter.ScaleOffset;
 import com.ebremer.falcon.hdf5.filter.Szip;
 import com.ebremer.falcon.hdf5.filter.ThirdPartyFilters;
+import com.ebremer.falcon.hdf5.io.ChunkWorkers;
 import com.ebremer.falcon.hdf5.io.HdfBuffer;
 import com.ebremer.falcon.hdf5.write.BTreeV2Writer;
 import com.ebremer.falcon.hdf5.write.ChunkIndexWriter;
@@ -80,7 +81,8 @@ import java.util.zip.Deflater;
  * }
  * }</pre>
  *
- * <p>Not thread-safe: use a writer from one thread.
+ * <p>Not thread-safe: use a writer from one thread. The writer itself runs the chunks of one write through
+ * their filters on several threads ({@link #encodeThreads}), and still writes the same file.
  */
 public final class Hdf5Writer implements AutoCloseable {
 
@@ -187,6 +189,8 @@ public final class Hdf5Writer implements AutoCloseable {
     private long legacyRootHeap = UNDEFINED;
     private boolean rootTableChanged;          // ... changed in this session (rebuilt, or gone: converted)
     private final Lifecycle lifecycle = new Lifecycle();
+    // The most threads that run one write's chunks through their filters at once (P2 PF10).
+    private int encodeThreads = Runtime.getRuntime().availableProcessors();
 
     /** Whether the writer (and every group and dataset handle it gave out) still accepts additions. */
     private static final class Lifecycle {
@@ -336,6 +340,33 @@ public final class Hdf5Writer implements AutoCloseable {
             existing.close();
             throw e;
         }
+    }
+
+    /**
+     * Sets how many threads run a write's chunks through their filters (P2 PF10). When a write completes
+     * several chunks of a filtered dataset (64 KiB of them or more: fewer are filtered sooner than handed to
+     * another thread), they are filtered (deflated, say) on up to this many threads at once: this thread, and
+     * threads of the common {@link java.util.concurrent.ForkJoinPool}, so never more than that pool has, and
+     * one. This thread alone still writes the file, each chunk after the one before it as on one thread, so
+     * the file is the same, byte for byte, whatever the number. The chunks being filtered at once are held to
+     * an eighth of the heap, so large chunks are filtered fewer at a time. Chunks of variable-length data or
+     * object references are filtered one at a time, here: where each goes in the file depends on the one
+     * before.
+     *
+     * @param threads the most threads filtering one write's chunks at once, at least 1 (default: one for each
+     *                processor, {@link Runtime#availableProcessors()}); 1 for this thread alone
+     * @return this writer
+     * @throws IllegalArgumentException if {@code threads} is less than 1
+     */
+    public Hdf5Writer encodeThreads(int threads) {
+        if (threads < 1) {
+            throw new IllegalArgumentException("encoding threads must be at least 1: " + threads);
+        }
+        encodeThreads = threads;
+        for (Hdf5Writer source : sourceWriters.values()) {
+            source.encodeThreads = threads;
+        }
+        return this;
     }
 
     /**
@@ -3773,6 +3804,7 @@ public final class Hdf5Writer implements AutoCloseable {
                 writer = sourceWriters.get(real);
                 if (writer == null) {
                     writer = open(real);
+                    writer.encodeThreads = encodeThreads;
                     sourceWriters.put(real, writer);
                 }
             } catch (IOException e) {
@@ -4578,6 +4610,10 @@ public final class Hdf5Writer implements AutoCloseable {
     private record EncodedChunk(byte[] bytes, int filterMask) {
     }
 
+    /** A pending chunk run through its filters, perhaps on another thread, and still to be put in the file. */
+    private record FilteredChunk(Cell cell, EncodedChunk encoded) {
+    }
+
     // --------------------------------------------------------------- storage
 
     /**
@@ -4919,12 +4955,14 @@ public final class Hdf5Writer implements AutoCloseable {
                 ChunkByte at = chunkByte(ref.offset(), offset, count, chunkStride);
                 pending.get(at.cell()).refs.put(at.offset(), ref.path());
             }
+            List<Cell> complete = new ArrayList<>();
             for (Cell key : touched) {
                 Pending p = pending.get(key);
                 if (p != null && !holdsAddresses && p.written.cardinality() >= p.needed) {
-                    flush(key, p);
+                    complete.add(key);
                 }
             }
+            flushAll(complete);
         }
 
         /** The chunk, and the byte within it, of byte {@code boxByte} of a box's encoded elements. */
@@ -4997,12 +5035,84 @@ public final class Hdf5Writer implements AutoCloseable {
         }
 
         /**
+         * Writes the pending chunks at {@code cells}, as {@link #flush} writes each in turn, their filters run
+         * on several threads at once (P2 PF10; {@link Hdf5Writer#encodeThreads}): this thread hands the
+         * chunks to {@link ChunkWorkers} (small ones several to a piece of work) and puts each filtered one in
+         * the file, in the cells' order, so the file is the one a single thread writes. A chunk with ids or
+         * object references to fill in is written by this thread once those before it are in the file, since
+         * filling them in places heap collections, which go after those chunks; so is a partial edge chunk
+         * kept unfiltered, which has nothing to run.
+         */
+        private void flushAll(List<Cell> cells) {
+            long chunkBytes = spec.chunkShape == null ? 0 : elementCount(spec.chunkShape) * size; // no chunks: no cells
+            int threads = spec.filters.isEmpty() || !ChunkWorkers.worthwhile(cells.size(), chunkBytes) ? 1
+                    : ChunkWorkers.threads(encodeThreads);
+            if (threads < 2) {
+                for (Cell cell : cells) {
+                    flush(cell, pending.get(cell));
+                }
+                return;
+            }
+            boolean keepsEdges = keepsPartialEdgesUnfiltered();
+            ChunkWorkers.<List<FilteredChunk>>run(threads, piece -> {
+                for (FilteredChunk filtered : piece) {
+                    place(filtered.cell(), filtered.encoded(), false);
+                    pending.remove(filtered.cell());
+                }
+            }, workers -> {
+                List<Cell> piece = new ArrayList<>();
+                for (Cell cell : cells) {
+                    Pending p = pending.get(cell);
+                    if (!p.ids.isEmpty() || !p.refs.isEmpty() || (keepsEdges && partial(cell))) {
+                        filter(workers, piece);
+                        piece = new ArrayList<>();
+                        workers.drain();
+                        flush(cell, p);
+                    } else {
+                        piece.add(cell);
+                        if (piece.size() * chunkBytes >= ChunkWorkers.PIECE_BYTES) {
+                            filter(workers, piece);
+                            piece = new ArrayList<>();
+                        }
+                    }
+                }
+                filter(workers, piece);
+            });
+        }
+
+        /** Hands the pending chunks at {@code cells} over, as one piece of work: each run through the filters. */
+        private void filter(ChunkWorkers<List<FilteredChunk>> workers, List<Cell> cells) {
+            if (cells.isEmpty()) {
+                return;
+            }
+            List<byte[]> chunks = new ArrayList<>(cells.size()); // taken here: the map of them is this thread's
+            long bytes = 0;
+            for (Cell cell : cells) {
+                byte[] data = pending.get(cell).data;
+                chunks.add(data);
+                bytes += data.length;
+            }
+            // In flight a chunk holds its filtered bytes, and a filter's output before the last one's.
+            workers.add(2 * bytes, () -> {
+                List<FilteredChunk> filtered = new ArrayList<>(cells.size());
+                for (int i = 0; i < cells.size(); i++) {
+                    filtered.add(new FilteredChunk(cells.get(i), encodeChunk(chunks.get(i), spec)));
+                }
+                return filtered;
+            });
+        }
+
+        /**
          * Writes a chunk's elements at the end of the file: filtered, or as they are for a partial edge chunk
          * of a dataset that keeps those unfiltered.
          */
         private void store(Cell cell, byte[] data) {
             boolean raw = keepsPartialEdgesUnfiltered() && partial(cell);
-            EncodedChunk encoded = spec.filters.isEmpty() || raw ? new EncodedChunk(data, 0) : encodeChunk(data, spec);
+            place(cell, spec.filters.isEmpty() || raw ? new EncodedChunk(data, 0) : encodeChunk(data, spec), raw);
+        }
+
+        /** Puts a chunk's stored bytes at the end of the file, and the chunk in the index: {@code raw} if unfiltered. */
+        private void place(Cell cell, EncodedChunk encoded, boolean raw) {
             long at = output().allocate(encoded.bytes().length);
             output().write(at, encoded.bytes());
             stored.put(cell, new ChunkIndexWriter.Entry(cell.scaled(), at, encoded.bytes().length, encoded.filterMask()));
@@ -5043,9 +5153,7 @@ public final class Hdf5Writer implements AutoCloseable {
          */
         void finish() {
             if (!holdsAddresses) {
-                for (Cell cell : new ArrayList<>(pending.keySet())) {
-                    flush(cell, pending.get(cell));
-                }
+                flushAll(new ArrayList<>(pending.keySet()));
             }
             // Chunks stored unfiltered that are no longer partial edge chunks (the dataset grew), or all of
             // them under a B-tree index, are filtered now, as libhdf5 does when a dataset grows.

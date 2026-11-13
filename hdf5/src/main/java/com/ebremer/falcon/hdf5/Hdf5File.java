@@ -56,7 +56,9 @@ import java.util.Optional;
  * be read from any number of threads at once (for example through {@code dataset.blocks(n).parallel()}):
  * the mapping is read without shared cursors, the decoded-chunk cache is synchronized, and lazily parsed
  * metadata is safely published. Close the file only once those reads have finished; a read already in
- * progress when another thread closes the file may fail with {@link IllegalStateException}.
+ * progress when another thread closes the file may fail with {@link IllegalStateException}. A read of
+ * several filtered chunks decodes them on several threads itself ({@link OpenOptions#decodeThreads}); only
+ * the reading thread reads the file.
  */
 public final class Hdf5File implements AutoCloseable {
 

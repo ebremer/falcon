@@ -88,7 +88,8 @@ ds.blocks(10_000).forEach(block -> {      // 10,000 rows at a time, along the fi
 });
 ```
 
-An open file may be read from several threads at once, so `ds.blocks(n).parallel()` works too.
+An open file may be read from several threads at once, so `ds.blocks(n).parallel()` works too. A read of
+compressed chunks already decodes them on several threads itself (see [Tips](#tips)).
 
 ### Read attributes
 
@@ -262,6 +263,9 @@ A file read through a `RangeReader` may also fail to be read at all: `java.io.Un
   read.
 - **Tune the caches** with `OpenOptions` (`chunkCacheSize`, `readerPageSize`, `readerCacheSize`) for large or
   remote files.
+- **Compressed chunks use every processor.** A read decodes its chunks, and a writer compresses them, on
+  several threads at once, with the same result as on one. `OpenOptions.decodeThreads(n)` and
+  `Hdf5Writer.encodeThreads(n)` set how many at most; 1 keeps the work on the calling thread.
 - **Write whole chunks** at a time to keep a writer's memory small.
 - See the [full guide](https://github.com/ebremer/falcon/blob/main/hdf5/USER_GUIDE.md) for virtual datasets,
   region references, ZFP, SZ, Blosc2, and the details of changing files in place.

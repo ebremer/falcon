@@ -32,6 +32,57 @@ chunked 64 × 64 (1,024 chunks), and chunked with gzip. The rows:
   itself.
 - **Remote reads:** how many bytes a 4 × 4 selection of the gzip dataset fetches through a
   `RangeReader`.
+- **Threads** (P2 PF9, PF10): the whole read of the gzip dataset, and 1,000 random 4 × 4 selections of it
+  with no chunk cache, with its chunks decoded on every thread and on the reading thread alone
+  (`decodeThreads(1)`).
+- **Writes** (P2 PF10): a file of one dataset (create, write, close: the flush to disk and the move into
+  place included), contiguous, chunked, and chunked with gzip, that one with its chunks filtered on every
+  thread and on the writer's alone (`encodeThreads(1)`).
+
+## P2 PF9, PF10: chunks filtered on several threads
+
+One build, with and without the threads (`decodeThreads(1)` and `encodeThreads(1)` are the code as it was),
+on one machine: OpenJDK 25 on a Windows developer workstation with 32 processors. Two runs each.
+
+| operation | one thread | every thread | |
+|---|--:|--:|--:|
+| read whole: chunked + gzip (1,024 chunks) | 134–142 ms | 25.0–27.8 ms | **5×** (PF9) |
+| write: chunked + gzip (1,024 chunks, level 4) | 969–996 ms | 118–134 ms | **7–8×** (PF10) |
+| 1,000 random 4 × 4 selections, gzip, no chunk cache | 114–136 ms | 124–128 ms | unchanged |
+| read whole: chunked, no filter | | 15.9–17.0 ms | no filter to run |
+| write: chunked, no filter | | 56–68 ms | no filter to run |
+| write: contiguous | | 45–49 ms | |
+
+Why each improves, and what bounds it:
+- **A gzip read was inflate.** Timed apart, inflating the 1,024 chunks takes some 117 ms on one thread and
+  6 ms across the processors. The rest of a read stays on the reading thread: reading the chunks' stored
+  bytes from the file, a chunk after another, and turning the bytes into `double`s. That is most of the
+  25 ms.
+- **A gzip write was deflate:** timed apart, some 900 ms on one thread and 52 ms across the processors. The
+  writer's thread still puts each chunk in the file in turn, and the file is flushed to disk as before; a
+  chunked write with no filter takes 56–68 ms.
+- **Small reads are as they were.** Nine in ten of the 4 × 4 selections fall in one chunk, which the reading
+  thread decodes itself; the rest decode two or four at once.
+
+What does not change: the bytes a read returns, the exception a damaged file fails it with, the requests a
+`RangeReader` sees, and every byte of a file written (`ParallelChunksTest`).
+
+**Small chunks.** Handing a chunk to another thread costs some microseconds, which is more than a chunk of a
+few hundred bytes takes to decode. So chunks smaller than 32 KiB are filtered several to a piece of work, and
+a read or write of less than 64 KiB of chunks stays on its own thread. Measured with a throwaway harness on
+the same machine (1,000 reads each, no chunk cache; a write of the 32 MiB dataset):
+
+| operation | one thread | every thread |
+|---|--:|--:|
+| read 4 chunks of 32 KiB, gzip | 497 ms | 193 ms |
+| read 25 chunks of 32 KiB, gzip | 2,846 ms | 482 ms |
+| read 16 chunks of 512 bytes, gzip (under 64 KiB: on one thread either way) | 21 ms | 26 ms |
+| read 256 chunks of 512 bytes, gzip | 285 ms | 241 ms |
+| write 65,536 chunks of 512 bytes, fletcher32 | 836 ms | 588 ms |
+| write 65,536 chunks of 512 bytes, gzip | 2,662 ms | 892 ms |
+
+Before chunks were grouped so, the reads of 512-byte chunks took up to 2.8 times as long on every thread as
+on one (4 of them: 19 ms against 7; 16: 41 against 25; 256: 458 against 308).
 
 ## P2 PF1–PF3: before and after
 

@@ -1,12 +1,12 @@
 # Falcon HDF5 — remaining work (prioritized)
 
-**Status (2026-11-13, after P2 S1–S10, A1–A12, PF1–PF8, WF1–WF11, all of P3, and P1 C1–C2):** build green,
-**1311 HDF5 tests** (144 at the review, 187 after the top 10, 206 after P0, 228 after P1, 243 after S1–S3, 256
+**Status (2026-11-13, after P2 S1–S10, A1–A12, PF1–PF10, WF1–WF11, all of P3, and P1 C1–C2):** build green,
+**1341 HDF5 tests** (144 at the review, 187 after the top 10, 206 after P0, 228 after P1, 243 after S1–S3, 256
 after S4–S7, 439 after A2–A6, 610 after PF1–PF4, 677 after A1–A10, 692 after A11–A12, 707 after WF1–WF4,
 743 after WF5–WF9, 782 after WF7 and WF10, 850 after WF11 and PF5–PF7, 855 after P3, 1117 after S8–S9; the
 checksum tests then moved to `core`, S10's ZFP added four, and its Blosc2 and SZ eleven: 1128; 1133 after the
-conformance harness, 1311 after C1 and C2), plus 147 in the `core`
-module. The review's top 10, every P1 item, **P2 S1–S10**, **A1–A12**, **PF1–PF8**, **WF1–WF11**,
+conformance harness, 1311 after C1 and C2, 1341 after PF9 and PF10), plus 147 in the `core`
+module. The review's top 10, every P1 item, **P2 S1–S10**, **A1–A12**, **PF1–PF10**, **WF1–WF11**,
 **every P3 item**, the P0 zstd fix (Z6/Z7, in `core`), and the P0 found with S8 (types libhdf5 refuses in
 version-1 object headers) are done (see *Done* at the end). Falcon now:
 
@@ -53,6 +53,8 @@ version-1 object headers) are done (see *Done* at the end). Falcon now:
   - names are found through the name indexes (see `BENCHMARKS.md`);
   - every handle of an object shares what any of them read of it, in a bounded per-file cache;
   - selected elements come out of each chunk a run at a time;
+- runs chunks through their filters on several threads: a read decodes its filtered chunks, and a writer
+  filters them, on the common pool's threads and its own, the file read and written exactly as on one;
 - writes files that **HDF5 2.0 and 1.14 read, and change**, checked by `tools/fixtures/check_hdf5_writer.py`.
   The last run (2026-11-13) read 557/557 objects with HDF5 2.0 and hdf5plugin 7.1.0; HDF5 1.14.6 last read
   298/298, before S8. Each library then changed every file (an attribute on every object, a dataset in every
@@ -81,6 +83,19 @@ version-1 object headers) are done (see *Done* at the end). Falcon now:
 
 P0, P1, and P3 are empty, and so is P2 but for its known limits and non-goals: C1 and C2, which the HDF5
 conformance harness found, were the last open items.
+
+**P2 PF9, PF10 (2026-11-13)** add API, and change no result:
+- **New: `OpenOptions.decodeThreads(threads)`** (default `DEFAULT_DECODE_THREADS`, one for each processor) and
+  **`Hdf5Writer.encodeThreads(threads)`** (the same default). 1 keeps the work on the calling thread, as it
+  was.
+- **A read of several filtered chunks decodes them on several threads,** and **a write that completes
+  several filters them on several:** the calling thread and the common `ForkJoinPool`'s. A read returns the
+  same bytes, fails with the same exception, and makes the same requests of a `RangeReader`; a writer writes
+  the same file, byte for byte.
+- **Memory:** the chunks in flight are held to an eighth of the heap (`Runtime.maxMemory()`), over what a
+  read or write held before.
+- **Measured** (`BENCHMARKS.md`, 32 processors): a whole read of 32 MiB of gzip chunks takes 25–28 ms, from
+  134–142; writing them 118–134 ms, from 969–996.
 
 **P1 C1, C2 (2026-11-13)** change behaviour, and no API:
 - **A file closed with a metadata cache image** (`H5Pset_mdc_image_config`) reads; it failed with
@@ -449,14 +464,85 @@ empty.
 
 ### Performance
 
-- PF1–PF8 are done (see *Done — 2026-10-05 (P2: PF8)*, *(P2: WF11, PF5–PF7)* and *(P2: PF1–PF4)*).
-  Nothing is open here. Strided single elements of contiguous data are still copied one by one (runs of
-  adjacent elements are one copy); a benchmark shows no gain worth the change yet.
+- PF1–PF10 are done (see *Done — 2026-11-13 (P2: PF9, PF10)*, *Done — 2026-10-05 (P2: PF8)*,
+  *(P2: WF11, PF5–PF7)* and *(P2: PF1–PF4)*). Strided single elements of contiguous data are still copied
+  one by one (runs of adjacent elements are one copy); a benchmark shows no gain worth the change yet.
+- **Measured with PF9 and PF10, and not done** (2026-11-13; 2048 × 2048 `float64`, 32 processors):
+  - **Chunks of a remote file are fetched one request at a time.** A whole read of the 1,024 gzip chunks
+    makes 479 requests of a `RangeReader`, one after another (64 of 512 KiB chunks), though the chunks lie
+    back to back in the file. Reading adjacent chunks in one request, and several requests at once, would
+    need a way to ask a `RangeReader` for several ranges. Counted, not timed against a store.
+  - **The byte shuffle moves a byte at a time:** unshuffling the 1,024 chunks takes 30 ms of a
+    shuffle + gzip read's 104 on one thread; a loop for 8-byte elements (a `long` assembled from eight
+    streams) takes 5.4 ms. It is `core`'s, so Zarr's shuffle and Blosc's would gain too.
+  - **The writer encodes typed arrays an element at a time:** `ValueEncoder` takes 15 ms for 4 million
+    `double`s and 28 ms for as many `int`s; one bulk copy takes 4.6 ms. Of a contiguous write's 37 ms, 24
+    are the file write and its flush to disk.
+  - **An unfiltered chunk is copied twice,** from the mapping to an array and from there to its place: a
+    whole read takes 14 ms chunked against 7 contiguous.
+  - **Not worth doing:** a bulk copy for `readDoubles` (4.6 ms against the loop's 5.2), and keeping whole
+    reads out of the chunk cache (124 ms with it, 128 without).
 
 ## P3 — docs, build, housekeeping
 
 - D1, D2, D3, D4, D6, B1, B2, and B3 are done (see *Done — 2026-10-05 (P3: D2, D6, B1–B3)* and
   *(P3: D1, D3, D4)*). P3 is empty.
+
+## Done — 2026-11-13 (P2: PF9, PF10)
+
+Found by timing the read and write paths: inflate was 117 of a gzip read's 124 ms, and deflate 899 of a gzip
+write's 953. Both items share one mechanism, `io.ChunkWorkers`.
+
+- [x] **PF9 — a read's filtered chunks decoded on several threads.**
+  - **`io.ChunkWorkers`.** The calling thread adds pieces of work in turn; they run on the common
+    `ForkJoinPool`'s threads (helper tasks that take pieces from a queue) and on the calling thread, which
+    takes a piece itself whenever it would otherwise wait, and waits only for a piece a helper is running.
+    Each piece's result is handed back on the calling thread in the order the work was added.
+    - **Bounds:** at most `threads` pieces in flight (never more than the pool's threads and one), and at
+      most an eighth of the heap in bytes; a piece over that alone runs on the calling thread, by itself.
+    - **One piece alone never leaves the calling thread:** the piece added last is not handed over until
+      another is added.
+    - **Failures:** the exception thrown is the one a single thread would have met first: the first failed
+      piece in the order added, or the caller's own failure between two pieces unless a piece before it
+      failed. Work after it is not started.
+    - **A common pool set to no threads** (`java.util.concurrent.ForkJoinPool.common.parallelism=0`) is
+      not used: everything runs on the calling thread.
+  - **Reads** (`ChunkedReader`: whole reads, boxes, strided selections, points). The reading thread reads
+    each chunk's stored bytes, in turn as before, and hands them over; a piece reverses the filters, puts
+    the chunk in the chunk cache, and copies its elements to their places in the read's output, which no
+    other chunk writes. Unfiltered chunks, and chunks found in the cache, are copied by the reading thread.
+  - **Small chunks:** chunks under 32 KiB go several to a piece, and a read of under 64 KiB of chunks
+    stays on its thread; handing each 512-byte chunk over took up to 2.8 times as long as decoding it in
+    place (`BENCHMARKS.md`).
+  - **New: `OpenOptions.decodeThreads(threads)`** and `DEFAULT_DECODE_THREADS`.
+  - **Measured:** a whole read of 32 MiB of gzip chunks (1,024 chunks) takes 25–28 ms, from 134–142.
+- [x] **PF10 — a write's chunks filtered on several threads.** `Hdf5Writer`'s chunk storage hands the chunks
+  a write completes (and those still pending on close) to `ChunkWorkers`, and its own thread puts each
+  filtered chunk in the file as the results come back in order: the allocations and writes are those of one
+  thread, so the file is the same byte for byte.
+  - **On the writer's thread, one at a time:** a chunk with variable-length ids or object references to
+    fill in (filling them in places heap collections, which go after the chunks before it), and a partial
+    edge chunk kept unfiltered. Everything before such a chunk is in the file first.
+  - **New: `Hdf5Writer.encodeThreads(threads)`,** which the writers of a virtual dataset's source files
+    take too.
+  - **Measured:** writing 32 MiB through gzip (level 4, 1,024 chunks) takes 118–134 ms, from 969–996.
+- **Tests:**
+  - `io.ChunkWorkersTest` (15): results in order on 1 to 64 threads; no more pieces at once than the threads,
+    nor bytes than the budget; a piece alone, and one over the budget, on the calling thread; `drain`; the
+    first failure in order, of a piece, of the feed, and of taking a result; work added from the pool's own
+    threads; which chunks are worth several threads.
+  - `ParallelChunksTest` (15): files of eight datasets (given whole in small chunks and in large ones,
+    appended and written again, variable-length, LZF, Zstandard, szip, partly written) in both formats, and
+    a file changed in place, are byte for byte the same on 1, 2, 3, 8 and 64 threads; every whole read, box,
+    strided selection and point
+    selection of them returns the same bytes on any number, with and without the chunk cache, and through a
+    `RangeReader`; six libhdf5 fixtures read the same; with four chunks damaged, each read fails with the
+    first damaged chunk's own message, 25 times over on 2, 4 and 16 threads, for small chunks and large; a
+    `RangeReader` sees the same requests, all from the reading thread; the options.
+  - `ParallelChunksTest` fails when the threaded paths are broken on purpose (a chunk left out of a piece,
+    a filtered chunk put at another's place).
+  - The suite passes with the common pool at one thread and at none.
+- **Benchmarks** gained the rows with and without the threads, and the write rows.
 
 ## Done — 2026-11-13 (P1: C1, C2)
 

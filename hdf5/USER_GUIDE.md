@@ -99,7 +99,8 @@ Hdf5File.open(reader, OpenOptions.defaults()
         .readerPageSize(1 << 20)        // 1 MiB pages
         .readerCacheSize(256L << 20)    // keep up to 256 MiB of them
         .chunkCacheSize(512L << 20)     // and up to 512 MiB of decoded chunks
-        .objectCacheSize(64L << 20));   // and up to 64 MiB of objects' metadata (see Performance notes)
+        .objectCacheSize(64L << 20)     // and up to 64 MiB of objects' metadata (see Performance notes)
+        .decodeThreads(8));             // and decode a read's chunks on at most 8 threads (see Performance notes)
 ```
 
 A reader failure surfaces from the read that needed the bytes as `java.io.UncheckedIOException`, or as
@@ -601,6 +602,22 @@ libhdf5 itself would write: scale-offset and n-bit chunks are libhdf5's byte for
 libaec's (Falcon ports libaec's encoder: zero-block runs, the second extension, its choice of each block's
 coding). A chunk szip cannot shrink is stored unfiltered, as libhdf5 does.
 
+**Threads.** When a write completes several chunks (64 KiB of them or more), the writer runs them through
+the filters on several threads at once: its own, and the common `ForkJoinPool`'s. Its own thread alone
+writes the file, each chunk after the one before it, so the file is the same, byte for byte, however many
+threads there are.
+
+```java
+try (Hdf5Writer w = Hdf5Writer.create(path).encodeThreads(4)) {   // at most 4; the default is one for each processor
+    ...
+}
+```
+
+`encodeThreads(1)` filters on the writer's thread alone. The chunks being filtered at once are held to an
+eighth of the heap. Chunks of variable-length data and of object references are filtered one at a time:
+where each goes in the file depends on the one before. Writing 32 MiB through gzip takes about an eighth of
+the time on a 32-processor machine (see [`BENCHMARKS.md`](BENCHMARKS.md)).
+
 Six third-party filters are written as h5py and hdf5plugin write them: the same filter id, client data,
 and name, so libhdf5 reads them through hdf5plugin's plugins (or h5py's, for LZF).
 - `lzf()`;
@@ -885,10 +902,26 @@ also fail to be read at all: that is `java.io.UncheckedIOException`, wrapping th
   per file, least recently used first out, set by `OpenOptions.chunkCacheSize(bytes)` (0 turns it off).
   A file read through a `RangeReader` also caches its pages, set by `readerPageSize` and
   `readerCacheSize`.
-- **Measuring.** `Benchmarks` (opt-in) times the common read paths; see [`BENCHMARKS.md`](BENCHMARKS.md).
+- **Filtered chunks are decoded on several threads.** A read that covers several filtered chunks (64 KiB of
+  them or more) reverses their filters on several threads at once: the reading thread, and the common
+  `ForkJoinPool`'s. `OpenOptions.decodeThreads(n)` sets how many at most (one for each processor by
+  default; 1 for the reading thread alone). Nothing else about the read changes:
+  - the reading thread alone reads the file, a chunk after another, so a `RangeReader` sees the same
+    requests, in the same order;
+  - the read returns the same bytes, and a damaged file fails it with the same exception, the first one
+    thread would have met;
+  - the chunks being decoded at once are held to an eighth of the heap, so large chunks are decoded
+    fewer at a time.
+
+  A whole read of 32 MiB of gzip chunks takes a fifth of the time on a 32-processor machine (see
+  [`BENCHMARKS.md`](BENCHMARKS.md)). Unfiltered chunks have nothing to decode, and are copied as before.
+- **So are the chunks a writer filters.** `Hdf5Writer.encodeThreads(n)` is the same setting for writes
+  (see [Chunking and filters](#chunking-and-filters)).
+- **Measuring.** `Benchmarks` (opt-in) times the common read paths, and writing a dataset; see
+  [`BENCHMARKS.md`](BENCHMARKS.md).
 - **Concurrent reads.** An open `Hdf5File` and everything obtained from it may be read from many
   threads at once (e.g. `dataset.blocks(n).parallel()`); close it only after those reads finish.
-  `Hdf5Writer` is single-threaded.
+  Use an `Hdf5Writer` from one thread; it runs its chunks' filters on several itself.
 
 ---
 
