@@ -84,6 +84,6 @@ that uses them takes those dependencies on.
 
 ## Status
 
-Falcon is pre-1.0 (`0.1.0`) and not yet published to Maven Central: build it from source and
+Falcon is pre-1.0 (`0.2.0`) and not yet published to Maven Central: build it from source and
 install it into your local Maven repository, as [Getting started](getting-started.md) shows. The source,
 issues, and the full user guide of each module are on [GitHub](https://github.com/ebremer/falcon).

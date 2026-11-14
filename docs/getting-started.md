@@ -40,9 +40,9 @@ Maven it says so and stops.
 Each module's jar is in its `target/` folder, beside a sources jar and a Javadoc jar:
 
 ```
-hdf5/target/hdf5-0.1.0.jar
-zarr/target/zarr-0.1.0.jar
-ome/target/ome-0.1.0.jar
+hdf5/target/hdf5-0.2.0.jar
+zarr/target/zarr-0.2.0.jar
+ome/target/ome-0.2.0.jar
 ...
 cli/target/falcon.jar            the falcon command, with everything it needs
 ```
@@ -71,12 +71,12 @@ Each brings `core`, Falcon's codecs, with it.
     <dependency>
         <groupId>com.ebremer</groupId>
         <artifactId>hdf5</artifactId>
-        <version>0.1.0</version>
+        <version>0.2.0</version>
     </dependency>
     <dependency>
         <groupId>com.ebremer</groupId>
         <artifactId>zarr</artifactId>
-        <version>0.1.0</version>
+        <version>0.2.0</version>
     </dependency>
 </dependencies>
 ```
@@ -94,8 +94,8 @@ java {
 }
 
 dependencies {
-    implementation("com.ebremer:hdf5:0.1.0")
-    implementation("com.ebremer:zarr:0.1.0")
+    implementation("com.ebremer:hdf5:0.2.0")
+    implementation("com.ebremer:zarr:0.2.0")
 }
 ```
 
