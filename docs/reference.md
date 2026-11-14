@@ -14,7 +14,7 @@ description: Falcon's modules, packages, main classes, and exceptions, and where
 | Codecs | `com.ebremer:core` | `com.ebremer.falcon.core` | internal: exported to Falcon's modules only |
 | Command | `com.ebremer:cli` | (an application) | `falcon.jar` |
 
-All are version `0.1.0-SNAPSHOT`, and need Java 25.
+All are version `0.1.0`, and need Java 25.
 
 ## Main classes
 

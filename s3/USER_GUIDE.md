@@ -40,12 +40,12 @@ The formats are optional dependencies, so an application adds the one it uses be
 <dependency>
     <groupId>com.ebremer</groupId>
     <artifactId>s3</artifactId>
-    <version>0.1.0-SNAPSHOT</version>
+    <version>0.1.0</version>
 </dependency>
 <dependency>
     <groupId>com.ebremer</groupId>
     <artifactId>zarr</artifactId>   <!-- or hdf5, or both -->
-    <version>0.1.0-SNAPSHOT</version>
+    <version>0.1.0</version>
 </dependency>
 ```
 

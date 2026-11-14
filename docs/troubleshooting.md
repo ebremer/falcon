@@ -13,7 +13,7 @@ fails.** Maven is running on an older JDK. Point `JAVA_HOME` at JDK 25 or later,
 Java 25 class files; build your project with Java 25 (`<maven.compiler.release>25</maven.compiler.release>`,
 or a Gradle toolchain of 25).
 
-**`Could not find artifact com.ebremer:zarr:jar:0.1.0-SNAPSHOT`.** Falcon is not on Maven Central yet. Run
+**`Could not find artifact com.ebremer:zarr:jar:0.1.0`.** Falcon is not on Maven Central yet. Run
 `mvn install -DskipTests` in Falcon's folder, so the jars are in `~/.m2/repository`; with Gradle, add
 `mavenLocal()` to `repositories`.
 
