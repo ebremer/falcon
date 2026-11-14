@@ -2,6 +2,7 @@ package com.ebremer.falcon.zarr;
 
 import com.ebremer.falcon.zarr.chunk.ChunkGrid;
 import com.ebremer.falcon.zarr.chunk.RegularChunkGrid;
+import com.ebremer.falcon.zarr.codec.ChunkPipeline;
 import com.ebremer.falcon.zarr.data.ChunkAssembler;
 import com.ebremer.falcon.zarr.data.ChunkCache;
 import com.ebremer.falcon.zarr.data.Resize;
@@ -16,6 +17,8 @@ import com.ebremer.falcon.zarr.metadata.Metadata;
 import com.ebremer.falcon.zarr.metadata.NodeMetadata;
 import com.ebremer.falcon.zarr.metadata.V2Metadata;
 import com.ebremer.falcon.zarr.store.Store;
+import java.lang.foreign.Arena;
+import java.lang.foreign.MemorySegment;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -189,6 +192,81 @@ public final class ZarrArray extends ZarrNode {
         metadata.grid().checkCoords(coords);
         String relative = metadata.chunkKeyEncoding().encode(coords);
         return path.isEmpty() ? relative : path + "/" + relative;
+    }
+
+    /**
+     * Whether each chunk is stored as its elements are: the array's codecs are the {@code bytes} codec alone
+     * (a v2 array has no compressor, no filters, and C order), and its elements are of a fixed size. The
+     * value under {@link #chunkKey} is then the chunk's elements in C order, each primitive in
+     * {@link #byteOrder()}, the whole declared chunk even at the array's edge: {@code store().getRange} on
+     * that key reads any of them, and {@link #chunkSegment} is all of them, in place. A sharded array's
+     * chunks are not: a shard holds an index, and its sub-chunks in any order.
+     *
+     * <p>In a rectilinear grid this is said of the first chunk; the others have the same codecs.
+     *
+     * @return true if a stored chunk is exactly its elements' bytes
+     * @throws ZarrFormatException      if the array's codecs are malformed
+     * @throws ZarrUnsupportedException if they use an unimplemented codec
+     */
+    public boolean hasRawChunks() {
+        return !metadata.dataType().isVariableLength() && metadata.pipeline().isRaw();
+    }
+
+    /**
+     * The elements of the chunk at {@code coords} as a read-only view of the bytes where the store keeps
+     * them, nothing copied and nothing decoded: for a caller that reads a chunk in place, at random, as
+     * BeakGraph reads its indexes. It is there when the array {@linkplain #hasRawChunks() has raw chunks}
+     * and its store can {@linkplain Store#map map} a value, as a
+     * {@link com.ebremer.falcon.zarr.store.FileSystemStore} can: the chunk's file, mapped. The segment holds
+     * the whole declared chunk in C order, each primitive in {@link #byteOrder()}; at the array's edge, the
+     * part of it outside the array too.
+     *
+     * <p>It lasts as long as {@code arena}, and is of the chunk as it was stored: this handle's chunk cache
+     * is not asked, and a later write is the store's to show or not (see {@link Store#map}).
+     *
+     * <p>Empty for an array whose chunks are not raw, for a store that maps nothing, and for a chunk that is
+     * not stored (it reads as the fill value): then read the chunk through {@link #select}.
+     *
+     * @param arena  what the view's lifetime is bound to
+     * @param coords the chunk's coordinates in the chunk grid, one per dimension
+     * @return the chunk's elements, or empty where there is no such view of them
+     * @throws IllegalArgumentException  if the wrong number of coordinates is given
+     * @throws IndexOutOfBoundsException if a coordinate lies outside the chunk grid
+     * @throws ZarrFormatException       if the stored chunk is not the size its shape and data type give, or
+     *                                   the array's codecs are malformed
+     * @throws ZarrUnsupportedException  if the codecs use an unimplemented codec
+     */
+    public Optional<MemorySegment> chunkSegment(Arena arena, long... coords) {
+        Objects.requireNonNull(arena, "arena");
+        String key = chunkKey(coords); // checks the coordinates
+        if (metadata.dataType().isVariableLength()) {
+            return Optional.empty();
+        }
+        ChunkPipeline pipeline = metadata.chunkPipeline(coords);
+        if (!pipeline.isRaw()) {
+            return Optional.empty();
+        }
+        Optional<MemorySegment> mapped = store.map(key, arena);
+        if (mapped.isPresent() && mapped.get().byteSize() != pipeline.rawLength()) {
+            throw new ZarrFormatException("chunk '" + key + "' is " + mapped.get().byteSize()
+                    + " bytes, expected " + pipeline.rawLength());
+        }
+        return mapped;
+    }
+
+    /**
+     * The byte order of each primitive in the array's raw element bytes: what {@link #readRawBytes()} and a
+     * {@link Selection}'s raw reads return, what the raw writes take, and what a
+     * {@linkplain #chunkSegment chunk's segment} holds. It is the {@code bytes} codec's {@code endian}
+     * (a v2 array's data type's), and little-endian where the codecs name none: single-byte elements, and
+     * the lengths of variable-length ones.
+     *
+     * @return the byte order of the raw element bytes
+     * @throws ZarrFormatException      if the array's codecs are malformed
+     * @throws ZarrUnsupportedException if they use an unimplemented codec
+     */
+    public ByteOrder byteOrder() {
+        return metadata.pipeline().elementOrder();
     }
 
     /** {@return the element data type} */

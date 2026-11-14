@@ -274,6 +274,21 @@ public final class ChunkPipeline {
     }
 
     /**
+     * Whether a chunk is stored as its elements are: the {@code bytes} codec alone, no codec before it and
+     * none after, so the stored bytes are the chunk's elements in C order, each primitive in
+     * {@link #elementOrder()}, {@link #rawLength()} bytes of them. Such a chunk can be read in place.
+     */
+    public boolean isRaw() {
+        return bytesCodec instanceof BytesCodec && arrayCodecs.isEmpty() && byteCodecs.isEmpty();
+    }
+
+    /** The size in bytes of a chunk's elements: what a {@linkplain #isRaw() raw} chunk is stored in. */
+    public long rawLength() {
+        requireFixedSize();
+        return (long) Pipelines.elementCount(chunkShape) * dataType.byteCount();
+    }
+
+    /**
      * The shape of the sub-chunks a shard holds, when the array&rarr;bytes codec is {@code sharding_indexed}
      * and no array&rarr;array codec before it moves elements (a {@code cast_value} does not), so that a read
      * fetches and decodes only the sub-chunks it overlaps; otherwise {@code null} (a chunk is decoded whole).

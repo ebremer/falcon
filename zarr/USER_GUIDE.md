@@ -119,6 +119,37 @@ A cached handle sees its own writes, but not writes made through other handles o
 while a chunk stays cached; `cached.clearChunkCache()` empties it. It also keeps shards' indexes, so many
 small reads of one shard fetch its index once. It may be shared between threads.
 
+### Reading a chunk in place
+
+A read copies: it fetches a chunk, decodes it, and hands back an array. A chunk that is stored as its
+elements are needs none of that. `hasRawChunks()` says whether an array's chunks are stored so: its codecs
+are the `bytes` codec alone (a v2 array has no compressor, no filters, and C order) and its elements are of
+a fixed size. The value under `chunkKey(coords)` is then the chunk's elements in C order, each primitive in
+`byteOrder()`, so `store().getRange(key, offset, length)` reads any part of them from any store, and in a
+directory store the chunk's file can be read where it lies:
+
+```java
+try (Arena arena = Arena.ofShared()) {
+    Optional<MemorySegment> chunk = array.chunkSegment(arena, 0, 0);   // the chunk at grid position (0, 0)
+    if (chunk.isPresent()) {
+        MemorySegment elements = chunk.get();                          // read-only: the chunk's file, mapped
+        var layout = ValueLayout.JAVA_INT_UNALIGNED.withOrder(array.byteOrder());
+        int first = elements.get(layout, 0);
+    }
+}
+```
+
+Nothing is copied, decoded, or read ahead, a chunk past the 2 GB of an array is one segment, and several
+threads may read it at once. The segment holds the whole declared chunk - at the array's edge, the part
+outside the array too - and lasts as long as the arena: closing the arena unmaps the file. It is empty for
+an array whose chunks are not raw (compressed, checksummed, sharded, transposed), for a store that cannot
+map a value (every store but `FileSystemStore`), and for a chunk that is not stored, which reads as the
+fill value: read those through a selection. A stored chunk that is not the size its shape and data type
+give is a `ZarrFormatException`. A sharded array has no such view: a shard holds an index, and its
+sub-chunks in any order.
+
+BeakGraph reads its indexes this way: each is a `uint8` array of one raw chunk, searched where it lies.
+
 ## Rectilinear chunk grids
 
 Most arrays use the core `regular` chunk grid: every chunk has `chunkShape()`. The `rectilinear` grid
@@ -698,6 +729,13 @@ by default because any other page a server answers with (a 200 error page, an ap
 would list links that are not keys. Listing a whole tree costs a request per directory. Implement `Store`
 yourself for other backends (databases, other object stores); `getSuffix`, which reads the last bytes of a
 value, has a default you can override with a single request.
+
+`Store.map(key, arena)` gives a value as a read-only `MemorySegment` of the bytes where the store keeps
+them, for as long as the arena lasts: `FileSystemStore` memory-maps the key's file (on Windows, a mapped
+file cannot be replaced or deleted, so `set` and `delete` of that key fail until the arena is closed). Every
+other store answers empty, the default, as does any store for an absent key; `exists` tells the two apart.
+It is what `ZarrArray.chunkSegment` reads a raw chunk through (see
+[Reading a chunk in place](#reading-a-chunk-in-place)).
 
 `HttpStore` percent-encodes keys, keeps a base URL's query (presigned or SAS URLs) on every request, and
 follows redirects (http to https, never back). Only 404 means a key is absent. For an S3 or GCS bucket

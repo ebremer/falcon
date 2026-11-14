@@ -116,6 +116,26 @@ New API: `ZipStore.create`/`open`, `HttpStore.Builder.directoryListing` (F13);
 note, coverage, the oracle note), and D5's last item pinned `zarr==3.4.0` and `numcodecs==0.17.0`, which
 regenerate every Zarr fixture with the same metadata and values. What remains is P2's F3 and F4.
 
+**Update (2026-11-14): F19, a chunk read in place.** For a caller that reads a raw chunk at random where
+it lies, and not into an array: BeakGraph, which keeps its indexes in `uint8` arrays of one uncompressed
+chunk. API is added, and no result changes. 925 Zarr tests pass, 8 of them new (`ChunkSegmentTest`).
+- `Store.map(key, arena)` (new, a default that answers empty): a value as a read-only `MemorySegment` of the
+  bytes where the store keeps them, for as long as the arena lasts. `FileSystemStore` memory-maps the key's
+  file; the other stores keep the default.
+- `ZarrArray.chunkSegment(arena, coords...)` (new): the elements of a chunk through that view, when the
+  array has raw chunks; empty otherwise, for a store that maps nothing, and for a chunk that is not stored;
+  a stored chunk of the wrong size is a `ZarrFormatException`.
+- `ZarrArray.hasRawChunks()` (new): whether a stored chunk is exactly its elements' bytes (the `bytes` codec
+  alone, fixed-size elements), so that a range of a chunk's key is a range of its elements in any store.
+- `ZarrArray.byteOrder()` (new): the byte order of the raw element bytes, which the raw reads and writes
+  have always used and nothing said.
+- Not done: `ZipStore` could map a `STORED` entry and does not; `HttpStore` and `S3Store` have nothing to
+  map. A sharded array has no view (a shard holds an index, and its sub-chunks in any order), though one
+  whose sub-chunks are raw, all stored, and in order could have. Writing has no counterpart: a store takes a
+  value as one array, so a chunk too large for the heap cannot be written through a `Store` (BeakGraph
+  writes the chunk files of a directory store itself, a piece at a time). Not checked against zarr-python,
+  which has no such call; the files read this way are ones the existing tests hold to zarr-python's.
+
 **Update (2026-10-06): P2's F3 and F4 are done, and with them the whole review.** 683 Zarr tests, 18 more
 under a small heap, and 83 core tests pass. Checked against zarr-python 3.4:
 - zarr-python reads all 273 arrays `check_zarr_writer.py` checks and all 42 v2 arrays Falcon wrote into

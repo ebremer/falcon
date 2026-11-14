@@ -1,6 +1,9 @@
 package com.ebremer.falcon.zarr.store;
 
+import java.lang.foreign.Arena;
+import java.lang.foreign.MemorySegment;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
 
@@ -74,6 +77,31 @@ public interface Store {
             return Optional.empty();
         }
         return getRange(key, Math.max(0, size.getAsLong() - length), length);
+    }
+
+    /**
+     * The value under {@code key} as a read-only view of the bytes where the store keeps them, nothing copied
+     * and nothing read until it is looked at: for a caller that reads a large value in place, at random. A
+     * {@link FileSystemStore} maps the key's file; a value of any size is one segment, past the 2 GB an array
+     * holds, and several threads may read it at once.
+     *
+     * <p>The view lasts as long as {@code arena}: closing the arena ends it (a mapped file is unmapped), and
+     * the segment then throws {@link IllegalStateException}. It is of the value as it was stored when this
+     * was called; whether a later {@link #set} or {@link #delete} of the key shows through it, or is refused
+     * while it lasts, is the store's to say.
+     *
+     * <p>Empty if the key is absent, and from every store that has no such view of its values: the default.
+     * {@link #exists} tells the two apart, and {@link #get} and {@link #getRange} read the value either way.
+     *
+     * @param key   the key
+     * @param arena what the view's lifetime is bound to
+     * @return the value as a read-only segment, or empty if the key is absent or the store cannot give one
+     * @throws IllegalArgumentException if {@code key} is not a legal key
+     */
+    default Optional<MemorySegment> map(String key, Arena arena) {
+        StoreKeys.validate(key);
+        Objects.requireNonNull(arena, "arena");
+        return Optional.empty();
     }
 
     /**

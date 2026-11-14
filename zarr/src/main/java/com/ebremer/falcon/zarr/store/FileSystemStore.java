@@ -2,6 +2,8 @@ package com.ebremer.falcon.zarr.store;
 
 import com.ebremer.falcon.zarr.ZarrException;
 import java.io.IOException;
+import java.lang.foreign.Arena;
+import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.AccessDeniedException;
@@ -18,6 +20,7 @@ import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
 
@@ -40,6 +43,11 @@ import java.util.OptionalLong;
  * the old value. It does not force the bytes to the disk: after a power loss, a value written just before
  * may be lost. A temporary file left by a process that died mid-write is named
  * {@code .<name>.<random>.tmp}.
+ *
+ * <p>{@link #map} memory-maps a key's file. The mapping is of the file as it was: a {@link #set} of the key
+ * renames a new file into place and leaves the mapped one as it is, to be read until its arena closes. On
+ * Windows a mapped file cannot be replaced or deleted, so there {@link #set} and {@link #delete} of a mapped
+ * key fail until the arena is closed.
  */
 public final class FileSystemStore implements Store {
 
@@ -124,6 +132,37 @@ public final class FileSystemStore implements Store {
             return Optional.of(read(channel, Math.max(0, channel.size() - len), len));
         } catch (IOException e) {
             throw new ZarrException("failed to read the end of key '" + key + "'", e);
+        }
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>The key's file, mapped read-only for as long as {@code arena} lasts; the file is not held open. An
+     * empty value is an empty segment, with nothing mapped. Empty, too, where the file system cannot map a
+     * file (one that is not the platform's own).
+     *
+     * @throws ZarrException if the file cannot be opened or mapped
+     */
+    @Override
+    public Optional<MemorySegment> map(String key, Arena arena) {
+        Objects.requireNonNull(arena, "arena");
+        Path path = resolve(key);
+        if (!Files.isRegularFile(path)) {
+            return Optional.empty();
+        }
+        try (FileChannel channel = FileChannel.open(path, StandardOpenOption.READ)) {
+            long size = channel.size();
+            if (size == 0) {
+                return Optional.of(MemorySegment.ofArray(new byte[0]).asReadOnly()); // a mapping has a length
+            }
+            return Optional.of(channel.map(FileChannel.MapMode.READ_ONLY, 0, size, arena));
+        } catch (NoSuchFileException e) {
+            return Optional.empty(); // deleted since it was looked for
+        } catch (UnsupportedOperationException e) {
+            return Optional.empty(); // a file system whose files cannot be mapped
+        } catch (IOException e) {
+            throw new ZarrException("failed to map key '" + key + "'", e);
         }
     }
 

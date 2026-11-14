@@ -102,6 +102,24 @@ or repeated reads, read through a cached handle, which decompresses each chunk o
 ZarrArray cached = array.withChunkCache(64L << 20);   // up to 64 MB of decoded chunks
 ```
 
+### Read a chunk in place
+
+A chunk stored with the `bytes` codec alone is its elements, in C order. In a directory store it can be
+read where it lies, memory-mapped, without a copy:
+
+```java
+if (array.hasRawChunks()) {
+    try (Arena arena = Arena.ofShared()) {
+        MemorySegment chunk = array.chunkSegment(arena, 0).orElseThrow();   // read-only, until the arena closes
+        long first = chunk.get(ValueLayout.JAVA_LONG_UNALIGNED.withOrder(array.byteOrder()), 0);
+    }
+}
+```
+
+`chunkSegment` is empty for a store that cannot map (read `store().getRange(array.chunkKey(0), offset,
+length)` there: with raw chunks, a range of the key is a range of the elements) and for a chunk that is not
+stored.
+
 ## Writing
 
 ### Create an array and write it
