@@ -1,13 +1,13 @@
 # Falcon HDF5 — remaining work (prioritized)
 
-**Status (2026-11-13, after P2 S1–S10, A1–A13, PF1–PF14, WF1–WF11, all of P3, and P1 C1–C2):** build green,
-**1516 HDF5 tests** (144 at the review, 187 after the top 10, 206 after P0, 228 after P1, 243 after S1–S3, 256
+**Status (2026-11-14, after P2 S1–S10, A1–A13, PF1–PF14, WF1–WF12, all of P3, and P1 C1–C2):** build green,
+**1518 HDF5 tests** (144 at the review, 187 after the top 10, 206 after P0, 228 after P1, 243 after S1–S3, 256
 after S4–S7, 439 after A2–A6, 610 after PF1–PF4, 677 after A1–A10, 692 after A11–A12, 707 after WF1–WF4,
 743 after WF5–WF9, 782 after WF7 and WF10, 850 after WF11 and PF5–PF7, 855 after P3, 1117 after S8–S9; the
 checksum tests then moved to `core`, S10's ZFP added four, and its Blosc2 and SZ eleven: 1128; 1133 after the
 conformance harness, 1311 after C1 and C2, 1341 after PF9 and PF10, 1366 after PF11, 1405 after PF12–PF14,
-1516 after A13), plus 149 in the `core` module. The review's top 10, every P1 item, **P2 S1–S10**,
-**A1–A13**, **PF1–PF14**, **WF1–WF11**, **every P3 item**, the P0 zstd fix (Z6/Z7, in `core`), and the P0
+1516 after A13, 1518 after WF12), plus 149 in the `core` module. The review's top 10, every P1 item, **P2 S1–S10**,
+**A1–A13**, **PF1–PF14**, **WF1–WF12**, **every P3 item**, the P0 zstd fix (Z6/Z7, in `core`), and the P0
 found with S8 (types libhdf5 refuses in version-1 object headers) are done (see *Done* at the end). Falcon
 now:
 
@@ -86,6 +86,13 @@ now:
 
 P0, P1, and P3 are empty, and so is P2 but for its known limits and non-goals: C1 and C2, which the HDF5
 conformance harness found, were the last open items.
+
+**P2 WF12 (2026-11-14)** adds no API, and changes no byte of a file:
+- **A file is no longer created sparse.** On NTFS a file created sparse stays slow to read through a
+  mapping for as long as it exists, with every byte of it written: a file Falcon wrote before this is made
+  fast by copying it.
+- **What it costs, on NTFS only:** a region allocated and never written is zeros on disk, where it was a
+  hole. Most Unix file systems leave holes whatever a program asks for, and nothing changes there.
 
 **P2 A13 (2026-11-13)** adds API, and changes no result:
 - **New: `Dataset.storageOffset()`** (an `OptionalLong`): where contiguous data lies in its file, in bytes
@@ -494,8 +501,11 @@ empty.
 
 ### Write features & API
 
-- WF1–WF11 are done (see *Done — 2026-10-05 (P2: WF11, PF5–PF7)*, *(P2: WF7, WF10)*,
-  *(P2: WF5, WF6, WF8, WF9)* and *(P2: WF1–WF4)*). Still open around them:
+- WF1–WF12 are done (see *Done — 2026-11-14 (P2: WF12)*, *Done — 2026-10-05 (P2: WF11, PF5–PF7)*,
+  *(P2: WF7, WF10)*, *(P2: WF5, WF6, WF8, WF9)* and *(P2: WF1–WF4)*). Still open around them:
+  - **Not done around WF12: a writer that asks for a sparse file.** One that allocates far more than it
+    writes (a contiguous dataset written only in places) would want its holes back on NTFS; nothing asks
+    for it yet, and such a file would be slow to map there.
   - Third-party filters: S8 writes LZF, Blosc, LZ4, bitshuffle, Zstandard, and bzip2, and S10 ZFP, Blosc2, and
     SZ: every filter Falcon reads.
   - **Not planned: writing through a virtual dataset of variable-length or reference data** (Falcon reads
@@ -549,6 +559,30 @@ empty.
 
 - D1, D2, D3, D4, D6, B1, B2, and B3 are done (see *Done — 2026-10-05 (P3: D2, D6, B1–B3)* and
   *(P3: D1, D3, D4)*). P3 is empty.
+
+## Done — 2026-11-14 (P2: WF12)
+
+Found by BeakGraph, whose stores are files Falcon writes and then maps: the first query after opening one
+took 18.9 ms where it took 3.1 ms on a copy of the same file.
+
+- [x] **WF12 — a file is not created sparse.**
+  - **What was wrong:** `write/OutputFile` opened its temporary file with `StandardOpenOption.SPARSE`
+    (WF1), so that a region allocated and never written took no disk space. On NTFS that mark stays with
+    the file when it is moved into place, and a file that carries it is slow to read through a mapping:
+    a page's first touch measured about 150 microseconds, against about 1 in a copy of the same bytes
+    (Windows 11, an NVMe disk, a plain JDK mapping; 8.4 ms against 0.07 ms for 50 pages spread over a
+    62 MB file). Every byte of the file had been written. Clearing the mark afterwards (`fsutil sparse
+    setflag <file> 0`) does not make the file fast again; copying it does.
+  - **The fix:** the option is gone. Nothing else changes: the same bytes go to the same offsets, and
+    the file is still written beside its target and moved into place.
+  - **What it costs, on NTFS only:** bytes allocated and never written are now zeros on disk, and NTFS
+    writes the zeros before a write that lands beyond them. `WriteStreamingTest.filesPass2GB`, which
+    writes six bytes at the two ends of a 2 GB dataset, takes about a second there. Most Unix file
+    systems leave holes whatever a program asks for, and the option was ignored on them.
+  - **Not measured:** Linux and macOS, where no slow mapping was looked for.
+- **Tests:** `WriteStreamingTest` gained `theFileIsNotSparse` (2, a format each; Windows only, where a
+  file's attributes say so): the temporary file while a dataset is written from its end, and the file in
+  place, are not marked sparse, and read back what was written. It fails with the option put back.
 
 ## Done — 2026-11-13 (P2: A13)
 

@@ -2,6 +2,7 @@ package com.ebremer.falcon.hdf5;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -212,6 +213,39 @@ class WriteStreamingTest {
             assertArrayEquals(new String[] {"a", "bc"}, h5.root().dataset("next/strings").readStrings());
             assertEquals(Dataset.Layout.COMPACT, h5.root().dataset("next/doubles").layout());
         }
+    }
+
+    /**
+     * A file is not written sparse (P2 WF12): on NTFS a file created sparse stays slow to read through a
+     * mapping, whatever is written into it. Windows says so in a file's attributes, while it is streamed into
+     * and once it is in place; elsewhere there is no such mark to look for.
+     */
+    @ParameterizedTest
+    @EnumSource(Hdf5Writer.Format.class)
+    void theFileIsNotSparse(Hdf5Writer.Format format) throws IOException {
+        assumeTrue(System.getProperty("os.name").startsWith("Windows"), "only Windows marks a sparse file");
+        Path file = dir.resolve("plain.h5");
+        try (Hdf5Writer w = Hdf5Writer.create(file, format)) {
+            Hdf5Writer.DatasetWriter d = w.createDataset("bytes", Datatype.int8(), 1 << 20);
+            d.write(new long[] {(1 << 20) - 3}, new long[] {3}, new byte[] {7, 8, 9}); // its end first: a gap before it
+            try (Stream<Path> files = Files.list(dir)) {
+                for (Path temp : files.filter(p -> p.getFileName().toString().endsWith(".tmp")).toList()) {
+                    assertFalse(sparse(temp), "the temporary file is sparse");
+                }
+            }
+            d.write(new long[] {0}, new long[] {3}, new byte[] {1, 2, 3});
+        }
+        assertFalse(sparse(file), "the file is sparse");
+        try (Hdf5File h5 = Hdf5File.open(file)) {
+            Dataset d = h5.root().dataset("bytes");
+            assertArrayEquals(new int[] {1, 2, 3, 0}, d.select(new long[] {0}, new long[] {4}).readInts());
+            assertArrayEquals(new int[] {0, 7, 8, 9}, d.select(new long[] {(1 << 20) - 4}, new long[] {4}).readInts());
+        }
+    }
+
+    /** Windows' FILE_ATTRIBUTE_SPARSE_FILE. */
+    private static boolean sparse(Path file) throws IOException {
+        return ((Integer) Files.getAttribute(file, "dos:attributes") & 0x200) != 0;
     }
 
     /** A file past 2 GB: a contiguous dataset whose block ends beyond 2^31 bytes, written only at its ends. */

@@ -20,9 +20,15 @@ import java.util.List;
  * <p>Or an existing file, being changed ({@link #openExisting}): new space is allocated after its end,
  * and its positions are HDF5 addresses, relative to its superblock (after a user block, if it has one).
  *
- * <p>The file is opened sparse, so a region allocated and never written takes no disk space where the
- * file system supports it. An I/O failure is an {@link UncheckedIOException}: the writer's methods that
- * stream data do not declare {@link IOException}.
+ * <p>The file is not created sparse (P2 WF12). On NTFS a file created sparse stays slow to read through a
+ * memory mapping for as long as it exists, even with every byte of it written: a page's first touch
+ * measured about 150 microseconds, against about 1 in a copy of the same bytes that was never sparse. A
+ * file Falcon writes is a file Falcon maps to read, so reading wins: a region allocated and never written
+ * is zeros on disk wherever the file system leaves no holes unasked (NTFS; most Unix file systems leave
+ * them whatever a program asks for).
+ *
+ * <p>An I/O failure is an {@link UncheckedIOException}: the writer's methods that stream data do not
+ * declare {@link IOException}.
  */
 public final class OutputFile {
 
@@ -59,8 +65,9 @@ public final class OutputFile {
         Path absolute = target.toAbsolutePath();
         Path temp = absolute.resolveSibling("." + absolute.getFileName() + "." + Long.toHexString(System.nanoTime()) + ".tmp");
         try {
+            // No StandardOpenOption.SPARSE: see the class comment (P2 WF12).
             FileChannel channel = FileChannel.open(temp, StandardOpenOption.CREATE_NEW, StandardOpenOption.READ,
-                    StandardOpenOption.WRITE, StandardOpenOption.SPARSE);
+                    StandardOpenOption.WRITE);
             OutputFile file = new OutputFile(absolute, temp, channel, userBlock.length, 0, reserved);
             file.write(-userBlock.length, userBlock);
             return file;
