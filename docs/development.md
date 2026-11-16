@@ -37,6 +37,11 @@ mvn install -DskipTests    # into ~/.m2, for other projects
 The build needs JDK 25 and Maven 3.9; it checks both and stops otherwise. It is **reproducible**: the same
 sources build byte-identical jars. Each module also builds a sources jar and a Javadoc jar.
 
+`mvn deploy` publishes every module, with its sources and Javadoc jars, to the Stony Brook BMI Maven
+repository that Halcyon and BeakGraph use: <https://cursus.bmi.stonybrookmedicine.edu/releases>, or
+`/snapshots` for a `-SNAPSHOT` version. It needs credentials for the server id `halcyon` in your Maven
+`settings.xml`.
+
 ## Rules the code follows
 
 - **Minimal dependencies.** `core`, `hdf5`, `zarr`, and `ome` depend on nothing but `java.base` (and

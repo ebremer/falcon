@@ -33,6 +33,22 @@
         </developer>
     </developers>
 
+    <!-- mvn deploy publishes to the Stony Brook BMI repository, the one Halcyon and BeakGraph deploy to.
+         Both ids are `halcyon`: a distributionManagement id names the settings.xml <server> that holds the
+         credentials, and `halcyon` is the one defined, so a SNAPSHOT deploys with the same credentials. -->
+    <distributionManagement>
+        <repository>
+            <id>halcyon</id>
+            <name>Halcyon</name>
+            <url>https://cursus.bmi.stonybrookmedicine.edu/releases</url>
+        </repository>
+        <snapshotRepository>
+            <id>halcyon</id>
+            <name>Halcyon Snapshots</name>
+            <url>https://cursus.bmi.stonybrookmedicine.edu/snapshots</url>
+        </snapshotRepository>
+    </distributionManagement>
+
     <modules>
         <module>core</module>  <!-- Code both formats share: the pure-Java compression codecs. -->
         <module>hdf5</module>
