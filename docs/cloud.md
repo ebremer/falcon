@@ -113,12 +113,12 @@ you use only when you want S3:
 <dependency>
     <groupId>com.ebremer</groupId>
     <artifactId>s3</artifactId>
-    <version>0.2.0</version>
+    <version>0.3.0</version>
 </dependency>
 <dependency>
     <groupId>com.ebremer</groupId>
     <artifactId>zarr</artifactId>       <!-- and/or hdf5 -->
-    <version>0.2.0</version>
+    <version>0.3.0</version>
 </dependency>
 ```
 
