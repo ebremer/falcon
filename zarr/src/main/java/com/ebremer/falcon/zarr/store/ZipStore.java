@@ -5,6 +5,8 @@ import com.ebremer.falcon.zarr.ZarrFormatException;
 import com.ebremer.falcon.zarr.ZarrUnsupportedException;
 import java.io.IOException;
 import java.io.InputStream;
+import java.lang.foreign.Arena;
+import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.channels.ClosedByInterruptException;
@@ -48,6 +50,8 @@ import java.util.zip.ZipException;
  * their entries uncompressed (the chunks are compressed already), and why this store writes them so. A
  * {@code DEFLATED} entry is not randomly addressable: a range is inflated from the entry's start, and
  * inflating stops at the range's end. A whole value read with {@link #get} is checked against its CRC-32.
+ * {@link #map} gives a {@code STORED} entry as a view of the archive's own bytes, that part of the file
+ * memory-mapped: a value of any size, read in place.
  * When an archive holds two entries of the same name (zarr-python adds a second when a key is written
  * again), the later one is the key's value, as Python's {@code zipfile} reads it. Entries that are
  * directories, or whose names are not store keys, are not listed and cannot be read; they are kept when
@@ -263,6 +267,52 @@ public final class ZipStore implements Store, AutoCloseable {
         StoreKeys.validate(key);
         Entry entry = entry(key);
         return entry == null ? Optional.empty() : Optional.of(read(entry, Math.max(0, entry.size - len), len));
+    }
+
+    /**
+     * A {@code STORED} entry's value as a read-only view of the archive: the part of the file that holds it,
+     * memory-mapped. Nothing is read until the segment is looked at, and nothing is checked: the entry's
+     * CRC-32 is {@link #get}'s to verify. The view is of the entry that was the key's value when this was
+     * called; a later {@link #set} of the key appends another entry and leaves these bytes where they are,
+     * so the view goes on showing the old value. On Windows a mapped archive cannot be shortened or
+     * replaced: close the arena before the store, where the store was opened to write.
+     *
+     * <p>Empty for an absent key, and for an entry with no such view: one that is deflated or encrypted, or
+     * an archive on a file system whose files cannot be mapped.
+     *
+     * @throws ZarrFormatException if the entry's local header is not where the directory says, or the entry
+     *                             runs past the end of the archive
+     */
+    @Override
+    public Optional<MemorySegment> map(String key, Arena arena) {
+        StoreKeys.validate(key);
+        Objects.requireNonNull(arena, "arena");
+        Entry entry = entry(key);
+        if (entry == null || entry.method != STORED || (entry.flags & FLAG_ENCRYPTED) != 0) {
+            return Optional.empty();
+        }
+        if (entry.compressedSize != entry.size) {
+            throw new ZarrFormatException("ZIP entry '" + key + "' is stored, yet its directory gives it "
+                    + entry.compressedSize + " bytes in the archive and " + entry.size + " out of it");
+        }
+        if (entry.size == 0) {
+            return Optional.of(MemorySegment.ofArray(new byte[0]).asReadOnly()); // a mapping has a length
+        }
+        try {
+            long data = dataOffset(entry);
+            for (int attempt = 1; ; attempt++) {
+                FileChannel c = channel;
+                try {
+                    return Optional.of(c.map(FileChannel.MapMode.READ_ONLY, data, entry.size, arena));
+                } catch (ClosedChannelException e) {
+                    recover(c, e, attempt);
+                }
+            }
+        } catch (UnsupportedOperationException e) {
+            return Optional.empty(); // a file system whose files cannot be mapped
+        } catch (IOException e) {
+            throw failure("failed to map ZIP entry '" + key + "'", e);
+        }
     }
 
     @Override

@@ -116,7 +116,8 @@ if (array.hasRawChunks()) {
 }
 ```
 
-`chunkSegment` is empty for a store that cannot map (read `store().getRange(array.chunkKey(0), offset,
+A `ZipStore` maps an uncompressed entry of its archive the same way, so an array kept in one ZIP file is
+read where it lies too. `chunkSegment` is empty for a store that cannot map (read `store().getRange(array.chunkKey(0), offset,
 length)` there: with raw chunks, a range of the key is a range of the elements) and for a chunk that is not
 stored.
 

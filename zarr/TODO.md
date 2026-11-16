@@ -129,12 +129,30 @@ chunk. API is added, and no result changes. 925 Zarr tests pass, 8 of them new (
   alone, fixed-size elements), so that a range of a chunk's key is a range of its elements in any store.
 - `ZarrArray.byteOrder()` (new): the byte order of the raw element bytes, which the raw reads and writes
   have always used and nothing said.
-- Not done: `ZipStore` could map a `STORED` entry and does not; `HttpStore` and `S3Store` have nothing to
+- Not done: ~~`ZipStore` could map a `STORED` entry and does not~~ (it does: see the update of
+  2026-11-15 below); `HttpStore` and `S3Store` have nothing to
   map. A sharded array has no view (a shard holds an index, and its sub-chunks in any order), though one
   whose sub-chunks are raw, all stored, and in order could have. Writing has no counterpart: a store takes a
   value as one array, so a chunk too large for the heap cannot be written through a `Store` (BeakGraph
   writes the chunk files of a directory store itself, a piece at a time). Not checked against zarr-python,
   which has no such call; the files read this way are ones the existing tests hold to zarr-python's.
+
+**Update (2026-11-15): F20, an uncompressed ZIP entry read in place.** `ZipStore.map(key, arena)` gives a
+`STORED` entry as a read-only `MemorySegment`: the part of the archive that holds it, memory-mapped, a value
+of any size. With it `ZarrArray.chunkSegment` reads a raw chunk of an array kept in a ZIP archive where it
+lies, which is what BeakGraph's single-file Zarr stores are read through. API is added (an override of
+`Store.map`'s default), and no result changes. 970 Zarr tests pass, 4 of them new (`ZipMapTest`).
+- Empty for an absent key and for an entry that is deflated or encrypted: such an entry is not its value's
+  bytes. An entry said to be stored whose two sizes differ is a `ZarrFormatException`.
+- Nothing is checked on the way: the entry's CRC-32 is `get`'s to verify, as before.
+- The view is of the entry that was the key's value when it was made. A later `set` of the key appends
+  another entry and leaves those bytes where they are, so the view goes on showing the old value.
+- An entry is mapped by itself, at its offset in the file. Not done: one mapping of the archive shared by
+  the entries mapped into one arena. Measured on Windows, on a 57 MB archive of 122 entries: mapping its 57
+  chunks one by one takes 0.79 ms, the whole file as one mapping 0.10 ms; the same chunks as 57 files of a
+  directory store take 1.95 ms (BeakGraph's PERFORMANCE.md has the rest). Writing still has no counterpart:
+  `set` takes a value as one array (BeakGraph packs its chunk files into the archive itself, with the
+  JDK's `ZipOutputStream`).
 
 **Update (2026-10-06): P2's F3 and F4 are done, and with them the whole review.** 683 Zarr tests, 18 more
 under a small heap, and 83 core tests pass. Checked against zarr-python 3.4:

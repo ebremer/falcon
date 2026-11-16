@@ -82,8 +82,9 @@ public interface Store {
     /**
      * The value under {@code key} as a read-only view of the bytes where the store keeps them, nothing copied
      * and nothing read until it is looked at: for a caller that reads a large value in place, at random. A
-     * {@link FileSystemStore} maps the key's file; a value of any size is one segment, past the 2 GB an array
-     * holds, and several threads may read it at once.
+     * {@link FileSystemStore} maps the key's file, and a {@link ZipStore} the part of its archive that holds an
+     * uncompressed entry; a value of any size is one segment, past the 2 GB an array holds, and several threads
+     * may read it at once.
      *
      * <p>The view lasts as long as {@code arena}: closing the arena ends it (a mapped file is unmapped), and
      * the segment then throws {@link IllegalStateException}. It is of the value as it was stored when this

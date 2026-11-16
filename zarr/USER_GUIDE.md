@@ -143,7 +143,7 @@ Nothing is copied, decoded, or read ahead, a chunk past the 2 GB of an array is 
 threads may read it at once. The segment holds the whole declared chunk - at the array's edge, the part
 outside the array too - and lasts as long as the arena: closing the arena unmaps the file. It is empty for
 an array whose chunks are not raw (compressed, checksummed, sharded, transposed), for a store that cannot
-map a value (every store but `FileSystemStore`), and for a chunk that is not stored, which reads as the
+map a value (every store but `FileSystemStore` and `ZipStore`), and for a chunk that is not stored, which reads as the
 fill value: read those through a selection. A stored chunk that is not the size its shape and data type
 give is a `ZarrFormatException`. A sharded array has no such view: a shard holds an index, and its
 sub-chunks in any order.
@@ -732,7 +732,10 @@ value, has a default you can override with a single request.
 
 `Store.map(key, arena)` gives a value as a read-only `MemorySegment` of the bytes where the store keeps
 them, for as long as the arena lasts: `FileSystemStore` memory-maps the key's file (on Windows, a mapped
-file cannot be replaced or deleted, so `set` and `delete` of that key fail until the arena is closed). Every
+file cannot be replaced or deleted, so `set` and `delete` of that key fail until the arena is closed), and
+`ZipStore` the part of its archive that holds the key's entry, when the entry is not compressed (a deflated
+or encrypted entry has no such view; the view is of the entry as it was written, so a later `set` of the key,
+which appends another entry, does not show through it). Every
 other store answers empty, the default, as does any store for an absent key; `exists` tells the two apart.
 It is what `ZarrArray.chunkSegment` reads a raw chunk through (see
 [Reading a chunk in place](#reading-a-chunk-in-place)).
